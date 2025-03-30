@@ -8,6 +8,8 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+
 
 DB_PATH = str(Path.home() / ".filehash.db")
 LOGFILE = Path.home() / ".filehash.log"
@@ -108,7 +110,7 @@ def scan_directory(base_path, max_workers=8):
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(index_file, f): f for f in all_files}
-        for future in as_completed(futures):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Indexing"):
             res = future.result()
             if res:
                 results.append(res)
@@ -124,7 +126,7 @@ def verify_full_hashes():
     partials = cur.fetchall()
 
     total_verified = 0
-    for (partial,) in partials:
+    for (partial,) in tqdm(partials, desc="Verifying", unit="group"):
         cur.execute("SELECT id, path FROM file_hashes WHERE partial_sha1 = ? AND full_sha1 IS NULL", (partial,))
         for file_id, path in cur.fetchall():
             if not os.path.exists(path):
