@@ -33,6 +33,9 @@ def init_db():
             path TEXT UNIQUE,
             size INTEGER,
             mtime REAL,
+            inode INTEGER,
+            owner INTEGER,
+            file_group INTEGER,
             partial_sha1 TEXT,
             full_sha1 TEXT
         )
@@ -64,15 +67,22 @@ def compute_full_sha1(path):
 
 def index_file(path):
     try:
-        stat = os.stat(path)
-        size = stat.st_size
-        mtime = stat.st_mtime
-        partial = compute_partial_sha1(path)
+        resolved_path = str(Path(path).resolve())
+        stat = os.stat(resolved_path)
+        partial = compute_partial_sha1(resolved_path)
         if not partial:
             return None
-        return (str(path), size, mtime, partial)
+        return (
+            resolved_path,
+            stat.st_size,
+            stat.st_mtime,
+            stat.st_ino,         # inode
+            stat.st_uid,         # owner (user id)
+            stat.st_gid,         # file group (group id)
+            partial
+        )
     except Exception as e:
-        log(f"[ERROR] Failed stat on {path}: {e}")
+        log(f"[ERROR] Failed indexing {path}: {e}")
         return None
 
 
@@ -82,8 +92,9 @@ def save_results(results):
     for res in results:
         if res:
             cur.execute("""
-                INSERT OR REPLACE INTO file_hashes (path, size, mtime, partial_sha1)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO file_hashes (
+                    path, size, mtime, inode, owner, file_group, partial_sha1
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """, res)
     conn.commit()
     conn.close()
