@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  hashall:
+    build: .
+    network_mode: host
+    volumes:
+      - /mnt/media:/mnt/media
+      - /volume1/docker/hashall:/data  # or wherever you want to persist the DB
+    environment:
+      - PYTHONUNBUFFERED=1
+    stdin_open: true
+    tty: true
