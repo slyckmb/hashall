@@ -15,10 +15,11 @@ from tqdm import tqdm
 import signal
 import psutil
 
-DB_PATH = str(Path.home() / ".filehash.db")
+DEFAULT_DB = str(Path.home() / ".filehash.db")
 LOGFILE = Path.home() / ".filehash.log"
 PARTIAL_SIZE = 4096
 INTERRUPTED = False
+BATCH_SIZE = 100  # For batched DB writes
 
 # Configure logger
 logger = logging.getLogger("filehash_tool")
@@ -32,13 +33,12 @@ def recommended_workers():
     cpu_count = os.cpu_count()
     mem = psutil.virtual_memory()
     ram_gb = mem.total / (1024 ** 3)
-    return max(2, min(cpu_count or 4, int(ram_gb // 2)))  # 1 worker per 2GB, max = cpu count
+    return max(2, min(cpu_count or 4, int(ram_gb // 2)))
 
 def log(msg):
     logger.info(msg)
     if VERBOSE:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}")
-
 
 def human_size(bytes):
     for unit in ['B','KB','MB','GB','TB']:
@@ -46,7 +46,6 @@ def human_size(bytes):
             return f"{bytes:.1f} {unit}"
         bytes /= 1024
     return f"{bytes:.1f} PB"
-
 
 def human_time(seconds):
     m, s = divmod(int(seconds), 60)
@@ -57,16 +56,16 @@ def human_time(seconds):
         return f"{m}m{s:02d}s"
     return f"{s}s"
 
-
 def handle_interrupt():
     global INTERRUPTED
     INTERRUPTED = True
     log("[INTERRUPTED] Caught Ctrl+C, cleaning up...")
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description="File Hashing Tool")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with extra diagnostics")
+    parser.add_argument("--db", type=str, default=DEFAULT_DB, help="Path to SQLite database file")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -85,7 +84,6 @@ def parse_args():
     subparsers.add_parser("detect-hardlinks", help="Mark entries with identical (dev, inode) as hardlinks")
 
     return parser.parse_args()
-
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -107,7 +105,6 @@ def init_db():
     """)
     conn.commit()
 
-    # Schema auto-upgrade check
     cur.execute("PRAGMA table_info(file_hashes)")
     existing = {row[1] for row in cur.fetchall()}
     expected = {
@@ -125,7 +122,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def compute_partial_sha1(path):
     try:
         with open(path, 'rb') as f:
@@ -133,7 +129,6 @@ def compute_partial_sha1(path):
     except Exception as e:
         log(f"[ERROR] Failed partial hash on {path}: {e}")
         return None
-
 
 def compute_full_sha1(path):
     h = hashlib.sha1()
@@ -145,7 +140,6 @@ def compute_full_sha1(path):
     except Exception as e:
         log(f"[ERROR] Failed full hash on {path}: {e}")
         return None
-
 
 def index_file(path):
     try:
@@ -168,17 +162,24 @@ def index_file(path):
         log(f"[ERROR] Failed indexing {path}: {e}")
         return None
 
-
 def save_results(results):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     for res in results:
-        if res:
-            cur.execute("""
-                INSERT OR REPLACE INTO file_hashes (
-                    path, size, mtime, inode, dev, owner, file_group, partial_sha1
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, res)
+        if not res:
+            continue
+        path = res[0]
+        # Get existing full_sha1 and is_hardlink
+        cur.execute("SELECT full_sha1, is_hardlink FROM file_hashes WHERE path = ?", (path,))
+        row = cur.fetchone()
+        full_sha1, is_hardlink = row if row else (None, 0)
+
+        # Save result with preserved fields
+        cur.execute("""
+            INSERT OR REPLACE INTO file_hashes (
+                path, size, mtime, inode, dev, owner, file_group, partial_sha1, full_sha1, is_hardlink
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, res + (full_sha1, is_hardlink))
     conn.commit()
     conn.close()
 
@@ -203,14 +204,12 @@ def scan_directory(base_path, max_workers=8):
     duration = time.perf_counter() - start
     log(f"[DONE] {len(results)} files indexed in {base_path} in {human_time(duration)}")
 
-
 def verify_worker(row):
     file_id, path = row
     if not os.path.exists(path):
         return None
     full_sha = compute_full_sha1(path)
     return (full_sha, file_id, path) if full_sha else None
-
 
 def verify_full_hashes(workers):
     start = time.perf_counter()
@@ -231,9 +230,7 @@ def verify_full_hashes(workers):
     known_fulls = {(d, i): sha for d, i, sha in cur.fetchall()}
     conn.close()
 
-    updated = []
-    hardlinked = []
-    todo = []
+    updated, hardlinked, todo = [], [], []
 
     for file_id, path, dev, inode, partial in rows:
         key = (dev, inode)
@@ -241,6 +238,10 @@ def verify_full_hashes(workers):
             hardlinked.append((known_fulls[key], file_id))
             continue
         todo.append((file_id, path))
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    batch = []
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(verify_worker, row): row for row in todo}
@@ -250,15 +251,16 @@ def verify_full_hashes(workers):
                 break
             res = future.result()
             if res:
-                updated.append(res)
-                # if VERBOSE:
-                #     log(f"[VERIFY] {res[2]} -> {res[0][:10]}...")
+                full_sha, file_id, _ = res
+                batch.append((full_sha, file_id))
+                if len(batch) >= BATCH_SIZE:
+                    cur.executemany("UPDATE file_hashes SET full_sha1 = ? WHERE id = ?", batch)
+                    conn.commit()
+                    batch.clear()
 
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    for full_sha, file_id, _ in updated:
-        cur.execute("UPDATE file_hashes SET full_sha1 = ? WHERE id = ?", (full_sha, file_id))
+    if batch:
+        cur.executemany("UPDATE file_hashes SET full_sha1 = ? WHERE id = ?", batch)
+        conn.commit()
 
     for full_sha, file_id in hardlinked:
         cur.execute("UPDATE file_hashes SET full_sha1 = ?, is_hardlink = 1 WHERE id = ?", (full_sha, file_id))
@@ -266,10 +268,9 @@ def verify_full_hashes(workers):
     conn.commit()
     conn.close()
     duration = time.perf_counter() - start
-    log(f"✅ Verified full hashes for {len(updated)} files and inferred {len(hardlinked)} hardlinks in {human_time(duration)}.")
+    log(f"✅ Verified full hashes and inferred {len(hardlinked)} hardlinks in {human_time(duration)}.")
     if INTERRUPTED:
         log("[INTERRUPTED] verify aborted early due to Ctrl+C")
-
 
 def clean_missing_paths():
     start = time.perf_counter()
@@ -295,7 +296,6 @@ def clean_missing_paths():
     if INTERRUPTED:
         log("[INTERRUPTED] clean aborted early due to Ctrl+C")
 
-
 def detect_hardlinks():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -318,11 +318,19 @@ def detect_hardlinks():
     conn.close()
     log(f"🔗 Marked {count} entries as hardlinks.")
 
-
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda sig, frame: handle_interrupt())
     args = parse_args()
     VERBOSE = args.verbose
+    DEBUG = args.debug
+    DB_PATH = args.db
+    if DEBUG:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = f"{DB_PATH}.{timestamp}.bak"
+        if os.path.exists(DB_PATH):
+            import shutil
+            shutil.copy2(DB_PATH, backup_path)
+            log(f"[DEBUG] Backed up DB to: {backup_path}")
 
     init_db()
 
