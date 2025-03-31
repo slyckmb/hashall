@@ -21,7 +21,8 @@ PARTIAL_SIZE = 4096
 INTERRUPTED = False
 BATCH_SIZE = 100  # For batched DB writes
 
-# Configure logger
+# Logging setup
+LOGFILE = Path(os.environ.get("HASHALL_LOG", Path.home() / ".filehash.log"))
 logger = logging.getLogger("filehash_tool")
 handler = logging.FileHandler(LOGFILE)
 formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -193,12 +194,17 @@ def scan_directory(base_path, max_workers=8):
     results = []
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(index_file, f): f for f in all_files}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Indexing", smoothing=0.3):
-            if INTERRUPTED:
-                break
-            res = future.result()
-            if res:
-                results.append(res)
+        try:
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Indexing", smoothing=0.3):
+                if INTERRUPTED:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                res = future.result()
+                if res:
+                    results.append(res)
+        except KeyboardInterrupt:
+            log("[INTERRUPTED] scan aborted by user.")
+            executor.shutdown(wait=False, cancel_futures=True)
 
     save_results(results)
     duration = time.perf_counter() - start
@@ -245,11 +251,23 @@ def verify_full_hashes(workers):
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(verify_worker, row): row for row in todo}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Verifying", unit="file", smoothing=0.3):
-            if INTERRUPTED:
-                executor.shutdown(wait=False, cancel_futures=True)
-                break
-            res = future.result()
+        try:
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Verifying", unit="file", smoothing=0.3):
+                if INTERRUPTED:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                res = future.result()
+                if res:
+                    full_sha, file_id, _ = res
+                    batch.append((full_sha, file_id))
+                    if len(batch) >= BATCH_SIZE:
+                        cur.executemany("UPDATE file_hashes SET full_sha1 = ? WHERE id = ?", batch)
+                        conn.commit()
+                        batch.clear()
+        except KeyboardInterrupt:
+            log("[INTERRUPTED] verify aborted by user.")
+            executor.shutdown(wait=False, cancel_futures=True)
+
             if res:
                 full_sha, file_id, _ = res
                 batch.append((full_sha, file_id))
