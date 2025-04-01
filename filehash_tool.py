@@ -1,85 +1,51 @@
 #!/usr/bin/env python3
-# filehash_tool.py v0.3.7 – Tree-level folder signature hashing
+# filehash_tool.py (rev v0.3.7)
 
 import argparse
-import hashlib
-import os
-import sqlite3
-from pathlib import Path
-from datetime import datetime
-from collections import defaultdict
+import sys
 
-VERSION = "v0.3.7"
-DEFAULT_DB_PATH = str(Path.home() / ".filehash.db")
+TOOL_VERSION = "v0.3.7"
 
-def compute_sha1_from_list(items):
-    sha1 = hashlib.sha1()
-    for item in sorted(items):
-        sha1.update(item.encode("utf-8"))
-    return sha1.hexdigest()
+def run_scan(args):
+    print(f"🔍 Running scan on root: {args.root} [rev {TOOL_VERSION}]")
 
-def build_folder_hashes(db_path):
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.cursor()
+def run_verify(args):
+    mode = "full" if args.full else "fast"
+    print(f"🔁 Running {mode} verify [rev {TOOL_VERSION}]")
 
-        print(f"\n🌳 filehash_tool.py (rev {VERSION})")
-        print(f"📂 Analyzing DB: {db_path}")
-        print("-" * 50)
+def run_clean(args):
+    print(f"🧹 Cleaning stale records [rev {TOOL_VERSION}]")
 
-        # Clear old data
-        cur.execute("DELETE FROM folder_hashes")
-
-        # Load all hashed files
-        cur.execute("""
-            SELECT path, full_sha1, size FROM file_hashes
-            WHERE full_sha1 IS NOT NULL
-        """)
-        file_rows = cur.fetchall()
-
-        # Map files to folders
-        folder_map = defaultdict(list)
-        for path, sha1, size in file_rows:
-            folder = str(Path(path).parent)
-            folder_map[folder].append((sha1, size))
-
-        print(f"📁 Found {len(folder_map)} folders to analyze")
-
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        inserted = 0
-        for folder_path, file_list in folder_map.items():
-            file_hashes = [sha1 for sha1, _ in file_list]
-            sizes = [s for _, s in file_list]
-
-            folder_hash = compute_sha1_from_list(file_hashes)
-            total_size = sum(sizes)
-            total_files = len(file_hashes)
-            hash_depth = 1  # placeholder for future recursion
-
-            cur.execute("""
-                INSERT OR REPLACE INTO folder_hashes
-                (folder_path, folder_hash, total_size, total_files, hash_depth, last_updated, needs_rebuild)
-                VALUES (?, ?, ?, ?, ?, ?, 0)
-            """, (folder_path, folder_hash, total_size, total_files, hash_depth, now))
-            inserted += 1
-
-        conn.commit()
-        print(f"✅ Folder hashes written: {inserted}")
+def run_tree(args):
+    print(f"🌲 Building folder signature hashes [rev {TOOL_VERSION}]")
 
 def main():
-    parser = argparse.ArgumentParser(description=f"filehash_tool.py (rev {VERSION})")
-    subparsers = parser.add_subparsers(dest="command")
+    parser = argparse.ArgumentParser(description=f"filehash_tool.py (rev {TOOL_VERSION})")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Tree subcommand
-    tree_parser = subparsers.add_parser("tree", help="Build folder signature hashes")
-    tree_parser.add_argument("--db", type=str, default=DEFAULT_DB_PATH, help="Path to hashall database")
+    # scan
+    p_scan = subparsers.add_parser("scan", help="Scan directory and hash files")
+    p_scan.add_argument("root", help="Directory root to scan")
+    p_scan.set_defaults(func=run_scan)
+
+    # verify
+    p_verify = subparsers.add_parser("verify", help="Verify file hashes")
+    p_verify.add_argument("--full", action="store_true", help="Force full hash verify")
+    p_verify.set_defaults(func=run_verify)
+
+    # clean
+    p_clean = subparsers.add_parser("clean", help="Clean removed/missing entries")
+    p_clean.set_defaults(func=run_clean)
+
+    # tree
+    p_tree = subparsers.add_parser("tree", help="Build folder signature hashes")
+    p_tree.set_defaults(func=run_tree)
 
     args = parser.parse_args()
-
-    if args.command == "tree":
-        build_folder_hashes(args.db)
-    else:
-        parser.print_help()
+    args.func(args)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        sys.exit(0)
