@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# analyze_hashes.py (hashall companion script) v0.3.0
+# analyze_hashes.py (hashall companion script) v0.3.5
 
 import os
 import sqlite3
@@ -8,9 +8,12 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 from termcolor import colored
+import re
 import sys
+from signal import signal, SIGPIPE, SIG_DFL
+signal(SIGPIPE, SIG_DFL)
 
-SCRIPT_VERSION = "0.3.0"
+VERSION = "v0.3.5"
 DEFAULT_DB_PATH = str(Path.home() / ".filehash.db")
 
 def format_mtime(mtime):
@@ -26,6 +29,17 @@ def human_size(bytes):
             return f"{bytes:.1f} {unit}"
         bytes /= 1024
     return f"{bytes:.1f} PB"
+
+def parse_size(size_str):
+    units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+    match = re.match(r'^(\d+(?:\.\d+)?)([KMGT]?B)?$', size_str.strip(), re.IGNORECASE)
+    if not match:
+        raise argparse.ArgumentTypeError(f"Invalid size format: {size_str}")
+    number, unit = match.groups()
+    unit = unit.upper() if unit else "B"
+    if unit not in units:
+        raise argparse.ArgumentTypeError(f"Unsupported unit: {unit}")
+    return int(float(number) * units[unit])
 
 def get_grouped_files(db_path):
     with sqlite3.connect(db_path) as conn:
@@ -55,24 +69,19 @@ def get_grouped_files(db_path):
 def display_group(sha1, files, verbose=False):
     total_files = len(files)
     file_size = files[0]['size'] if files else 0
-
-    # Group-wide reclaim calculation (across devices)
-    seen_inodes = set()
-    for f in files:
-        seen_inodes.add((f["dev"], f["inode"]))
-    disk_usage = file_size * len(seen_inodes)
-    reclaimable = file_size * max(0, len(seen_inodes) - 1)
+    dev_inode_set = set((f["dev"], f["inode"]) for f in files)
+    disk_usage = file_size * len(dev_inode_set)
+    reclaimable = file_size * max(0, len(dev_inode_set) - 1)
 
     print(colored(f"\n🔁 Group: {sha1[:16]} [file size: {human_size(file_size)}] "
-                  f"(files: {total_files}, disk: {human_size(disk_usage)}, reclaimable: {human_size(reclaimable)})", attrs=["bold"]))
+                  f"(files: {total_files}, disk: {human_size(disk_usage)}, reclaimable: {human_size(reclaimable)})",
+                  attrs=["bold"]))
 
-    # Device subgroups
     dev_groups = defaultdict(list)
     for f in files:
         dev_groups[f["dev"]].append(f)
 
     for dev, dev_files in dev_groups.items():
-        # Device-level reclaim and disk calc
         inode_groups = defaultdict(list)
         for f in dev_files:
             inode_groups[f["inode"]].append(f)
@@ -90,33 +99,53 @@ def display_group(sha1, files, verbose=False):
                 info = f"[{format_mtime(f['mtime'])},{f['uid']},{f['gid']}]"
                 icon = "🔗" if len(inode_files) >= 2 else "♻️"
                 print(f"  │ {colored(icon, 'green' if icon == '🔗' else 'magenta')} {info} {f['path']}")
+
         print("  └─────────────────────")
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze hashall database for duplicate and linkable files")
+    parser = argparse.ArgumentParser(description="Analyze hashall database")
     parser.add_argument("--db", type=str, default=DEFAULT_DB_PATH, help="Path to hashall database")
-    parser.add_argument("--verbose", action="store_true", help="Print detailed group layout with file info")
+    parser.add_argument("--verbose", action="store_true", help="Print file paths and details")
+    parser.add_argument("--min-size", type=parse_size, help="Only show groups where file size >= this (e.g., 1GB)")
+    parser.add_argument("--max-size", type=parse_size, help="Only show groups where file size <= this")
+    parser.add_argument("--only-hardlinkable", action="store_true", help="Only show groups with ♻️ reclaimable files")
     args = parser.parse_args()
 
     db_path = args.db
-    print(f"\n📂 analyze_hashes.py v{SCRIPT_VERSION} | DB: {db_path}")
-    print("-" * 60)
-
-    try:
-        groups = get_grouped_files(db_path)
-    except Exception as e:
-        print(colored(f"\n❌ Error loading database: {e}", "red"))
+    if not os.path.exists(db_path):
+        print(f"\n❌ Error: DB not found at {db_path}")
         sys.exit(1)
 
+    print(f"\n📂 Analyzing hashall DB: {db_path} (rev {VERSION})")
+    print("-" * 50)
+
+    filters = []
+    if args.min_size:
+        filters.append(f"min-size: {human_size(args.min_size)}")
+    if args.max_size:
+        filters.append(f"max-size: {human_size(args.max_size)}")
+    if args.only_hardlinkable:
+        filters.append("only-hardlinkable: true")
+    if filters:
+        print("📎 Filters: " + ", ".join(filters))
+
+    groups = get_grouped_files(db_path)
     print(f"\n🔁 Duplicate full-hash groups: {len(groups)}")
 
     for sha1, files in groups.items():
-        if args.verbose:
-            display_group(sha1, files, verbose=True)
+        file_size = files[0]['size']
+        if args.min_size and file_size < args.min_size:
+            continue
+        if args.max_size and file_size > args.max_size:
+            continue
+
+        dev_inode_set = set((f["dev"], f["inode"]) for f in files)
+        reclaimable = file_size * max(0, len(dev_inode_set) - 1)
+
+        if args.only_hardlinkable and reclaimable == 0:
+            continue
+
+        display_group(sha1, files, verbose=args.verbose)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except BrokenPipeError:
-        # Handle `| less` gracefully
-        sys.exit(0)
+    main()
