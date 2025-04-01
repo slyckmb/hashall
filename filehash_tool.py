@@ -1,366 +1,85 @@
 #!/usr/bin/env python3
-# filehash_tool.py
+# filehash_tool.py v0.3.7 – Tree-level folder signature hashing
 
-import os
+import argparse
 import hashlib
+import os
 import sqlite3
-import logging
-import time
-import sys
 from pathlib import Path
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import argparse
-from tqdm import tqdm
-import signal
-import psutil
+from collections import defaultdict
 
-DEFAULT_DB = str(Path.home() / ".filehash.db")
-LOGFILE = Path.home() / ".filehash.log"
-PARTIAL_SIZE = 4096
-INTERRUPTED = False
-BATCH_SIZE = 100  # For batched DB writes
+VERSION = "v0.3.7"
+DEFAULT_DB_PATH = str(Path.home() / ".filehash.db")
 
-# Logging setup
-LOGFILE = Path(os.environ.get("HASHALL_LOG", Path.home() / ".filehash.log"))
-logger = logging.getLogger("filehash_tool")
-handler = logging.FileHandler(LOGFILE)
-formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+def compute_sha1_from_list(items):
+    sha1 = hashlib.sha1()
+    for item in sorted(items):
+        sha1.update(item.encode("utf-8"))
+    return sha1.hexdigest()
 
-def recommended_workers():
-    cpu_count = os.cpu_count()
-    mem = psutil.virtual_memory()
-    ram_gb = mem.total / (1024 ** 3)
-    return max(2, min(cpu_count or 4, int(ram_gb // 2)))
+def build_folder_hashes(db_path):
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
 
-def log(msg):
-    logger.info(msg)
-    if VERBOSE:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}")
+        print(f"\n🌳 filehash_tool.py (rev {VERSION})")
+        print(f"📂 Analyzing DB: {db_path}")
+        print("-" * 50)
 
-def human_size(bytes):
-    for unit in ['B','KB','MB','GB','TB']:
-        if bytes < 1024:
-            return f"{bytes:.1f} {unit}"
-        bytes /= 1024
-    return f"{bytes:.1f} PB"
+        # Clear old data
+        cur.execute("DELETE FROM folder_hashes")
 
-def human_time(seconds):
-    m, s = divmod(int(seconds), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h{m:02d}m{s:02d}s"
-    elif m:
-        return f"{m}m{s:02d}s"
-    return f"{s}s"
-
-def handle_interrupt():
-    global INTERRUPTED
-    INTERRUPTED = True
-    log("[INTERRUPTED] Caught Ctrl+C, cleaning up...")
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="File Hashing Tool")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode with extra diagnostics")
-    parser.add_argument("--db", type=str, default=DEFAULT_DB, help="Path to SQLite database file")
-
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    scan_parser = subparsers.add_parser("scan", help="Scan directory for file hashes")
-    scan_parser.add_argument("directory", type=str, help="Directory to scan")
-
-    verify_parser = subparsers.add_parser("verify", help="Verify full hashes for duplicate partials")
-    verify_parser.add_argument(
-        "--workers",
-        type=int,
-        default=recommended_workers(),
-        help=f"Number of worker processes (default: recommended based on system: {recommended_workers()})"
-    )
-
-    subparsers.add_parser("clean", help="Remove DB entries for missing files")
-    subparsers.add_parser("detect-hardlinks", help="Mark entries with identical (dev, inode) as hardlinks")
-
-    return parser.parse_args()
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS file_hashes (
-            id INTEGER PRIMARY KEY,
-            path TEXT UNIQUE,
-            size INTEGER,
-            mtime REAL,
-            inode INTEGER,
-            dev INTEGER,
-            owner INTEGER,
-            file_group INTEGER,
-            partial_sha1 TEXT,
-            full_sha1 TEXT,
-            is_hardlink INTEGER DEFAULT 0
-        )
-    """)
-    conn.commit()
-
-    cur.execute("PRAGMA table_info(file_hashes)")
-    existing = {row[1] for row in cur.fetchall()}
-    expected = {
-        "inode": "INTEGER",
-        "dev": "INTEGER",
-        "owner": "INTEGER",
-        "file_group": "INTEGER",
-        "is_hardlink": "INTEGER DEFAULT 0"
-    }
-    for col, col_type in expected.items():
-        if col not in existing:
-            log(f"[DB] Adding missing column: {col}")
-            cur.execute(f"ALTER TABLE file_hashes ADD COLUMN {col} {col_type}")
-
-    conn.commit()
-    conn.close()
-
-def compute_partial_sha1(path):
-    try:
-        with open(path, 'rb') as f:
-            return hashlib.sha1(f.read(PARTIAL_SIZE)).hexdigest()
-    except Exception as e:
-        log(f"[ERROR] Failed partial hash on {path}: {e}")
-        return None
-
-def compute_full_sha1(path):
-    h = hashlib.sha1()
-    try:
-        with open(path, 'rb') as f:
-            while chunk := f.read(8192):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception as e:
-        log(f"[ERROR] Failed full hash on {path}: {e}")
-        return None
-
-def index_file(path):
-    try:
-        resolved_path = str(Path(path).resolve())
-        stat = os.stat(resolved_path)
-        partial = compute_partial_sha1(resolved_path)
-        if not partial:
-            return None
-        return (
-            resolved_path,
-            stat.st_size,
-            stat.st_mtime,
-            stat.st_ino,
-            stat.st_dev,
-            stat.st_uid,
-            stat.st_gid,
-            partial
-        )
-    except Exception as e:
-        log(f"[ERROR] Failed indexing {path}: {e}")
-        return None
-
-def save_results(results):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    for res in results:
-        if not res:
-            continue
-        path = res[0]
-        # Get existing full_sha1 and is_hardlink
-        cur.execute("SELECT full_sha1, is_hardlink FROM file_hashes WHERE path = ?", (path,))
-        row = cur.fetchone()
-        full_sha1, is_hardlink = row if row else (None, 0)
-
-        # Save result with preserved fields
+        # Load all hashed files
         cur.execute("""
-            INSERT OR REPLACE INTO file_hashes (
-                path, size, mtime, inode, dev, owner, file_group, partial_sha1, full_sha1, is_hardlink
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, res + (full_sha1, is_hardlink))
-    conn.commit()
-    conn.close()
+            SELECT path, full_sha1, size FROM file_hashes
+            WHERE full_sha1 IS NOT NULL
+        """)
+        file_rows = cur.fetchall()
 
+        # Map files to folders
+        folder_map = defaultdict(list)
+        for path, sha1, size in file_rows:
+            folder = str(Path(path).parent)
+            folder_map[folder].append((sha1, size))
 
-def scan_directory(base_path, max_workers=8):
-    start = time.perf_counter()
-    base_path = Path(base_path)
-    all_files = [p for p in base_path.rglob('*') if p.is_file()]
-    log(f"[SCAN] {len(all_files)} files in {base_path}")
+        print(f"📁 Found {len(folder_map)} folders to analyze")
 
-    results = []
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(index_file, f): f for f in all_files}
-        try:
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Indexing", smoothing=0.3):
-                if INTERRUPTED:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                res = future.result()
-                if res:
-                    results.append(res)
-        except KeyboardInterrupt:
-            log("[INTERRUPTED] scan aborted by user.")
-            executor.shutdown(wait=False, cancel_futures=True)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    save_results(results)
-    duration = time.perf_counter() - start
-    log(f"[DONE] {len(results)} files indexed in {base_path} in {human_time(duration)}")
+        inserted = 0
+        for folder_path, file_list in folder_map.items():
+            file_hashes = [sha1 for sha1, _ in file_list]
+            sizes = [s for _, s in file_list]
 
-def verify_worker(row):
-    file_id, path = row
-    if not os.path.exists(path):
-        return None
-    full_sha = compute_full_sha1(path)
-    return (full_sha, file_id, path) if full_sha else None
+            folder_hash = compute_sha1_from_list(file_hashes)
+            total_size = sum(sizes)
+            total_files = len(file_hashes)
+            hash_depth = 1  # placeholder for future recursion
 
-def verify_full_hashes(workers):
-    start = time.perf_counter()
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+            cur.execute("""
+                INSERT OR REPLACE INTO folder_hashes
+                (folder_path, folder_hash, total_size, total_files, hash_depth, last_updated, needs_rebuild)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+            """, (folder_path, folder_hash, total_size, total_files, hash_depth, now))
+            inserted += 1
 
-    cur.execute("""
-        SELECT id, path, dev, inode, partial_sha1 FROM file_hashes
-        WHERE full_sha1 IS NULL
-        AND partial_sha1 IN (
-            SELECT partial_sha1 FROM file_hashes
-            GROUP BY partial_sha1 HAVING COUNT(*) > 1
-        )
-    """)
-    rows = cur.fetchall()
-
-    cur.execute("SELECT dev, inode, full_sha1 FROM file_hashes WHERE full_sha1 IS NOT NULL")
-    known_fulls = {(d, i): sha for d, i, sha in cur.fetchall()}
-    conn.close()
-
-    updated, hardlinked, todo = [], [], []
-
-    for file_id, path, dev, inode, partial in rows:
-        key = (dev, inode)
-        if key in known_fulls:
-            hardlinked.append((known_fulls[key], file_id))
-            continue
-        todo.append((file_id, path))
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    batch = []
-
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(verify_worker, row): row for row in todo}
-        try:
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Verifying", unit="file", smoothing=0.3):
-                if INTERRUPTED:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                res = future.result()
-                if res:
-                    full_sha, file_id, _ = res
-                    batch.append((full_sha, file_id))
-                    if len(batch) >= BATCH_SIZE:
-                        cur.executemany("UPDATE file_hashes SET full_sha1 = ? WHERE id = ?", batch)
-                        conn.commit()
-                        batch.clear()
-        except KeyboardInterrupt:
-            log("[INTERRUPTED] verify aborted by user.")
-            executor.shutdown(wait=False, cancel_futures=True)
-
-            if res:
-                full_sha, file_id, _ = res
-                batch.append((full_sha, file_id))
-                if len(batch) >= BATCH_SIZE:
-                    cur.executemany("UPDATE file_hashes SET full_sha1 = ? WHERE id = ?", batch)
-                    conn.commit()
-                    batch.clear()
-
-    if batch:
-        cur.executemany("UPDATE file_hashes SET full_sha1 = ? WHERE id = ?", batch)
         conn.commit()
+        print(f"✅ Folder hashes written: {inserted}")
 
-    for full_sha, file_id in hardlinked:
-        cur.execute("UPDATE file_hashes SET full_sha1 = ?, is_hardlink = 1 WHERE id = ?", (full_sha, file_id))
+def main():
+    parser = argparse.ArgumentParser(description=f"filehash_tool.py (rev {VERSION})")
+    subparsers = parser.add_subparsers(dest="command")
 
-    conn.commit()
-    conn.close()
-    duration = time.perf_counter() - start
-    log(f"✅ Verified full hashes and inferred {len(hardlinked)} hardlinks in {human_time(duration)}.")
-    if INTERRUPTED:
-        log("[INTERRUPTED] verify aborted early due to Ctrl+C")
+    # Tree subcommand
+    tree_parser = subparsers.add_parser("tree", help="Build folder signature hashes")
+    tree_parser.add_argument("--db", type=str, default=DEFAULT_DB_PATH, help="Path to hashall database")
 
-def clean_missing_paths():
-    start = time.perf_counter()
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT id, path FROM file_hashes")
-    rows = cur.fetchall()
+    args = parser.parse_args()
 
-    deleted = 0
-    for file_id, path in tqdm(rows, desc="Cleaning", unit="file", smoothing=0.3):
-        if INTERRUPTED:
-            break
-        if not os.path.exists(path):
-            cur.execute("DELETE FROM file_hashes WHERE id = ?", (file_id,))
-            if VERBOSE:
-                log(f"[CLEAN] Removed: {path}")
-            deleted += 1
-
-    conn.commit()
-    conn.close()
-    duration = time.perf_counter() - start
-    log(f"🧹 Cleaned {deleted} entries from the DB in {human_time(duration)}.")
-    if INTERRUPTED:
-        log("[INTERRUPTED] clean aborted early due to Ctrl+C")
-
-def detect_hardlinks():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT dev, inode, COUNT(*)
-        FROM file_hashes
-        GROUP BY dev, inode
-        HAVING COUNT(*) > 1
-    """)
-    groups = cur.fetchall()
-    count = 0
-    for dev, inode, _ in groups:
-        cur.execute("""
-            UPDATE file_hashes SET is_hardlink = 1
-            WHERE dev = ? AND inode = ?
-        """, (dev, inode))
-        count += cur.rowcount
-
-    conn.commit()
-    conn.close()
-    log(f"🔗 Marked {count} entries as hardlinks.")
+    if args.command == "tree":
+        build_folder_hashes(args.db)
+    else:
+        parser.print_help()
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, lambda sig, frame: handle_interrupt())
-    args = parse_args()
-    VERBOSE = args.verbose
-    DEBUG = args.debug
-    DB_PATH = args.db
-    if DEBUG:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_path = f"{DB_PATH}.{timestamp}.bak"
-        if os.path.exists(DB_PATH):
-            import shutil
-            shutil.copy2(DB_PATH, backup_path)
-            log(f"[DEBUG] Backed up DB to: {backup_path}")
-
-    init_db()
-
-    try:
-        if args.command == "scan":
-            scan_directory(args.directory)
-        elif args.command == "verify":
-            verify_full_hashes(args.workers)
-        elif args.command == "clean":
-            clean_missing_paths()
-        elif args.command == "detect-hardlinks":
-            detect_hardlinks()
-    except KeyboardInterrupt:
-        log(f"[INTERRUPTED] {args.command} cancelled by user.")
-        sys.exit(1)
+    main()
