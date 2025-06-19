@@ -1,0 +1,4 @@
+.venv_name
+*.code-workspace
+/data/
+*.db
