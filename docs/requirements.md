@@ -19,7 +19,7 @@ Priority	Feature	Status
 🟢 Misc	🎨 Color-coded file info & simplified display	✅ Done
 
 ✅ v0.2.2 Patch Highlights
-1. Bugfix: Use correct default DB if ~/.filehash.db is missing or empty.
+1. Bugfix: Use correct default DB if $HOME/.filehash.db is missing or empty.
 2. Improvement: Fallback warning with suggestion if DB is invalid.
 3. Polish: Cleaner group and subgroup output when no matching files are found.
 
@@ -47,7 +47,7 @@ Info block [mtime, uid, gid] shown only in verbose	✅ Done
 Chain icon only when same inode & same dev	✅ Done	
 📌 TODO for 0.2.x
 
-Potential matches: add files with matching partial hashes but no full hash (full_sha1 IS NULL). Include with ❔ icon.
+Potential matches: add files with matching partial hashes but no full hash (sha1 IS NULL). Include with ❔ icon.
 
 Add CLI filters:
 

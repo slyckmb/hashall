@@ -51,9 +51,9 @@ def get_grouped_files(db_path):
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT full_sha1, path, dev, inode, mtime, owner, file_group, is_hardlink, size
+            SELECT sha1, path, dev, inode, mtime, owner, file_group, is_hardlink, size
             FROM file_hashes
-            WHERE full_sha1 IS NOT NULL
+            WHERE sha1 IS NOT NULL
         """)
         rows = cur.fetchall()
 

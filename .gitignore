@@ -1,5 +1,33 @@
+# Repo Infra
+tmp/
 .venv_name
-*.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# SQLite
+*.sqlite3
+*.db
+
+# Hashall runtime artifacts
+.hashall/
 /data/
 *.db
-tmp/
+
+# Editor/IDE
+*.swp
+*.swo
+*.bak
+*.log
+*.DS_Store
+.vscode/
+*.code-workspace
+.idea/
+
+# Ignore disposable test artifacts
+/sandbox/
+/**/.hashall/
+*.sqlite3
