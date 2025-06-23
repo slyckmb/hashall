@@ -1,5 +1,5 @@
 sessions:
-- slug: linex-hashall-001-19Jun25-hashall-json-scan-b2d406
+- slug: linex-hashall-001-19Jun25-json-scan-docker-b2d406
   repo: hashall
   index: 1
   date: '2025-06-19'

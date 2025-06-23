@@ -1,3 +1,4 @@
+# gptrail: linex-hashall-001-19Jun25-json-scan-docker-b2d406
 version: "3.9"
 
 services:
@@ -6,7 +7,7 @@ services:
     network_mode: host
     volumes:
       - /mnt/media:/mnt/media
-      - /volume1/docker/hashall:/data  # or wherever you want to persist the DB
+      - $HOME/.hashall:/root/.hashall   # Match internal DB default
     environment:
       - PYTHONUNBUFFERED=1
     stdin_open: true

@@ -1,35 +1,59 @@
-HASH_SCRIPT=hash_scan_parallel.py
-VERIFY_SCRIPT=verify_full_hashes.py
-CLEAN_SCRIPT=clean_missing_paths.py
-DB=$(HOME)/.filehash.db
+# gptrail: linex-hashall-001-19Jun25-json-scan-docker-b2d406
 
-.PHONY: hash verify clean reset help
+# Makefile for hashall
+# Place in root of repo
 
-hash:
-	@if [ -z "$(TARGET)" ]; then \
-		echo "❌ Please specify TARGET=/path/to/scan"; \
-		exit 1; \
-	fi
-	@echo "🔍 Scanning: $(TARGET)"
-	python3 $(HASH_SCRIPT) $(TARGET)
+REPO_DIR := $(shell pwd)
+DB_DIR := $(HOME)/.hashall
+DB_FILE := $(DB_DIR)/hashall.sqlite3
+HASHALL_IMG := hashall
 
-verify:
-	@echo "🔍 Verifying full hashes for duplicates..."
-	python3 $(VERIFY_SCRIPT)
+.DEFAULT_GOAL := help
 
+.PHONY: help bootstrap build docker-scan docker-export docker-test clean sandbox test
+
+## bootstrap         Prepare environment (clone, venv, db dir, ~/.bin link)
+bootstrap:
+	@echo "🚀 Bootstrapping hashall repo setup..."
+	@.setup/bootstrap-hashall.sh
+
+## build             Build Docker image for hashall
+build:
+	@echo "🐳 Building Docker image: $(HASHALL_IMG)"
+	docker build -t $(HASHALL_IMG) .
+
+## docker-scan       Run scan inside Docker container
+docker-scan:
+	@echo "📦 Running scan in Docker..."
+	@scripts/docker_scan_and_export.sh scan
+
+## docker-export     Export .json from latest scan inside Docker
+docker-export:
+	@echo "📤 Running export in Docker..."
+	@scripts/docker_scan_and_export.sh export
+
+## docker-test       Run full scan + export test in Docker
+docker-test:
+	@echo "🧪 Running Docker scan + export test..."
+	@scripts/docker_test.sh
+
+## sandbox           Regenerate local test sandbox
+sandbox:
+	@echo "🔁 Resetting test sandbox..."
+	@bash tests/generate_sandbox.sh
+
+## test              Run full CLI smoke test
+test:
+	@echo "🧪 Running full smoke test..."
+	@bash tests/smoke_test.sh
+
+## clean             Remove generated files and sandbox
 clean:
-	@echo "🧹 Cleaning missing paths from DB..."
-	python3 $(CLEAN_SCRIPT)
+	@echo "🧹 Cleaning up..."
+	rm -rf sandbox/ tmp/
+	rm -f $(DB_FILE)
 
-reset:
-	@echo "🔥 Deleting database at $(DB)..."
-	rm -f $(DB)
-
+## help              Show this help message
 help:
-	@echo "Usage: make [target] TARGET=/path/to/scan"
-	@echo "Targets:"
-	@echo "  hash     - Scan directory and record partial hashes"
-	@echo "  verify   - Fill in full hashes for detected duplicates"
-	@echo "  clean    - Remove deleted file paths from DB"
-	@echo "  reset    - Delete DB file completely"
-	@echo "  help     - Show this help message"
+	@echo "🧰 Hashall Make Targets:"
+	@awk '/^[a-zA-Z\-\_]+:/ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$NF}' $(MAKEFILE_LIST) | sed 's/://'

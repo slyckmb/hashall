@@ -1,3 +1,4 @@
+# gptrail: linex-hashall-001-19Jun25-json-scan-docker-b2d406
 # Repo Infra
 tmp/
 .venv_name
@@ -31,3 +32,6 @@ __pycache__/
 /sandbox/
 /**/.hashall/
 *.sqlite3
+# Ignore dev-only GPTrail symlinks
+tools/inject_staged.sh
+tools/pre-commit-gptrail.sh

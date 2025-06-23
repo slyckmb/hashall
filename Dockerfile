@@ -1,22 +1,36 @@
-# Base image
 FROM python:3.12-slim
 
-# Install required dependencies
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Install dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
     build-essential \
-    libsqlite3-dev \
-    python3-dev \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
+# Create app directory
 WORKDIR /app
 
-# Copy script
-COPY filehash_tool.py .
+# Copy source
+COPY . /app
 
-# Install required Python packages
-RUN pip install --no-cache-dir tqdm psutil
+# Optional: install virtualenv
+# RUN pip install virtualenv && virtualenv /venv && . /venv/bin/activate
 
-# Allow overriding DB and commands at runtime
-ENTRYPOINT ["python", "filehash_tool.py"]
-CMD ["--help"]
+# Install Python dependencies
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt || true  # If requirements.txt is missing
+
+# Make CLI tools executable
+RUN chmod +x filehash_tool.py
+RUN chmod +x tests/*.sh
+RUN chmod +x tests/smoke/*
+RUN chmod +x db_migration.py
+RUN chmod +x json_export.py
+RUN chmod +x scan_session.py
+
+# Entry point for testing (can be overridden)
+ENTRYPOINT ["python3", "filehash_tool.py"]
