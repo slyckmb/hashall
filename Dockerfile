@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
     sqlite3 \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
