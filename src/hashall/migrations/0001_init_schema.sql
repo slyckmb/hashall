@@ -1,4 +1,4 @@
--- Unified Hashall Schema
+-- Initial schema creation
 
 CREATE TABLE IF NOT EXISTS scan_sessions (
     id INTEGER PRIMARY KEY,

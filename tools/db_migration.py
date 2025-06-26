@@ -1,3 +1,4 @@
+# gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 #!/usr/bin/env python3
 """
 db_migration.py – Ensure SQLite schema and perform safe upgrades

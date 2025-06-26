@@ -1,0 +1,19 @@
+# gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
+# Core
+tqdm>=4.64
+click>=8.0
+rich>=13.0
+
+# DB
+sqlite-utils>=3.30
+
+# Testing
+pytest>=7.0
+coverage>=6.0
+
+# Dev/Tools
+mypy>=1.0
+flake8>=6.0
+
+# Optional: For parsing JSON files more strictly
+orjson>=3.9

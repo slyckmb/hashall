@@ -30,8 +30,8 @@ RUN chmod +x filehash_tool.py
 RUN chmod +x tests/*.sh
 RUN chmod +x tests/smoke/*
 RUN chmod +x db_migration.py
-RUN chmod +x json_export.py
-RUN chmod +x scan_session.py
+RUN chmod +x export.py
+RUN chmod +x scan.py
 
 # Entry point for testing (can be overridden)
 ENTRYPOINT ["python3", "filehash_tool.py"]

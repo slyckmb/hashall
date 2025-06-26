@@ -5,3 +5,15 @@ sessions:
   date: '2025-06-19'
   title: Hashall-Json-Scan
   chat_url: https://chatgpt.com/g/g-Ia0hiDskv-linux-server-expert/c/6851dd9c-7fe0-8001-8bfc-9fd29ab2d406
+- slug: conin-hashall-002-24Jun25-smart-verify-treehash-3b3f58
+  repo: hashall
+  index: 2
+  date: '2025-06-24'
+  title: Smart-Verify-Treehash
+  chat_url: https://chatgpt.com/g/g-xsn3vKCj1-code-ninja-python-java-c-html-sql-lua-php-coding/c/685a7fc9-092c-8001-8a76-477a1b3b3f58
+- slug: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
+  repo: hashall
+  index: 3
+  date: '2025-06-26'
+  title: Smart-Verify
+  chat_url: https://chatgpt.com/g/g-jIgQDiQuT-python-copilot-v2/c/685bc374-cf00-8001-8788-b6a6042cfc4c

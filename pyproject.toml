@@ -1,0 +1,50 @@
+# gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
+[project]
+name = "hashall"
+version = "0.3.0"
+description = "Smart CLI tool to scan, export, verify and repair file hashes."
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "Hashall Contributors" }]
+license = { text = "MIT" }
+
+dependencies = [
+  "click>=8.0",
+  "tqdm>=4.64",
+  "rich>=13.0",
+  "sqlite-utils>=3.30",
+  "orjson>=3.9"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "coverage>=6.0",
+  "mypy>=1.0",
+  "flake8>=6.0",
+  "bumpver>=2023.1129"
+]
+
+[project.scripts]
+hashall = "hashall.cli:cli"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-v"
+testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["hashall"]
+package-dir = {"" = "src"}
+
+[tool.bumpver]
+current_version = "0.3.0"
+version_pattern = "MAJOR.MINOR.PATCH"
+
+[tool.bumpver.file_patterns]
+"pyproject.toml" = ['version = "{version}"']
+"src/hashall/__init__.py" = ['__version__ = "{version}"']

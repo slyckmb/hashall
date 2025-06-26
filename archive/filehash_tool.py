@@ -1,3 +1,4 @@
+# gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 #!/usr/bin/env python3
 """
 filehash_tool.py – CLI interface for hashall operations
@@ -9,8 +10,8 @@ import sys
 from pathlib import Path
 import logging
 
-from scan_session import scan_files
-from json_export import export_json
+from hashall.scan import scan_files
+from export import export_json
 from db_migration import backup_db, apply_migrations
 import sqlite3
 

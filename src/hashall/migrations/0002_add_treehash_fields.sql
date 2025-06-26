@@ -1,0 +1,4 @@
+-- Legacy migration; already in 0001_init_schema.sql
+-- included here to maintain ordering
+-- NOOP or can be simplified to:
+-- SELECT 1;

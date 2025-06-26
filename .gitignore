@@ -1,37 +1,44 @@
-# gptrail: linex-hashall-001-19Jun25-json-scan-docker-b2d406
-# Repo Infra
+# gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
+# 📁 Infrastructure
 tmp/
+.vscode/
+.idea/
+*.code-workspace
 .venv_name
 
-# Python
+# 🐍 Python Artifacts
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.egg-info/
+*/.egg-info/
 
-# SQLite
+# 🗄️ SQLite / Local DBs
 *.sqlite3
 *.db
 
-# Hashall runtime artifacts
+# 📦 Hashall Runtime Artifacts
 .hashall/
-/data/
-*.db
+sandbox/
+data/
+**/.hashall/
 
-# Editor/IDE
+# ✍️ Logs & Backups
+*.log
+*.bak
 *.swp
 *.swo
-*.bak
-*.log
 *.DS_Store
-.vscode/
-*.code-workspace
-.idea/
 
-# Ignore disposable test artifacts
-/sandbox/
-/**/.hashall/
-*.sqlite3
-# Ignore dev-only GPTrail symlinks
+# 🧪 Test / Temp Artifacts
+sandbox/
+tests/tmp/
+coverage.xml
+.cache/
+pytest_cache/
+
+# 🧠 GPTrail & Dev Symlinks
 tools/inject_staged.sh
 tools/pre-commit-gptrail.sh
+# Ignore dev-only GPTrail symlinks

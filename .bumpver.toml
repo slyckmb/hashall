@@ -1,0 +1,21 @@
+[bumpver]
+current_version = "0.3.0"
+version_pattern = "MAJOR.MINOR.PATCH"
+commit_message = "🔖 Bump version: {old_version} → {new_version}"
+tag_message = "Release {new_version}"
+tag_scope = "default"
+commit = true
+tag = true
+push = false
+
+[bumpver.file_patterns]
+"src/hashall/__init__.py" = [
+    "__version__ = '{version}'"
+]
+"README.md" = [
+    'hashall_version": "{version}"',
+    "Version {version}"
+]
+"pyproject.toml" = [
+    'version = "{version}"'
+]
