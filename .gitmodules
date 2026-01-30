@@ -1,3 +1,0 @@
-[submodule "tools/hubkit"]
-	path = tools/hubkit
-	url = git@github.com:slyckmb/hubkit.git
