@@ -1,7 +1,7 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 # hashall
 
-`hashall` is a fast, threaded file hashing and deduplication utility. It uses partial and full SHA-1 hashes stored in a local SQLite database to index and compare large sets of files efficiently.
+`hashall` is a fast, threaded file hashing and verification utility that stores file metadata in a local SQLite database for scan/export/compare workflows.
 
 ---
 
@@ -9,8 +9,7 @@
 
 - ✅ Fast, threaded directory scanning
 - 🧠 Stores file metadata in SQLite (`hashall.sqlite3`)
-- 🔍 Verifies full hashes only for files with matching partial hashes
-- 🧹 Removes stale DB entries for missing files
+- 🔍 Verifies file trees via scan sessions and JSON exports
 - 📦 Designed for deduping, archiving, and long-term seeding workflows
 - 📊 tqdm-powered progress bars for all operations
 - 🧾 Exports scan sessions to `.hashall/hashall.json` for external tooling
@@ -36,20 +35,12 @@ pip install -r requirements.txt
 ## 🚀 Usage
 
 ```bash
-python filehash_tool.py scan <directory> [--db DB] [--mode MODE] [--workers N] [--debug]
-python filehash_tool.py export <directory> [--db DB]
-python filehash_tool.py version
+python -m hashall scan /path/to/root [--db PATH] [--parallel]
+python -m hashall export /path/to/hashall.sqlite3 [--root /path/to/root] [--out /path/to/output.json]
+python -m hashall verify-trees /src/root /dst/root [--repair] [--force] [--no-export] [--db PATH]
 ```
 
-#### 🔁 Alternate CLI Entry:
-```bash
-python3 -m src.hashall verify-trees /src /dest [--repair] [--force]
-```
-
-### Commands:
-- `scan <dir>` — Index files into the database and associate with a scan session
-- `export <dir>` — Export JSON metadata for the latest scan session under `.hashall/hashall.json`
-- `version` — Display version info
+See `docs/cli.md` for the full CLI reference.
 
 ---
 
@@ -94,38 +85,13 @@ python3 tests/test_cli_all.py
 
 ## 📁 Database Schema
 
-Each file indexed stores:
-- Full absolute path (`abs_path`)
-- Relative path (`rel_path`)
-- Device ID (`dev`), inode (`ino`)
-- Size, mtime, UID, GID
-- Partial SHA-1 and full SHA-1
-- `scan_id` foreign key linking to `scan_session`
-
-Stored in: `hashall.sqlite3`
+See `docs/schema.md` and `schema.sql`.
 
 ---
 
 ## 📄 Example JSON Output
 
-Located at: `<root>/.hashall/hashall.json`
-
-```json
-{
-  "scan_id": "uuid-v4",
-  "scan_time": "2025-06-17T18:45:22Z",
-  "scan_root": "/mnt/data/movies",
-  "hashall_version": "0.3.8-dev",
-  "files": [
-    {
-      "rel_path": "movie1.avi",
-      "size": 123456,
-      "sha1": "abcdef123456..."
-    },
-    ...
-  ]
-}
-```
+See `docs/architecture.md` for the data flow and artifacts.
 
 ---
 
