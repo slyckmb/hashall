@@ -24,10 +24,11 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
     files = conn.execute("SELECT path, size, mtime, sha1 FROM files WHERE scan_session_id = ?", (scan_session_id,))
     data = {
         "scan_id": scan_id,
+        "root_path": str(root_path) if root_path else None,
         "files": [dict(row) for row in files],
     }
 
-    out = out_path or Path.home() / ".hashall" / "hashall.json"
+    out = Path(out_path) if out_path else Path.home() / ".hashall" / "hashall.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(orjson.dumps(data, option=orjson.OPT_INDENT_2))
     print(f"✅ Exported {len(data['files'])} records to: {out}")

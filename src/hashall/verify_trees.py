@@ -11,6 +11,32 @@ from hashall.verify import verify_paths
 
 console = Console()
 
+def _ensure_session_id(conn, scan_id: str, root_path: Path) -> int | None:
+    if not scan_id:
+        return None
+    row = conn.execute(
+        "SELECT id FROM scan_sessions WHERE scan_id = ?",
+        (scan_id,),
+    ).fetchone()
+    if row:
+        return row["id"]
+    conn.execute(
+        "INSERT INTO scan_sessions (scan_id, root_path) VALUES (?, ?)",
+        (scan_id, str(root_path)),
+    )
+    conn.commit()
+    return conn.execute(
+        "SELECT id FROM scan_sessions WHERE scan_id = ?",
+        (scan_id,),
+    ).fetchone()["id"]
+
+def _latest_session_id(conn, root_path: Path) -> int | None:
+    row = conn.execute(
+        "SELECT id FROM scan_sessions WHERE root_path = ? ORDER BY id DESC LIMIT 1",
+        (str(root_path),),
+    ).fetchone()
+    return row["id"] if row else None
+
 def verify_trees(
     src_root: Path,
     dst_root: Path,
@@ -34,23 +60,25 @@ def verify_trees(
 
     if src_json.exists():
         console.print(f"ℹ️   Loading scan JSON from source: {src_json}")
-        src_session = load_json_scan_into_db(conn, str(src_json))
+        src_scan_id = load_json_scan_into_db(conn, str(src_json))
+        src_session = _ensure_session_id(conn, src_scan_id, src_root)
     else:
         console.print(f"⚠️   No source export found, scanning `{src_root}`")
         scan_path(db_path=db_path, root_path=src_root)
         if auto_export:
             export_json(db_path=db_path, root_path=src_root)
-        src_session = None
+        src_session = _latest_session_id(conn, src_root)
 
     if dst_json.exists():
         console.print(f"ℹ️   Loading scan JSON from destination: {dst_json}")
-        dst_session = load_json_scan_into_db(conn, str(dst_json))
+        dst_scan_id = load_json_scan_into_db(conn, str(dst_json))
+        dst_session = _ensure_session_id(conn, dst_scan_id, dst_root)
     else:
         console.print(f"⚠️   No dest export found, scanning `{dst_root}`")
         scan_path(db_path=db_path, root_path=dst_root)
         if auto_export:
             export_json(db_path=db_path, root_path=dst_root)
-        dst_session = None
+        dst_session = _latest_session_id(conn, dst_root)
 
     verify_paths(
         conn=conn,

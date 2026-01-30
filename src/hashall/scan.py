@@ -19,6 +19,13 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False):
     init_db_schema(conn)
     cursor = conn.cursor()
     scan_id = str(uuid.uuid4())
+    root_str = str(root_path)
+
+    cursor.execute(
+        "INSERT INTO scan_sessions (scan_id, root_path) VALUES (?, ?)",
+        (scan_id, root_str),
+    )
+    scan_session_id = cursor.lastrowid
 
     print(f"✅ Scan session started: {scan_id} — {root_path}")
     file_paths = [
@@ -33,9 +40,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False):
             rel_path = str(Path(file_path).relative_to(root_path))
             sha1 = compute_sha1(file_path)
             cursor.execute("""
-                INSERT OR REPLACE INTO files (path, size, mtime, scan_session_id)
-                VALUES (?, ?, ?, ?)
-            """, (rel_path, stat.st_size, stat.st_mtime, scan_id))
+                INSERT OR REPLACE INTO files (path, size, mtime, sha1, scan_session_id)
+                VALUES (?, ?, ?, ?, ?)
+            """, (rel_path, stat.st_size, stat.st_mtime, sha1, scan_session_id))
         except Exception as e:
             print(f"⚠️ Could not process: {file_path} ({e})")
 

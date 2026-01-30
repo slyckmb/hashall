@@ -17,11 +17,11 @@ def verify_paths(
 
     cursor = conn.cursor()
     src_rows = cursor.execute(
-        "SELECT path, size, mtime FROM files WHERE scan_session_id = ?",
+        "SELECT path, size, mtime, sha1 FROM files WHERE scan_session_id = ?",
         (src_session_id,)
     ).fetchall()
     dst_rows = cursor.execute(
-        "SELECT path, size, mtime FROM files WHERE scan_session_id = ?",
+        "SELECT path, size, mtime, sha1 FROM files WHERE scan_session_id = ?",
         (dst_session_id,)
     ).fetchall()
 
@@ -40,7 +40,7 @@ def verify_paths(
         elif dst and not src:
             mismatches.append((path, "unexpected"))
         elif src and dst:
-            if src["size"] != dst["size"] or int(src["mtime"]) != int(dst["mtime"]):
+            if src["sha1"] != dst["sha1"] or src["size"] != dst["size"] or int(src["mtime"]) != int(dst["mtime"]):
                 mismatches.append((path, "changed"))
 
     for path, status in mismatches:
