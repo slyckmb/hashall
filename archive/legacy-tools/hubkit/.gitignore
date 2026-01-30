@@ -1,0 +1,3 @@
+*.code-workspace
+tmp/
+.venv_name

@@ -1,0 +1,44 @@
+# gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
+# 📁 Infrastructure
+tmp/
+.vscode/
+.idea/
+*.code-workspace
+.venv_name
+
+# 🐍 Python Artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*/.egg-info/
+
+# 🗄️ SQLite / Local DBs
+*.sqlite3
+*.db
+
+# 📦 Hashall Runtime Artifacts
+.hashall/
+sandbox/
+data/
+**/.hashall/
+
+# ✍️ Logs & Backups
+*.log
+*.bak
+*.swp
+*.swo
+*.DS_Store
+
+# 🧪 Test / Temp Artifacts
+sandbox/
+tests/tmp/
+coverage.xml
+.cache/
+pytest_cache/
+
+# 🧠 GPTrail & Dev Symlinks
+tools/inject_staged.sh
+tools/pre-commit-gptrail.sh
+# Ignore dev-only GPTrail symlinks

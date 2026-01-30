@@ -1,0 +1,14 @@
+# gptrail: linex-hashall-001-19Jun25-json-scan-docker-b2d406
+version: "3.9"
+
+services:
+  hashall:
+    build: .
+    network_mode: host
+    volumes:
+      - /mnt/media:/mnt/media
+      - $HOME/.hashall:/root/.hashall   # Match internal DB default
+    environment:
+      - PYTHONUNBUFFERED=1
+    stdin_open: true
+    tty: true
