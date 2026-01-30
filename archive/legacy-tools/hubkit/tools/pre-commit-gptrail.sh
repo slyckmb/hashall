@@ -1,0 +1,1 @@
+/home/michael/dev/work/gptrail/tools/pre-commit-gptrail.sh

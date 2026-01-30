@@ -1,0 +1,1 @@
+/home/michael/dev/work/gptrail/tools/inject_staged.sh
