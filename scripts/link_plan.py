@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dry-run conductor plan generator for hashall exports.
+Dry-run link plan generator for hashall exports.
 Identifies deduplication and hardlink opportunities WITHOUT modifying filesystem.
 READ-ONLY analysis only.
 """
@@ -18,7 +18,7 @@ def load_export(json_path):
 
 def generate_plan(export_a, export_b=None):
     """
-    Generate a dry-run conductor plan from one or two exports.
+    Generate a dry-run link plan from one or two exports.
 
     Returns:
         dict with action plans categorized by type
@@ -134,7 +134,7 @@ def generate_plan(export_a, export_b=None):
 def write_human_plan(plan, output_path):
     """Write human-readable plan to text file."""
     with open(output_path, 'w') as f:
-        f.write("HASHALL CONDUCTOR DRY-RUN PLAN\n")
+        f.write("HASHALL LINK DRY-RUN PLAN\n")
         f.write("=" * 70 + "\n\n")
         f.write("This is a DRY-RUN plan. NO filesystem modifications will be performed.\n\n")
 
@@ -195,11 +195,11 @@ if __name__ == '__main__':
         print(f"Loading ROOT_B: {export_b_path}")
         export_b = load_export(export_b_path)
 
-    print("Generating conductor plan...")
+    print("Generating link plan...")
     plan = generate_plan(export_a, export_b)
 
-    txt_path = '/tmp/hashall_conductor_plan.txt'
-    json_path = '/tmp/hashall_conductor_plan.json'
+    txt_path = '/tmp/hashall_link_plan.txt'
+    json_path = '/tmp/hashall_link_plan.json'
 
     write_human_plan(plan, txt_path)
     write_json_plan(plan, json_path)

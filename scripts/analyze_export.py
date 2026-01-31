@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Analyze hashall export JSON for real-world conductor validation.
+Analyze hashall export JSON for real-world link validation.
 Read-only analysis script - no filesystem modifications.
 """
 import json
