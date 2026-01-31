@@ -14,8 +14,11 @@ CREATE TABLE IF NOT EXISTS files (
     mtime REAL NOT NULL,
     sha1 TEXT,
     scan_session_id INTEGER,
+    inode INTEGER,
+    device_id INTEGER,
     PRIMARY KEY (path, scan_session_id),
     FOREIGN KEY (scan_session_id) REFERENCES scan_sessions(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_scan_session ON files(scan_session_id);
+CREATE INDEX IF NOT EXISTS idx_files_inode_device ON files(inode, device_id);

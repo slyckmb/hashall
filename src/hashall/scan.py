@@ -40,9 +40,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False):
             rel_path = str(Path(file_path).relative_to(root_path))
             sha1 = compute_sha1(file_path)
             cursor.execute("""
-                INSERT OR REPLACE INTO files (path, size, mtime, sha1, scan_session_id)
-                VALUES (?, ?, ?, ?, ?)
-            """, (rel_path, stat.st_size, stat.st_mtime, sha1, scan_session_id))
+                INSERT OR REPLACE INTO files (path, size, mtime, sha1, scan_session_id, inode, device_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (rel_path, stat.st_size, stat.st_mtime, sha1, scan_session_id, stat.st_ino, stat.st_dev))
         except Exception as e:
             print(f"⚠️ Could not process: {file_path} ({e})")
 
