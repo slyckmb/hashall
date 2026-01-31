@@ -91,6 +91,62 @@ class DemotionExecutor:
         actual_bytes = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
         return actual_bytes == expected_bytes
 
+    def _relocate_torrent(self, torrent_hash: str, new_path: str) -> None:
+        """
+        Relocate a torrent in qBittorrent.
+
+        Follows tracker-ctl pattern from qbit_migrate_paths.sh:
+        1. Pause torrent
+        2. Set new location
+        3. Resume torrent
+        4. Verify new location
+
+        Args:
+            torrent_hash: Torrent hash to relocate
+            new_path: New save path (directory containing torrent content)
+
+        Raises:
+            RuntimeError: If relocation fails at any step
+        """
+        self._log(f"relocate_torrent hash={torrent_hash[:16]} new_path={new_path}")
+
+        # 1. Pause torrent
+        self._log(f"  pause_torrent hash={torrent_hash[:16]}")
+        if not self.qbit_client.pause_torrent(torrent_hash):
+            raise RuntimeError(f"Failed to pause torrent {torrent_hash[:16]}")
+
+        # 2. Set location
+        self._log(f"  set_location hash={torrent_hash[:16]} location={new_path}")
+        if not self.qbit_client.set_location(torrent_hash, new_path):
+            # Try to resume on failure
+            self.qbit_client.resume_torrent(torrent_hash)
+            raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
+
+        # 3. Resume torrent
+        self._log(f"  resume_torrent hash={torrent_hash[:16]}")
+        if not self.qbit_client.resume_torrent(torrent_hash):
+            raise RuntimeError(f"Failed to resume torrent {torrent_hash[:16]}")
+
+        # 4. Verify new location
+        self._log(f"  verify_location hash={torrent_hash[:16]}")
+        import time
+        time.sleep(1)  # Give qBittorrent time to update
+        torrent_info = self.qbit_client.get_torrent_info(torrent_hash)
+        if not torrent_info:
+            raise RuntimeError(f"Failed to verify torrent {torrent_hash[:16]} after relocation")
+
+        # Normalize paths for comparison
+        expected_path = Path(new_path).resolve()
+        actual_path = Path(torrent_info.save_path).resolve()
+
+        if actual_path != expected_path:
+            raise RuntimeError(
+                f"Torrent {torrent_hash[:16]} location verification failed: "
+                f"expected={expected_path}, actual={actual_path}"
+            )
+
+        self._log(f"  verified hash={torrent_hash[:16]} save_path={actual_path}", "success")
+
     def dry_run(self, plan: Dict) -> None:
         """
         Perform dry-run of plan (print actions without executing).
@@ -185,23 +241,30 @@ class DemotionExecutor:
             raise RuntimeError(f"Pool payload total bytes mismatch at {target_path}")
 
         # 2. For each sibling, build view and relocate
+        relocated_torrents = []
         for torrent_hash in plan['affected_torrents']:
-            self._log(f"step=build_view torrent={torrent_hash[:16]} target={target_path}")
-            # TODO: Build torrent view using hardlinks
-            # For MVP, we'll assume the view is the payload itself
-            # (single-torrent or torrent name matches directory name)
+            self._log(f"step=relocate_sibling torrent={torrent_hash[:16]}")
 
-            self._log(f"step=relocate_torrent torrent={torrent_hash[:16]} new_path={target_path}")
-            # TODO: Call qBittorrent API to relocate torrent
-            # For MVP, this is stubbed out (requires qBit integration)
+            # Build torrent view on pool
+            # For MVP: Assume payload directory matches torrent name
+            # Future: Use hashall link to create hardlink views
+            self._log(f"  build_view torrent={torrent_hash[:16]} target={target_path}")
 
-            self._log(f"step=verify_torrent torrent={torrent_hash[:16]}")
-            # TODO: Verify torrent can access files (check qBit status)
+            # Relocate torrent in qBittorrent
+            try:
+                self._relocate_torrent(torrent_hash, str(target_path.parent))
+                relocated_torrents.append(torrent_hash)
+            except Exception as e:
+                # Rollback: abort execution, torrents remain on stash
+                self._log(f"Relocation failed for {torrent_hash[:16]}, aborting", "error")
+                raise RuntimeError(f"Failed to relocate torrent {torrent_hash[:16]}: {e}")
 
-        # 3. Remove stash-side views
-        self._log(f"step=cleanup_stash path={source_path}")
-        # TODO: Remove stash-side torrent views
-        # For MVP, we'll leave this manual (safety-first approach)
+        # 3. Cleanup stash-side views
+        # Only cleanup after ALL torrents successfully relocated
+        self._log(f"step=cleanup_stash path={source_path} relocated={len(relocated_torrents)}")
+        # For safety, we don't auto-delete stash content in MVP
+        # User should manually verify and cleanup after confirming all torrents work
+        self._log(f"  MANUAL_ACTION_REQUIRED: Verify torrents work, then delete {source_path}", "warning")
 
         self._log("REUSE execution complete", "success")
 
@@ -251,16 +314,28 @@ class DemotionExecutor:
             raise RuntimeError(f"Target total bytes mismatch after move")
 
         # 4. For each sibling, build view and relocate
+        relocated_torrents = []
         for torrent_hash in plan['affected_torrents']:
-            self._log(f"step=build_view torrent={torrent_hash[:16]} target={target_path}")
-            # TODO: Build torrent view using hardlinks
-            # For MVP, assume view is the payload itself
+            self._log(f"step=relocate_sibling torrent={torrent_hash[:16]}")
 
-            self._log(f"step=relocate_torrent torrent={torrent_hash[:16]} new_path={target_path}")
-            # TODO: Call qBittorrent API to relocate torrent
+            # Build torrent view on pool
+            # For MVP: Assume torrent content is at target_path
+            # Future: Use hashall link to create hardlink views
+            self._log(f"  build_view torrent={torrent_hash[:16]} target={target_path}")
 
-            self._log(f"step=verify_torrent torrent={torrent_hash[:16]}")
-            # TODO: Verify torrent can access files
+            # Relocate torrent in qBittorrent
+            try:
+                self._relocate_torrent(torrent_hash, str(target_path.parent))
+                relocated_torrents.append(torrent_hash)
+            except Exception as e:
+                # Rollback: move payload back to stash if ANY torrent fails
+                self._log(f"Relocation failed for {torrent_hash[:16]}, rolling back", "error")
+                try:
+                    shutil.move(str(target_path), str(source_path))
+                    self._log(f"  Rolled back payload to {source_path}", "warning")
+                except Exception as rollback_error:
+                    self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
+                raise RuntimeError(f"Failed to relocate torrent {torrent_hash[:16]}: {e}")
 
         # 5. Verify source is removed
         self._log(f"step=verify_source_removed path={source_path}")

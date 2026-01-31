@@ -191,6 +191,128 @@ class QBittorrentClient:
             # Multi-file torrent: save_path/torrent_name/
             return str(save_path / torrent.name)
 
+    def pause_torrent(self, torrent_hash: str) -> bool:
+        """
+        Pause a torrent.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            True if successful, False otherwise
+
+        Note:
+            Follows tracker-ctl pattern from qbit_migrate_paths.sh
+            Uses qBittorrent API: POST /api/v2/torrents/pause
+        """
+        self._ensure_authenticated()
+
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/v2/torrents/pause",
+                data={"hashes": torrent_hash}
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            print(f"⚠️ Failed to pause torrent {torrent_hash}: {e}")
+            return False
+
+    def resume_torrent(self, torrent_hash: str) -> bool:
+        """
+        Resume a paused torrent.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            True if successful, False otherwise
+
+        Note:
+            Follows tracker-ctl pattern from qbit_migrate_paths.sh
+            Uses qBittorrent API: POST /api/v2/torrents/resume
+        """
+        self._ensure_authenticated()
+
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/v2/torrents/resume",
+                data={"hashes": torrent_hash}
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            print(f"⚠️ Failed to resume torrent {torrent_hash}: {e}")
+            return False
+
+    def set_location(self, torrent_hash: str, new_location: str) -> bool:
+        """
+        Relocate a torrent to a new save path.
+
+        Args:
+            torrent_hash: Torrent infohash
+            new_location: New save path (absolute path)
+
+        Returns:
+            True if successful, False otherwise
+
+        Note:
+            Follows tracker-ctl pattern from qbit_migrate_paths.sh
+            Uses qBittorrent API: POST /api/v2/torrents/setLocation
+            Pattern: pause → setLocation → resume
+        """
+        self._ensure_authenticated()
+
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/v2/torrents/setLocation",
+                data={"hashes": torrent_hash, "location": new_location}
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            print(f"⚠️ Failed to set location for torrent {torrent_hash}: {e}")
+            return False
+
+    def get_torrent_info(self, torrent_hash: str) -> Optional[QBitTorrent]:
+        """
+        Get detailed info for a specific torrent.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            QBitTorrent object or None if not found
+        """
+        self._ensure_authenticated()
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/v2/torrents/info",
+                params={"hashes": torrent_hash}
+            )
+            response.raise_for_status()
+            torrents_data = response.json()
+
+            if not torrents_data:
+                return None
+
+            t = torrents_data[0]
+            return QBitTorrent(
+                hash=t.get('hash', ''),
+                name=t.get('name', ''),
+                save_path=t.get('save_path', ''),
+                category=t.get('category', ''),
+                tags=t.get('tags', ''),
+                state=t.get('state', ''),
+                size=t.get('size', 0),
+                progress=t.get('progress', 0.0)
+            )
+
+        except requests.RequestException as e:
+            print(f"⚠️ Failed to get info for torrent {torrent_hash}: {e}")
+            return None
+
     def test_connection(self) -> bool:
         """
         Test connection to qBittorrent.
