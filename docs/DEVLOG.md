@@ -489,6 +489,256 @@ pytest tests/test_rehome.py -v
 
 ---
 
+## 2026-01-31: Stage 4 - qBittorrent Integration + Batch Demotion
+
+### Summary
+
+Completed **rehome** with real qBittorrent integration and batch demotion support. Torrents are now actually relocated via qBittorrent Web API following tracker-ctl patterns. Batch mode allows demoting multiple payloads in one operation.
+
+### Rationale
+
+**Problem**: Stage 3 had stubbed qBittorrent integration - torrents weren't actually relocated. Batch operations were needed to efficiently demote multiple torrents.
+
+**Solution**:
+- Reuse tracker-ctl's proven qBittorrent authentication and relocation patterns
+- Add pause → set_location → resume → verify flow
+- Extend planner to support batch modes (by payload hash or tag)
+
+### Changes Made
+
+#### qBittorrent Integration (Reused from tracker-ctl)
+
+**Extended `src/hashall/qbittorrent.py`** with write operations:
+- `pause_torrent()` - Pause torrent before relocation
+- `set_location()` - Change torrent save path
+- `resume_torrent()` - Resume after relocation
+- `get_torrent_info()` - Fetch torrent details for verification
+
+**Pattern followed** (from `tracker-ctl/bin/qbit_migrate_paths.sh`):
+```bash
+# tracker-ctl pattern:
+qbit_api_request "POST" "/api/v2/torrents/pause" "hashes=${hash}"
+qbit_api_request "POST" "/api/v2/torrents/setLocation" "hashes=${hash}&location=${dest}"
+qbit_api_request "POST" "/api/v2/torrents/resume" "hashes=${hash}"
+```
+
+**Authentication** (from `tracker-ctl/bin/lib/qbittorrent.sh`):
+- Environment variables: `QBITTORRENT_URL`, `QBITTORRENT_USER`, `QBITTORRENT_PASS`
+- Session-based auth via `requests.Session`
+- Automatic cookie management
+
+**Updated `src/rehome/executor.py`**:
+- Added `_relocate_torrent()` - implements full relocation flow
+- Replaced stubs in `_execute_reuse()` and `_execute_move()`
+- Added verification: check qBittorrent reports expected save_path
+- Added rollback: on MOVE failure, restore payload to stash
+
+#### Batch Demotion
+
+**Extended `src/rehome/planner.py`**:
+- `plan_batch_demotion_by_payload_hash()` - Demote all torrents with specific payload
+- `plan_batch_demotion_by_tag()` - Demote all torrents with qBittorrent tag
+- Grouping logic: one plan per unique payload (avoids duplicates)
+
+**Updated `src/rehome/cli.py`**:
+- Added `--payload-hash` option for batch by payload
+- Added `--tag` option for batch by tag
+- Made `--torrent-hash`, `--payload-hash`, `--tag` mutually exclusive
+- Batch plan format: `{ batch: true, plans: [...] }`
+- Apply command handles both single and batch plans
+
+**Batch plan structure**:
+```json
+{
+  "version": "1.0",
+  "batch": true,
+  "mode": "tag",
+  "filter": "~noHL",
+  "plans": [
+    { <individual plan for payload 1> },
+    { <individual plan for payload 2> },
+    ...
+  ]
+}
+```
+
+#### Testing
+
+**Created `tests/test_rehome_stage4.py`**:
+- `test_pause_resume_relocate_flow` - Tests qBit client methods with mocks
+- `test_relocation_failure_handling` - Tests executor failure handling
+- `test_batch_by_payload_hash` - Tests batch planning by payload
+- `test_batch_by_tag_multiple_payloads` - Tests batch planning by tag
+- `test_verification_catches_failed_relocation` - Tests location verification
+
+All tests use mocked HTTP responses (no live qBittorrent required).
+
+#### Documentation
+
+**Updated `docs/REHOME.md`**:
+- Added "qBittorrent Integration" section documenting auth pattern and relocation flow
+- Documented batch modes: `--payload-hash` and `--tag`
+- Added workflow examples for batch demotion
+- Updated version to 0.2.0 (Stage 4)
+- Removed "stubbed qBittorrent" from limitations
+
+**Updated `docs/DEVLOG.md`**:
+- This entry
+
+### Key Concepts
+
+#### qBittorrent Relocation Flow
+
+Following tracker-ctl's `qbit_migrate_paths.sh`:
+
+1. **Pause** torrent (prevents file access conflicts)
+2. **Set location** to new save path
+3. **Resume** torrent (re-checks files at new location)
+4. **Verify** qBittorrent reports correct save_path
+
+**Failure handling**:
+- If `set_location` fails → resume at old location, abort
+- If ANY sibling fails → abort entire plan, don't cleanup
+- For MOVE plans → rollback payload to stash on failure
+
+#### Batch Demotion Modes
+
+**By payload hash**:
+- Use case: Demote specific payload when you know the hash
+- Result: Single plan affecting all sibling torrents
+- Example: `--payload-hash sha256_abc123...`
+
+**By tag**:
+- Use case: Demote all torrents with a specific tag (e.g., `~noHL` for "no hardlink")
+- Result: Multiple plans (one per unique payload)
+- Execution: Sequential, stops on first failure
+- Example: `--tag ~noHL`
+
+### Example Workflows
+
+#### Batch Demote by Tag
+
+```bash
+# Tag torrents in qBittorrent with ~noHL for "no hardlink, demote to pool"
+
+# Create batch plan
+rehome plan --demote \
+  --tag ~noHL \
+  --seeding-root /stash/torrents/seeding \
+  --stash-device 50 \
+  --pool-device 49
+
+# Output: rehome-plan-tag-~noHL.json
+# Contains one plan per unique payload
+
+# Dry-run (shows all payloads)
+rehome apply rehome-plan-tag-~noHL.json --dryrun
+
+# Execute
+rehome apply rehome-plan-tag-~noHL.json --force
+```
+
+#### Verify Relocation
+
+```bash
+# After apply, check qBittorrent to confirm:
+# 1. Torrents are at new save_path
+# 2. Torrents are seeding (not checking/errored)
+# 3. No file access errors
+
+# Then manually cleanup stash (safety-first):
+rm -rf /stash/torrents/seeding/Movie.2024
+```
+
+### Implementation Notes
+
+#### Why Reuse tracker-ctl?
+
+**NOT reused**:
+- Bash library (`qbittorrent.sh`) - would require subprocess calls from Python
+- Shell scripts - awkward Python integration
+
+**REUSED** (patterns and logic):
+- Authentication flow: env vars → session → cookies
+- Relocation flow: pause → set_location → resume
+- API endpoints: `/api/v2/torrents/pause`, `/api/v2/torrents/setLocation`, etc.
+- Verification: check save_path after relocation
+
+**Result**: Python-native implementation following proven tracker-ctl patterns.
+
+#### Batch Execution
+
+Batch plans execute **sequentially** (not parallel):
+- Safer: easier to track failures
+- Simpler: no concurrency issues with qBittorrent
+- Acceptable: relocation is fast (<1s per torrent)
+
+Future: Could parallelize with asyncio if needed.
+
+#### Manual Cleanup
+
+Stash-side cleanup remains manual for safety:
+- Verify ALL torrents work on pool first
+- Then `rm -rf /stash/.../` to reclaim space
+- Prevents accidental data loss if relocation silently failed
+
+### Testing
+
+```bash
+# Run all rehome tests
+pytest tests/test_rehome.py tests/test_rehome_stage4.py -v
+
+# Stage 3 tests (6 passed):
+# - External consumer detection
+# - REUSE/MOVE/BLOCK decisions
+# - Sibling handling
+# - Dry-run safety
+
+# Stage 4 tests (5 passed):
+# - qBittorrent pause/resume/relocate
+# - Relocation failure handling
+# - Batch by payload hash
+# - Batch by tag
+# - Verification after relocation
+```
+
+### What's Next
+
+**Stage 5+** (not part of this change):
+- Promotion (pool → stash for active torrents)
+- Smart view building (hardlink forests for complex torrent layouts)
+- Automatic cleanup with user confirmation
+- Parallel batch execution (asyncio)
+- Fuzzy payload matching (similar but not identical content)
+- Web UI for plan review and approval
+
+### Files Added/Modified
+
+**Modified files**:
+- `src/hashall/qbittorrent.py` - Added pause/resume/set_location/get_torrent_info
+- `src/rehome/executor.py` - Replaced stubs with real relocation, added rollback
+- `src/rehome/planner.py` - Added batch planning methods
+- `src/rehome/cli.py` - Added --payload-hash and --tag options, batch plan handling
+- `docs/REHOME.md` - Documented qBit integration and batch modes
+- `docs/DEVLOG.md` - This entry
+
+**New files**:
+- `tests/test_rehome_stage4.py` - Tests for qBit integration and batch demotion
+
+### Limitations
+
+**Addressed in Stage 4**:
+- ✅ qBittorrent relocation (was stubbed)
+- ✅ Batch operations (was single-torrent only)
+
+**Remaining**:
+- Manual stash cleanup (safety-first approach)
+- Sequential batch execution (acceptable for MVP)
+- Basic view building (assumes torrent name = directory name)
+- No promotion (pool → stash)
+
+---
+
 ## Future Entries
 
 Additional entries will be added here as the project evolves.

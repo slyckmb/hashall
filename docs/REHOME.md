@@ -1,8 +1,8 @@
 # Rehome - Seed Payload Demotion
 
-**Version:** 0.1.0 (Stage 3 MVP)
+**Version:** 0.2.0 (Stage 4 - qBittorrent Integration + Batch)
 **Purpose:** Orchestrate safe demotion of seed-only payloads from stash to pool
-**Status:** MVP - Demotion only, single-torrent mode
+**Status:** Production - Demotion with real qBittorrent relocation and batch support
 
 ---
 
@@ -16,12 +16,20 @@ Rehome is an external orchestration tool that moves seed-only payloads from high
 - Reuses existing payloads on pool when available
 - Moves payloads safely with verification at each step
 - Handles multiple torrents pointing to same payload (siblings)
+- **Real qBittorrent integration** - pause/relocate/resume torrents via Web API
+- **Batch demotion** - demote by payload hash or qBittorrent tag
 
 **What rehome is NOT:**
 - Not a promotion tool (pool → stash is out of scope)
 - Not a fuzzy/variant payload matcher
 - Not an automatic background service
 - Not a hashall core feature (external orchestrator)
+
+**Stage 4 additions:**
+- Real qBittorrent relocation (replaces Stage 3 stubs)
+- Batch demotion by payload hash or tag
+- Follows tracker-ctl patterns for qBittorrent authentication
+- Verification after each relocation operation
 
 ---
 
@@ -130,13 +138,45 @@ Result: BLOCKED (cannot demote because external consumer exists)
 
 ---
 
+## qBittorrent Integration
+
+### Authentication Pattern (Reused from tracker-ctl)
+
+Rehome uses the same qBittorrent authentication pattern as tracker-ctl:
+- Credentials from environment variables: `QBITTORRENT_URL`, `QBITTORRENT_USER`, `QBITTORRENT_PASS`
+- Session-based authentication via Web API
+- Cookie management handled automatically
+
+**Environment variables:**
+```bash
+export QBITTORRENT_URL=http://localhost:9003  # qBittorrent Web UI URL
+export QBITTORRENT_USER=admin                  # Username
+export QBITTORRENT_PASS=password               # Password
+```
+
+### Relocation Flow
+
+When relocating torrents, rehome follows the tracker-ctl pattern from `qbit_migrate_paths.sh`:
+
+1. **Pause** torrent (`POST /api/v2/torrents/pause`)
+2. **Set location** (`POST /api/v2/torrents/setLocation`)
+3. **Resume** torrent (`POST /api/v2/torrents/resume`)
+4. **Verify** new location matches expected path
+
+**Failure handling:**
+- If set_location fails, torrent is resumed at old location
+- If any torrent relocation fails, entire operation aborts
+- For MOVE plans, payload is rolled back to stash on failure
+
+---
+
 ## Commands
 
 ### `rehome plan`
 
-Create a demotion plan for a torrent.
+Create a demotion plan for torrents (single or batch mode).
 
-**Syntax:**
+**Syntax (single-torrent mode):**
 ```bash
 rehome plan --demote \
   --torrent-hash <hash> \
@@ -147,14 +187,41 @@ rehome plan --demote \
   [--output <plan_file>]
 ```
 
+**Syntax (batch mode - by payload hash):**
+```bash
+rehome plan --demote \
+  --payload-hash <hash> \
+  --seeding-root <path> \
+  --stash-device <device_id> \
+  --pool-device <device_id> \
+  [--catalog <db_path>] \
+  [--output <plan_file>]
+```
+
+**Syntax (batch mode - by tag):**
+```bash
+rehome plan --demote \
+  --tag <tag> \
+  --seeding-root <path> \
+  --stash-device <device_id> \
+  --pool-device <device_id> \
+  [--catalog <db_path>] \
+  [--output <plan_file>]
+```
+
 **Options:**
 - `--demote` - Required flag indicating demotion operation
-- `--torrent-hash` - Torrent infohash to demote
+- `--torrent-hash` - Torrent infohash to demote (single-torrent mode)
+- `--payload-hash` - Payload hash to demote (batch mode - all torrents with this payload)
+- `--tag` - qBittorrent tag to filter by (batch mode - all torrents with this tag)
 - `--seeding-root` - Seeding domain root path(s) (can specify multiple times)
 - `--stash-device` - Device ID for stash storage
 - `--pool-device` - Device ID for pool storage
 - `--catalog` - Path to hashall catalog database (default: `~/.hashall/catalog.db`)
-- `--output` - Output plan file (default: `rehome-plan-<hash>.json`)
+- `--output` - Output plan file (default: `rehome-plan-<mode>.json`)
+
+**Modes (mutually exclusive):**
+- Specify exactly ONE of: `--torrent-hash`, `--payload-hash`, or `--tag`
 
 **Output:**
 - JSON plan file with decision (BLOCK | REUSE | MOVE)
@@ -227,36 +294,68 @@ rehome apply rehome-plan-abc123de.json --force
 
 ## Workflow
 
-### Typical Demotion Flow
+### Single-Torrent Demotion
 
 ```bash
 # 1. Ensure catalog is up-to-date
 hashall scan /stash/torrents/seeding
 hashall scan /pool/torrents/content
-
-# 2. Sync payloads from qBittorrent
 hashall payload sync
 
-# 3. Create demotion plan for a torrent
+# 2. Create demotion plan for a specific torrent
 rehome plan --demote \
   --torrent-hash abc123def456 \
   --seeding-root /stash/torrents/seeding \
   --stash-device 50 \
   --pool-device 49
 
-# 4. Review the plan
+# 3. Review the plan
 cat rehome-plan-abc123de.json | jq .
 
-# 5. Dry-run to preview actions
+# 4. Dry-run to preview actions
 rehome apply rehome-plan-abc123de.json --dryrun
 
-# 6. Execute if everything looks good
+# 5. Execute if everything looks good
 rehome apply rehome-plan-abc123de.json --force
 
-# 7. Rescan to update catalog
-hashall scan /stash/torrents/seeding
-hashall scan /pool/torrents/content
+# 6. Rescan to update catalog
+hashall scan /stash
+hashall scan /pool
 hashall payload sync
+```
+
+### Batch Demotion by Payload Hash
+
+```bash
+# Demote all torrents sharing a specific payload
+rehome plan --demote \
+  --payload-hash sha256_abc123... \
+  --seeding-root /stash/torrents/seeding \
+  --stash-device 50 \
+  --pool-device 49
+
+# Review and apply
+cat rehome-plan-payload-sha256_abc.json | jq .
+rehome apply rehome-plan-payload-sha256_abc.json --dryrun
+rehome apply rehome-plan-payload-sha256_abc.json --force
+```
+
+### Batch Demotion by Tag
+
+```bash
+# Demote all torrents with a specific tag (e.g., ~noHL for "no hardlink")
+rehome plan --demote \
+  --tag ~noHL \
+  --seeding-root /stash/torrents/seeding \
+  --stash-device 50 \
+  --pool-device 49
+
+# This creates a batch plan with one sub-plan per unique payload
+cat rehome-plan-tag-~noHL.json | jq .
+
+# Apply will process each payload sequentially
+rehome apply rehome-plan-tag-~noHL.json --dryrun
+rehome apply rehome-plan-tag-~noHL.json --force
 ```
 
 ---
@@ -405,15 +504,13 @@ hashall payload sync
 
 ## Known Limitations
 
-### MVP Constraints
+### Current Constraints (Stage 4)
 
 1. **Demotion only** - No promotion (pool → stash)
-2. **Single-torrent mode** - Process one at a time
-3. **No batch operations** - Must run plan/apply for each torrent
-4. **Manual cleanup** - Stash-side cleanup is not automated
-5. **No fuzzy matching** - Exact payload_hash match only
-6. **Stubbed qBittorrent integration** - Torrent relocation not implemented
-7. **Basic view building** - Assumes torrent name = directory name
+2. **Manual cleanup** - Stash-side cleanup requires user verification
+3. **No fuzzy matching** - Exact payload_hash match only
+4. **Basic view building** - Assumes torrent name = directory name
+5. **Sequential batch processing** - Batch plans execute serially, not in parallel
 
 ### Future Enhancements (Stage 4+)
 
