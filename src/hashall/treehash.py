@@ -5,11 +5,11 @@ from hashlib import sha1
 def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
     """
     Computes a SHA1-based treehash representing the file structure of a scan session.
-    
+
     Args:
-        scan_id (str): The scan session ID.
+        scan_id (str): The scan session UUID.
         db_path (str): Path to the SQLite database.
-        commit (bool): If True, updates the scan_session.treehash field.
+        commit (bool): If True, updates the scan_sessions.treehash field.
 
     Returns:
         str: Computed treehash value.
@@ -17,10 +17,11 @@ def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT rel_path, sha1, size, mtime
-        FROM files
-        WHERE scan_id = ?
-        ORDER BY rel_path
+        SELECT f.path, f.sha1, f.size, f.mtime
+        FROM files f
+        JOIN scan_sessions s ON f.scan_session_id = s.id
+        WHERE s.scan_id = ?
+        ORDER BY f.path
     """, (scan_id,))
     rows = cursor.fetchall()
     conn.close()
@@ -34,7 +35,7 @@ def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE scan_session SET treehash = ? WHERE scan_id = ?",
+            "UPDATE scan_sessions SET treehash = ? WHERE scan_id = ?",
             (treehash, scan_id)
         )
         conn.commit()
