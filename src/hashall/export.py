@@ -28,7 +28,15 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
         "files": [dict(row) for row in files],
     }
 
-    out = Path(out_path) if out_path else Path.home() / ".hashall" / "hashall.json"
+    # Default export location: <root>/.hashall/hashall.json if root_path provided,
+    # otherwise ~/.hashall/hashall.json for backward compatibility
+    if out_path:
+        out = Path(out_path)
+    elif root_path:
+        out = Path(root_path) / ".hashall" / "hashall.json"
+    else:
+        out = Path.home() / ".hashall" / "hashall.json"
+
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(orjson.dumps(data, option=orjson.OPT_INDENT_2))
     print(f"✅ Exported {len(data['files'])} records to: {out}")
