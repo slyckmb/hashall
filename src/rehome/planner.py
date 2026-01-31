@@ -250,3 +250,112 @@ class DemotionPlanner:
 
         finally:
             conn.close()
+
+    def plan_batch_demotion_by_payload_hash(self, payload_hash: str) -> Dict:
+        """
+        Create a batch demotion plan for all torrents with a specific payload hash.
+
+        Args:
+            payload_hash: Payload hash to demote
+
+        Returns:
+            Batch plan dictionary with payload-level decision
+        """
+        conn = self._get_db_connection()
+
+        try:
+            # Find payload with this hash on stash
+            row = conn.execute("""
+                SELECT payload_id
+                FROM payloads
+                WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
+                LIMIT 1
+            """, (payload_hash, self.stash_device)).fetchone()
+
+            if not row:
+                raise ValueError(
+                    f"Payload with hash {payload_hash} not found on stash (device {self.stash_device})"
+                )
+
+            payload_id = row[0]
+
+            # Get all torrents for this payload
+            torrent_rows = conn.execute("""
+                SELECT torrent_hash
+                FROM torrent_instances
+                WHERE payload_id = ?
+                ORDER BY torrent_hash
+            """, (payload_id,)).fetchall()
+
+            if not torrent_rows:
+                raise ValueError(f"No torrents found for payload {payload_hash}")
+
+            # Use first torrent to generate plan (all siblings share same decision)
+            first_torrent = torrent_rows[0][0]
+            plan = self.plan_demotion(first_torrent)
+
+            # Mark as batch plan
+            plan['batch_mode'] = 'payload_hash'
+            plan['batch_filter'] = payload_hash
+
+            return plan
+
+        finally:
+            conn.close()
+
+    def plan_batch_demotion_by_tag(self, tag: str) -> List[Dict]:
+        """
+        Create batch demotion plans for all torrents with a specific tag.
+
+        Args:
+            tag: qBittorrent tag to filter by
+
+        Returns:
+            List of plans (one per unique payload)
+        """
+        conn = self._get_db_connection()
+
+        try:
+            # Get all torrents with this tag on stash
+            torrent_rows = conn.execute("""
+                SELECT DISTINCT ti.torrent_hash, ti.payload_id, ti.tags
+                FROM torrent_instances ti
+                JOIN payloads p ON ti.payload_id = p.payload_id
+                WHERE p.device_id = ? AND p.status = 'complete'
+                ORDER BY ti.payload_id, ti.torrent_hash
+            """, (self.stash_device,)).fetchall()
+
+            if not torrent_rows:
+                raise ValueError(f"No torrents found on stash")
+
+            # Filter by tag (tags are comma-separated in database)
+            matching_torrents = []
+            for torrent_hash, payload_id, tags in torrent_rows:
+                tag_list = [t.strip() for t in (tags or '').split(',')]
+                if tag in tag_list:
+                    matching_torrents.append((torrent_hash, payload_id))
+
+            if not matching_torrents:
+                raise ValueError(f"No torrents with tag '{tag}' found on stash")
+
+            # Group by payload_id to avoid duplicate plans
+            payloads_seen = set()
+            plans = []
+
+            for torrent_hash, payload_id in matching_torrents:
+                if payload_id in payloads_seen:
+                    continue  # Already planned this payload
+
+                payloads_seen.add(payload_id)
+
+                # Generate plan for this payload
+                plan = self.plan_demotion(torrent_hash)
+                plan['batch_mode'] = 'tag'
+                plan['batch_filter'] = tag
+
+                plans.append(plan)
+
+            return plans
+
+        finally:
+            conn.close()
