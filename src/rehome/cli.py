@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from rehome import __version__
-from rehome.planner import DemotionPlanner
+from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 
 DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
@@ -22,8 +22,10 @@ def cli():
 
 
 @cli.command("plan")
-@click.option("--demote", is_flag=True, required=True,
+@click.option("--demote", is_flag=True,
               help="Plan demotion from stash to pool")
+@click.option("--promote", is_flag=True,
+              help="Plan promotion from pool to stash (reuse only)")
 @click.option("--torrent-hash",
               help="Torrent hash to demote (single-torrent mode)")
 @click.option("--payload-hash",
@@ -40,7 +42,7 @@ def cli():
               help="Device ID for pool storage")
 @click.option("--output", "-o", type=click.Path(),
               help="Output plan file (default: rehome-plan-<mode>.json)")
-def plan_cmd(demote, torrent_hash, payload_hash, tag, catalog, seeding_root, stash_device, pool_device, output):
+def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_root, stash_device, pool_device, output):
     """
     Create a demotion plan for torrents.
 
@@ -52,6 +54,11 @@ def plan_cmd(demote, torrent_hash, payload_hash, tag, catalog, seeding_root, sta
     Analyzes payloads, checks for external consumers, and determines
     whether to BLOCK, REUSE, or MOVE each payload from stash to pool.
     """
+    # Validate direction
+    if demote == promote:
+        click.echo("❌ Must specify exactly one of: --demote or --promote", err=True)
+        raise click.Abort()
+
     # Validate mutually exclusive options
     mode_count = sum([bool(torrent_hash), bool(payload_hash), bool(tag)])
     if mode_count == 0:
@@ -68,11 +75,18 @@ def plan_cmd(demote, torrent_hash, payload_hash, tag, catalog, seeding_root, sta
         raise click.Abort()
 
     # Create planner
-    planner = DemotionPlanner(
-        catalog_path=catalog_path,
-        seeding_roots=list(seeding_root),
-        stash_device=stash_device,
-        pool_device=pool_device
+    planner = (
+        DemotionPlanner(
+            catalog_path=catalog_path,
+            seeding_roots=list(seeding_root),
+            stash_device=stash_device,
+            pool_device=pool_device
+        ) if demote else PromotionPlanner(
+            catalog_path=catalog_path,
+            seeding_roots=list(seeding_root),
+            stash_device=stash_device,
+            pool_device=pool_device
+        )
     )
 
     # Generate plan(s) based on mode
@@ -81,22 +95,27 @@ def plan_cmd(demote, torrent_hash, payload_hash, tag, catalog, seeding_root, sta
             # Single-torrent mode
             mode = "torrent"
             filter_val = torrent_hash
-            click.echo(f"📋 Planning demotion for torrent {torrent_hash[:16]}...")
-            plans = [planner.plan_demotion(torrent_hash)]
+            action = "demotion" if demote else "promotion"
+            click.echo(f"📋 Planning {action} for torrent {torrent_hash[:16]}...")
+            plans = [planner.plan_demotion(torrent_hash)] if demote else [planner.plan_promotion(torrent_hash)]
 
         elif payload_hash:
             # Batch mode by payload hash
             mode = "payload"
             filter_val = payload_hash
-            click.echo(f"📋 Planning batch demotion for payload {payload_hash[:16]}...")
-            plans = [planner.plan_batch_demotion_by_payload_hash(payload_hash)]
+            action = "demotion" if demote else "promotion"
+            click.echo(f"📋 Planning batch {action} for payload {payload_hash[:16]}...")
+            plans = [planner.plan_batch_demotion_by_payload_hash(payload_hash)] if demote else [
+                planner.plan_batch_promotion_by_payload_hash(payload_hash)
+            ]
 
         elif tag:
             # Batch mode by tag
             mode = "tag"
             filter_val = tag
-            click.echo(f"📋 Planning batch demotion for tag '{tag}'...")
-            plans = planner.plan_batch_demotion_by_tag(tag)
+            action = "demotion" if demote else "promotion"
+            click.echo(f"📋 Planning batch {action} for tag '{tag}'...")
+            plans = planner.plan_batch_demotion_by_tag(tag) if demote else planner.plan_batch_promotion_by_tag(tag)
 
     except Exception as e:
         click.echo(f"❌ Planning failed: {e}", err=True)
@@ -105,10 +124,10 @@ def plan_cmd(demote, torrent_hash, payload_hash, tag, catalog, seeding_root, sta
     # Default output filename
     if not output:
         if mode == "torrent":
-            output = f"rehome-plan-{filter_val[:8]}.json"
+            output = f"rehome-plan-{'demote' if demote else 'promote'}-{filter_val[:8]}.json"
         else:
             safe_filter = filter_val[:16] if mode == "payload" else filter_val.replace('/', '-')
-            output = f"rehome-plan-{mode}-{safe_filter}.json"
+            output = f"rehome-plan-{'demote' if demote else 'promote'}-{mode}-{safe_filter}.json"
 
     output_path = Path(output)
 
@@ -136,11 +155,14 @@ def plan_cmd(demote, torrent_hash, payload_hash, tag, catalog, seeding_root, sta
         decision = plan['decision']
 
         if decision == 'BLOCK':
-            click.echo("🚫 BLOCKED - External consumers detected:")
+            click.echo("🚫 BLOCKED - Plan cannot proceed:")
             for reason in plan['reasons']:
                 click.echo(f"   {reason}")
         elif decision == 'REUSE':
-            click.echo("♻️  REUSE - Payload already exists on pool")
+            if plan.get('direction') == 'promote':
+                click.echo("♻️  REUSE - Payload already exists on stash")
+            else:
+                click.echo("♻️  REUSE - Payload already exists on pool")
             click.echo(f"   Payload hash: {plan['payload_hash'][:16]}...")
             click.echo(f"   Sibling torrents: {len(plan['affected_torrents'])}")
         elif decision == 'MOVE':
