@@ -1,20 +1,22 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 # hashall
 
-`hashall` is a fast, threaded file hashing and verification utility that stores file metadata in a local SQLite database for scan/export/compare workflows.
+A unified catalog system for file deduplication and management. Hashall maintains a single database of all your files across all storage devices, enabling intelligent deduplication, hardlink management, and safe file migrations.
+
+**Architecture:** Unified Catalog Model (v0.5.0+)
 
 ---
 
 ## 🔧 Features
 
-- ✅ Fast, threaded directory scanning
-- 🧠 Stores file metadata in SQLite (`hashall.sqlite3`)
-- 🔍 Verifies file trees via scan sessions and JSON exports
-- 📦 Designed for deduping, archiving, and long-term seeding workflows
-- 📊 tqdm-powered progress bars for all operations
-- 🧾 Exports scan sessions to `.hashall/hashall.json` for external tooling
-- 🧠 Tracks scan sessions using UUIDs and persistent metadata
-- 🌲 New: Smart tree verification via `verify-trees` command
+- 📊 **Unified Catalog** - Single database for all storage devices
+- 🔍 **Incremental Scanning** - Updates catalog with add/remove/modify/move detection
+- 🔗 **Hardlink Aware** - Tracks inodes and device IDs for safe deduplication
+- 🎯 **Device-Based Tables** - Natural hardlink boundaries, faster queries
+- 🧠 **Smart Deduplication** - Conductor plans and executes hardlink operations
+- 🔒 **Symlink Safe** - Canonical path resolution prevents double-scanning
+- 📦 **ZFS Ready** - Built for ZFS + jdupes + qBittorrent workflows
+- 📊 **Progress Bars** - tqdm-powered feedback for all operations
 
 ---
 
@@ -28,42 +30,138 @@ source $HOME/.venvs/hashall/bin/activate
 pip install -r requirements.txt
 ```
 
-(Requirements file coming soon — add `pytest` if testing)
+---
+
+## 🚀 Quick Start
+
+### 1. Scan Your Storage
+
+```bash
+# Scan each filesystem you want to catalog
+hashall scan /pool
+hashall scan /stash
+hashall scan /backup
+```
+
+This builds a unified catalog at `~/.hashall/catalog.db`.
+
+**What happens:**
+- Walks filesystem, computes SHA1 hashes
+- Stores file metadata (path, inode, size, mtime, device_id)
+- Resolves symlinks to canonical paths
+- Detects add/remove/modify/move changes
+- Updates in place (incremental, not snapshot)
+
+### 2. Find Deduplication Opportunities
+
+```bash
+# Analyze a single device
+hashall conductor analyze --device /pool
+
+# Or analyze across all devices
+hashall conductor analyze --cross-device
+```
+
+**Output:**
+```
+🔍 Same-device deduplication opportunities:
+  /pool: 250 opportunities, 45.2 GB saveable
+
+🌐 Cross-device duplicates:
+  50 files duplicated across 2 devices, 12.3 GB total
+```
+
+### 3. Create a Deduplication Plan
+
+```bash
+hashall conductor plan "Monthly /pool dedupe" --device /pool
+```
+
+**Output:**
+```
+✅ Plan created: Monthly /pool dedupe
+   ID: 1
+   Opportunities: 250
+   Potential savings: 45.2 GB
+```
+
+### 4. Review and Execute
+
+```bash
+# Review the plan
+hashall conductor show-plan 1
+
+# Dry run (preview changes)
+hashall conductor execute 1 --dry-run
+
+# Execute for real
+hashall conductor execute 1
+```
+
+See `docs/conductor-guide.md` for complete workflow.
 
 ---
 
-## 🚀 Usage
+## 📖 Documentation
 
-```bash
-python -m hashall scan /path/to/root [--db PATH] [--parallel]
-python -m hashall export /path/to/hashall.sqlite3 [--root /path/to/root] [--out /path/to/output.json]
-python -m hashall verify-trees /src/root /dst/root [--repair] [--force] [--no-export] [--db PATH]
-```
+### Core Documentation
+- **[Architecture](docs/architecture.md)** - How the unified catalog works
+- **[Unified Catalog Design](docs/unified-catalog-architecture.md)** - Comprehensive design document
+- **[CLI Reference](docs/cli.md)** - All commands and options
+- **[Database Schema](docs/schema.md)** - Complete schema documentation
 
-See `docs/cli.md` for the full CLI reference.
+### Guides
+- **[Conductor Guide](docs/conductor-guide.md)** - Deduplication workflow and best practices
+- **[Symlinks & Bind Mounts](docs/symlinks-and-bind-mounts.md)** - How hashall handles them correctly
+- **[Quick Reference](docs/quick-reference.md)** - Cheat sheet for common operations
+
+### Historical
+- **[Archive](docs/archive/)** - Obsolete docs, session summaries, validation reports
 
 ---
 
-## 🌲 verify-trees: Smart File Tree Comparison
+## 💡 Common Workflows
 
-Compare two directory trees using previously stored scan sessions.
+### Monthly Deduplication
 
 ```bash
-hashall verify-trees /path/to/source /path/to/destination [--repair] [--force]
+# 1. Update catalog
+hashall scan /pool
+
+# 2. Find and execute deduplication
+hashall conductor plan "Monthly dedupe" --device /pool
+hashall conductor execute <plan_id>
 ```
 
-| Flag        | Description |
-|-------------|-------------|
-| `--repair`  | Emit file list for potential rsync-style repair |
-| `--force`   | Force a fresh rescan even if session data exists |
-| `--help`    | Show command help |
+### Cross-Device Audit
 
-### Example:
 ```bash
-hashall verify-trees /mnt/dataA /mnt/dataB --repair
+# Scan all devices
+hashall scan /pool
+hashall scan /stash
+
+# Find duplicates across devices (informational)
+hashall conductor analyze --cross-device
 ```
 
-💡 This performs a session-based scan/load and hash comparison of both trees, emitting diffs and (soon) a repair manifest.
+### Verify Hardlinks Are Intact
+
+```bash
+hashall scan /data
+hashall conductor analyze --device /data
+# Look for NOOP items (already optimized)
+```
+
+### Check Catalog Status
+
+```bash
+hashall conductor status
+
+# Output:
+# 📊 Registered Devices:
+#   /pool  (device 49) - 50,000 files, 500 GB
+#   /stash (device 50) - 30,000 files, 300 GB
+```
 
 ---
 
@@ -73,61 +171,109 @@ hashall verify-trees /mnt/dataA /mnt/dataB --repair
 pytest tests/
 ```
 
-You can also run individual test files:
-
+Individual test files:
 ```bash
+python3 tests/test_e2e_workflow.py
 python3 tests/test_verify_trees.py
 python3 tests/test_diff.py
-python3 tests/test_cli_all.py
 ```
 
 ---
 
-## 📁 Database Schema
+## 🏗️ Architecture Overview
 
-See `docs/schema.md` and `schema.sql`.
+### Unified Catalog Model
+
+```
+~/.hashall/catalog.db
+  ├─ devices                  (registry: /pool, /stash, ...)
+  ├─ files_49                 (files on device 49)
+  ├─ files_50                 (files on device 50)
+  ├─ hardlink_groups          (inodes with multiple paths)
+  ├─ duplicate_groups         (same SHA1 across devices)
+  └─ conductor_plans          (deduplication plans)
+```
+
+**Key concepts:**
+- **One table per device** - Hardlinks only work within a device
+- **Incremental updates** - Rescans update existing records, not snapshots
+- **Canonical paths** - Symlinks resolved to avoid double-scanning
+- **Conductor-ready** - Direct SQL queries, no JSON intermediates
+
+See `docs/architecture.md` for complete details.
 
 ---
 
-## 📄 Example JSON Output
+## 🔄 Migration from Session-Based Model
 
-See `docs/architecture.md` for the data flow and artifacts.
+If upgrading from v0.4.x (session-based):
 
----
-
-## ⌨️ Make Targets
-
-Coming soon:
 ```bash
-make scan DIR=~/media
-make verify
-make clean
+# Export latest session
+hashall export old.db --root /pool --out /tmp/pool.json
+
+# Import into unified catalog (future feature)
+hashall import /tmp/pool.json --device /pool
 ```
+
+See `docs/unified-catalog-architecture.md` for migration guide.
 
 ---
 
 ## 📌 Roadmap
-- [x] Base scan/verify/clean tool
-- [x] TUI/CLI progress feedback
-- [x] JSON export with metadata
-- [x] UUID-based scan session tracking
-- [x] Treehash-based smart comparison
-- [ ] `verify-trees` repair manifest via `--files-from`
-- [ ] Rsync repair integration
-- [ ] `dupes` reporting
-- [ ] Dedup strategies (hardlink/move/delete)
-- [ ] Export filters and incremental updates
+
+### Completed ✅
+- [x] Unified catalog with device tables
+- [x] Incremental scan with change detection
+- [x] Hardlink tracking (inode + device_id)
+- [x] Symlink/bind mount safe scanning
+- [x] Conductor deduplication planning
+- [x] E2E integration tests
+- [x] Canonical path resolution
+
+### In Progress 🚧
+- [ ] Conductor execution engine
+- [ ] Parallel scanning (multi-threaded hashing)
+- [ ] Migration tool (session → unified)
+
+### Planned 📋
+- [ ] Web UI for browsing catalog
+- [ ] Subtree treehash for fast comparison
+- [ ] Automated deduplication schedules
+- [ ] Advanced filters (size, date, patterns)
+- [ ] Cloud integration (S3, Backblaze)
+
+---
+
+## 🤝 Contributing
+
+Contributions welcome! Please:
+1. Read `docs/architecture.md` to understand the unified catalog model
+2. Check existing issues or create a new one
+3. Submit PRs with tests and documentation
 
 ---
 
 ## 📄 License
+
 MIT
 
 ---
 
 ## 👤 Author
+
 Maintained by [slyckmb](https://github.com/slyckmb)
 
 ---
 
-Have feedback or ideas? PRs and issues welcome!
+## 🙏 Acknowledgments
+
+Built with:
+- SQLite for catalog storage
+- tqdm for progress bars
+- Click for CLI
+- pytest for testing
+
+---
+
+**Questions?** See `docs/` or file an issue on GitHub.

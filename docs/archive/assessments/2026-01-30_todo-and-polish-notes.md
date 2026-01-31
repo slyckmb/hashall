@@ -1,3 +1,9 @@
+# Hashall Development Notes and TODOs
+
+> **⚠️ OBSOLETE (2026-01-31):** This was a working TODO list from pre-v0.2 development.
+> Many items are now completed or superseded by unified catalog architecture.
+> Retained for feature idea reference only.
+
 sorting:
 implement cla sorting options
 

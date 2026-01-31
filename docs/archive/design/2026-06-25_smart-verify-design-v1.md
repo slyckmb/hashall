@@ -1,6 +1,11 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 # 📘 Hashall: Smart Verify, Treehash, and Hardlink Design Spec
 
+> **⚠️ PARTIALLY OBSOLETE (2026-01-31):** This design assumed session-based architecture.
+> Unified catalog model (2026-01-31) takes a different approach.
+> Some concepts (treehash for subtrees, inode tracking) are still relevant but implementation differs.
+> Retained for reference during unified architecture design.
+
 ## 🧠 Purpose
 To enhance `Hashall` with robust and efficient features for:
 - Smart verification of file trees post-migration
