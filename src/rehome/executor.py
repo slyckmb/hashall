@@ -154,12 +154,25 @@ class DemotionExecutor:
         Args:
             plan: Plan dictionary from planner
         """
+        direction = plan.get('direction', 'demote')
         decision = plan['decision']
-        self._log(f"decision={decision}")
+        self._log(f"direction={direction} decision={decision}")
         self._log(f"payload_hash={plan['payload_hash'][:16]}..." if plan['payload_hash'] else "payload_hash=None")
         self._log(f"affected_torrents={len(plan['affected_torrents'])}")
+        if plan.get("no_blind_copy"):
+            self._log("no_blind_copy=true")
 
-        if decision == 'REUSE':
+        if direction == 'promote' and decision == 'REUSE':
+            self._log("ACTION: PROMOTE_REUSE (reuse existing payload on stash)")
+            self._log(f"  source_path={plan['source_path']}")
+            self._log(f"  target_path={plan['target_path']}")
+            self._log("  Steps:")
+            for i, torrent_hash in enumerate(plan['affected_torrents'], 1):
+                self._log(f"    {i}. Build stash-side torrent view for {torrent_hash[:16]}...")
+                self._log(f"    {i}. Relocate torrent {torrent_hash[:16]} in qBittorrent")
+                self._log(f"    {i}. Verify torrent can access files")
+
+        elif decision == 'REUSE':
             self._log("ACTION: REUSE existing payload on pool")
             self._log(f"  source_path={plan['source_path']}")
             self._log(f"  target_path={plan['target_path']}")
@@ -197,15 +210,20 @@ class DemotionExecutor:
         Raises:
             RuntimeError: If any step fails
         """
+        direction = plan.get('direction', 'demote')
         decision = plan['decision']
 
         if decision == 'BLOCK':
             raise RuntimeError("Cannot execute BLOCKED plan")
 
-        self._log(f"Executing {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
+        self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
 
         try:
-            if decision == 'REUSE':
+            if direction == 'promote':
+                if decision != 'REUSE':
+                    raise RuntimeError(f"Unknown promotion decision: {decision}")
+                self._execute_promote_reuse(plan)
+            elif decision == 'REUSE':
                 self._execute_reuse(plan)
             elif decision == 'MOVE':
                 self._execute_move(plan)
@@ -217,6 +235,38 @@ class DemotionExecutor:
         except Exception as e:
             self._log(f"Execution failed: {e}", "error")
             raise
+
+    def _execute_promote_reuse(self, plan: Dict) -> None:
+        """
+        Execute a PROMOTE_REUSE plan (pool → stash).
+
+        Steps:
+        1. Verify existing payload on stash
+        2. For each sibling torrent:
+           a. Build stash-side view (logical)
+           b. Relocate torrent in qBittorrent
+           c. Verify torrent can access files
+        """
+        target_path = Path(plan['target_path'])
+
+        # 1. Verify existing payload on stash
+        self._log(f"step=verify_stash_payload path={target_path}")
+        if not self._verify_file_count(target_path, plan['file_count']):
+            raise RuntimeError(f"Stash payload file count mismatch at {target_path}")
+        if not self._verify_total_bytes(target_path, plan['total_bytes']):
+            raise RuntimeError(f"Stash payload total bytes mismatch at {target_path}")
+
+        # 2. For each sibling, relocate
+        for torrent_hash in plan['affected_torrents']:
+            self._log(f"step=relocate_sibling torrent={torrent_hash[:16]}")
+            self._log(f"  build_view torrent={torrent_hash[:16]} target={target_path}")
+            try:
+                self._relocate_torrent(torrent_hash, str(target_path.parent))
+            except Exception as e:
+                self._log(f"Relocation failed for {torrent_hash[:16]}, aborting", "error")
+                raise RuntimeError(f"Failed to relocate torrent {torrent_hash[:16]}: {e}")
+
+        self._log("PROMOTE_REUSE execution complete", "success")
 
     def _execute_reuse(self, plan: Dict) -> None:
         """
