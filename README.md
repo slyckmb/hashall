@@ -17,6 +17,7 @@ A unified catalog system for file deduplication and management. Hashall maintain
 - 🔒 **Symlink Safe** - Canonical path resolution prevents double-scanning
 - 📦 **ZFS Ready** - Built for ZFS + jdupes + qBittorrent workflows
 - 📊 **Progress Bars** - tqdm-powered feedback for all operations
+- 🎯 **Payload Identity** - Track multiple torrents pointing to same content
 
 ---
 
@@ -99,6 +100,21 @@ hashall link execute 1
 ```
 
 See `docs/link-guide.md` for complete workflow.
+
+### 5. Map Torrents to Payloads
+
+```bash
+# Sync torrents from qBittorrent
+hashall payload sync
+
+# Show payload for a torrent
+hashall payload show <torrent_hash>
+
+# Find sibling torrents (same content, different metadata)
+hashall payload siblings <torrent_hash>
+```
+
+**Payload identity** tracks the on-disk content independently of torrent metadata. Different torrents (v1/v2, different piece sizes, different sources) that point to identical content map to the same payload.
 
 ---
 
