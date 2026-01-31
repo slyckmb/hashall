@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Invariant checks for hashall exports - safety guarantees for conductor.
+Invariant checks for hashall exports - safety guarantees for link.
 READ-ONLY validation script.
 """
 import json
@@ -179,7 +179,7 @@ def run_all_checks(export_paths, plan_json_path=None):
     # Check 2: Hardlink safety (requires plan)
     if plan_json_path and Path(plan_json_path).exists():
         print(f"\n{'='*70}")
-        print(f"Checking Conductor Plan: {plan_json_path}")
+        print(f"Checking Link Plan: {plan_json_path}")
         print(f"{'='*70}")
 
         with open(plan_json_path) as f:

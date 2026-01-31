@@ -152,7 +152,7 @@ LIMIT 20;
 
 ---
 
-## Conductor Tables
+## Link Tables
 
 ### `link_plans`
 

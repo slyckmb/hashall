@@ -412,7 +412,7 @@ Direct DB queries (no JSON parsing):
 
 1. **Content-based move detection** - Not just inode-based
 2. **Automatic execution** - Scheduled deduplication
-3. **Undo/rollback** - Revert conductor actions
+3. **Undo/rollback** - Revert link actions
 4. **Cloud integration** - S3, Backblaze support
 
 ---

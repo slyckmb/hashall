@@ -152,7 +152,7 @@ LIMIT 20;
 ### "Device not found"
 ```bash
 # Check registered devices
-hashall conductor status
+hashall link status
 
 # Rescan the device
 hashall scan /pool

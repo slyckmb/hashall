@@ -225,7 +225,7 @@ files_49:
 
 ---
 
-## Conductor Workflow
+## Link Workflow
 
 ### **Phase 1: Discovery**
 
@@ -416,7 +416,7 @@ Central location makes sense for unified view.
 - Update modified files
 - Track scan history for auditing
 
-### **Conductor: ✅ Direct DB access**
+### **Link: ✅ Direct DB access**
 
 No JSON parsing needed - query catalog directly for speed and simplicity.
 
