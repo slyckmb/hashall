@@ -1,14 +1,16 @@
-# Rehome - Seed Payload Demotion
+# Rehome - Seed Payload Rehome (Demotion + Promotion)
 
-**Version:** 0.2.0 (Stage 4 - qBittorrent Integration + Batch)
-**Purpose:** Orchestrate safe demotion of seed-only payloads from stash to pool
-**Status:** Production - Demotion with real qBittorrent relocation and batch support
+**Version:** 0.3.0 (Stage 5 - Promotion + Guarded Cleanup)
+**Purpose:** Orchestrate safe rehome of seed payloads between stash and pool
+**Status:** Production - Demotion + Promotion (reuse-only) with qBittorrent relocation
 
 ---
 
 ## Overview
 
-Rehome is an external orchestration tool that moves seed-only payloads from high-tier storage (stash) to lower-tier storage (pool) without creating duplicate data.
+Rehome is an external orchestration tool that moves seed payloads between tiers:
+- **Demotion**: stash → pool (may reuse or move)
+- **Promotion**: pool → stash (**reuse-only, no blind copy**)
 
 **Key capabilities:**
 - Uses hashall catalog as source of truth
@@ -18,18 +20,18 @@ Rehome is an external orchestration tool that moves seed-only payloads from high
 - Handles multiple torrents pointing to same payload (siblings)
 - **Real qBittorrent integration** - pause/relocate/resume torrents via Web API
 - **Batch demotion** - demote by payload hash or qBittorrent tag
+- **Promotion (reuse-only)** - promote only when payload already exists on stash
+- **Guarded cleanup** - optional source-view and empty-dir cleanup
 
 **What rehome is NOT:**
-- Not a promotion tool (pool → stash is out of scope)
 - Not a fuzzy/variant payload matcher
 - Not an automatic background service
 - Not a hashall core feature (external orchestrator)
 
-**Stage 4 additions:**
-- Real qBittorrent relocation (replaces Stage 3 stubs)
-- Batch demotion by payload hash or tag
-- Follows tracker-ctl patterns for qBittorrent authentication
-- Verification after each relocation operation
+**Stage 5 additions:**
+- Promotion planning and apply flow (reuse-only)
+- **No blind copy** rule for promotion (BLOCK if stash payload missing)
+- Guarded cleanup flags (opt-in, safe by default)
 
 ---
 
@@ -136,6 +138,14 @@ Result: BLOCKED (cannot demote because external consumer exists)
 - All sibling torrents are updated to point to pool location
 - No duplicate bytes are created
 
+### Promotion (Reuse-Only)
+
+**Promotion** means:
+- A payload currently on **pool** (lower-tier storage)
+- A matching payload **already exists on stash**
+- All sibling torrents are updated to point to stash location
+- **No blind copy**: if stash payload is missing, promotion is BLOCKED
+
 ---
 
 ## qBittorrent Integration
@@ -174,11 +184,22 @@ When relocating torrents, rehome follows the tracker-ctl pattern from `qbit_migr
 
 ### `rehome plan`
 
-Create a demotion plan for torrents (single or batch mode).
+Create a demotion or promotion plan for torrents (single or batch mode).
 
 **Syntax (single-torrent mode):**
 ```bash
 rehome plan --demote \
+  --torrent-hash <hash> \
+  --seeding-root <path> \
+  --stash-device <device_id> \
+  --pool-device <device_id> \
+  [--catalog <db_path>] \
+  [--output <plan_file>]
+```
+
+**Syntax (promotion - single-torrent mode):**
+```bash
+rehome plan --promote \
   --torrent-hash <hash> \
   --seeding-root <path> \
   --stash-device <device_id> \
@@ -198,6 +219,17 @@ rehome plan --demote \
   [--output <plan_file>]
 ```
 
+**Syntax (promotion - batch by payload hash):**
+```bash
+rehome plan --promote \
+  --payload-hash <hash> \
+  --seeding-root <path> \
+  --stash-device <device_id> \
+  --pool-device <device_id> \
+  [--catalog <db_path>] \
+  [--output <plan_file>]
+```
+
 **Syntax (batch mode - by tag):**
 ```bash
 rehome plan --demote \
@@ -209,8 +241,20 @@ rehome plan --demote \
   [--output <plan_file>]
 ```
 
+**Syntax (promotion - batch by tag):**
+```bash
+rehome plan --promote \
+  --tag <tag> \
+  --seeding-root <path> \
+  --stash-device <device_id> \
+  --pool-device <device_id> \
+  [--catalog <db_path>] \
+  [--output <plan_file>]
+```
+
 **Options:**
-- `--demote` - Required flag indicating demotion operation
+- `--demote` - Demotion (stash → pool)
+- `--promote` - Promotion (pool → stash, reuse-only)
 - `--torrent-hash` - Torrent infohash to demote (single-torrent mode)
 - `--payload-hash` - Payload hash to demote (batch mode - all torrents with this payload)
 - `--tag` - qBittorrent tag to filter by (batch mode - all torrents with this tag)
@@ -222,9 +266,10 @@ rehome plan --demote \
 
 **Modes (mutually exclusive):**
 - Specify exactly ONE of: `--torrent-hash`, `--payload-hash`, or `--tag`
+- Specify exactly ONE of: `--demote` or `--promote`
 
 **Output:**
-- JSON plan file with decision (BLOCK | REUSE | MOVE)
+- JSON plan file with decision (BLOCK | REUSE | MOVE) and direction
 - Summary printed to stdout
 
 **Example:**
@@ -244,7 +289,7 @@ rehome plan --demote \
 
 ### `rehome apply`
 
-Apply a demotion plan.
+Apply a demotion or promotion plan.
 
 **Syntax:**
 ```bash
@@ -256,6 +301,8 @@ rehome apply <plan_file> --force    # Execute
 - `<plan_file>` - Path to plan JSON file (from `rehome plan`)
 - `--dryrun` - Show what would happen without making changes
 - `--force` - Execute the plan (mutually exclusive with --dryrun)
+- `--cleanup-source-views` - Remove source-side torrent views (never payload roots)
+- `--cleanup-empty-dirs` - Remove empty directories under seeding roots only
 - `--catalog` - Path to hashall catalog database (default: `~/.hashall/catalog.db`)
 
 **Behavior:**
@@ -280,6 +327,19 @@ rehome apply <plan_file> --force    # Execute
 
 **For BLOCKED plans:**
 - Refuses to execute, prints reasons
+
+**For PROMOTION (REUSE-only) plans:**
+1. Verify existing payload on stash
+2. For each sibling torrent:
+   - Build stash-side torrent view (logical)
+   - Relocate torrent in qBittorrent
+   - Verify torrent can access files
+3. Optional cleanup (if flags provided)
+
+**Cleanup behavior:**
+- Cleanup flags are **opt-in** and **disabled by default**
+- Cleanup is **skipped on any relocation failure**
+- Cleanup actions are shown during dry-run
 
 **Example:**
 ```bash
@@ -367,6 +427,7 @@ Plans are JSON files with this structure:
 ```json
 {
   "version": "1.0",
+  "direction": "demote",
   "decision": "REUSE",
   "torrent_hash": "abc123def456...",
   "payload_id": 42,
@@ -375,6 +436,10 @@ Plans are JSON files with this structure:
   "affected_torrents": ["abc123def456", "fedcba654321"],
   "source_path": "/stash/torrents/seeding/Movie.2024",
   "target_path": "/pool/torrents/content/Movie.2024",
+  "source_device_id": 50,
+  "target_device_id": 49,
+  "seeding_roots": ["/stash/torrents/seeding"],
+  "no_blind_copy": false,
   "file_count": 125,
   "total_bytes": 25000000000
 }
@@ -382,6 +447,7 @@ Plans are JSON files with this structure:
 
 **Fields:**
 - `version` - Plan format version
+- `direction` - demote | promote
 - `decision` - BLOCK | REUSE | MOVE
 - `torrent_hash` - Requested torrent hash
 - `payload_id` - Payload ID in catalog
@@ -390,6 +456,10 @@ Plans are JSON files with this structure:
 - `affected_torrents` - All sibling torrents (same payload)
 - `source_path` - Current location on stash
 - `target_path` - Target location on pool (null for BLOCK)
+- `source_device_id` - Source device ID
+- `target_device_id` - Target device ID
+- `seeding_roots` - Roots allowed for cleanup
+- `no_blind_copy` - True for promotion plans
 - `file_count` - Number of files in payload
 - `total_bytes` - Total size of payload
 
@@ -410,14 +480,12 @@ Plans are JSON files with this structure:
 - Step-by-step logging with `key=value` format
 - Verification after each major operation
 - Fail-fast on any verification failure
+- Cleanup is opt-in and skipped on failure
 
 ### Limitations (MVP)
 
-- **No qBittorrent integration** - Torrent relocation is stubbed (TODO)
-- **No view building** - Assumes torrent name matches directory name
-- **No automatic cleanup** - Stash-side cleanup is manual for safety
-- **Single-torrent mode** - Process one torrent at a time
-- **No rollback** - Manual recovery required if execution fails partway
+- **No advanced view building** - Assumes torrent name matches directory name
+- **Limited rollback** - MOVE plans attempt rollback on relocation failure; other failures require manual recovery
 
 ---
 
@@ -564,3 +632,21 @@ Blocking is the safe default. Users can remove external consumers if demotion is
 ---
 
 **Questions or issues?** File a GitHub issue with the `rehome` label.
+### Promotion (Reuse-Only)
+
+```bash
+# Promote a payload from pool → stash (reuse-only)
+rehome plan --promote \
+  --torrent-hash abc123def456 \
+  --seeding-root /pool/torrents/seeding \
+  --stash-device 50 \
+  --pool-device 49
+
+# Dry-run
+rehome apply rehome-plan-promote-abc123de.json --dryrun
+
+# Execute (optional cleanup)
+rehome apply rehome-plan-promote-abc123de.json --force \\
+  --cleanup-source-views \\
+  --cleanup-empty-dirs
+```

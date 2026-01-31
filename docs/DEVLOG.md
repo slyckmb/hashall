@@ -739,6 +739,92 @@ pytest tests/test_rehome.py tests/test_rehome_stage4.py -v
 
 ---
 
+## 2026-01-31: Stage 5 - Promotion (Reuse-Only) + Guarded Cleanup
+
+### Summary
+
+Added **promotion workflows** (pool → stash) with a strict **no-blind-copy** rule and introduced **guarded cleanup** flags for source views and empty directories. Promotion is reuse-only: if the stash payload does not already exist, the plan is BLOCKED.
+
+### Rationale
+
+**Problem**: Operators needed a safe way to move active torrents back to stash without risking duplicate data or blind copy operations.
+
+**Solution**:
+- Enforce reuse-only promotion (BLOCK if stash payload missing)
+- Add explicit cleanup flags that are opt-in and skipped on failures
+- Preserve existing demotion behavior unchanged
+
+### Changes Made
+
+#### Promotion Planning
+
+**Added `PromotionPlanner` in `src/rehome/planner.py`**:
+- `plan_promotion()` - Single torrent promotion plan
+- `plan_batch_promotion_by_payload_hash()` - Batch by payload hash
+- `plan_batch_promotion_by_tag()` - Batch by tag
+- Always emits `direction: promote` and `no_blind_copy: true`
+
+**No-blind-copy rule**:
+- If stash payload (same `payload_hash`) does not exist → `decision: BLOCK`
+- If stash payload exists → `decision: REUSE`
+
+#### Promotion Apply Flow
+
+**Extended `src/rehome/executor.py`**:
+- Added promotion reuse execution path
+- Reuse-only relocation via qBittorrent (pause → set_location → resume → verify)
+- No filesystem copy or move for promotion
+
+#### Guarded Cleanup (Opt-In)
+
+**New apply flags**:
+- `--cleanup-source-views` - removes source-side torrent views only
+- `--cleanup-empty-dirs` - removes empty dirs under seeding roots only
+
+**Safety**:
+- Cleanup is **disabled by default**
+- Cleanup is **skipped on any relocation failure**
+- Cleanup actions are shown in dry-run output
+
+#### CLI Updates
+
+**Updated `src/rehome/cli.py`**:
+- Added `--promote` flag (mutually exclusive with `--demote`)
+- Default plan filenames include `promote`/`demote`
+- Apply passes cleanup flags to executor
+
+#### Tests
+
+**Added tests for promotion and cleanup**:
+- Promotion BLOCK when stash payload missing
+- Promotion REUSE when stash payload exists
+- Batch promotion includes siblings
+- Cleanup flags default off, run on success, skipped on failure
+
+#### Documentation
+
+**Updated `docs/REHOME.md`**:
+- Added promotion section with no-blind-copy rule
+- Documented cleanup flags and behavior
+- Updated plan format with `direction` and `no_blind_copy`
+
+### Testing
+
+```bash
+# Run rehome tests (including promotion + cleanup)
+pytest tests/test_rehome.py tests/test_rehome_promotion.py -v
+```
+
+### What's Next
+
+**Stage 6+** (not part of this change):
+- Smart view building (hardlink forests for complex layouts)
+- Parallel batch execution (asyncio)
+- Fuzzy payload matching (similar but not identical content)
+- Web UI for plan review and approval
+
+---
+
 ## Future Entries
 
 Additional entries will be added here as the project evolves.
