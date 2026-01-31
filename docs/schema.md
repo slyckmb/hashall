@@ -154,12 +154,12 @@ LIMIT 20;
 
 ## Conductor Tables
 
-### `conductor_plans`
+### `link_plans`
 
-Deduplication plans created by conductor.
+Deduplication plans created by link.
 
 ```sql
-CREATE TABLE conductor_plans (
+CREATE TABLE link_plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at REAL NOT NULL,
     name TEXT,                                   -- User-friendly name
@@ -175,16 +175,16 @@ CREATE TABLE conductor_plans (
 
 **Purpose:** Store deduplication plans for review/execution
 
-**Created by:** `hashall conductor plan` command
+**Created by:** `hashall link plan` command
 
 ---
 
-### `conductor_actions`
+### `link_actions`
 
 Individual actions within a plan.
 
 ```sql
-CREATE TABLE conductor_actions (
+CREATE TABLE link_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plan_id INTEGER NOT NULL,
     action_type TEXT NOT NULL,                   -- 'HARDLINK', 'DELETE', 'MOVE', 'COPY_THEN_HARDLINK'
@@ -197,21 +197,21 @@ CREATE TABLE conductor_actions (
     status TEXT DEFAULT 'pending',               -- 'pending', 'executed', 'failed', 'skipped'
     executed_at REAL,
     error_message TEXT,
-    FOREIGN KEY (plan_id) REFERENCES conductor_plans(id),
+    FOREIGN KEY (plan_id) REFERENCES link_plans(id),
     FOREIGN KEY (source_device) REFERENCES devices(device_id),
     FOREIGN KEY (target_device) REFERENCES devices(device_id)
 );
 
-CREATE INDEX idx_actions_plan ON conductor_actions(plan_id);
-CREATE INDEX idx_actions_status ON conductor_actions(status);
-CREATE INDEX idx_actions_sha1 ON conductor_actions(sha1);
+CREATE INDEX idx_actions_plan ON link_actions(plan_id);
+CREATE INDEX idx_actions_status ON link_actions(status);
+CREATE INDEX idx_actions_sha1 ON link_actions(sha1);
 ```
 
 **Purpose:** Track execution of individual operations
 
-**Created by:** `hashall conductor plan` command
+**Created by:** `hashall link plan` command
 
-**Updated by:** `hashall conductor execute` command
+**Updated by:** `hashall link execute` command
 
 ---
 
@@ -280,7 +280,7 @@ GROUP BY d.device_id;
 
 **Purpose:** Dashboard statistics
 
-**Used by:** `hashall conductor status` command
+**Used by:** `hashall link status` command
 
 ---
 

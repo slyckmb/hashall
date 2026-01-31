@@ -108,16 +108,16 @@ hashall export ~/.hashall/catalog.db --device 49 --out /tmp/pool.json
 hashall export ~/.hashall/catalog.db --out /tmp/catalog.json
 ```
 
-**Note:** JSON export is now optional. Conductor works directly with the database.
+**Note:** JSON export is now optional. Link works directly with the database.
 
 ---
 
-### `conductor analyze`
+### `link analyze`
 
 Analyze catalog for deduplication opportunities.
 
 ```bash
-hashall conductor analyze [OPTIONS]
+hashall link analyze [OPTIONS]
 ```
 
 **Options:**
@@ -129,13 +129,13 @@ hashall conductor analyze [OPTIONS]
 **Example:**
 ```bash
 # Analyze single device
-hashall conductor analyze --device /pool
+hashall link analyze --device /pool
 
 # Analyze all devices
-hashall conductor analyze --cross-device
+hashall link analyze --cross-device
 
 # Quick summary
-hashall conductor analyze --limit 10
+hashall link analyze --limit 10
 ```
 
 **Output:**
@@ -155,12 +155,12 @@ hashall conductor analyze --limit 10
 
 ---
 
-### `conductor plan`
+### `link plan`
 
 Create a deduplication plan.
 
 ```bash
-hashall conductor plan NAME [OPTIONS]
+hashall link plan NAME [OPTIONS]
 ```
 
 **Arguments:**
@@ -175,10 +175,10 @@ hashall conductor plan NAME [OPTIONS]
 **Example:**
 ```bash
 # Plan for single device
-hashall conductor plan "Monthly /pool dedupe" --device /pool
+hashall link plan "Monthly /pool dedupe" --device /pool
 
 # Cross-device audit (informational)
-hashall conductor plan "Cross-device audit" --cross-device --same-device=false
+hashall link plan "Cross-device audit" --cross-device --same-device=false
 ```
 
 **Output:**
@@ -191,12 +191,12 @@ hashall conductor plan "Cross-device audit" --cross-device --same-device=false
 
 ---
 
-### `conductor show-plan`
+### `link show-plan`
 
 Display plan details.
 
 ```bash
-hashall conductor show-plan PLAN_ID [OPTIONS]
+hashall link show-plan PLAN_ID [OPTIONS]
 ```
 
 **Arguments:**
@@ -208,14 +208,14 @@ hashall conductor show-plan PLAN_ID [OPTIONS]
 
 **Example:**
 ```bash
-hashall conductor show-plan 1
-hashall conductor show-plan 1 --limit 50
+hashall link show-plan 1
+hashall link show-plan 1 --limit 50
 ```
 
 **Output:**
 ```
 ╔══════════════════════════════════════════════════════════════
-║ CONDUCTOR PLAN #1: Monthly /pool dedupe
+║ LINK PLAN #1: Monthly /pool dedupe
 ╚══════════════════════════════════════════════════════════════
 
 Status: pending
@@ -233,12 +233,12 @@ Top 20 Actions:
 
 ---
 
-### `conductor execute`
+### `link execute`
 
 Execute a deduplication plan.
 
 ```bash
-hashall conductor execute PLAN_ID [OPTIONS]
+hashall link execute PLAN_ID [OPTIONS]
 ```
 
 **Arguments:**
@@ -251,10 +251,10 @@ hashall conductor execute PLAN_ID [OPTIONS]
 **Example:**
 ```bash
 # Always dry-run first!
-hashall conductor execute 1 --dry-run
+hashall link execute 1 --dry-run
 
 # Execute for real
-hashall conductor execute 1 --force
+hashall link execute 1 --force
 ```
 
 **Output (dry-run):**
@@ -289,12 +289,12 @@ HARDLINK: /pool/backup/movies/film.mkv
 
 ---
 
-### `conductor status`
+### `link status`
 
 Show catalog and device status.
 
 ```bash
-hashall conductor status [OPTIONS]
+hashall link status [OPTIONS]
 ```
 
 **Options:**
@@ -303,8 +303,8 @@ hashall conductor status [OPTIONS]
 
 **Example:**
 ```bash
-hashall conductor status
-hashall conductor status --device /pool
+hashall link status
+hashall link status --device /pool
 ```
 
 **Output:**
@@ -339,7 +339,7 @@ Compare two directory trees (session-based workflow - may be deprecated).
 hashall verify-trees SRC_ROOT DST_ROOT [OPTIONS]
 ```
 
-**Note:** This command uses the legacy session-based model. For unified catalog workflows, use `conductor analyze` instead.
+**Note:** This command uses the legacy session-based model. For unified catalog workflows, use `link analyze` instead.
 
 **Arguments:**
 - `SRC_ROOT` - Source directory
@@ -376,17 +376,17 @@ HASHALL_JOBS    Number of parallel hash workers (future)
 hashall scan /pool
 
 # 2. Analyze
-hashall conductor analyze --device /pool
+hashall link analyze --device /pool
 
 # 3. Create plan
-hashall conductor plan "Monthly dedupe" --device /pool
+hashall link plan "Monthly dedupe" --device /pool
 
 # 4. Review
-hashall conductor show-plan <plan_id>
+hashall link show-plan <plan_id>
 
 # 5. Execute
-hashall conductor execute <plan_id> --dry-run
-hashall conductor execute <plan_id> --force
+hashall link execute <plan_id> --dry-run
+hashall link execute <plan_id> --force
 ```
 
 ### Initial Setup
@@ -398,18 +398,18 @@ hashall scan /stash
 hashall scan /backup
 
 # Check status
-hashall conductor status
+hashall link status
 ```
 
 ### Cross-Device Audit
 
 ```bash
 # Find duplicates across devices
-hashall conductor analyze --cross-device
+hashall link analyze --cross-device
 
 # Create informational report
-hashall conductor plan "Audit 2026-01" --cross-device
-hashall conductor show-plan <plan_id>
+hashall link plan "Audit 2026-01" --cross-device
+hashall link show-plan <plan_id>
 ```
 
 ---
@@ -440,7 +440,7 @@ source ~/.hashall-completion.bash
 
 ## See Also
 
-- `docs/conductor-guide.md` - Complete conductor workflow
+- `docs/link-guide.md` - Complete link workflow
 - `docs/architecture.md` - How hashall works
 - `docs/schema.md` - Database schema
 - `docs/quick-reference.md` - Cheat sheet

@@ -13,7 +13,7 @@ A unified catalog system for file deduplication and management. Hashall maintain
 - 🔍 **Incremental Scanning** - Updates catalog with add/remove/modify/move detection
 - 🔗 **Hardlink Aware** - Tracks inodes and device IDs for safe deduplication
 - 🎯 **Device-Based Tables** - Natural hardlink boundaries, faster queries
-- 🧠 **Smart Deduplication** - Conductor plans and executes hardlink operations
+- 🧠 **Smart Deduplication** - Link plans and executes hardlink operations
 - 🔒 **Symlink Safe** - Canonical path resolution prevents double-scanning
 - 📦 **ZFS Ready** - Built for ZFS + jdupes + qBittorrent workflows
 - 📊 **Progress Bars** - tqdm-powered feedback for all operations
@@ -56,10 +56,10 @@ This builds a unified catalog at `~/.hashall/catalog.db`.
 
 ```bash
 # Analyze a single device
-hashall conductor analyze --device /pool
+hashall link analyze --device /pool
 
 # Or analyze across all devices
-hashall conductor analyze --cross-device
+hashall link analyze --cross-device
 ```
 
 **Output:**
@@ -74,7 +74,7 @@ hashall conductor analyze --cross-device
 ### 3. Create a Deduplication Plan
 
 ```bash
-hashall conductor plan "Monthly /pool dedupe" --device /pool
+hashall link plan "Monthly /pool dedupe" --device /pool
 ```
 
 **Output:**
@@ -89,16 +89,16 @@ hashall conductor plan "Monthly /pool dedupe" --device /pool
 
 ```bash
 # Review the plan
-hashall conductor show-plan 1
+hashall link show-plan 1
 
 # Dry run (preview changes)
-hashall conductor execute 1 --dry-run
+hashall link execute 1 --dry-run
 
 # Execute for real
-hashall conductor execute 1
+hashall link execute 1
 ```
 
-See `docs/conductor-guide.md` for complete workflow.
+See `docs/link-guide.md` for complete workflow.
 
 ---
 
@@ -111,7 +111,7 @@ See `docs/conductor-guide.md` for complete workflow.
 - **[Database Schema](docs/schema.md)** - Complete schema documentation
 
 ### Guides
-- **[Conductor Guide](docs/conductor-guide.md)** - Deduplication workflow and best practices
+- **[Link Guide](docs/link-guide.md)** - Deduplication workflow and best practices
 - **[Symlinks & Bind Mounts](docs/symlinks-and-bind-mounts.md)** - How hashall handles them correctly
 - **[Quick Reference](docs/quick-reference.md)** - Cheat sheet for common operations
 
@@ -129,8 +129,8 @@ See `docs/conductor-guide.md` for complete workflow.
 hashall scan /pool
 
 # 2. Find and execute deduplication
-hashall conductor plan "Monthly dedupe" --device /pool
-hashall conductor execute <plan_id>
+hashall link plan "Monthly dedupe" --device /pool
+hashall link execute <plan_id>
 ```
 
 ### Cross-Device Audit
@@ -141,21 +141,21 @@ hashall scan /pool
 hashall scan /stash
 
 # Find duplicates across devices (informational)
-hashall conductor analyze --cross-device
+hashall link analyze --cross-device
 ```
 
 ### Verify Hardlinks Are Intact
 
 ```bash
 hashall scan /data
-hashall conductor analyze --device /data
+hashall link analyze --device /data
 # Look for NOOP items (already optimized)
 ```
 
 ### Check Catalog Status
 
 ```bash
-hashall conductor status
+hashall link status
 
 # Output:
 # 📊 Registered Devices:
@@ -191,14 +191,14 @@ python3 tests/test_diff.py
   ├─ files_50                 (files on device 50)
   ├─ hardlink_groups          (inodes with multiple paths)
   ├─ duplicate_groups         (same SHA1 across devices)
-  └─ conductor_plans          (deduplication plans)
+  └─ link_plans               (deduplication plans)
 ```
 
 **Key concepts:**
 - **One table per device** - Hardlinks only work within a device
 - **Incremental updates** - Rescans update existing records, not snapshots
 - **Canonical paths** - Symlinks resolved to avoid double-scanning
-- **Conductor-ready** - Direct SQL queries, no JSON intermediates
+- **Link-ready** - Direct SQL queries, no JSON intermediates
 
 See `docs/architecture.md` for complete details.
 
@@ -227,12 +227,12 @@ See `docs/unified-catalog-architecture.md` for migration guide.
 - [x] Incremental scan with change detection
 - [x] Hardlink tracking (inode + device_id)
 - [x] Symlink/bind mount safe scanning
-- [x] Conductor deduplication planning
+- [x] Link deduplication planning
 - [x] E2E integration tests
 - [x] Canonical path resolution
 
 ### In Progress 🚧
-- [ ] Conductor execution engine
+- [ ] Link execution engine
 - [ ] Parallel scanning (multi-threaded hashing)
 - [ ] Migration tool (session → unified)
 

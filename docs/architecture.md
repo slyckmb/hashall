@@ -12,7 +12,7 @@ Hashall uses a **unified catalog model**: one database catalogs all files across
 - Single source of truth (`~/.hashall/catalog.db`)
 - One table per device/filesystem
 - Incremental updates (not snapshots)
-- Conductor-ready for deduplication
+- Link-ready for deduplication
 
 ---
 
@@ -27,7 +27,7 @@ Hashall uses a **unified catalog model**: one database catalogs all files across
   ├─ files_50                   (files on device 50: /stash)
   ├─ hardlink_groups            (inodes with multiple paths)
   ├─ duplicate_groups           (same content across devices)
-  └─ conductor_plans            (deduplication plans)
+  └─ link_plans                 (deduplication plans)
 ```
 
 **Why device-based tables?**
@@ -80,7 +80,7 @@ User: hashall scan /pool
 ### 2. Analysis Phase
 
 ```
-User: hashall conductor analyze
+User: hashall link analyze
        ↓
 ┌──────────────────────────────────────┐
 │ Query catalog:                        │
@@ -105,7 +105,7 @@ User: hashall conductor analyze
 ### 3. Planning Phase
 
 ```
-User: hashall conductor plan "dedupe"
+User: hashall link plan "dedupe"
        ↓
 ┌──────────────────────────────────────┐
 │ Generate plan:                        │
@@ -117,8 +117,8 @@ User: hashall conductor plan "dedupe"
        ↓
 ┌──────────────────────────────────────┐
 │ Store plan:                           │
-│ - conductor_plans (summary)           │
-│ - conductor_actions (individual ops)  │
+│ - link_plans (summary)                │
+│ - link_actions (individual ops)       │
 └──────────────────────────────────────┘
 ```
 
@@ -127,7 +127,7 @@ User: hashall conductor plan "dedupe"
 ### 4. Execution Phase
 
 ```
-User: hashall conductor execute <plan_id>
+User: hashall link execute <plan_id>
        ↓
 ┌──────────────────────────────────────┐
 │ For each action:                      │
@@ -170,18 +170,18 @@ Unified catalog management.
 - `Device` - Device registry
 - `FileRecord` - File metadata
 
-### `src/hashall/conductor.py`
+### `src/hashall/link.py`
 Deduplication planning and execution.
 
 **Key classes:**
-- `Conductor` - Main conductor interface
+- `Link` - Main link interface
 - `Plan` - Deduplication plan
 - `Action` - Individual hardlink operation
 
 ### `src/hashall/export.py` (Optional)
 JSON export for archival/sharing.
 
-**Note:** Conductor works directly with DB now, export is optional.
+**Note:** Link works directly with DB now, export is optional.
 
 ---
 
@@ -204,9 +204,9 @@ hardlink_groups (device_id, inode, path_count, sha1, ...)
 -- Duplicate tracking (across devices)
 duplicate_groups (sha1, instance_count, device_count, ...)
 
--- Conductor plans
-conductor_plans (id, name, status, total_opportunities, ...)
-conductor_actions (id, plan_id, action_type, source_path, ...)
+-- Link plans
+link_plans (id, name, status, total_opportunities, ...)
+link_actions (id, plan_id, action_type, source_path, ...)
 
 -- Audit trail
 scan_history (device_id, started_at, files_added, files_removed, ...)
@@ -429,7 +429,7 @@ hashall export old.db --root /pool --out /tmp/pool.json
 hashall import /tmp/pool.json --device /pool
 
 # Verify
-hashall conductor status
+hashall link status
 ```
 
 See `docs/unified-catalog-architecture.md` for complete migration guide.
@@ -440,7 +440,7 @@ See `docs/unified-catalog-architecture.md` for complete migration guide.
 
 - `docs/unified-catalog-architecture.md` - Comprehensive design document
 - `docs/schema.md` - Complete database schema
-- `docs/conductor-guide.md` - Deduplication workflow
+- `docs/link-guide.md` - Deduplication workflow
 - `docs/symlinks-and-bind-mounts.md` - Canonical path handling
 - `docs/cli.md` - Command reference
 

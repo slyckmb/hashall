@@ -14,14 +14,14 @@ hashall scan /pool
 hashall scan /stash
 
 # Find duplicates
-hashall conductor analyze --device /pool
+hashall link analyze --device /pool
 
 # Create dedup plan
-hashall conductor plan "Monthly dedupe" --device /pool
+hashall link plan "Monthly dedupe" --device /pool
 
 # Execute (dry-run first!)
-hashall conductor execute 1 --dry-run
-hashall conductor execute 1 --force
+hashall link execute 1 --dry-run
+hashall link execute 1 --force
 ```
 
 ---
@@ -45,31 +45,31 @@ hashall scan /pool && hashall scan /stash && hashall scan /backup
 
 ```bash
 # Analyze single device
-hashall conductor analyze --device /pool
+hashall link analyze --device /pool
 
 # Analyze all devices
-hashall conductor analyze
+hashall link analyze
 
 # Cross-device duplicates
-hashall conductor analyze --cross-device
+hashall link analyze --cross-device
 
 # Check catalog status
-hashall conductor status
+hashall link status
 ```
 
 ### Deduplication
 
 ```bash
 # Create plan
-hashall conductor plan "NAME" --device /pool
+hashall link plan "NAME" --device /pool
 
 # Review plan
-hashall conductor show-plan 1
-hashall conductor show-plan 1 --limit 50
+hashall link show-plan 1
+hashall link show-plan 1 --limit 50
 
 # Execute (ALWAYS dry-run first!)
-hashall conductor execute 1 --dry-run
-hashall conductor execute 1 --force
+hashall link execute 1 --dry-run
+hashall link execute 1 --force
 ```
 
 ---
@@ -79,7 +79,7 @@ hashall conductor execute 1 --force
 ### Show All Devices
 
 ```bash
-hashall conductor status
+hashall link status
 ```
 
 ### Show Recent Scan Activity
@@ -123,25 +123,25 @@ LIMIT 20;
 ### Monthly Deduplication
 
 - [ ] `hashall scan /pool` - Update catalog
-- [ ] `hashall conductor analyze --device /pool` - Find opportunities
-- [ ] `hashall conductor plan "Monthly dedupe" --device /pool` - Create plan
-- [ ] `hashall conductor show-plan <id>` - Review actions
-- [ ] `hashall conductor execute <id> --dry-run` - Test
-- [ ] `hashall conductor execute <id> --force` - Execute
+- [ ] `hashall link analyze --device /pool` - Find opportunities
+- [ ] `hashall link plan "Monthly dedupe" --device /pool` - Create plan
+- [ ] `hashall link show-plan <id>` - Review actions
+- [ ] `hashall link execute <id> --dry-run` - Test
+- [ ] `hashall link execute <id> --force` - Execute
 
 ### Initial Setup
 
 - [ ] `hashall scan /pool` - Scan first device
 - [ ] `hashall scan /stash` - Scan second device
 - [ ] `hashall scan /backup` - Scan third device
-- [ ] `hashall conductor status` - Verify catalog
+- [ ] `hashall link status` - Verify catalog
 - [ ] Review dedup opportunities
 
 ### Cross-Device Audit
 
 - [ ] `hashall scan /pool` - Update first device
 - [ ] `hashall scan /stash` - Update second device
-- [ ] `hashall conductor analyze --cross-device` - Find duplicates
+- [ ] `hashall link analyze --cross-device` - Find duplicates
 - [ ] Review results (informational only)
 - [ ] Decide: delete or consolidate?
 
@@ -179,7 +179,7 @@ chmod 644 ~/.hashall/catalog.db
 ### "Plan failed"
 ```bash
 # Check execution log
-hashall conductor show-plan <id>
+hashall link show-plan <id>
 
 # Common causes:
 # - Files moved/deleted between plan and execution
@@ -188,7 +188,7 @@ hashall conductor show-plan <id>
 
 # Solution: Rescan and create new plan
 hashall scan /pool
-hashall conductor plan "Retry" --device /pool
+hashall link plan "Retry" --device /pool
 ```
 
 ---
@@ -215,7 +215,7 @@ hashall conductor plan "Retry" --device /pool
 - **Different inode, same SHA1** = dedup opportunity
 - **Cross-device** = can't hardlink (different filesystems)
 
-### Conductor Plans
+### Link Plans
 - **NOOP** - Already optimal, no action
 - **HARDLINK** - Can link, same device
 - **COPY_THEN_HARDLINK** - Cross-device (not implemented)
@@ -233,7 +233,7 @@ hashall conductor plan "Retry" --device /pool
 **Safety:**
 - ALWAYS `--dry-run` before execute
 - Review plans carefully
-- Conductor creates backups (.bak files)
+- Link creates backups (.bak files)
 - Failures rollback automatically
 
 **Best Practices:**
@@ -247,7 +247,7 @@ hashall conductor plan "Retry" --device /pool
 ## See Also
 
 - **[Full CLI Reference](cli.md)** - All commands and options
-- **[Conductor Guide](conductor-guide.md)** - Complete workflow
+- **[Link Guide](link-guide.md)** - Complete workflow
 - **[Architecture](architecture.md)** - How it works
 - **[Schema](schema.md)** - Database design
 

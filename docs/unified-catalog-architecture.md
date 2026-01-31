@@ -8,7 +8,7 @@
 - One table per device/filesystem (natural hardlink boundaries)
 - Incremental updates: rescans modify existing records, don't create new sessions
 - Full paths relative to filesystem mount point
-- Direct SQL queries for conductor operations (no JSON export needed)
+- Direct SQL queries for link operations (no JSON export needed)
 
 ---
 
@@ -26,12 +26,12 @@ hashall scan /backup
 hashall scan /pool    # Adds new, removes deleted, tracks moves
 
 # Find deduplication opportunities
-hashall conductor plan --device /pool    # Within one filesystem
-hashall conductor plan --cross-device    # Across filesystems
+hashall link plan --device /pool    # Within one filesystem
+hashall link plan --cross-device    # Across filesystems
 
 # Execute deduplication
-hashall conductor execute <plan-id> --dry-run
-hashall conductor execute <plan-id>      # Actually do it
+hashall link execute <plan-id> --dry-run
+hashall link execute <plan-id>      # Actually do it
 ```
 
 **Workflow:**
@@ -47,7 +47,7 @@ hashall conductor execute <plan-id>      # Actually do it
 - Archival (snapshot for historical comparison)
 - External tool integration (if you want to process with jq)
 
-**For conductor operations: work directly with SQLite.**
+**For link operations: work directly with SQLite.**
 
 ```python
 # Instead of:
@@ -158,8 +158,8 @@ duplicate_groups         -- Same content across devices
   ├─ instance_count, device_count
   └─ total_wasted_bytes
 
-conductor_plans          -- Deduplication plans
-  └─ conductor_actions   -- Individual hardlink/move/delete operations
+link_plans               -- Deduplication plans
+  └─ link_actions        -- Individual hardlink/move/delete operations
 
 scan_history            -- Lightweight audit trail
   └─ devices, started_at, stats (added/removed/modified)
@@ -243,7 +243,7 @@ hashall scan /stash
 ### **Phase 2: Analysis**
 
 ```bash
-hashall conductor analyze
+hashall link analyze
 ```
 
 **Queries catalog:**
@@ -265,20 +265,20 @@ WHERE f49.device_id != f50.device_id;
 ### **Phase 3: Planning**
 
 ```bash
-hashall conductor plan "Monthly dedupe" --device 49
+hashall link plan "Monthly dedupe" --device 49
 ```
 
 **Creates plan record:**
 - Scan `files_49` for SHA1s with multiple inodes
 - For each group: pick canonical path, plan HARDLINK for others
-- Store in `conductor_actions` table
+- Store in `link_actions` table
 - Show summary: X opportunities, Y GB saveable
 
 ### **Phase 4: Execution**
 
 ```bash
-hashall conductor execute <plan-id> --dry-run  # Preview
-hashall conductor execute <plan-id>             # Apply
+hashall link execute <plan-id> --dry-run  # Preview
+hashall link execute <plan-id>             # Apply
 ```
 
 **Safe execution:**
@@ -427,7 +427,7 @@ No JSON parsing needed - query catalog directly for speed and simplicity.
 1. **High Priority:**
    - Implement unified schema (`devices`, `files_*` tables)
    - Incremental scan with add/delete/modify/move detection
-   - Basic conductor: find same-device duplicates, generate plans
+   - Basic link: find same-device duplicates, generate plans
 
 2. **Medium Priority:**
    - Cross-device duplicate detection
@@ -447,7 +447,7 @@ Would you like me to:
 
 1. **Implement the unified schema** in hashall?
 2. **Port the scan.py to incremental model**?
-3. **Build the conductor module** for real?
+3. **Build the link module** for real?
 4. **Create migration tool** from current DB format?
 
 The architecture is solid. Implementation is straightforward SQLite + filesystem operations.
