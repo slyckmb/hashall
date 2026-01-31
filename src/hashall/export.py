@@ -21,7 +21,7 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
         scan_session_id = row["id"]
         scan_id = row["scan_id"]
 
-    files = conn.execute("SELECT path, size, mtime, sha1 FROM files WHERE scan_session_id = ?", (scan_session_id,))
+    files = conn.execute("SELECT path, size, mtime, sha1, inode, device_id FROM files WHERE scan_session_id = ?", (scan_session_id,))
     data = {
         "scan_id": scan_id,
         "root_path": str(root_path) if root_path else None,
