@@ -8,7 +8,7 @@ import sqlite3
 import shutil
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 import json
 
 # Import hashall and qBittorrent modules
@@ -91,6 +91,33 @@ class DemotionExecutor:
         actual_bytes = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
         return actual_bytes == expected_bytes
 
+    def _is_under_roots(self, path: Path, roots: List[Path]) -> bool:
+        """Check if a path is under any of the given roots."""
+        for root in roots:
+            try:
+                path.resolve().relative_to(root.resolve())
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _get_torrent_view_path(self, conn: sqlite3.Connection, torrent_hash: str) -> Optional[Path]:
+        """Get the on-disk view path for a torrent from the catalog."""
+        row = conn.execute("""
+            SELECT save_path, root_name
+            FROM torrent_instances
+            WHERE torrent_hash = ?
+        """, (torrent_hash,)).fetchone()
+
+        if not row:
+            return None
+
+        save_path, root_name = row
+        if not save_path or not root_name:
+            return None
+
+        return Path(save_path) / root_name
+
     def _relocate_torrent(self, torrent_hash: str, new_path: str) -> None:
         """
         Relocate a torrent in qBittorrent.
@@ -147,7 +174,8 @@ class DemotionExecutor:
 
         self._log(f"  verified hash={torrent_hash[:16]} save_path={actual_path}", "success")
 
-    def dry_run(self, plan: Dict) -> None:
+    def dry_run(self, plan: Dict, cleanup_source_views: bool = False,
+                cleanup_empty_dirs: bool = False) -> None:
         """
         Perform dry-run of plan (print actions without executing).
 
@@ -198,9 +226,19 @@ class DemotionExecutor:
                 self._log(f"    {i+3}. Relocate torrent {torrent_hash[:16]} in qBittorrent")
                 self._log(f"    {i+3}. Verify torrent can access files")
 
+        if cleanup_source_views or cleanup_empty_dirs:
+            self._log("CLEANUP (dry-run):")
+            if cleanup_source_views:
+                self._log("  cleanup_source_views=true")
+                self._preview_cleanup_source_views(plan)
+            if cleanup_empty_dirs:
+                self._log("  cleanup_empty_dirs=true")
+                self._preview_cleanup_empty_dirs(plan)
+
         self._log("✅ Dry-run complete (no changes made)", "success")
 
-    def execute(self, plan: Dict) -> None:
+    def execute(self, plan: Dict, cleanup_source_views: bool = False,
+                cleanup_empty_dirs: bool = False) -> None:
         """
         Execute a demotion plan.
 
@@ -230,7 +268,16 @@ class DemotionExecutor:
             else:
                 raise RuntimeError(f"Unknown decision: {decision}")
 
+            self._apply_cleanup(plan, cleanup_source_views, cleanup_empty_dirs)
+
             self._log("Plan execution completed successfully", "success")
+            self._log(
+                f"summary direction={direction} decision={decision} "
+                f"torrents={len(plan['affected_torrents'])} "
+                f"cleanup_source_views={str(cleanup_source_views).lower()} "
+                f"cleanup_empty_dirs={str(cleanup_empty_dirs).lower()}",
+                "success"
+            )
 
         except Exception as e:
             self._log(f"Execution failed: {e}", "error")
@@ -393,3 +440,108 @@ class DemotionExecutor:
             raise RuntimeError(f"Source still exists after move: {source_path}")
 
         self._log("MOVE execution complete", "success")
+
+    def _apply_cleanup(self, plan: Dict, cleanup_source_views: bool,
+                       cleanup_empty_dirs: bool) -> None:
+        """Apply optional cleanup actions after successful relocation."""
+        if not cleanup_source_views and not cleanup_empty_dirs:
+            return
+
+        seeding_roots = [Path(r) for r in plan.get('seeding_roots', [])]
+        if not seeding_roots:
+            self._log("cleanup_skipped reason=no_seeding_roots", "warning")
+            return
+
+        if cleanup_source_views:
+            self._cleanup_source_views(plan, seeding_roots, dry_run=False)
+        if cleanup_empty_dirs:
+            self._cleanup_empty_dirs(plan, seeding_roots, dry_run=False)
+
+    def _preview_cleanup_source_views(self, plan: Dict) -> None:
+        """Preview source view cleanup actions without executing."""
+        seeding_roots = [Path(r) for r in plan.get('seeding_roots', [])]
+        if not seeding_roots:
+            self._log("  cleanup_skipped reason=no_seeding_roots", "warning")
+            return
+        self._cleanup_source_views(plan, seeding_roots, dry_run=True)
+
+    def _preview_cleanup_empty_dirs(self, plan: Dict) -> None:
+        """Preview empty dir cleanup actions without executing."""
+        seeding_roots = [Path(r) for r in plan.get('seeding_roots', [])]
+        if not seeding_roots:
+            self._log("  cleanup_skipped reason=no_seeding_roots", "warning")
+            return
+        self._cleanup_empty_dirs(plan, seeding_roots, dry_run=True)
+
+    def _cleanup_source_views(self, plan: Dict, seeding_roots: List[Path],
+                              dry_run: bool) -> None:
+        """Remove torrent views at the source side, never canonical payload roots."""
+        source_path = Path(plan['source_path']).resolve()
+        target_path = Path(plan['target_path']).resolve() if plan.get('target_path') else None
+
+        conn = self._get_db_connection()
+        try:
+            for torrent_hash in plan['affected_torrents']:
+                view_path = self._get_torrent_view_path(conn, torrent_hash)
+                if not view_path:
+                    self._log(f"  cleanup_view skip reason=missing_view torrent={torrent_hash[:16]}")
+                    continue
+
+                view_path = view_path.resolve()
+                if view_path == source_path or (target_path and view_path == target_path):
+                    self._log(f"  cleanup_view skip reason=canonical_root path={view_path}")
+                    continue
+
+                if not self._is_under_roots(view_path, seeding_roots):
+                    self._log(f"  cleanup_view skip reason=outside_roots path={view_path}")
+                    continue
+
+                if not view_path.exists():
+                    self._log(f"  cleanup_view skip reason=missing path={view_path}")
+                    continue
+
+                action = "remove_view"
+                if dry_run:
+                    self._log(f"  {action} dry_run=true path={view_path}")
+                    continue
+
+                if view_path.is_dir():
+                    shutil.rmtree(view_path)
+                else:
+                    view_path.unlink()
+
+                self._log(f"  {action} path={view_path}", "success")
+        finally:
+            conn.close()
+
+    def _cleanup_empty_dirs(self, plan: Dict, seeding_roots: List[Path],
+                            dry_run: bool) -> None:
+        """Remove empty directories under known seeding roots only."""
+        source_path = Path(plan['source_path']).resolve()
+        target_path = Path(plan['target_path']).resolve() if plan.get('target_path') else None
+
+        for root in seeding_roots:
+            root = root.resolve()
+            if not root.exists():
+                self._log(f"  cleanup_empty skip reason=missing_root root={root}")
+                continue
+
+            for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+                path = Path(dirpath)
+                if path == root:
+                    continue
+                if path == source_path or (target_path and path == target_path):
+                    continue
+                if dirnames or filenames:
+                    continue
+
+                if dry_run:
+                    self._log(f"  remove_empty_dir dry_run=true path={path}")
+                    continue
+
+                try:
+                    path.rmdir()
+                    self._log(f"  remove_empty_dir path={path}", "success")
+                except OSError:
+                    # Directory no longer empty or failed; skip
+                    self._log(f"  remove_empty_dir skip path={path}", "warning")

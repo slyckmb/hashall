@@ -194,9 +194,13 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
               help="Show what would happen without making changes")
 @click.option("--force", is_flag=True,
               help="Execute the plan (mutually exclusive with --dryrun)")
+@click.option("--cleanup-source-views", is_flag=True,
+              help="Remove torrent views at source side (never payload roots)")
+@click.option("--cleanup-empty-dirs", is_flag=True,
+              help="Remove empty directories under seeding roots only")
 @click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
               help="Path to hashall catalog database")
-def apply_cmd(plan_file, dryrun, force, catalog):
+def apply_cmd(plan_file, dryrun, force, cleanup_source_views, cleanup_empty_dirs, catalog):
     """
     Apply a demotion plan.
 
@@ -264,9 +268,17 @@ def apply_cmd(plan_file, dryrun, force, catalog):
                 click.echo(f"Payload: {plan['payload_hash'][:16]}... ({plan['decision']})")
 
             if dryrun:
-                executor.dry_run(plan)
+                executor.dry_run(
+                    plan,
+                    cleanup_source_views=cleanup_source_views,
+                    cleanup_empty_dirs=cleanup_empty_dirs
+                )
             else:
-                executor.execute(plan)
+                executor.execute(
+                    plan,
+                    cleanup_source_views=cleanup_source_views,
+                    cleanup_empty_dirs=cleanup_empty_dirs
+                )
 
             if len(plans_to_apply) > 1:
                 click.echo()
