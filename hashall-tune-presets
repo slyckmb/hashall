@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""
+Preset tuning tool - Analyzes scan telemetry and tunes preset recommendations.
+
+Collects performance data from actual scans and provides evidence-based
+recommendations for optimal scan settings.
+"""
+
+import sys
+import argparse
+import json
+from pathlib import Path
+from tabulate import tabulate
+
+# Add hashall to path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from hashall.telemetry import TelemetryCollector, generate_telemetry_report
+
+
+def format_size(size_bytes: float) -> str:
+    """Format bytes as human-readable size."""
+    if size_bytes >= 1024 * 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024 / 1024:.1f}GB"
+    elif size_bytes >= 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024:.1f}MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    else:
+        return f"{size_bytes:.0f}B"
+
+
+def show_preset_performance(db_path: Path):
+    """Show performance statistics for each preset."""
+    collector = TelemetryCollector(db_path)
+
+    print("📊 Preset Performance Analysis\n")
+
+    presets = ["video", "audio", "books", "mixed"]
+    table_data = []
+
+    for preset in presets:
+        analysis = collector.analyze_preset_performance(preset)
+
+        if "error" in analysis:
+            table_data.append([
+                preset.upper(),
+                "No data",
+                "-",
+                "-",
+                "-"
+            ])
+        else:
+            config = analysis['typical_config']
+            workers = config['workers'] if config['workers'] else "N/A"
+
+            table_data.append([
+                preset.upper(),
+                analysis['sample_count'],
+                f"{analysis['median_files_per_second']:.1f}",
+                f"{format_size(analysis['avg_file_size'])}",
+                f"parallel={config['parallel']}, workers={workers}"
+            ])
+
+    headers = ["Preset", "Samples", "Files/sec (median)", "Avg Size", "Config"]
+    print(tabulate(table_data, headers=headers, tablefmt="simple"))
+    print()
+
+
+def show_size_recommendations(db_path: Path):
+    """Show recommended settings for different file sizes."""
+    collector = TelemetryCollector(db_path)
+
+    print("💡 Data-Driven Recommendations by File Size\n")
+
+    size_ranges = [
+        ("Tiny (100KB)", 100 * 1024),
+        ("Small (1MB)", 1 * 1024 * 1024),
+        ("Medium (10MB)", 10 * 1024 * 1024),
+        ("Large (100MB)", 100 * 1024 * 1024),
+        ("Huge (500MB)", 500 * 1024 * 1024)
+    ]
+
+    table_data = []
+
+    for label, size in size_ranges:
+        rec = collector.recommend_optimal_settings(size)
+
+        if rec.get("recommendation") == "default":
+            table_data.append([
+                label,
+                "No data",
+                "-",
+                rec['confidence'].upper()
+            ])
+        else:
+            config = rec['recommendation']
+            workers = config['workers'] if config['workers'] else "seq"
+
+            table_data.append([
+                label,
+                f"parallel={config['parallel']}, workers={workers}",
+                f"{config['expected_files_per_sec']:.1f} files/sec",
+                f"{rec['confidence'].upper()} ({rec['sample_size']} scans)"
+            ])
+
+    headers = ["File Size", "Recommended Config", "Expected Speed", "Confidence"]
+    print(tabulate(table_data, headers=headers, tablefmt="simple"))
+    print()
+
+
+def compare_presets_vs_data(db_path: Path):
+    """Compare current preset recommendations vs actual data."""
+    collector = TelemetryCollector(db_path)
+
+    print("🔬 Preset Validation: Theory vs Reality\n")
+
+    # Current theoretical presets
+    theoretical = {
+        "video": {"size": 500 * 1024 * 1024, "parallel": True, "workers": 4},
+        "audio": {"size": 10 * 1024 * 1024, "parallel": True, "workers": 8},
+        "books": {"size": 2 * 1024 * 1024, "parallel": False, "workers": None}
+    }
+
+    table_data = []
+
+    for preset_name, theory in theoretical.items():
+        # Get data-driven recommendation
+        rec = collector.recommend_optimal_settings(theory['size'])
+
+        if rec.get("recommendation") == "default":
+            status = "⚠️  NO DATA"
+            recommendation = "Need more scans"
+        else:
+            data_rec = rec['recommendation']
+
+            # Compare
+            if data_rec['parallel'] == theory['parallel'] and data_rec['workers'] == theory['workers']:
+                status = "✅ MATCHES"
+                recommendation = "Current preset is optimal"
+            else:
+                status = "❌ MISMATCH"
+                workers_data = data_rec['workers'] if data_rec['workers'] else "seq"
+                recommendation = f"Data suggests: parallel={data_rec['parallel']}, workers={workers_data}"
+
+        table_data.append([
+            preset_name.upper(),
+            format_size(theory['size']),
+            f"parallel={theory['parallel']}, workers={theory['workers']}",
+            status,
+            recommendation
+        ])
+
+    headers = ["Preset", "Target Size", "Current Config", "Status", "Recommendation"]
+    print(tabulate(table_data, headers=headers, tablefmt="simple"))
+    print()
+
+
+def export_report(db_path: Path, output_path: Path):
+    """Export full telemetry report to JSON."""
+    print(f"📊 Generating telemetry report...")
+
+    report = generate_telemetry_report(db_path, output_path)
+
+    print(f"\n✅ Report exported to: {output_path}")
+    print(f"   Analyzed {sum(len(p.get('sample_count', 0)) for p in report.get('presets', {}).values())} scans")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Analyze scan telemetry and tune preset recommendations",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+How it works:
+  As you run scans, performance metrics are automatically collected.
+  This tool analyzes that data to validate and improve preset recommendations.
+
+Commands:
+  # View performance by preset
+  hashall-tune-presets --presets
+
+  # View recommendations by file size
+  hashall-tune-presets --sizes
+
+  # Compare theory vs reality
+  hashall-tune-presets --validate
+
+  # Export full report
+  hashall-tune-presets --export report.json
+
+  # Show all analysis
+  hashall-tune-presets --all
+
+Example workflow:
+  1. Run scans normally (metrics auto-collected)
+  2. After 10+ scans: hashall-tune-presets --validate
+  3. See if presets match data
+  4. Adjust presets if needed
+        """
+    )
+
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=Path.home() / ".hashall" / "catalog.db",
+        help="Database path (default: ~/.hashall/catalog.db)"
+    )
+
+    parser.add_argument(
+        "--presets",
+        action="store_true",
+        help="Show performance statistics by preset"
+    )
+
+    parser.add_argument(
+        "--sizes",
+        action="store_true",
+        help="Show recommendations by file size"
+    )
+
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Compare current presets vs actual data"
+    )
+
+    parser.add_argument(
+        "--export",
+        type=Path,
+        metavar="FILE",
+        help="Export full telemetry report to JSON file"
+    )
+
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Show all analysis (presets + sizes + validation)"
+    )
+
+    args = parser.parse_args()
+
+    # Default to --all if no specific analysis requested
+    if not any([args.presets, args.sizes, args.validate, args.export, args.all]):
+        args.all = True
+
+    try:
+        if args.all or args.presets:
+            show_preset_performance(args.db)
+
+        if args.all or args.sizes:
+            show_size_recommendations(args.db)
+
+        if args.all or args.validate:
+            compare_presets_vs_data(args.db)
+
+        if args.export:
+            export_report(args.db, args.export)
+
+        return 0
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
