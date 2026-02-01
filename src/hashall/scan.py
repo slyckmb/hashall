@@ -488,3 +488,6 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
    Deleted: {stats.files_deleted:,}
    Hashed: {stats.bytes_hashed / 1024 / 1024:.1f} MB
     """)
+
+    # Close connection to prevent resource leaks with hierarchical scanning
+    conn.close()
