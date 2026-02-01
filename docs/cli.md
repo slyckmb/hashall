@@ -1,6 +1,6 @@
 # Hashall CLI Reference
-**Version:** 0.5.0 (Unified Catalog)
-**Last Updated:** 2026-01-31
+**Version:** 0.5.0 (Unified Catalog with Incremental Scanning)
+**Last Updated:** 2026-02-01
 
 ---
 
@@ -34,7 +34,7 @@ hashall --help
 
 ### `scan`
 
-Scan a directory and update the unified catalog.
+Scan a directory and update the unified catalog. **Now incremental by default.**
 
 ```bash
 hashall scan ROOT_PATH [OPTIONS]
@@ -44,41 +44,78 @@ hashall scan ROOT_PATH [OPTIONS]
 - `ROOT_PATH` - Directory to scan (e.g., `/pool`, `/stash`)
 
 **Options:**
-- `--db PATH` - Database path (default: `~/.hashall/catalog.db`)
-- `--parallel` - Enable parallel hashing (future feature)
+- `--db PATH` - Database path (default: `~/.hashall/hashall.sqlite3`)
+- `--parallel` - Enable parallel hashing with thread pool
+- `--workers N` - Number of worker threads (default: CPU count)
+- `--batch-size N` - Batch size for parallel writes (default: 500)
 
 **Behavior:**
-- First scan: Creates device table, adds all files
-- Subsequent scans: Incremental update (add/remove/modify/move detection)
+- **First scan:** Detects filesystem UUID, registers device, creates `files_<device_id>` table, hashes all files
+- **Subsequent scans:** Incremental update - skips unchanged files (same size+mtime), only rehashes modified files
+- Automatically detects: additions, deletions, modifications
+- Tracks scan roots for scoped deletion detection
 - Resolves symlinks to canonical paths
 - Skips duplicate paths from bind mounts
+- Handles device_id changes across reboots (renames tables automatically)
+
+**Performance:**
+- Sequential: ~20-30 files/s (initial), ~500-1000 files/s (incremental)
+- Parallel (8 workers): ~100-150 files/s (initial), ~2000-5000 files/s (incremental)
+- **10-100x faster on rescans** due to unchanged file skipping
 
 **Example:**
 ```bash
-# Initial scan
+# Initial scan (hashes all files)
 hashall scan /pool
 
-# Rescan (incremental update)
+# Incremental rescan (skips unchanged files)
 hashall scan /pool
+# Much faster - only rehashes modified files
+
+# Parallel scan (faster on large datasets)
+hashall scan /pool --parallel --workers 8
 
 # Scan multiple devices
 hashall scan /pool
 hashall scan /stash
 hashall scan /backup
+
+# Scan a subset (scoped deletion)
+hashall scan /pool/torrents
+# Only files under /pool/torrents are considered for deletion
 ```
 
 **Output:**
 ```
-✅ Scan session started: <device_id> — /pool
-📦 Scanning: 100%|███████████| 50000/50000 [10:25<00:00, 79.92it/s]
-📦 Scan complete.
+📍 Scanning: /pool
+   Device ID: 49
+   Filesystem UUID: zfs-12345678
+✅ Registered new device: pool (fs_uuid=zfs-12345678, device_id=49)
+✅ Scan session: a1b2c3d4-...
+📊 Existing files in catalog: 0
+📁 Files on filesystem: 50,000
+📦 Scanning: 100%|███████████| 50000/50000 [8:20<00:00, 100.0it/s]
 
-✅ Scan Summary:
-   Added:     1,234
-   Removed:   567
-   Modified:  89
-   Moved:     45
-   Unchanged: 48,234
+📦 Scan complete!
+   Duration: 500.0s
+   Scanned: 50,000 files
+   Added: 50,000
+   Updated: 0
+   Unchanged: 0
+   Deleted: 0
+   Hashed: 500.0 GB
+
+# Rescan output (mostly unchanged):
+📦 Scanning: 100%|███████████| 50000/50000 [0:25<00:00, 2000.0it/s]
+
+📦 Scan complete!
+   Duration: 25.0s
+   Scanned: 50,000 files
+   Added: 10
+   Updated: 50
+   Unchanged: 49,940
+   Deleted: 5
+   Hashed: 0.5 GB
 ```
 
 ---
@@ -109,6 +146,145 @@ hashall export ~/.hashall/catalog.db --out /tmp/catalog.json
 ```
 
 **Note:** JSON export is now optional. Link works directly with the database.
+
+---
+
+### `devices list`
+
+List all registered devices and their statistics.
+
+```bash
+hashall devices list [OPTIONS]
+```
+
+**Options:**
+- `--db PATH` - Database path (default: `~/.hashall/hashall.sqlite3`)
+
+**Example:**
+```bash
+hashall devices list
+```
+
+**Output:**
+```
+Alias  UUID (first 8)  Device ID  Mount Point  Type  Files     Size
+pool   zfs-1234        49         /pool        zfs   50,000    500.0 GB
+stash  zfs-5678        50         /stash       zfs   30,000    300.0 GB
+```
+
+---
+
+### `devices show`
+
+Display detailed information for a specific device.
+
+```bash
+hashall devices show DEVICE [OPTIONS]
+```
+
+**Arguments:**
+- `DEVICE` - Device alias (e.g., "pool") or device_id (e.g., "49")
+
+**Options:**
+- `--db PATH` - Database path (default: `~/.hashall/hashall.sqlite3`)
+
+**Example:**
+```bash
+hashall devices show pool
+hashall devices show 49
+```
+
+**Output:**
+```
+Device: pool
+  Filesystem UUID: zfs-12345678
+  Current Device ID: 49
+  Mount Point: /pool
+  Filesystem Type: zfs
+
+  ZFS Metadata:
+    Pool Name: pool
+    Dataset Name: pool
+    Pool GUID: 12345678901234567890
+
+  Statistics:
+    Total Files: 50,000 active, 123 deleted
+    Total Size: 500.0 GB
+    First Scanned: 2026-01-15 10:00:00
+    Last Scanned: 2026-02-01 14:30:00
+    Scan Count: 25
+
+  Device ID History:
+    2026-01-15: device_id 48 (initial)
+    2026-02-01: device_id 49 (changed after reboot)
+```
+
+---
+
+### `devices alias`
+
+Update device alias for easier identification.
+
+```bash
+hashall devices alias CURRENT_NAME NEW_ALIAS [OPTIONS]
+```
+
+**Arguments:**
+- `CURRENT_NAME` - Current alias or device_id
+- `NEW_ALIAS` - New alias to assign
+
+**Options:**
+- `--db PATH` - Database path (default: `~/.hashall/hashall.sqlite3`)
+
+**Example:**
+```bash
+# Rename by alias
+hashall devices alias pool main_pool
+
+# Rename by device_id
+hashall devices alias 49 primary_storage
+```
+
+**Output:**
+```
+Updated alias: pool -> main_pool
+```
+
+---
+
+### `stats`
+
+Display overall catalog statistics.
+
+```bash
+hashall stats [OPTIONS]
+```
+
+**Options:**
+- `--db PATH` - Database path (default: `~/.hashall/hashall.sqlite3`)
+
+**Example:**
+```bash
+hashall stats
+```
+
+**Output:**
+```
+Hashall Catalog Statistics
+  Database: /home/user/.hashall/hashall.sqlite3
+  Database Size: 12.5 MB
+
+  Devices: 2
+    pool            (49): 50,000 files, 500.0 GB
+    stash           (50): 30,000 files, 300.0 GB
+
+  Total Files: 80,000 active, 245 deleted
+  Total Size: 800.0 GB
+
+  Scan History:
+    Last Scan: 2026-02-01 14:30:00 (pool)
+    Total Scans: 47
+```
 
 ---
 

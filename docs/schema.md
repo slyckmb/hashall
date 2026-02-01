@@ -1,9 +1,9 @@
 # Hashall Database Schema
-**Model:** Unified Catalog
+**Model:** Unified Catalog with Incremental Scanning
 **Version:** 0.5.0
-**Last Updated:** 2026-01-31
+**Last Updated:** 2026-02-01
 
-Source of truth for current implementation: Check `src/hashall/migrations/` for actual schema.
+Source of truth for current implementation: Check `src/hashall/migrations/0007_incremental_scanning.sql` for actual schema.
 
 ---
 
@@ -19,28 +19,96 @@ The unified catalog uses a device-aware schema where files are stored in separat
 
 ### `devices`
 
-Registry of filesystems/mount points.
+Registry of filesystems/mount points with persistent filesystem UUID tracking.
 
 ```sql
 CREATE TABLE devices (
-    device_id INTEGER PRIMARY KEY,              -- st_dev from stat()
-    mount_point TEXT NOT NULL,                  -- e.g., "/pool", "/stash"
-    filesystem_type TEXT,                       -- e.g., "zfs", "ext4"
-    last_scan_started REAL,                     -- Unix timestamp
-    last_scan_completed REAL,                   -- Unix timestamp
-    last_scan_status TEXT,                      -- "completed", "in_progress", "failed"
-    total_files INTEGER DEFAULT 0,              -- Cached count
-    total_size INTEGER DEFAULT 0,               -- Cached total bytes
-    notes TEXT,                                 -- User notes
-    UNIQUE(device_id)
+    -- Identity (persistent)
+    fs_uuid TEXT PRIMARY KEY,                   -- Persistent filesystem UUID
+                                                 -- Examples: "zfs-12345678", "a1b2c3d4-..."
+
+    -- Identity (transient - can change across reboots)
+    device_id INTEGER NOT NULL UNIQUE,          -- Current st_dev from stat()
+
+    -- User-friendly naming
+    device_alias TEXT UNIQUE,                   -- User-friendly name (e.g., "pool", "stash")
+
+    -- Mount information
+    mount_point TEXT NOT NULL,                  -- Current mount point (can change)
+    fs_type TEXT,                               -- Filesystem type (zfs, ext4, btrfs, etc.)
+
+    -- ZFS-specific metadata (if applicable)
+    zfs_pool_name TEXT,                         -- ZFS pool name (e.g., "pool", "stash")
+    zfs_dataset_name TEXT,                      -- ZFS dataset name (e.g., "pool/torrents")
+    zfs_pool_guid TEXT,                         -- ZFS pool GUID
+
+    -- Statistics
+    first_scanned_at TEXT,                      -- Timestamp of first scan
+    last_scanned_at TEXT,                       -- Timestamp of most recent scan
+    scan_count INTEGER DEFAULT 0,               -- Number of times scanned
+    total_files INTEGER DEFAULT 0,              -- Total active files
+    total_bytes INTEGER DEFAULT 0,              -- Total bytes of active files
+
+    -- Tracking device_id changes (for debugging)
+    device_id_history TEXT,                     -- JSON array of historical device_ids
+
+    -- Timestamps
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE UNIQUE INDEX idx_devices_device_id ON devices(device_id);
+CREATE UNIQUE INDEX idx_devices_alias ON devices(device_alias);
 CREATE INDEX idx_devices_mount ON devices(mount_point);
 ```
 
-**Purpose:** Track which filesystems are cataloged
+**Purpose:** Track which filesystems are cataloged with persistent identity
 
 **Updated by:** `scan` command on each run
+
+**Key features:**
+- `fs_uuid` is the primary key (persistent across reboots)
+- `device_id` can change after reboot (tracked in `device_id_history`)
+- Auto-suggests `device_alias` based on path (e.g., "/pool" → "pool")
+- ZFS metadata automatically extracted if available
+
+---
+
+### `scan_roots`
+
+Tracks which specific root paths have been scanned on each device.
+
+```sql
+CREATE TABLE scan_roots (
+    fs_uuid TEXT NOT NULL,                      -- Which filesystem
+    root_path TEXT NOT NULL,                    -- Canonical path that was scanned
+    last_scanned_at TEXT,                       -- When this root was last scanned
+    scan_count INTEGER DEFAULT 0,               -- Number of times scanned
+
+    PRIMARY KEY (fs_uuid, root_path),
+    FOREIGN KEY (fs_uuid) REFERENCES devices(fs_uuid)
+);
+
+CREATE INDEX idx_scan_roots_fs_uuid ON scan_roots(fs_uuid);
+```
+
+**Purpose:** Track scanned root paths for scoped deletion detection
+
+**Updated by:** `scan` command on each run
+
+**Why this matters:**
+- Prevents false deletions when scanning a subset of a filesystem
+- Example: If you scan `/pool/torrents`, files under `/pool/media` won't be marked deleted
+- Critical for safe partial rescans
+
+**Query example:**
+```sql
+-- Show all scanned roots for a filesystem
+SELECT root_path, last_scanned_at, scan_count
+FROM scan_roots
+WHERE fs_uuid = 'zfs-12345678'
+ORDER BY last_scanned_at DESC;
+```
 
 ---
 
@@ -55,19 +123,25 @@ One table per device. Created dynamically during first scan of each device.
 ```sql
 CREATE TABLE files_<device_id> (
     path TEXT PRIMARY KEY,                      -- Relative to mount_point
-    inode INTEGER NOT NULL,                     -- st_ino
     size INTEGER NOT NULL,                      -- st_size (bytes)
     mtime REAL NOT NULL,                        -- st_mtime (modification time)
-    sha1 TEXT,                                  -- Hex digest (40 chars)
-    last_seen REAL NOT NULL,                    -- Unix timestamp of last scan
-    first_seen REAL NOT NULL,                   -- Unix timestamp when first discovered
-    scan_count INTEGER DEFAULT 1,               -- How many times seen
-    status TEXT DEFAULT 'active'                -- 'active', 'deleted', 'moved'
+    sha1 TEXT NOT NULL,                         -- Hex digest (40 chars)
+    inode INTEGER NOT NULL,                     -- st_ino
+
+    -- Tracking
+    first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,      -- When first discovered
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,       -- When last seen in scan
+    last_modified_at TEXT DEFAULT CURRENT_TIMESTAMP,   -- When metadata changed
+
+    -- Status
+    status TEXT DEFAULT 'active',               -- 'active', 'deleted', 'moved'
+
+    -- Optional: track which scan root discovered this file
+    discovered_under TEXT                       -- e.g., '/pool/torrents', '/stash/media'
 );
 
-CREATE INDEX idx_files_<device_id>_inode ON files_<device_id>(inode);
 CREATE INDEX idx_files_<device_id>_sha1 ON files_<device_id>(sha1);
-CREATE INDEX idx_files_<device_id>_size ON files_<device_id>(size);
+CREATE INDEX idx_files_<device_id>_inode ON files_<device_id>(inode);
 CREATE INDEX idx_files_<device_id>_status ON files_<device_id>(status);
 ```
 
@@ -75,12 +149,24 @@ CREATE INDEX idx_files_<device_id>_status ON files_<device_id>(status);
 
 **Key fields:**
 - `path` - Relative to mount point (not absolute)
-- `inode` - For hardlink detection
+- `size`, `mtime` - Used for change detection (if unchanged, skip rehashing)
 - `sha1` - For content-based deduplication
-- `last_seen` - Tracks when file was last verified
-- `status` - Lifecycle: active → deleted/moved
+- `inode` - For hardlink detection
+- `first_seen_at` - When file was first discovered
+- `last_seen_at` - Updated every scan (for staleness detection)
+- `last_modified_at` - Updated when size/mtime changes
+- `status` - Lifecycle: 'active' → 'deleted' (scoped to scan_roots)
+- `discovered_under` - Tracks which scan root found this file first
 
 **Updated by:** `scan` command (incremental updates)
+
+**Incremental scan logic:**
+1. Load existing files from DB
+2. For each file on filesystem:
+   - If size+mtime unchanged → UPDATE last_seen_at (skip hashing)
+   - If size/mtime changed → REHASH and UPDATE
+   - If new → INSERT
+3. For each file in DB not seen → UPDATE status='deleted'
 
 ---
 
@@ -217,40 +303,77 @@ CREATE INDEX idx_actions_sha1 ON link_actions(sha1);
 
 ## Audit Trail
 
-### `scan_history`
+### `scan_sessions`
 
-Lightweight audit trail of scan operations.
+Audit trail of scan operations with incremental metrics.
 
 ```sql
-CREATE TABLE scan_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id INTEGER NOT NULL,
-    started_at REAL NOT NULL,
-    completed_at REAL,
-    files_added INTEGER DEFAULT 0,
-    files_removed INTEGER DEFAULT 0,
-    files_modified INTEGER DEFAULT 0,
-    files_unchanged INTEGER DEFAULT 0,
-    status TEXT,                                 -- 'completed', 'failed', 'interrupted'
-    error_message TEXT,
-    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+CREATE TABLE scan_sessions (
+    id INTEGER PRIMARY KEY,
+    scan_id TEXT UNIQUE NOT NULL,               -- UUID for this scan
+
+    -- Device identification
+    fs_uuid TEXT NOT NULL,                      -- Which filesystem was scanned
+    device_id INTEGER NOT NULL,                 -- Device ID at time of scan
+    root_path TEXT NOT NULL,                    -- Specific path that was scanned
+
+    -- Timing
+    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    duration_seconds REAL,
+
+    -- Status
+    status TEXT DEFAULT 'running',              -- 'running', 'completed', 'failed', 'interrupted'
+
+    -- Statistics (incremental scan metrics)
+    files_scanned INTEGER DEFAULT 0,            -- Total files processed
+    files_added INTEGER DEFAULT 0,              -- New files added to catalog
+    files_updated INTEGER DEFAULT 0,            -- Existing files updated (mtime changed)
+    files_unchanged INTEGER DEFAULT 0,          -- Existing files skipped (no change)
+    files_deleted INTEGER DEFAULT 0,            -- Files marked as deleted
+    bytes_hashed INTEGER DEFAULT 0,             -- Total bytes hashed (new + updated)
+
+    -- Settings
+    parallel BOOLEAN DEFAULT 0,                 -- Whether parallel mode was used
+    workers INTEGER,                            -- Number of worker processes
+
+    FOREIGN KEY (fs_uuid) REFERENCES devices(fs_uuid)
 );
 
-CREATE INDEX idx_scan_history_device ON scan_history(device_id);
-CREATE INDEX idx_scan_history_started ON scan_history(started_at DESC);
+CREATE INDEX idx_scan_sessions_fs_uuid ON scan_sessions(fs_uuid);
+CREATE INDEX idx_scan_sessions_completed ON scan_sessions(completed_at);
+CREATE INDEX idx_scan_sessions_status ON scan_sessions(status);
 ```
 
-**Purpose:** Track scan activity for auditing
+**Purpose:** Track scan activity for auditing and performance analysis
 
 **Created by:** `scan` command (one record per scan)
 
+**Key metrics:**
+- `files_scanned` - Total files walked on filesystem
+- `files_added` - New files inserted into catalog
+- `files_updated` - Files rehashed due to size/mtime change
+- `files_unchanged` - Files skipped (no rehashing needed)
+- `files_deleted` - Files marked deleted (scoped to root_path)
+- `bytes_hashed` - Only counts rehashed bytes (excludes unchanged)
+- `parallel`, `workers` - Performance tuning settings used
+
 **Query example:**
 ```sql
--- Show recent scan activity
-SELECT d.mount_point, h.started_at, h.files_added, h.files_removed
-FROM scan_history h
-JOIN devices d ON h.device_id = d.device_id
-ORDER BY h.started_at DESC
+-- Show recent scan activity with incremental metrics
+SELECT
+    d.device_alias,
+    s.root_path,
+    datetime(s.started_at) as scan_time,
+    s.files_added,
+    s.files_updated,
+    s.files_unchanged,
+    s.files_deleted,
+    s.duration_seconds,
+    CASE WHEN s.parallel THEN s.workers || ' workers' ELSE 'sequential' END as mode
+FROM scan_sessions s
+JOIN devices d ON s.fs_uuid = d.fs_uuid
+ORDER BY s.started_at DESC
 LIMIT 10;
 ```
 
@@ -411,17 +534,69 @@ GROUP BY dg.sha1;
 ### Show Recent Scan Activity
 
 ```sql
+-- Scan history with incremental metrics
 SELECT
-    d.mount_point,
-    datetime(h.started_at, 'unixepoch') as scan_time,
-    h.files_added,
-    h.files_removed,
-    h.files_modified,
-    h.status
-FROM scan_history h
-JOIN devices d ON h.device_id = d.device_id
-ORDER BY h.started_at DESC
+    d.device_alias,
+    s.root_path,
+    datetime(s.started_at) as scan_time,
+    s.files_added,
+    s.files_updated,
+    s.files_unchanged,
+    s.files_deleted,
+    round(s.duration_seconds, 1) || 's' as duration,
+    round(s.files_scanned / s.duration_seconds, 1) || '/s' as rate
+FROM scan_sessions s
+JOIN devices d ON s.fs_uuid = d.fs_uuid
+WHERE s.status = 'completed'
+ORDER BY s.started_at DESC
 LIMIT 10;
+```
+
+### List All Registered Devices
+
+```sql
+-- Show all devices with stats
+SELECT
+    device_alias,
+    fs_type,
+    mount_point,
+    total_files,
+    round(total_bytes / 1024.0 / 1024 / 1024, 2) || ' GB' as total_size,
+    scan_count,
+    datetime(last_scanned_at) as last_scan
+FROM devices
+ORDER BY last_scanned_at DESC;
+```
+
+### Check for Stale Files
+
+```sql
+-- Files not seen in recent scans (potential deletions)
+SELECT
+    path,
+    round(size / 1024.0 / 1024, 2) || ' MB' as size,
+    datetime(last_seen_at) as last_seen,
+    discovered_under
+FROM files_49
+WHERE status = 'active'
+  AND last_seen_at < datetime('now', '-30 days')
+ORDER BY last_seen_at
+LIMIT 20;
+```
+
+### Analyze Scan Performance
+
+```sql
+-- Compare sequential vs parallel scan performance
+SELECT
+    CASE WHEN parallel THEN 'parallel' ELSE 'sequential' END as mode,
+    COUNT(*) as scans,
+    round(AVG(files_scanned / duration_seconds), 1) as avg_rate,
+    round(AVG(duration_seconds), 1) as avg_duration,
+    round(AVG(CAST(files_unchanged AS REAL) / files_scanned * 100), 1) as pct_unchanged
+FROM scan_sessions
+WHERE status = 'completed' AND duration_seconds > 0
+GROUP BY parallel;
 ```
 
 ---

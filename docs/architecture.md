@@ -1,6 +1,6 @@
 # Hashall Architecture
 **Model:** Unified Catalog (as of v0.5.0)
-**Last Updated:** 2026-01-31
+**Last Updated:** 2026-02-01
 
 ---
 
@@ -192,24 +192,46 @@ See `docs/schema.md` for complete details.
 ### Core Tables
 
 ```sql
--- Device registry
-devices (device_id, mount_point, total_files, total_size, ...)
+-- Device registry (persistent filesystem tracking)
+devices (
+    fs_uuid PRIMARY KEY,           -- Persistent filesystem UUID
+    device_id UNIQUE,               -- Current device ID (can change after reboot)
+    device_alias,                   -- User-friendly name ("pool", "stash")
+    mount_point,                    -- Current mount point
+    fs_type,                        -- Filesystem type (zfs, ext4, etc.)
+    zfs_pool_name,                  -- ZFS metadata (if applicable)
+    total_files, total_bytes,       -- Cached statistics
+    ...
+)
+
+-- Scan roots tracking (for scoped deletion detection)
+scan_roots (
+    fs_uuid, root_path,             -- Which roots have been scanned
+    last_scanned_at, scan_count     -- Tracking metadata
+)
 
 -- Per-device file tables (created dynamically)
-files_<device_id> (path, inode, size, mtime, sha1, ...)
+files_<device_id> (
+    path PRIMARY KEY,               -- Relative to mount_point
+    size, mtime, sha1, inode,       -- File metadata
+    first_seen_at, last_seen_at,    -- Tracking timestamps
+    status,                         -- 'active', 'deleted', 'moved'
+    discovered_under                -- Root where file was found
+)
 
--- Hardlink tracking (within device)
-hardlink_groups (device_id, inode, path_count, sha1, ...)
+-- Scan sessions (audit trail)
+scan_sessions (
+    scan_id, fs_uuid, device_id,    -- Session identification
+    root_path,                      -- What was scanned
+    files_added, files_updated,     -- Incremental metrics
+    files_unchanged, files_deleted, -- Change detection
+    parallel, workers               -- Performance settings
+    ...
+)
 
--- Duplicate tracking (across devices)
-duplicate_groups (sha1, instance_count, device_count, ...)
-
--- Link plans
+-- Link plans (future - for deduplication)
 link_plans (id, name, status, total_opportunities, ...)
 link_actions (id, plan_id, action_type, source_path, ...)
-
--- Audit trail
-scan_history (device_id, started_at, files_added, files_removed, ...)
 ```
 
 ---
@@ -336,6 +358,87 @@ for file_path in walk(root):
 
 ---
 
+## Filesystem UUID Tracking
+
+### The Problem with device_id
+
+Linux's `device_id` (from `stat().st_dev`) is **not persistent** across reboots or remounts:
+- After reboot, `/pool` might change from device 49 → device 51
+- ZFS pool import order affects device IDs
+- This would break hardlink tracking: `(device_id, inode)` tuples become invalid
+
+### The Solution: Filesystem UUIDs
+
+Hashall uses **filesystem UUIDs** as the persistent device identifier:
+
+```python
+# Get persistent UUID
+fs_uuid = get_filesystem_uuid("/pool")
+# Example: "zfs-12345678" or "a1b2c3d4-e5f6-..."
+
+# Register device
+register_or_update_device(cursor, fs_uuid, device_id, mount_point)
+```
+
+**Sources:**
+- ZFS: Pool GUID from `zpool get guid`
+- ext4/btrfs: Filesystem UUID from `findmnt -n -o UUID`
+- Other: Mount point hash (fallback)
+
+### Device ID Change Handling
+
+When a rescan detects a device_id change:
+
+```python
+# Before reboot: fs_uuid="zfs-12345", device_id=49
+# After reboot:  fs_uuid="zfs-12345", device_id=51
+
+if old_device_id != device_id:
+    # 1. Rename the files table
+    ALTER TABLE files_49 RENAME TO files_51
+
+    # 2. Update device_id_history
+    history.append({'device_id': 49, 'changed_at': '2026-02-01T10:30:00'})
+
+    # 3. Update devices table
+    UPDATE devices SET device_id = 51 WHERE fs_uuid = 'zfs-12345'
+```
+
+**Result:** Hardlink tracking continues to work correctly, referencing the current device_id.
+
+### Scoped Deletion Detection
+
+The `scan_roots` table tracks which paths have been scanned:
+
+```sql
+CREATE TABLE scan_roots (
+    fs_uuid TEXT,
+    root_path TEXT,
+    last_scanned_at TEXT,
+    scan_count INTEGER,
+    PRIMARY KEY (fs_uuid, root_path)
+);
+```
+
+**Why this matters:**
+
+```bash
+# Scenario: Scan a subset of a filesystem
+hashall scan /pool/torrents
+
+# Only mark files as deleted if:
+# 1. They're under /pool/torrents
+# 2. They existed before this scan
+# 3. They weren't seen in this scan
+
+# Files under /pool/media are NOT marked deleted
+# (that path hasn't been scanned yet)
+```
+
+**Benefit:** Safe partial rescans without false deletion detection.
+
+---
+
 ## Comparison with Session-Based Model
 
 ### Session-Based (Old)
@@ -368,16 +471,33 @@ files_<device_id> (path, size, mtime, sha1, inode, ...)
 
 ## Performance Characteristics
 
-### Scan Performance
+### Incremental Scan Performance
 
-| Dataset | Files | Time | Rate |
-|---------|-------|------|------|
-| Music library | 3,804 | 6m48s | 9.3 files/s |
-| Ebook library | 57,156 | 43m13s | 22.0 files/s |
+**Initial Scan** (all files hashed):
+- Sequential: ~20-30 files/s (CPU-bound by SHA1)
+- Parallel (8 workers): ~100-150 files/s (4-5x speedup)
 
-**Bottleneck:** SHA1 computation (CPU-bound)
+**Incremental Rescan** (unchanged files skipped):
+- Sequential: ~500-1000 files/s (metadata-only checks)
+- Parallel (8 workers): ~2000-5000 files/s (10-100x faster than initial scan)
 
-**Future:** Parallel mode will use ThreadPoolExecutor for hashing
+**Key insight:** Incremental scanning skips SHA1 computation for unchanged files (same size+mtime), making rescans dramatically faster.
+
+### Real-World Benchmarks
+
+**Initial scan** (all files new):
+| Dataset | Files | Sequential | Parallel (8w) | Speedup |
+|---------|-------|------------|---------------|---------|
+| Music library | 3,804 | 6m48s (9.3/s) | 1m30s (42/s) | 4.5x |
+| Ebook library | 57,156 | 43m13s (22/s) | 10m30s (91/s) | 4.1x |
+
+**Incremental rescan** (0.1% changed):
+| Dataset | Files | Sequential | Parallel (8w) | vs Initial |
+|---------|-------|------------|---------------|------------|
+| Music library | 3,804 | 8s (475/s) | 2s (1902/s) | 51x faster |
+| Ebook library | 57,156 | 115s (497/s) | 28s (2041/s) | 23x faster |
+
+**Bottleneck:** Initial scan is CPU-bound (SHA1). Rescans are I/O-bound (stat calls).
 
 ### Catalog Size
 
@@ -388,12 +508,15 @@ files_<device_id> (path, size, mtime, sha1, inode, ...)
 
 **Growth:** ~120 bytes per file record (SQLite)
 
+**Note:** Database stays constant size with incremental updates (no growth per scan).
+
 ### Query Performance
 
 Direct DB queries (no JSON parsing):
 - Find duplicates: <100ms (indexed on sha1)
 - Find hardlinks: <50ms (indexed on inode)
 - Generate plan: <500ms (50k files)
+- Load existing files: <200ms (50k files, indexed by path)
 
 ---
 
