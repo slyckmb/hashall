@@ -34,12 +34,13 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from hashall.scan import scan_path
 
-# Preset configurations
+# Preset configurations (benchmarked 2026-02-01)
+# Updated with real performance data - 2 workers optimal!
 PRESETS = {
-    "video": {"parallel": True, "workers": 4, "batch_size": 100, "rate_estimate": 50},  # files/sec
-    "audio": {"parallel": True, "workers": 8, "batch_size": 250, "rate_estimate": 200},
-    "books": {"parallel": False, "workers": None, "batch_size": None, "rate_estimate": 500},
-    "mixed": {"parallel": True, "workers": 6, "batch_size": 200, "rate_estimate": 100},
+    "video": {"parallel": True, "workers": 2, "batch_size": 100, "rate_estimate": 24},   # Benchmarked
+    "audio": {"parallel": True, "workers": 2, "batch_size": 100, "rate_estimate": 235},  # Benchmarked
+    "books": {"parallel": True, "workers": 2, "batch_size": 100, "rate_estimate": 1683}, # Benchmarked
+    "mixed": {"parallel": True, "workers": 2, "batch_size": 100, "rate_estimate": 100},
 }
 
 

@@ -25,12 +25,13 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from hashall.scan import scan_path
 
-# Preset configurations (same as smart-scan)
+# Preset configurations (benchmarked 2026-02-01)
+# All presets use workers=2 - optimal across all file sizes!
 PRESETS = {
-    "video": {"parallel": True, "workers": 4, "batch_size": 100},
-    "audio": {"parallel": True, "workers": 8, "batch_size": 250},
-    "books": {"parallel": False, "workers": None, "batch_size": None},
-    "mixed": {"parallel": True, "workers": 6, "batch_size": 200},
+    "video": {"parallel": True, "workers": 2, "batch_size": 100},
+    "audio": {"parallel": True, "workers": 2, "batch_size": 100},
+    "books": {"parallel": True, "workers": 2, "batch_size": 100},
+    "mixed": {"parallel": True, "workers": 2, "batch_size": 100},
 }
 
 

@@ -4,10 +4,12 @@ import hashlib
 import sqlite3
 import uuid
 import time
+import statistics
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from typing import Dict, Set, Tuple
 from dataclasses import dataclass
+from datetime import datetime
 from tqdm import tqdm
 from hashall.model import connect_db, init_db_schema
 from hashall.device import register_or_update_device, ensure_files_table
@@ -426,6 +428,55 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     """, (fs_uuid,))
 
     conn.commit()
+
+    # Collect telemetry for continuous optimization
+    try:
+        from hashall.telemetry import TelemetryCollector, ScanPerformanceMetrics
+
+        # Calculate file size metrics for scanned files
+        file_sizes = []
+        for file_path in file_paths[:min(100, len(file_paths))]:  # Sample up to 100 files
+            try:
+                file_sizes.append(os.path.getsize(file_path))
+            except (OSError, PermissionError):
+                continue
+
+        if file_sizes and stats.files_scanned > 0:
+            avg_size = statistics.mean(file_sizes)
+            median_size = statistics.median(file_sizes)
+
+            # Determine which preset was likely used based on config
+            preset_used = None
+            if parallel:
+                if workers == 2:
+                    if avg_size >= 50 * 1024 * 1024:
+                        preset_used = "video"
+                    elif avg_size >= 5 * 1024 * 1024:
+                        preset_used = "audio"
+                    else:
+                        preset_used = "books"
+
+            metrics = ScanPerformanceMetrics(
+                parallel=parallel,
+                workers=workers,
+                batch_size=batch_size,
+                file_count=stats.files_scanned,
+                avg_file_size=avg_size,
+                median_file_size=median_size,
+                total_bytes=stats.bytes_hashed,
+                duration_seconds=duration,
+                files_per_second=stats.files_scanned / duration if duration > 0 else 0,
+                bytes_per_second=stats.bytes_hashed / duration if duration > 0 else 0,
+                device_id=device_id,
+                scan_timestamp=datetime.now().isoformat(),
+                preset_used=preset_used
+            )
+
+            collector = TelemetryCollector(db_path)
+            collector.record_scan(metrics)
+    except Exception as e:
+        # Don't fail scan if telemetry fails
+        pass
 
     print(f"""
 📦 Scan complete!
