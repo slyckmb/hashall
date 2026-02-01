@@ -42,3 +42,5 @@ pytest_cache/
 tools/inject_staged.sh
 tools/pre-commit-gptrail.sh
 # Ignore dev-only GPTrail symlinks
+
+out/
