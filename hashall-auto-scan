@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+Hierarchical auto-scan - Intelligently scans directory tree with adaptive settings.
+
+Walks directory tree, analyzes each subdirectory independently, and applies
+optimal scan settings per-folder. Automatically adapts to mixed content.
+
+Example:
+  /pool/
+  ├── movies/    → Detected 450MB avg → VIDEO preset
+  ├── music/     → Detected 8MB avg   → AUDIO preset
+  └── docs/      → Detected 500KB avg → BOOKS preset
+"""
+
+import os
+import sys
+import argparse
+import statistics
+from pathlib import Path
+from typing import List, Dict, Tuple
+from collections import defaultdict
+
+# Add hashall to path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from hashall.scan import scan_path
+
+# Preset configurations (same as smart-scan)
+PRESETS = {
+    "video": {"parallel": True, "workers": 4, "batch_size": 100},
+    "audio": {"parallel": True, "workers": 8, "batch_size": 250},
+    "books": {"parallel": False, "workers": None, "batch_size": None},
+    "mixed": {"parallel": True, "workers": 6, "batch_size": 200},
+}
+
+
+def format_size(size_bytes: int) -> str:
+    """Format bytes as human-readable size."""
+    if size_bytes >= 1024 * 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024 / 1024:.2f}GB"
+    elif size_bytes >= 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024:.2f}MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.2f}KB"
+    else:
+        return f"{size_bytes}B"
+
+
+def analyze_directory(path: Path, max_samples: int = 50) -> Tuple[List[int], int]:
+    """
+    Analyze files directly in this directory (non-recursive).
+
+    Returns:
+        (file_sizes, total_files_in_dir)
+    """
+    sizes = []
+    total_files = 0
+
+    try:
+        for item in path.iterdir():
+            if item.is_file():
+                total_files += 1
+                try:
+                    sizes.append(item.stat().st_size)
+                    if len(sizes) >= max_samples:
+                        break
+                except (OSError, PermissionError):
+                    continue
+    except (OSError, PermissionError):
+        pass
+
+    return sizes, total_files
+
+
+def recommend_preset(sizes: List[int]) -> str:
+    """Recommend preset based on file sizes."""
+    if not sizes:
+        return "mixed"
+
+    avg_size = statistics.mean(sizes)
+
+    if avg_size >= 50 * 1024 * 1024:  # >= 50MB
+        return "video"
+    elif avg_size >= 5 * 1024 * 1024:  # >= 5MB
+        return "audio"
+    else:
+        return "books"
+
+
+def get_subdirectories(path: Path, max_depth: int = None, current_depth: int = 0) -> List[Path]:
+    """
+    Get all subdirectories up to max_depth.
+
+    Args:
+        path: Root path to start from
+        max_depth: Maximum depth to traverse (None = unlimited)
+        current_depth: Current depth in recursion
+
+    Returns:
+        List of subdirectory paths
+    """
+    if max_depth is not None and current_depth >= max_depth:
+        return []
+
+    subdirs = []
+
+    try:
+        for item in path.iterdir():
+            if item.is_dir():
+                subdirs.append(item)
+                if max_depth is None or current_depth + 1 < max_depth:
+                    subdirs.extend(get_subdirectories(item, max_depth, current_depth + 1))
+    except (OSError, PermissionError):
+        pass
+
+    return subdirs
+
+
+def hierarchical_scan(
+    root_path: Path,
+    db_path: Path,
+    max_depth: int = None,
+    min_files: int = 10,
+    dry_run: bool = False,
+    variance_threshold: float = 2.0
+):
+    """
+    Hierarchical scan with adaptive settings.
+
+    Args:
+        root_path: Root directory to scan
+        db_path: Database path
+        max_depth: Maximum depth to analyze (None = auto-detect)
+        min_files: Minimum files in a directory to warrant separate scan
+        dry_run: Preview only, don't execute
+        variance_threshold: Coefficient of variation threshold to split directories
+    """
+    print(f"🔍 Analyzing directory tree: {root_path}")
+    print(f"   Max depth: {max_depth or 'unlimited'}")
+    print(f"   Min files per scan: {min_files}")
+    print()
+
+    # Get all subdirectories
+    all_subdirs = get_subdirectories(root_path, max_depth)
+
+    # Analyze each directory
+    analysis_results = {}
+
+    print("📊 Analyzing directories...\n")
+
+    # Analyze root
+    sizes, total = analyze_directory(root_path)
+    if sizes:
+        analysis_results[root_path] = {
+            "sizes": sizes,
+            "total_files": total,
+            "avg_size": statistics.mean(sizes),
+            "preset": recommend_preset(sizes)
+        }
+
+    # Analyze subdirectories
+    for subdir in all_subdirs:
+        sizes, total = analyze_directory(subdir)
+        if total >= min_files and sizes:
+            analysis_results[subdir] = {
+                "sizes": sizes,
+                "total_files": total,
+                "avg_size": statistics.mean(sizes),
+                "preset": recommend_preset(sizes)
+            }
+
+    # Group directories by preset
+    by_preset = defaultdict(list)
+    for dir_path, info in analysis_results.items():
+        by_preset[info["preset"]].append((dir_path, info))
+
+    # Show analysis
+    print(f"📋 Scan Plan ({len(analysis_results)} directories):\n")
+
+    total_scans = 0
+    for preset, dirs in sorted(by_preset.items()):
+        print(f"  {preset.upper()} preset ({len(dirs)} directories):")
+        for dir_path, info in sorted(dirs, key=lambda x: x[0]):
+            rel_path = dir_path.relative_to(root_path) if dir_path != root_path else Path(".")
+            print(f"    • {rel_path}")
+            print(f"      Files: {info['total_files']}, Avg: {format_size(int(info['avg_size']))}")
+        print()
+        total_scans += len(dirs)
+
+    if dry_run:
+        print(f"🔧 Dry-run mode: Would execute {total_scans} scans")
+        return
+
+    # Execute scans
+    print(f"🚀 Starting {total_scans} optimized scans...\n")
+
+    completed = 0
+    for preset, dirs in sorted(by_preset.items()):
+        config = PRESETS[preset]
+
+        for dir_path, info in sorted(dirs, key=lambda x: x[0]):
+            completed += 1
+            rel_path = dir_path.relative_to(root_path) if dir_path != root_path else Path(".")
+
+            print(f"[{completed}/{total_scans}] Scanning: {rel_path}")
+            print(f"            Preset: {preset.upper()} (avg {format_size(int(info['avg_size']))})")
+
+            try:
+                scan_path(
+                    db_path=db_path,
+                    root_path=dir_path,
+                    parallel=config['parallel'],
+                    workers=config['workers'],
+                    batch_size=config['batch_size']
+                )
+                print()
+            except KeyboardInterrupt:
+                print("\n⚠️  Scan interrupted by user")
+                return
+            except Exception as e:
+                print(f"❌ Scan failed: {e}\n")
+                continue
+
+    print(f"✅ Completed all {total_scans} scans!")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Hierarchical auto-scan with adaptive settings per-folder",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+How it works:
+  1. Analyzes each subdirectory independently
+  2. Detects optimal preset for each directory based on file sizes
+  3. Groups directories by preset type
+  4. Executes optimized scans per-directory
+
+Example:
+  # Auto-scan entire tree with adaptive settings
+  hashall-auto-scan /pool
+
+  # Limit to depth 2 (don't recurse too deep)
+  hashall-auto-scan /pool --max-depth 2
+
+  # Preview scan plan without executing
+  hashall-auto-scan /pool --dry-run
+
+  # Require at least 20 files per directory to scan separately
+  hashall-auto-scan /pool --min-files 20
+        """
+    )
+
+    parser.add_argument("path", type=Path, help="Root directory to scan")
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help="Maximum directory depth to analyze (default: unlimited)"
+    )
+    parser.add_argument(
+        "--min-files",
+        type=int,
+        default=10,
+        help="Minimum files in directory to warrant separate scan (default: 10)"
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=Path.home() / ".hashall" / "catalog.db",
+        help="Database path (default: ~/.hashall/catalog.db)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show scan plan without executing"
+    )
+
+    args = parser.parse_args()
+
+    if not args.path.exists():
+        print(f"❌ Error: Path does not exist: {args.path}")
+        return 1
+
+    if not args.path.is_dir():
+        print(f"❌ Error: Path is not a directory: {args.path}")
+        return 1
+
+    try:
+        hierarchical_scan(
+            root_path=args.path,
+            db_path=args.db,
+            max_depth=args.max_depth,
+            min_files=args.min_files,
+            dry_run=args.dry_run
+        )
+        return 0
+    except KeyboardInterrupt:
+        print("\n⚠️  Interrupted by user")
+        return 130
+    except Exception as e:
+        print(f"\n❌ Failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

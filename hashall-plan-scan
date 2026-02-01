@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""
+Scan Strategy Planner - Analyzes directory tree and proposes optimal scan strategy.
+
+Pre-analyzes entire directory structure, identifies optimal folder depth and
+grouping strategy, then generates an executable scan plan.
+
+Example output:
+  📊 Analysis complete!
+
+  Strategy: Scan at depth 2 (4 directories)
+
+  /pool/movies    → VIDEO  (450MB avg, 1,234 files)
+  /pool/tv        → VIDEO  (380MB avg, 2,456 files)
+  /pool/music     → AUDIO  (8MB avg, 5,678 files)
+  /pool/docs      → BOOKS  (500KB avg, 890 files)
+
+  Estimated time: 45 minutes
+
+  Execute: hashall-plan-scan /pool --execute
+"""
+
+import os
+import sys
+import argparse
+import statistics
+from pathlib import Path
+from typing import List, Dict, Tuple
+from collections import defaultdict
+from dataclasses import dataclass
+
+# Add hashall to path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from hashall.scan import scan_path
+
+# Preset configurations
+PRESETS = {
+    "video": {"parallel": True, "workers": 4, "batch_size": 100, "rate_estimate": 50},  # files/sec
+    "audio": {"parallel": True, "workers": 8, "batch_size": 250, "rate_estimate": 200},
+    "books": {"parallel": False, "workers": None, "batch_size": None, "rate_estimate": 500},
+    "mixed": {"parallel": True, "workers": 6, "batch_size": 200, "rate_estimate": 100},
+}
+
+
+@dataclass
+class DirectoryInfo:
+    """Information about a directory for scan planning."""
+    path: Path
+    depth: int
+    file_count: int
+    total_size: int
+    avg_size: float
+    preset: str
+    sample_sizes: List[int]
+
+
+def format_size(size_bytes: int) -> str:
+    """Format bytes as human-readable size."""
+    if size_bytes >= 1024 * 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024 / 1024:.1f}GB"
+    elif size_bytes >= 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024:.1f}MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    else:
+        return f"{size_bytes}B"
+
+
+def format_duration(seconds: float) -> str:
+    """Format seconds as human-readable duration."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        return f"{seconds / 60:.0f}m {seconds % 60:.0f}s"
+    else:
+        hours = int(seconds / 3600)
+        minutes = int((seconds % 3600) / 60)
+        return f"{hours}h {minutes}m"
+
+
+def recommend_preset(avg_size: float) -> str:
+    """Recommend preset based on average file size."""
+    if avg_size >= 50 * 1024 * 1024:  # >= 50MB
+        return "video"
+    elif avg_size >= 5 * 1024 * 1024:  # >= 5MB
+        return "audio"
+    elif avg_size >= 1 * 1024 * 1024:  # >= 1MB
+        return "books"
+    else:
+        return "books"
+
+
+def analyze_tree(root_path: Path, max_depth: int = 5, sample_limit: int = 100) -> Dict[int, List[DirectoryInfo]]:
+    """
+    Analyze directory tree and collect statistics per depth level.
+
+    Returns:
+        Dict mapping depth -> list of DirectoryInfo
+    """
+    print(f"🔍 Analyzing directory tree: {root_path}")
+    print(f"   Max depth: {max_depth}")
+    print(f"   Sampling up to {sample_limit} files per directory\n")
+
+    by_depth = defaultdict(list)
+    total_dirs = 0
+
+    def walk_tree(path: Path, depth: int):
+        nonlocal total_dirs
+
+        if depth > max_depth:
+            return
+
+        # Analyze this directory
+        file_sizes = []
+        file_count = 0
+        total_size = 0
+
+        try:
+            for item in path.iterdir():
+                if item.is_file():
+                    file_count += 1
+                    try:
+                        size = item.stat().st_size
+                        total_size += size
+                        if len(file_sizes) < sample_limit:
+                            file_sizes.append(size)
+                    except (OSError, PermissionError):
+                        continue
+        except (OSError, PermissionError):
+            return
+
+        # Only include directories with files
+        if file_count > 0:
+            avg_size = statistics.mean(file_sizes) if file_sizes else 0
+            preset = recommend_preset(avg_size)
+
+            info = DirectoryInfo(
+                path=path,
+                depth=depth,
+                file_count=file_count,
+                total_size=total_size,
+                avg_size=avg_size,
+                preset=preset,
+                sample_sizes=file_sizes
+            )
+
+            by_depth[depth].append(info)
+            total_dirs += 1
+
+            if total_dirs % 10 == 0:
+                print(f"   Analyzed {total_dirs} directories...", end='\r')
+
+        # Recurse into subdirectories
+        try:
+            for item in path.iterdir():
+                if item.is_dir():
+                    walk_tree(item, depth + 1)
+        except (OSError, PermissionError):
+            pass
+
+    walk_tree(root_path, depth=0)
+    print(f"   Analyzed {total_dirs} directories    ")
+    print()
+
+    return by_depth
+
+
+def find_optimal_depth(by_depth: Dict[int, List[DirectoryInfo]], root_path: Path) -> int:
+    """
+    Find optimal scan depth based on preset diversity and directory count.
+
+    Strategy:
+    - Too shallow: Might miss content type variations
+    - Too deep: Too many small scans
+    - Optimal: Maximum preset diversity with reasonable directory count
+    """
+    if not by_depth:
+        return 0
+
+    scores = {}
+
+    for depth, dirs in by_depth.items():
+        if depth == 0:  # Skip root level
+            continue
+
+        # Count preset diversity
+        preset_counts = defaultdict(int)
+        for d in dirs:
+            preset_counts[d.preset] += 1
+
+        diversity = len(preset_counts)  # Number of different presets
+        dir_count = len(dirs)
+
+        # Prefer depth with high diversity but not too many directories
+        # Score = diversity * (1 - penalty_for_too_many_dirs)
+        penalty = min(1.0, dir_count / 50)  # Penalize if > 50 dirs
+        score = diversity * (1 - penalty * 0.5)
+
+        scores[depth] = score
+
+    if not scores:
+        return 1
+
+    # Return depth with highest score
+    optimal = max(scores.items(), key=lambda x: x[1])[0]
+    return optimal
+
+
+def generate_scan_plan(
+    by_depth: Dict[int, List[DirectoryInfo]],
+    target_depth: int,
+    root_path: Path
+) -> List[DirectoryInfo]:
+    """Generate scan plan for target depth."""
+    if target_depth not in by_depth:
+        return []
+
+    return sorted(by_depth[target_depth], key=lambda d: d.path)
+
+
+def estimate_scan_time(plan: List[DirectoryInfo]) -> float:
+    """Estimate total scan time in seconds."""
+    total_seconds = 0.0
+
+    for dir_info in plan:
+        config = PRESETS[dir_info.preset]
+        rate = config['rate_estimate']  # files/sec
+        time = dir_info.file_count / rate
+        total_seconds += time
+
+    return total_seconds
+
+
+def execute_plan(plan: List[DirectoryInfo], db_path: Path):
+    """Execute the scan plan."""
+    total = len(plan)
+
+    print(f"\n🚀 Executing scan plan ({total} directories)...\n")
+
+    for idx, dir_info in enumerate(plan, 1):
+        config = PRESETS[dir_info.preset]
+
+        print(f"[{idx}/{total}] {dir_info.path}")
+        print(f"        Preset: {dir_info.preset.upper()}, Files: {dir_info.file_count}, Avg: {format_size(int(dir_info.avg_size))}")
+
+        try:
+            scan_path(
+                db_path=db_path,
+                root_path=dir_info.path,
+                parallel=config['parallel'],
+                workers=config['workers'],
+                batch_size=config['batch_size']
+            )
+            print()
+        except KeyboardInterrupt:
+            print("\n⚠️  Scan interrupted by user")
+            return
+        except Exception as e:
+            print(f"❌ Scan failed: {e}\n")
+            continue
+
+    print(f"✅ Completed all {total} scans!")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Scan Strategy Planner - Analyze tree and propose optimal scan plan",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+How it works:
+  1. Analyzes entire directory tree (fast, no hashing)
+  2. Identifies optimal scan depth based on content diversity
+  3. Proposes scan strategy with time estimates
+  4. User reviews and executes (or adjusts)
+
+Workflow:
+  # Step 1: Analyze and get recommendations
+  hashall-plan-scan /pool
+
+  # Step 2: Review proposed plan
+
+  # Step 3: Execute the plan
+  hashall-plan-scan /pool --execute
+
+  # Or force specific depth
+  hashall-plan-scan /pool --depth 2 --execute
+
+Example output:
+  📊 Analysis: 234 directories scanned
+
+  Recommended depth: 2 (optimal diversity)
+
+  Scan Plan (4 directories):
+    VIDEO (2 dirs): /pool/movies, /pool/tv
+    AUDIO (1 dir):  /pool/music
+    BOOKS (1 dir):  /pool/docs
+
+  Estimated time: 45 minutes
+
+  Execute: hashall-plan-scan /pool --execute
+        """
+    )
+
+    parser.add_argument("path", type=Path, help="Root directory to analyze")
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        help="Target scan depth (default: auto-detect optimal)"
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=5,
+        help="Maximum depth to analyze (default: 5)"
+    )
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Execute the scan plan (default: show plan only)"
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=Path.home() / ".hashall" / "catalog.db",
+        help="Database path (default: ~/.hashall/catalog.db)"
+    )
+
+    args = parser.parse_args()
+
+    if not args.path.exists():
+        print(f"❌ Error: Path does not exist: {args.path}")
+        return 1
+
+    if not args.path.is_dir():
+        print(f"❌ Error: Path is not a directory: {args.path}")
+        return 1
+
+    # Analyze tree
+    try:
+        by_depth = analyze_tree(args.path, max_depth=args.max_depth)
+    except KeyboardInterrupt:
+        print("\n⚠️  Analysis interrupted")
+        return 130
+
+    if not by_depth:
+        print("❌ No directories found with files")
+        return 1
+
+    # Determine target depth
+    if args.depth is not None:
+        target_depth = args.depth
+        print(f"📍 Using specified depth: {target_depth}\n")
+    else:
+        target_depth = find_optimal_depth(by_depth, args.path)
+        print(f"💡 Recommended depth: {target_depth} (optimal content diversity)\n")
+
+    # Generate plan
+    plan = generate_scan_plan(by_depth, target_depth, args.path)
+
+    if not plan:
+        print(f"❌ No directories found at depth {target_depth}")
+        print(f"\nAvailable depths: {sorted(by_depth.keys())}")
+        return 1
+
+    # Show plan
+    print(f"📋 Scan Plan (depth {target_depth}):\n")
+
+    by_preset = defaultdict(list)
+    for dir_info in plan:
+        by_preset[dir_info.preset].append(dir_info)
+
+    for preset in sorted(by_preset.keys()):
+        dirs = by_preset[preset]
+        total_files = sum(d.file_count for d in dirs)
+        print(f"  {preset.upper()} preset ({len(dirs)} directories, {total_files:,} files):")
+        for dir_info in dirs:
+            rel_path = dir_info.path.relative_to(args.path) if dir_info.path != args.path else Path(".")
+            print(f"    • {rel_path}")
+            print(f"      {dir_info.file_count:,} files, avg {format_size(int(dir_info.avg_size))}, total {format_size(dir_info.total_size)}")
+        print()
+
+    # Estimate time
+    estimated_time = estimate_scan_time(plan)
+    print(f"⏱️  Estimated scan time: {format_duration(estimated_time)}")
+    print(f"📊 Total: {len(plan)} directories, {sum(d.file_count for d in plan):,} files")
+    print()
+
+    # Execute or show command
+    if args.execute:
+        execute_plan(plan, args.db)
+    else:
+        print("💡 To execute this plan:")
+        if args.depth is not None:
+            print(f"   hashall-plan-scan {args.path} --depth {args.depth} --execute")
+        else:
+            print(f"   hashall-plan-scan {args.path} --execute")
+        print()
+        print("   Or scan manually:")
+        for dir_info in plan:
+            print(f"   make scan-{dir_info.preset} PATH={dir_info.path}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

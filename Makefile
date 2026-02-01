@@ -21,6 +21,9 @@ help:  ## Show this help message
 	@echo "Smart Scan Operations (Auto-Tuning):"
 	@grep -E '^scan-(auto|video|audio|books|mixed|dry-run|presets):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
+	@echo "Advanced Hierarchical Scanning:"
+	@grep -E '^scan-(hierarchical|plan|hier):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo ""
 	@echo "Device Management:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
@@ -32,9 +35,9 @@ help:  ## Show this help message
 	@echo ""
 	@echo "Examples:"
 	@echo "  make scan-auto PATH=/pool/media         # Auto-detect optimal settings"
+	@echo "  make scan-hierarchical PATH=/pool       # Adaptive per-folder scan"
+	@echo "  make scan-plan PATH=/pool               # Analyze & propose strategy"
 	@echo "  make scan-video PATH=/pool/movies       # Optimize for large video files"
-	@echo "  make scan-audio PATH=/stash/music       # Optimize for audio files"
-	@echo "  make scan-books PATH=/library           # Optimize for small files"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
 	@echo ""
@@ -76,6 +79,30 @@ scan-dry-run:  ## Show what scan would execute without running
 .PHONY: scan-presets
 scan-presets:  ## Show all available scan presets and their settings
 	$(SMART_SCAN) --show-presets
+
+# ============================================================================
+# Hierarchical & Adaptive Scanning - ADVANCED
+# ============================================================================
+
+.PHONY: scan-hierarchical
+scan-hierarchical:  ## Adaptive scan - analyzes each subfolder independently
+	@echo "🌳 Hierarchical scan with per-folder optimization: $(PATH)"
+	./hashall-auto-scan "$(PATH)" --db "$(DB_FILE)"
+
+.PHONY: scan-plan
+scan-plan:  ## Analyze tree and propose optimal scan strategy
+	@echo "📊 Analyzing directory tree for optimal scan strategy: $(PATH)"
+	./hashall-plan-scan "$(PATH)" --db "$(DB_FILE)"
+
+.PHONY: scan-plan-execute
+scan-plan-execute:  ## Analyze and execute optimal scan plan
+	@echo "🚀 Planning and executing optimal scan: $(PATH)"
+	./hashall-plan-scan "$(PATH)" --execute --db "$(DB_FILE)"
+
+.PHONY: scan-hier-dry
+scan-hier-dry:  ## Preview hierarchical scan plan without executing
+	@echo "🔍 Previewing hierarchical scan plan: $(PATH)"
+	./hashall-auto-scan "$(PATH)" --dry-run --db "$(DB_FILE)"
 
 # ============================================================================
 # Device Management
