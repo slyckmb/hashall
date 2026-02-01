@@ -22,9 +22,12 @@ def cli():
 @click.argument("path", type=click.Path(exists=True, file_okay=False))
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option("--parallel", is_flag=True, help="Use thread pool to hash faster.")
-def scan_cmd(path, db, parallel):
+@click.option("--workers", type=int, default=None, help="Worker count for parallel scan (default: cpu_count).")
+@click.option("--batch-size", type=int, default=None, help="Batch size for parallel DB writes.")
+def scan_cmd(path, db, parallel, workers, batch_size):
     """Scan a directory and store file metadata in SQLite."""
-    scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel)
+    scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
+              workers=workers, batch_size=batch_size)
 
 @cli.command("export")
 @click.argument("db_path", type=click.Path(exists=True, dir_okay=False))
