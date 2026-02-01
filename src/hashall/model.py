@@ -8,7 +8,15 @@ from pathlib import Path
 def connect_db(path: Path):
     from hashall.migrate import apply_migrations  # Lazy import
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30.0)
+
+    # Enable WAL mode for better concurrency
+    # - Allows multiple readers + one writer simultaneously
+    # - Readers don't block writers (and vice versa)
+    # - Better performance for concurrent scans
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
+
     conn.row_factory = sqlite3.Row
     apply_migrations(path, Path(__file__).parent / "migrations")
     return conn
