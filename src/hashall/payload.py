@@ -10,6 +10,7 @@ Multiple different torrents can map to the same payload.
 """
 
 import hashlib
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -87,15 +88,14 @@ def compute_payload_hash(files: List[PayloadFile]) -> Optional[str]:
     return hasher.hexdigest()
 
 
-def get_files_for_path(conn: sqlite3.Connection, root_path: str,
-                       scan_session_id: Optional[int] = None) -> List[PayloadFile]:
+def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> List[PayloadFile]:
     """
-    Get all files under a given root path from the database.
+    Get all files under a given root path from the per-device table.
 
     Args:
         conn: Database connection
+        device_id: Device ID for the filesystem
         root_path: Root directory path
-        scan_session_id: Optional scan session to filter by
 
     Returns:
         List of PayloadFile objects
@@ -103,27 +103,30 @@ def get_files_for_path(conn: sqlite3.Connection, root_path: str,
     # Normalize path
     root_path = root_path.rstrip('/')
 
-    # Query files table
-    if scan_session_id:
-        query = """
-            SELECT path, size, sha1
-            FROM files
-            WHERE scan_session_id = ? AND (path = ? OR path LIKE ?)
-            ORDER BY path
-        """
-        pattern = f"{root_path}/%"
-        rows = conn.execute(query, (scan_session_id, root_path, pattern)).fetchall()
-    else:
-        # Get from most recent scan
-        query = """
-            SELECT f.path, f.size, f.sha1
-            FROM files f
-            INNER JOIN scan_sessions s ON f.scan_session_id = s.id
-            WHERE (f.path = ? OR f.path LIKE ?)
-            ORDER BY s.started_at DESC, f.path
-        """
-        pattern = f"{root_path}/%"
-        rows = conn.execute(query, (root_path, pattern)).fetchall()
+    # Use device-specific table
+    table_name = f"files_{device_id}"
+
+    # Check if table exists
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name=?
+    """, (table_name,))
+
+    if not cursor.fetchone():
+        # Table doesn't exist, no files to return
+        return []
+
+    # Query files from device-specific table
+    # Only get active files (exclude deleted files)
+    query = f"""
+        SELECT path, size, sha1
+        FROM {table_name}
+        WHERE status = 'active' AND (path = ? OR path LIKE ?)
+        ORDER BY path
+    """
+    pattern = f"{root_path}/%"
+    rows = conn.execute(query, (root_path, pattern)).fetchall()
 
     # Convert to PayloadFile objects
     files = []
@@ -154,13 +157,30 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
     Args:
         conn: Database connection
         root_path: Root directory path
-        device_id: Optional device ID
+        device_id: Optional device ID (will be derived from root_path if not provided)
 
     Returns:
         Payload object (may be incomplete)
     """
-    # Get files
-    files = get_files_for_path(conn, root_path)
+    # Derive device_id from root_path if not provided
+    if device_id is None:
+        try:
+            device_id = os.stat(root_path).st_dev
+        except (OSError, IOError):
+            # Path doesn't exist or is inaccessible
+            return Payload(
+                payload_id=None,
+                payload_hash=None,
+                device_id=None,
+                root_path=root_path,
+                file_count=0,
+                total_bytes=0,
+                status='incomplete',
+                last_built_at=None
+            )
+
+    # Get files from device-specific table
+    files = get_files_for_path(conn, device_id, root_path)
 
     if not files:
         return Payload(

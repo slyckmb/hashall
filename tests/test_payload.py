@@ -22,26 +22,26 @@ def test_db():
     # Connect and initialize
     conn = connect_db(db_path)
 
-    # Insert test scan session and files
+    # Create per-device files table
+    device_id = 49
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO scan_sessions (scan_id, root_path) VALUES (?, ?)",
-        ("test-scan-1", "/test/root")
-    )
-    scan_id = cursor.lastrowid
 
-    # Insert test files
+    # Create files_49 table
+    from hashall.device import ensure_files_table
+    ensure_files_table(cursor, device_id)
+
+    # Insert test files into device-specific table
     test_files = [
-        ("file1.txt", 100, "aaa111", 12345, 49),
-        ("file2.txt", 200, "bbb222", 12346, 49),
-        ("subdir/file3.txt", 300, "ccc333", 12347, 49),
+        ("/test/root/file1.txt", 100, "aaa111", 12345),
+        ("/test/root/file2.txt", 200, "bbb222", 12346),
+        ("/test/root/subdir/file3.txt", 300, "ccc333", 12347),
     ]
 
-    for path, size, sha1, inode, device in test_files:
-        cursor.execute("""
-            INSERT INTO files (path, size, mtime, sha1, scan_session_id, inode, device_id)
-            VALUES (?, ?, 1234567890.0, ?, ?, ?, ?)
-        """, (path, size, sha1, scan_id, inode, device))
+    for path, size, sha1, inode in test_files:
+        cursor.execute(f"""
+            INSERT INTO files_{device_id} (path, size, mtime, sha1, inode, status)
+            VALUES (?, ?, 1234567890.0, ?, ?, 'active')
+        """, (path, size, sha1, inode))
 
     conn.commit()
 

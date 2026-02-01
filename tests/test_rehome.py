@@ -33,14 +33,32 @@ class TestDatabase:
 
         # Create minimal schema for testing
         conn.executescript("""
-            -- Session-based files table (used by current hashall)
-            CREATE TABLE files (
+            -- Per-device files tables (used by current hashall)
+            -- We'll create files_49 (pool) and files_50 (stash) for testing
+            CREATE TABLE files_49 (
                 path TEXT PRIMARY KEY,
                 inode INTEGER NOT NULL,
                 size INTEGER NOT NULL,
                 mtime REAL NOT NULL,
                 sha1 TEXT,
-                scan_session_id INTEGER
+                first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_modified_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'active',
+                discovered_under TEXT
+            );
+
+            CREATE TABLE files_50 (
+                path TEXT PRIMARY KEY,
+                inode INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                sha1 TEXT,
+                first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_modified_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'active',
+                discovered_under TEXT
             );
 
             -- Payload tables (Stage 2)
@@ -87,14 +105,14 @@ class TestExternalConsumerDetection:
         # - One file has a hardlink outside seeding domain
         payload_root = "/stash/torrents/seeding/Movie.2024"
 
-        # Insert files
+        # Insert files into per-device table (device 50 = stash)
         conn.executescript(f"""
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('{payload_root}/video.mkv', 1001, 1000000, 1234567890, 'abc123'),
                 ('{payload_root}/subtitles.srt', 1002, 5000, 1234567890, 'def456');
 
             -- External hardlink for video.mkv (same inode, outside seeding domain)
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('/media/exports/Movie.2024.mkv', 1001, 1000000, 1234567890, 'abc123');
 
             -- Create payload
@@ -137,12 +155,12 @@ class TestExternalConsumerDetection:
         payload_root = "/stash/torrents/seeding/Movie.2024"
 
         conn.executescript(f"""
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('{payload_root}/video.mkv', 1001, 1000000, 1234567890, 'abc123'),
                 ('{payload_root}/subtitles.srt', 1002, 5000, 1234567890, 'def456');
 
             -- Internal hardlink (within seeding domain)
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('/stash/torrents/seeding/Movie.2024.Alt/video.mkv', 1001, 1000000, 1234567890, 'abc123');
 
             -- Create payload
@@ -188,13 +206,13 @@ class TestReusePlan:
         payload_hash = "shared_payload_hash_456"
 
         conn.executescript(f"""
-            -- Files on stash
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            -- Files on stash (device 50)
+            INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('{stash_root}/video.mkv', 2001, 1000000, 1234567890, 'abc123'),
                 ('{stash_root}/subtitles.srt', 2002, 5000, 1234567890, 'def456');
 
-            -- Files on pool (same content)
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            -- Files on pool (device 49, same content)
+            INSERT INTO files_49 (path, inode, size, mtime, sha1) VALUES
                 ('{pool_root}/video.mkv', 3001, 1000000, 1234567890, 'abc123'),
                 ('{pool_root}/subtitles.srt', 3002, 5000, 1234567890, 'def456');
 
@@ -247,8 +265,8 @@ class TestMovePlan:
         payload_hash = "unique_payload_hash_789"
 
         conn.executescript(f"""
-            -- Files on stash
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            -- Files on stash (device 50)
+            INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('{stash_root}/video.mkv', 4001, 1000000, 1234567890, 'abc123'),
                 ('{stash_root}/subtitles.srt', 4002, 5000, 1234567890, 'def456');
 
@@ -298,8 +316,8 @@ class TestSiblingTorrents:
         payload_hash = "shared_payload_siblings"
 
         conn.executescript(f"""
-            -- Files on stash
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            -- Files on stash (device 50)
+            INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('{stash_root}/video.mkv', 5001, 1000000, 1234567890, 'abc123'),
                 ('{stash_root}/subtitles.srt', 5002, 5000, 1234567890, 'def456');
 
@@ -348,7 +366,7 @@ class TestDryRun:
         stash_root = "/stash/torrents/seeding/Movie.2024"
 
         conn.executescript(f"""
-            INSERT INTO files (path, inode, size, mtime, sha1) VALUES
+            INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('{stash_root}/video.mkv', 6001, 1000000, 1234567890, 'abc123');
 
             INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)

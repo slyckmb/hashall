@@ -90,11 +90,18 @@ class DemotionPlanner:
         # Normalize root path
         root_path = root_path.rstrip('/')
 
-        # Get all files under root_path from the files table
-        # Note: We're using the session-based schema (files table)
-        query = """
+        # Get device_id from payload
+        device_id = conn.execute("""
+            SELECT device_id FROM payloads WHERE root_path = ?
+        """, (root_path,)).fetchone()[0]
+
+        # Use per-device table
+        table_name = f"files_{device_id}"
+
+        # Get all files under root_path from the per-device files table
+        query = f"""
             SELECT DISTINCT path, inode
-            FROM files
+            FROM {table_name}
             WHERE (path = ? OR path LIKE ?)
             ORDER BY path
         """
@@ -106,9 +113,9 @@ class DemotionPlanner:
         # For each file, check if its inode has any paths outside seeding domain
         for file_path, inode in file_rows:
             # Find all paths with same inode (hardlinks)
-            hardlink_query = """
+            hardlink_query = f"""
                 SELECT DISTINCT path
-                FROM files
+                FROM {table_name}
                 WHERE inode = ?
                 ORDER BY path
             """
