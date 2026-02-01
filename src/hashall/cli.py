@@ -10,7 +10,7 @@ from hashall.export import export_json
 from hashall.verify_trees import verify_trees
 from hashall import __version__
 
-DEFAULT_DB_PATH = Path.home() / ".hashall" / "hashall.sqlite3"
+DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
 
 @click.group()
 @click.version_option(__version__)

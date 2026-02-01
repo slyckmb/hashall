@@ -6,11 +6,11 @@ from pathlib import Path
 def find_db_path(db_path=None):
     """
     Return a Path to the SQLite DB.
-    If db_path is not provided, use ~/.hashall/hashall.sqlite3.
+    If db_path is not provided, use ~/.hashall/catalog.db.
     """
     if db_path:
         return Path(db_path)
-    default = Path.home() / ".hashall" / "hashall.sqlite3"
+    default = Path.home() / ".hashall" / "catalog.db"
     return default
 
 def find_json_path(json_path=None, db_path=None):
