@@ -6,8 +6,8 @@ DB_DIR := $(HOME)/.hashall
 DB_FILE := $(DB_DIR)/catalog.db
 HASHALL_IMG := hashall
 
-# Python interpreter (uses active virtualenv)
-PYTHON = python
+# Python interpreter (uses active virtualenv if available)
+PYTHON := $(shell if [ -n "$$VIRTUAL_ENV" ]; then echo "$$VIRTUAL_ENV/bin/python"; else echo "python3"; fi)
 
 # Smart scan wrapper
 SMART_SCAN = $(PYTHON) ./hashall-smart-scan
