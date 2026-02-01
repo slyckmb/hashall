@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""
+Smart scan wrapper for hashall - auto-detects optimal parallel settings.
+
+Analyzes directory file size distribution and selects optimal scan parameters:
+- Large files (video): parallel with fewer workers
+- Medium files (audio): parallel with moderate workers
+- Small files (books/docs): sequential (faster than parallel)
+"""
+
+import os
+import sys
+import argparse
+import statistics
+from pathlib import Path
+from typing import List, Tuple
+
+# Add hashall to path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from hashall.scan import scan_path
+
+# Presets based on media type
+PRESETS = {
+    "video": {
+        "description": "Large video files (avg >50MB)",
+        "parallel": True,
+        "workers": 4,
+        "batch_size": 100,
+        "expected_avg_size": 500 * 1024 * 1024,  # 500MB
+    },
+    "audio": {
+        "description": "Medium audio files (avg 5-50MB)",
+        "parallel": True,
+        "workers": 8,
+        "batch_size": 250,
+        "expected_avg_size": 10 * 1024 * 1024,  # 10MB
+    },
+    "books": {
+        "description": "Small files/books (avg <5MB)",
+        "parallel": False,
+        "workers": None,
+        "batch_size": None,
+        "expected_avg_size": 2 * 1024 * 1024,  # 2MB
+    },
+    "mixed": {
+        "description": "Mixed content (let auto-detect decide)",
+        "parallel": True,
+        "workers": 6,
+        "batch_size": 200,
+        "expected_avg_size": 20 * 1024 * 1024,  # 20MB
+    },
+}
+
+
+def sample_directory(path: Path, max_samples: int = 100) -> List[int]:
+    """
+    Sample file sizes from directory for analysis.
+
+    Args:
+        path: Directory to sample
+        max_samples: Maximum number of files to sample
+
+    Returns:
+        List of file sizes in bytes
+    """
+    sizes = []
+    file_count = 0
+
+    try:
+        for root, _, files in os.walk(path):
+            for filename in files:
+                filepath = os.path.join(root, filename)
+                try:
+                    size = os.path.getsize(filepath)
+                    sizes.append(size)
+                    file_count += 1
+
+                    if len(sizes) >= max_samples:
+                        return sizes
+                except (OSError, PermissionError):
+                    continue
+    except (OSError, PermissionError) as e:
+        print(f"⚠️  Warning: Could not fully sample directory: {e}")
+
+    return sizes
+
+
+def analyze_file_sizes(sizes: List[int]) -> dict:
+    """
+    Analyze file size distribution and recommend settings.
+
+    Args:
+        sizes: List of file sizes in bytes
+
+    Returns:
+        Dict with analysis and recommendations
+    """
+    if not sizes:
+        return {
+            "avg_size": 0,
+            "median_size": 0,
+            "recommendation": "mixed",
+            "reason": "No files found"
+        }
+
+    avg_size = statistics.mean(sizes)
+    median_size = statistics.median(sizes)
+
+    # Determine best preset based on average size
+    if avg_size >= 50 * 1024 * 1024:  # >= 50MB
+        recommendation = "video"
+        reason = f"Large files detected (avg {avg_size / 1024 / 1024:.1f}MB)"
+    elif avg_size >= 5 * 1024 * 1024:  # >= 5MB
+        recommendation = "audio"
+        reason = f"Medium files detected (avg {avg_size / 1024 / 1024:.1f}MB)"
+    elif avg_size >= 1 * 1024 * 1024:  # >= 1MB
+        recommendation = "books"
+        reason = f"Small-medium files detected (avg {avg_size / 1024 / 1024:.1f}MB)"
+    else:  # < 1MB
+        recommendation = "books"
+        reason = f"Small files detected (avg {avg_size / 1024:.1f}KB) - sequential faster"
+
+    return {
+        "avg_size": avg_size,
+        "median_size": median_size,
+        "min_size": min(sizes),
+        "max_size": max(sizes),
+        "sample_count": len(sizes),
+        "recommendation": recommendation,
+        "reason": reason
+    }
+
+
+def format_size(size_bytes: int) -> str:
+    """Format bytes as human-readable size."""
+    if size_bytes >= 1024 * 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024 / 1024:.2f}GB"
+    elif size_bytes >= 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024:.2f}MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.2f}KB"
+    else:
+        return f"{size_bytes}B"
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Smart scan wrapper - auto-detects optimal settings",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Presets:
+  video   Large video files (parallel, 4 workers, optimized for >50MB files)
+  audio   Medium audio files (parallel, 8 workers, optimized for 5-50MB files)
+  books   Small files/documents (sequential, optimized for <5MB files)
+  mixed   Mixed content (parallel, 6 workers, balanced settings)
+  auto    Auto-detect based on sampling (default)
+
+Examples:
+  # Auto-detect optimal settings
+  hashall-smart-scan /pool/media
+
+  # Force video preset
+  hashall-smart-scan /pool/media --preset video
+
+  # Auto-detect with custom sample size
+  hashall-smart-scan /pool/media --sample-size 200
+
+  # Dry-run to see what would be executed
+  hashall-smart-scan /pool/media --dry-run
+        """
+    )
+
+    parser.add_argument("path", type=Path, nargs='?', help="Directory to scan")
+    parser.add_argument(
+        "--preset",
+        choices=list(PRESETS.keys()) + ["auto"],
+        default="auto",
+        help="Preset optimization profile (default: auto)"
+    )
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=100,
+        help="Number of files to sample for auto-detection (default: 100)"
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=Path.home() / ".hashall" / "catalog.db",
+        help="Database path (default: ~/.hashall/catalog.db)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be executed without running scan"
+    )
+    parser.add_argument(
+        "--show-presets",
+        action="store_true",
+        help="Show all available presets and exit"
+    )
+
+    args = parser.parse_args()
+
+    # Show presets
+    if args.show_presets:
+        print("Available presets:\n")
+        for name, config in PRESETS.items():
+            print(f"  {name:8} - {config['description']}")
+            print(f"           Parallel: {config['parallel']}, Workers: {config['workers']}, Batch: {config['batch_size']}")
+            print(f"           Optimized for: {format_size(config['expected_avg_size'])} average file size")
+            print()
+        return 0
+
+    # Validate path is provided
+    if args.path is None:
+        parser.error("the following arguments are required: path")
+
+    # Validate path exists
+    if not args.path.exists():
+        print(f"❌ Error: Path does not exist: {args.path}")
+        return 1
+
+    if not args.path.is_dir():
+        print(f"❌ Error: Path is not a directory: {args.path}")
+        return 1
+
+    print(f"🔍 Analyzing directory: {args.path}")
+
+    # Determine settings
+    if args.preset == "auto":
+        print(f"   Sampling {args.sample_size} files for analysis...")
+        sizes = sample_directory(args.path, max_samples=args.sample_size)
+
+        if not sizes:
+            print("⚠️  No files found, using 'mixed' preset")
+            analysis = {"recommendation": "mixed", "reason": "No files found"}
+        else:
+            analysis = analyze_file_sizes(sizes)
+
+            print(f"\n📊 File size analysis:")
+            print(f"   Sample size: {analysis['sample_count']} files")
+            print(f"   Average: {format_size(analysis['avg_size'])}")
+            print(f"   Median: {format_size(analysis['median_size'])}")
+            print(f"   Range: {format_size(analysis['min_size'])} - {format_size(analysis['max_size'])}")
+            print(f"\n💡 Recommendation: {analysis['recommendation'].upper()} preset")
+            print(f"   Reason: {analysis['reason']}")
+
+        preset_name = analysis["recommendation"]
+    else:
+        preset_name = args.preset
+        print(f"   Using preset: {preset_name.upper()}")
+
+    # Get preset config
+    config = PRESETS[preset_name]
+
+    print(f"\n⚙️  Scan configuration:")
+    print(f"   Preset: {preset_name} - {config['description']}")
+    print(f"   Parallel: {config['parallel']}")
+    if config['parallel']:
+        print(f"   Workers: {config['workers']}")
+        print(f"   Batch size: {config['batch_size']}")
+    else:
+        print(f"   Mode: Sequential (fastest for small files)")
+
+    # Dry run
+    if args.dry_run:
+        print(f"\n🔧 Would execute:")
+        cmd_parts = [f"hashall scan {args.path}"]
+        if config['parallel']:
+            cmd_parts.append(f"--parallel --workers {config['workers']} --batch-size {config['batch_size']}")
+        print(f"   {' '.join(cmd_parts)}")
+        return 0
+
+    # Execute scan
+    print(f"\n🚀 Starting scan...\n")
+
+    try:
+        scan_path(
+            db_path=args.db,
+            root_path=args.path,
+            parallel=config['parallel'],
+            workers=config['workers'],
+            batch_size=config['batch_size']
+        )
+        return 0
+    except KeyboardInterrupt:
+        print("\n⚠️  Scan interrupted by user")
+        return 130
+    except Exception as e:
+        print(f"\n❌ Scan failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
