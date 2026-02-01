@@ -206,21 +206,31 @@ def hierarchical_scan(
             print(f"[{completed}/{total_scans}] Scanning: {rel_path}")
             print(f"            Preset: {preset.upper()} (avg {format_size(int(info['avg_size']))})")
 
-            try:
-                scan_path(
-                    db_path=db_path,
-                    root_path=dir_path,
-                    parallel=config['parallel'],
-                    workers=config['workers'],
-                    batch_size=config['batch_size']
-                )
-                print()
-            except KeyboardInterrupt:
-                print("\n⚠️  Scan interrupted by user")
-                return
-            except Exception as e:
-                print(f"❌ Scan failed: {e}\n")
-                continue
+            # Retry logic for database lock contention
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    scan_path(
+                        db_path=db_path,
+                        root_path=dir_path,
+                        parallel=config['parallel'],
+                        workers=config['workers'],
+                        batch_size=config['batch_size']
+                    )
+                    print()
+                    break  # Success!
+                except KeyboardInterrupt:
+                    print("\n⚠️  Scan interrupted by user")
+                    return
+                except Exception as e:
+                    if "database is locked" in str(e) and attempt < max_retries - 1:
+                        import time
+                        wait_time = (2 ** attempt) * 1.0  # 1s, 2s, 4s
+                        print(f"⏳ Database busy, retrying in {wait_time:.0f}s... (attempt {attempt + 2}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        print(f"❌ Scan failed: {e}\n")
+                        break  # Give up after retries or non-lock error
 
     print(f"✅ Completed all {total_scans} scans!")
 
