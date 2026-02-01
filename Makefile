@@ -6,8 +6,15 @@ DB_DIR := $(HOME)/.hashall
 DB_FILE := $(DB_DIR)/catalog.db
 HASHALL_IMG := hashall
 
+# Python interpreter (uses active virtualenv)
+PYTHON = python
+
 # Smart scan wrapper
-SMART_SCAN = ./hashall-smart-scan
+SMART_SCAN = $(PYTHON) ./hashall-smart-scan
+
+# Hierarchical scanners
+AUTO_SCAN = $(PYTHON) ./hashall-auto-scan
+PLAN_SCAN = $(PYTHON) ./hashall-plan-scan
 
 # Default scan path (override with PATH=/custom/path)
 PATH ?= .
@@ -78,7 +85,7 @@ scan-dry-run:  ## Show what scan would execute without running
 
 .PHONY: scan-presets
 scan-presets:  ## Show all available scan presets and their settings
-	$(SMART_SCAN) --show-presets
+	@$(SMART_SCAN) --show-presets
 
 # ============================================================================
 # Hierarchical & Adaptive Scanning - ADVANCED
@@ -87,22 +94,22 @@ scan-presets:  ## Show all available scan presets and their settings
 .PHONY: scan-hierarchical
 scan-hierarchical:  ## Adaptive scan - analyzes each subfolder independently
 	@echo "🌳 Hierarchical scan with per-folder optimization: $(PATH)"
-	./hashall-auto-scan "$(PATH)" --db "$(DB_FILE)"
+	$(AUTO_SCAN) "$(PATH)" --db "$(DB_FILE)"
 
 .PHONY: scan-plan
 scan-plan:  ## Analyze tree and propose optimal scan strategy
 	@echo "📊 Analyzing directory tree for optimal scan strategy: $(PATH)"
-	./hashall-plan-scan "$(PATH)" --db "$(DB_FILE)"
+	$(PLAN_SCAN) "$(PATH)" --db "$(DB_FILE)"
 
 .PHONY: scan-plan-execute
 scan-plan-execute:  ## Analyze and execute optimal scan plan
 	@echo "🚀 Planning and executing optimal scan: $(PATH)"
-	./hashall-plan-scan "$(PATH)" --execute --db "$(DB_FILE)"
+	$(PLAN_SCAN) "$(PATH)" --execute --db "$(DB_FILE)"
 
 .PHONY: scan-hier-dry
 scan-hier-dry:  ## Preview hierarchical scan plan without executing
 	@echo "🔍 Previewing hierarchical scan plan: $(PATH)"
-	./hashall-auto-scan "$(PATH)" --dry-run --db "$(DB_FILE)"
+	$(AUTO_SCAN) "$(PATH)" --dry-run --db "$(DB_FILE)"
 
 # ============================================================================
 # Device Management
