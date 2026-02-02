@@ -121,6 +121,222 @@ def compute_sha1(file_path):
             h.update(chunk)
     return h.hexdigest()
 
+
+def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]:
+    """
+    Find collision groups where multiple files share the same quick_hash.
+
+    Args:
+        device_id: Device ID to query
+        db_path: Path to catalog database
+
+    Returns:
+        Dict mapping quick_hash to list of file records with that hash.
+        Each file record is a dict with keys: path, size, mtime, quick_hash, sha1
+
+    Example:
+        {
+            'abc123...': [
+                {'path': 'file1.dat', 'size': 1048576, 'quick_hash': 'abc123...', 'sha1': None},
+                {'path': 'file2.dat', 'size': 1048576, 'quick_hash': 'abc123...', 'sha1': None}
+            ]
+        }
+    """
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    table_name = f"files_{device_id}"
+
+    # Find all quick_hash values with multiple files
+    cursor.execute(f"""
+        SELECT quick_hash, COUNT(*) as file_count
+        FROM {table_name}
+        WHERE status = 'active'
+          AND quick_hash IS NOT NULL
+        GROUP BY quick_hash
+        HAVING COUNT(*) > 1
+        ORDER BY file_count DESC
+    """)
+
+    collision_hashes = [row[0] for row in cursor.fetchall()]
+
+    # For each collision hash, get all files
+    collisions = {}
+    for quick_hash in collision_hashes:
+        cursor.execute(f"""
+            SELECT path, size, mtime, quick_hash, sha1
+            FROM {table_name}
+            WHERE quick_hash = ? AND status = 'active'
+            ORDER BY path
+        """, (quick_hash,))
+
+        files = []
+        for row in cursor.fetchall():
+            files.append({
+                'path': row[0],
+                'size': row[1],
+                'mtime': row[2],
+                'quick_hash': row[3],
+                'sha1': row[4]
+            })
+        collisions[quick_hash] = files
+
+    conn.close()
+    return collisions
+
+
+def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, mount_point: Path) -> list:
+    """
+    Upgrade all files in a collision group to full SHA1 hash.
+
+    Args:
+        quick_hash: The quick_hash value shared by the collision group
+        device_id: Device ID
+        db_path: Path to catalog database
+        mount_point: Mount point for the filesystem (to resolve absolute paths)
+
+    Returns:
+        List of updated file records with full SHA1 computed
+
+    Side effects:
+        Updates database records with computed full SHA1 values
+    """
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    table_name = f"files_{device_id}"
+
+    # Get all files with this quick_hash
+    cursor.execute(f"""
+        SELECT path, size, mtime, quick_hash, sha1
+        FROM {table_name}
+        WHERE quick_hash = ? AND status = 'active'
+    """, (quick_hash,))
+
+    files = []
+    for row in cursor.fetchall():
+        file_record = {
+            'path': row[0],
+            'size': row[1],
+            'mtime': row[2],
+            'quick_hash': row[3],
+            'sha1': row[4]
+        }
+        files.append(file_record)
+
+    # Compute full hash for any file missing it
+    updated_files = []
+    for file_record in files:
+        if file_record['sha1'] is None:
+            # Resolve absolute path
+            abs_path = mount_point / file_record['path']
+            try:
+                full_sha1 = compute_sha1(abs_path)
+
+                # Update database
+                cursor.execute(f"""
+                    UPDATE {table_name}
+                    SET sha1 = ?, last_modified_at = datetime('now')
+                    WHERE path = ?
+                """, (full_sha1, file_record['path']))
+
+                file_record['sha1'] = full_sha1
+                updated_files.append(file_record)
+            except Exception as e:
+                print(f"⚠️  Could not upgrade {abs_path}: {e}")
+
+    conn.commit()
+    conn.close()
+
+    return files  # Return all files (updated and already had sha1)
+
+
+def find_duplicates(device_id: int, db_path: Path, auto_upgrade: bool = True) -> Dict[str, list]:
+    """
+    Find duplicate files, optionally auto-upgrading collision groups to full hash.
+
+    Args:
+        device_id: Device ID to query
+        db_path: Path to catalog database
+        auto_upgrade: If True, automatically compute full SHA1 for collision groups
+
+    Returns:
+        Dict mapping full SHA1 to list of duplicate files.
+        Only includes groups with 2+ files sharing the same full SHA1.
+
+    Example:
+        {
+            'def456...': [
+                {'path': 'file1.dat', 'size': 10485760, 'sha1': 'def456...'},
+                {'path': 'file2.dat', 'size': 10485760, 'sha1': 'def456...'}
+            ]
+        }
+
+    Algorithm:
+        1. Find collision groups (files with same quick_hash)
+        2. If auto_upgrade: compute full SHA1 for each collision group
+        3. Group files by full SHA1
+        4. Return only groups with 2+ files (true duplicates)
+    """
+    from collections import defaultdict
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+
+    # Get mount point for path resolution
+    cursor.execute("""
+        SELECT mount_point FROM devices WHERE device_id = ?
+    """, (device_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {}
+
+    mount_point = Path(row[0])
+    conn.close()
+
+    # Find collision groups
+    collisions = find_quick_hash_collisions(device_id, db_path)
+
+    if not collisions:
+        return {}  # No collisions, no duplicates
+
+    print(f"🔍 Found {len(collisions)} collision groups")
+
+    # Auto-upgrade collision groups if requested
+    if auto_upgrade:
+        print("⚡ Upgrading collision groups to full SHA1...")
+        for quick_hash in collisions.keys():
+            upgrade_collision_group(quick_hash, device_id, db_path, mount_point)
+
+        # Re-query collisions to get updated SHA1 values
+        collisions = find_quick_hash_collisions(device_id, db_path)
+
+    # Group by full SHA1
+    by_sha1 = defaultdict(list)
+    for quick_hash, files in collisions.items():
+        for file_record in files:
+            if file_record['sha1'] is not None:
+                by_sha1[file_record['sha1']].append(file_record)
+
+    # Only return groups with 2+ files (true duplicates)
+    duplicates = {}
+    true_dupe_count = 0
+    false_collision_count = 0
+
+    for sha1, files in by_sha1.items():
+        if len(files) >= 2:
+            duplicates[sha1] = files
+            true_dupe_count += 1
+        elif len(files) == 1:
+            false_collision_count += 1
+
+    if true_dupe_count > 0:
+        print(f"✅ True duplicates: {true_dupe_count} groups")
+    if false_collision_count > 0:
+        print(f"⚠️  False collisions: {false_collision_count} groups (same quick_hash, different sha1)")
+
+    return duplicates
+
+
 def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[str, dict], hash_mode: str = 'fast'):
     """
     Hash a file for incremental scanning.
