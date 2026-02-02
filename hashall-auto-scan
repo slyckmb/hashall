@@ -27,7 +27,10 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from hashall.scan import scan_path
 
 # Optimal configuration (benchmarked 2026-02-01)
-# Fast hash: workers=12 (empirical testing: 423.54 files/sec, 23% faster than workers=8)
+# Fast hash: workers=12 (good for single or dual concurrent scans)
+#   - Single scan (cached): ~3000 files/sec
+#   - Single scan (uncached): ~84 files/sec
+#   - Dual scan: 24 total workers on 16 cores = reasonable oversubscription
 # Full hash: workers=2 (reading entire files, I/O saturated)
 # batch_size=1000 for frequent commits and telemetry collection
 SCAN_CONFIG = {"parallel": True, "workers": 12, "batch_size": 1000}
