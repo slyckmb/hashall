@@ -1,0 +1,434 @@
+#!/usr/bin/env python3
+"""
+iowatch - Real-time I/O and system monitoring dashboard
+Monitors disk I/O, CPU usage, and hashall scan processes with colors!
+"""
+
+__version__ = "1.0.0"
+
+import sys
+import time
+import subprocess
+import re
+from collections import defaultdict
+from pathlib import Path
+
+# ANSI Color Codes
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+
+    # Foreground colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+
+    # Bright colors
+    BRIGHT_BLACK = '\033[90m'
+    BRIGHT_RED = '\033[91m'
+    BRIGHT_GREEN = '\033[92m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_BLUE = '\033[94m'
+    BRIGHT_MAGENTA = '\033[95m'
+    BRIGHT_CYAN = '\033[96m'
+    BRIGHT_WHITE = '\033[97m'
+
+    # Background colors
+    BG_BLACK = '\033[40m'
+    BG_RED = '\033[41m'
+    BG_GREEN = '\033[42m'
+    BG_YELLOW = '\033[43m'
+    BG_BLUE = '\033[44m'
+    BG_MAGENTA = '\033[45m'
+    BG_CYAN = '\033[46m'
+    BG_WHITE = '\033[47m'
+
+def clear_screen():
+    """Clear terminal screen."""
+    print("\033[2J\033[H", end="")
+
+def colorize(text, color):
+    """Colorize text."""
+    return f"{color}{text}{Colors.RESET}"
+
+def get_color_for_percentage(pct):
+    """Get color based on percentage (green=low, yellow=medium, red=high)."""
+    if pct < 50:
+        return Colors.GREEN
+    elif pct < 80:
+        return Colors.YELLOW
+    else:
+        return Colors.RED
+
+def get_disk_stats():
+    """Get disk I/O statistics."""
+    try:
+        # Read /proc/diskstats
+        result = subprocess.run(
+            ['cat', '/proc/diskstats'],
+            capture_output=True,
+            text=True,
+            timeout=1
+        )
+
+        stats = {}
+        for line in result.stdout.strip().split('\n'):
+            parts = line.split()
+            if len(parts) >= 14:
+                device = parts[2]
+                # Only track major devices (sda, nvme0n1, etc)
+                if device.startswith(('sd', 'nvme', 'vd', 'hd')):
+                    # sectors read, sectors written
+                    read_sectors = int(parts[5])
+                    write_sectors = int(parts[9])
+                    stats[device] = {
+                        'read_sectors': read_sectors,
+                        'write_sectors': write_sectors
+                    }
+        return stats
+    except Exception as e:
+        return {}
+
+def get_cpu_stats():
+    """Get CPU usage statistics."""
+    try:
+        result = subprocess.run(
+            ['cat', '/proc/stat'],
+            capture_output=True,
+            text=True,
+            timeout=1
+        )
+
+        cpu_stats = {}
+        for line in result.stdout.strip().split('\n'):
+            if line.startswith('cpu'):
+                parts = line.split()
+                cpu_name = parts[0]
+                # user, nice, system, idle, iowait, irq, softirq
+                values = [int(x) for x in parts[1:8]]
+                cpu_stats[cpu_name] = {
+                    'total': sum(values),
+                    'idle': values[3],
+                    'iowait': values[4]
+                }
+        return cpu_stats
+    except Exception:
+        return {}
+
+def get_hashall_processes():
+    """Get running hashall scan processes."""
+    try:
+        result = subprocess.run(
+            ['ps', 'aux'],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+
+        processes = []
+        count = 0
+        for line in result.stdout.strip().split('\n'):
+            # Look for hashall-auto-scan processes (but not iowatch itself)
+            if 'hashall-auto-scan' in line and 'python' in line and 'iowatch' not in line:
+                parts = line.split(None, 10)
+                if len(parts) >= 11:
+                    cmd = parts[10]
+                    # Make sure it's the actual python process, not the shell wrapper
+                    if 'python' in cmd and 'hashall-auto-scan' in cmd:
+                        count += 1
+                        try:
+                            cpu_val = float(parts[2])
+                            mem_val = float(parts[3])
+                            processes.append({
+                                'user': parts[0],
+                                'pid': parts[1],
+                                'cpu': parts[2],
+                                'mem': parts[3],
+                                'command': parts[10]
+                            })
+                        except (ValueError, IndexError) as e:
+                            # Skip malformed entries
+                            pass
+        return processes
+    except Exception as e:
+        return []
+
+def get_zfs_arc_stats():
+    """Get ZFS ARC statistics."""
+    try:
+        arcstats_path = Path('/proc/spl/kstat/zfs/arcstats')
+        if not arcstats_path.exists():
+            return None
+
+        stats = {}
+        with open(arcstats_path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    name = parts[0]
+                    value = parts[2]
+                    if name in ['size', 'c_max', 'hits', 'misses']:
+                        stats[name] = int(value)
+
+        if stats:
+            # Convert to human readable
+            size_gb = stats.get('size', 0) / (1024**3)
+            max_gb = stats.get('c_max', 0) / (1024**3)
+            hits = stats.get('hits', 0)
+            misses = stats.get('misses', 0)
+            total = hits + misses
+            hit_rate = (hits / total * 100) if total > 0 else 0
+
+            return {
+                'size_gb': size_gb,
+                'max_gb': max_gb,
+                'hit_rate': hit_rate
+            }
+    except Exception:
+        pass
+    return None
+
+def format_bytes(bytes_val):
+    """Format bytes to human readable."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if bytes_val < 1024.0:
+            return f"{bytes_val:6.1f} {unit}"
+        bytes_val /= 1024.0
+    return f"{bytes_val:6.1f} PB"
+
+def format_bar(percentage, width=40, colored=True):
+    """Format a colored progress bar."""
+    filled = int(width * percentage / 100)
+    empty = width - filled
+
+    if colored:
+        color = get_color_for_percentage(percentage)
+        bar = f"{color}{'█' * filled}{Colors.BRIGHT_BLACK}{'░' * empty}{Colors.RESET}"
+    else:
+        bar = '█' * filled + '░' * empty
+
+    return f"[{bar}]"
+
+def print_two_columns(left_lines, right_lines, width, separator=" │ "):
+    """Print two columns side by side."""
+    max_rows = max(len(left_lines), len(right_lines))
+
+    for i in range(max_rows):
+        left = left_lines[i] if i < len(left_lines) else ""
+        right = right_lines[i] if i < len(right_lines) else ""
+
+        # Strip ANSI codes to measure actual width
+        import re
+        left_plain = re.sub(r'\033\[[0-9;]*m', '', left)
+        right_plain = re.sub(r'\033\[[0-9;]*m', '', right)
+
+        # Pad left to width
+        left_padding = width - len(left_plain)
+
+        print(f"{left}{' ' * left_padding}{separator}{right}")
+
+def main():
+    """Main dashboard loop."""
+    print(colorize("Starting iowatch dashboard... Press Ctrl+C to exit", Colors.CYAN))
+    time.sleep(1)
+
+    prev_disk_stats = get_disk_stats()
+    prev_cpu_stats = get_cpu_stats()
+    prev_time = time.time()
+
+    WIDTH = 45  # Half width for 2-column layout
+    FULL_WIDTH = WIDTH * 2 + 3  # Two columns plus separator
+
+    try:
+        while True:
+            time.sleep(2)  # Update every 2 seconds
+
+            now = time.time()
+            elapsed = now - prev_time
+
+            # Get current stats
+            disk_stats = get_disk_stats()
+            cpu_stats = get_cpu_stats()
+            hashall_procs = get_hashall_processes()
+            arc_stats = get_zfs_arc_stats()
+
+            clear_screen()
+
+            # Header
+            print(colorize("=" * WIDTH, Colors.BRIGHT_CYAN))
+            print(colorize(f"{'⚡ iowatch - I/O & System Monitor ⚡':^{WIDTH}}", Colors.BOLD + Colors.BRIGHT_YELLOW))
+            timestamp_line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} | v{__version__}"
+            print(colorize(f"{timestamp_line:^{WIDTH}}", Colors.BRIGHT_CYAN))
+            print(colorize("=" * WIDTH, Colors.BRIGHT_CYAN))
+            print()
+
+            # Disk I/O - show only active partition totals
+            print(colorize("📊 DISK I/O", Colors.BOLD + Colors.BRIGHT_MAGENTA))
+            print(colorize("-" * WIDTH, Colors.BRIGHT_BLACK))
+            if prev_disk_stats and disk_stats:
+                # Group by device (exclude partition numbers)
+                device_io = defaultdict(lambda: {'read': 0, 'write': 0})
+
+                for device in sorted(disk_stats.keys()):
+                    if device in prev_disk_stats:
+                        prev = prev_disk_stats[device]
+                        curr = disk_stats[device]
+
+                        # Calculate MB/s (512 byte sectors)
+                        read_sectors = curr['read_sectors'] - prev['read_sectors']
+                        write_sectors = curr['write_sectors'] - prev['write_sectors']
+
+                        read_mb_s = (read_sectors * 512) / (1024 * 1024) / elapsed
+                        write_mb_s = (write_sectors * 512) / (1024 * 1024) / elapsed
+
+                        # Use partition if it has activity, otherwise base device
+                        if read_mb_s > 0.1 or write_mb_s > 0.1:
+                            # Get base device name (sda from sda1, nvme0n1 from nvme0n1p1)
+                            base_dev = device.rstrip('0123456789').rstrip('p')
+                            if not base_dev:
+                                base_dev = device
+
+                            device_io[base_dev]['read'] += read_mb_s
+                            device_io[base_dev]['write'] += write_mb_s
+
+                if device_io:
+                    for dev in sorted(device_io.keys()):
+                        read_mb = device_io[dev]['read']
+                        write_mb = device_io[dev]['write']
+
+                        read_color = Colors.BRIGHT_GREEN if read_mb > 10 else Colors.GREEN
+                        write_color = Colors.BRIGHT_YELLOW if write_mb > 1 else Colors.YELLOW
+
+                        print(f"  {colorize(dev, Colors.BRIGHT_CYAN):<20} "
+                              f"R: {colorize(f'{read_mb:6.1f}', read_color)} MB/s  "
+                              f"W: {colorize(f'{write_mb:6.1f}', write_color)} MB/s")
+                else:
+                    print(colorize("  No disk activity", Colors.BRIGHT_BLACK))
+            else:
+                print(colorize("  No disk activity", Colors.BRIGHT_BLACK))
+            print()
+
+            # CPU Usage
+            print(colorize("💻 CPU USAGE", Colors.BOLD + Colors.BRIGHT_BLUE))
+            print(colorize("-" * WIDTH, Colors.BRIGHT_BLACK))
+            if prev_cpu_stats and cpu_stats:
+                # Overall CPU
+                if 'cpu' in cpu_stats and 'cpu' in prev_cpu_stats:
+                    prev_total = prev_cpu_stats['cpu']['total']
+                    curr_total = cpu_stats['cpu']['total']
+                    prev_idle = prev_cpu_stats['cpu']['idle']
+                    curr_idle = cpu_stats['cpu']['idle']
+                    prev_iowait = prev_cpu_stats['cpu']['iowait']
+                    curr_iowait = cpu_stats['cpu']['iowait']
+
+                    total_diff = curr_total - prev_total
+                    idle_diff = curr_idle - prev_idle
+                    iowait_diff = curr_iowait - prev_iowait
+
+                    if total_diff > 0:
+                        usage_pct = 100.0 - (idle_diff / total_diff * 100.0)
+                        iowait_pct = iowait_diff / total_diff * 100.0
+
+                        usage_color = get_color_for_percentage(usage_pct)
+                        iowait_color = Colors.BRIGHT_RED if iowait_pct > 30 else Colors.YELLOW if iowait_pct > 10 else Colors.GREEN
+
+                        print(f"  Overall: {colorize(f'{usage_pct:5.1f}%', usage_color)} usage  "
+                              f"I/O wait: {colorize(f'{iowait_pct:5.1f}%', iowait_color)}")
+                        print(f"  {format_bar(usage_pct, WIDTH-4)}")
+
+                        # Per-core (4x4 grid)
+                        print()
+                        cores = [k for k in sorted(cpu_stats.keys()) if k.startswith('cpu') and k != 'cpu'][:16]
+                        for i in range(0, len(cores), 4):
+                            line = "  "
+                            for core in cores[i:i+4]:
+                                if core in prev_cpu_stats:
+                                    prev_t = prev_cpu_stats[core]['total']
+                                    curr_t = cpu_stats[core]['total']
+                                    prev_i = prev_cpu_stats[core]['idle']
+                                    curr_i = cpu_stats[core]['idle']
+
+                                    t_diff = curr_t - prev_t
+                                    i_diff = curr_i - prev_i
+
+                                    if t_diff > 0:
+                                        core_pct = 100.0 - (i_diff / t_diff * 100.0)
+                                        core_num = int(core[3:])
+                                        core_color = get_color_for_percentage(core_pct)
+                                        line += f"{colorize(f'{core_num:2d}', Colors.BRIGHT_BLACK)}:{colorize(f'{core_pct:3.0f}%', core_color)} "
+                            print(line)
+            print()
+
+            # ZFS ARC
+            if arc_stats:
+                print(colorize("💾 ZFS ARC CACHE", Colors.BOLD + Colors.BRIGHT_GREEN))
+                print(colorize("-" * WIDTH, Colors.BRIGHT_BLACK))
+                size_pct = (arc_stats['size_gb'] / arc_stats['max_gb'] * 100) if arc_stats['max_gb'] > 0 else 0
+
+                print(f"  Size: {colorize(f'{arc_stats['size_gb']:.1f}', Colors.CYAN)} / "
+                      f"{colorize(f'{arc_stats['max_gb']:.1f}', Colors.BRIGHT_BLACK)} GB "
+                      f"({colorize(f'{size_pct:.0f}%', Colors.CYAN)})  "
+                      f"Hit Rate: {colorize(f'{arc_stats['hit_rate']:.1f}%', Colors.BRIGHT_GREEN)}")
+                print(f"  {format_bar(arc_stats['hit_rate'], WIDTH-4, colored=False)}")
+                print()
+
+            # Hashall Processes
+            scan_count = len(hashall_procs) if hashall_procs else 0
+            print(colorize(f"🔍 HASHALL SCANS ({scan_count} active)", Colors.BOLD + Colors.BRIGHT_YELLOW))
+            print(colorize("-" * WIDTH, Colors.BRIGHT_BLACK))
+            if hashall_procs:
+                print(f"  {colorize('PID', Colors.BRIGHT_WHITE):<10} "
+                      f"{colorize('CPU%', Colors.BRIGHT_WHITE):>8} "
+                      f"{colorize('MEM%', Colors.BRIGHT_WHITE):>8}  "
+                      f"{colorize('PATH', Colors.BRIGHT_WHITE)}")
+                for proc in hashall_procs:
+                    try:
+                        pid = proc['pid']
+                        cpu = float(proc['cpu'])
+                        mem = float(proc['mem'])
+
+                        # Extract path from command
+                        cmd = proc['command']
+                        if '/pool' in cmd:
+                            path = colorize('pool', Colors.BRIGHT_CYAN)
+                        elif '/stash' in cmd:
+                            path = colorize('stash', Colors.BRIGHT_MAGENTA)
+                        else:
+                            path = cmd[:30]
+
+                        cpu_color = get_color_for_percentage(cpu)
+                        mem_color = get_color_for_percentage(mem)
+
+                        print(f"  {colorize(pid, Colors.YELLOW):<10} "
+                              f"{colorize(f'{cpu:5.1f}%', cpu_color):>16} "
+                              f"{colorize(f'{mem:5.1f}%', mem_color):>16}  "
+                              f"{path}")
+                    except (ValueError, KeyError) as e:
+                        # Skip malformed process entries
+                        pass
+            else:
+                print(colorize("  No active scans", Colors.BRIGHT_BLACK))
+            print()
+
+            print(colorize("-" * WIDTH, Colors.BRIGHT_BLACK))
+            print(colorize("Press Ctrl+C to exit", Colors.BRIGHT_CYAN) +
+                  colorize(" | ", Colors.BRIGHT_BLACK) +
+                  colorize("Refreshing every 2s", Colors.BRIGHT_GREEN))
+
+            # Update previous stats
+            prev_disk_stats = disk_stats
+            prev_cpu_stats = cpu_stats
+            prev_time = now
+
+    except KeyboardInterrupt:
+        print("\n")
+        print(colorize("Exiting iowatch...", Colors.BRIGHT_YELLOW))
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()
