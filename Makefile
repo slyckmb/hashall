@@ -93,8 +93,8 @@ scan-presets:  ## Show all available scan presets and their settings
 
 .PHONY: scan-hierarchical
 scan-hierarchical:  ## Adaptive scan - analyzes each subfolder independently
-	@echo "🌳 Hierarchical scan with per-folder optimization: $(PATH)"
-	$(AUTO_SCAN) "$(PATH)" --db "$(DB_FILE)"
+	@echo "🌳 Hierarchical scan with device-local database: $(PATH)"
+	$(AUTO_SCAN) "$(PATH)" --per-device
 
 .PHONY: scan-plan
 scan-plan:  ## Analyze tree and propose optimal scan strategy
