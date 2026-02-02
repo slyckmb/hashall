@@ -39,7 +39,7 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
         root_path: Root path to scope the query to
 
     Returns:
-        dict: {path: {size, mtime, sha1}} for files under root_path
+        dict: {path: {size, mtime, quick_hash, sha1}} for files under root_path
 
     Edge cases:
         - Mount point not found -> return empty dict
@@ -70,48 +70,69 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
     # Special case: if rel_root is ".", get all files (root == mount point)
     if rel_root_str == ".":
         cursor.execute(f"""
-            SELECT path, size, mtime, sha1
+            SELECT path, size, mtime, quick_hash, sha1
             FROM {table_name}
             WHERE status = 'active'
         """)
     else:
         # Use both exact match and prefix match to get all files under the path
         cursor.execute(f"""
-            SELECT path, size, mtime, sha1
+            SELECT path, size, mtime, quick_hash, sha1
             FROM {table_name}
             WHERE status = 'active' AND (path = ? OR path LIKE ?)
         """, (rel_root_str, f"{rel_root_str}/%"))
 
-    # Build dict: {path: {size, mtime, sha1}}
+    # Build dict: {path: {size, mtime, quick_hash, sha1}}
     existing = {}
     for row in cursor.fetchall():
         existing[row[0]] = {
             'size': row[1],
             'mtime': row[2],
-            'sha1': row[3]
+            'quick_hash': row[3],
+            'sha1': row[4]
         }
 
     return existing
 
 
+def compute_quick_hash(file_path, sample_size=1024*1024):
+    """
+    Compute SHA1 of first N bytes for fast scanning.
+
+    Args:
+        file_path: Path to file
+        sample_size: Bytes to read (default 1MB)
+
+    Returns:
+        SHA1 hex digest of sample
+    """
+    h = hashlib.sha1()
+    with open(file_path, "rb") as f:
+        data = f.read(sample_size)
+        h.update(data)
+    return h.hexdigest()
+
+
 def compute_sha1(file_path):
+    """Compute full SHA1 hash of entire file."""
     h = hashlib.sha1()
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
             h.update(chunk)
     return h.hexdigest()
 
-def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[str, dict]):
+def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[str, dict], hash_mode: str = 'fast'):
     """
     Hash a file for incremental scanning.
 
     Args:
         file_path: Absolute path to the file
         mount_point: Mount point for the filesystem (to compute relative path)
-        existing_files: Dict of {rel_path: {size, mtime, sha1}} from database
+        existing_files: Dict of {rel_path: {size, mtime, quick_hash, sha1}} from database
+        hash_mode: 'fast' (quick_hash only), 'full' (both), or 'upgrade' (add sha1 to existing quick_hash)
 
     Returns:
-        Tuple of (rel_path, size, mtime, sha1, inode, device_id, is_new, is_updated)
+        Tuple of (rel_path, size, mtime, quick_hash, sha1, inode, device_id, is_new, is_updated)
         or None on error
     """
     try:
@@ -123,15 +144,25 @@ def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[st
 
         # Determine if we need to hash
         if existing and existing['size'] == stat.st_size and abs(existing['mtime'] - stat.st_mtime) < 0.001:
-            # File unchanged - reuse existing hash
-            return (rel_path, stat.st_size, stat.st_mtime, existing['sha1'], stat.st_ino, stat.st_dev, False, False)
+            # File unchanged - reuse existing hashes
+            quick_hash = existing.get('quick_hash')
+            sha1 = existing.get('sha1')
 
-        # File is new or modified - compute hash
-        sha1 = compute_sha1(file_path)
+            # If upgrading and no full hash yet, compute it
+            if hash_mode == 'upgrade' and not sha1:
+                sha1 = compute_sha1(file_path)
+                return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, stat.st_ino, stat.st_dev, False, True)
+
+            return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, stat.st_ino, stat.st_dev, False, False)
+
+        # File is new or modified - compute hashes based on mode
+        quick_hash = compute_quick_hash(file_path)
+        sha1 = compute_sha1(file_path) if hash_mode == 'full' else None
+
         is_new = existing is None
         is_updated = not is_new
 
-        return (rel_path, stat.st_size, stat.st_mtime, sha1, stat.st_ino, stat.st_dev, is_new, is_updated)
+        return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, stat.st_ino, stat.st_dev, is_new, is_updated)
     except Exception as e:
         print(f"⚠️ Could not process: {file_path} ({e})")
         return None
@@ -153,26 +184,36 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
     root_str = str(root_canonical)
 
     for row in rows:
-        rel_path, size, mtime, sha1, inode, device_id, is_new, is_updated = row
+        rel_path, size, mtime, quick_hash, sha1, inode, device_id, is_new, is_updated = row
 
         if is_new:
-            # Insert new file
+            # Insert new file or re-activate deleted file
             cursor.execute(f"""
                 INSERT INTO {table_name}
-                (path, size, mtime, sha1, inode, first_seen_at, last_seen_at, last_modified_at, status, discovered_under)
-                VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), 'active', ?)
-            """, (rel_path, size, mtime, sha1, inode, root_str))
+                (path, size, mtime, quick_hash, sha1, inode, first_seen_at, last_seen_at, last_modified_at, status, discovered_under)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), 'active', ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    size = excluded.size,
+                    mtime = excluded.mtime,
+                    quick_hash = excluded.quick_hash,
+                    sha1 = excluded.sha1,
+                    inode = excluded.inode,
+                    last_seen_at = datetime('now'),
+                    last_modified_at = datetime('now'),
+                    status = 'active',
+                    discovered_under = excluded.discovered_under
+            """, (rel_path, size, mtime, quick_hash, sha1, inode, root_str))
             stats.files_added += 1
             stats.bytes_hashed += size
 
         elif is_updated:
-            # Update existing file (metadata changed)
+            # Update existing file (metadata or hash changed)
             cursor.execute(f"""
                 UPDATE {table_name}
-                SET size = ?, mtime = ?, sha1 = ?, inode = ?,
+                SET size = ?, mtime = ?, quick_hash = ?, sha1 = ?, inode = ?,
                     last_seen_at = datetime('now'), last_modified_at = datetime('now'), status = 'active'
                 WHERE path = ?
-            """, (size, mtime, sha1, inode, rel_path))
+            """, (size, mtime, quick_hash, sha1, inode, rel_path))
             stats.files_updated += 1
             stats.bytes_hashed += size
 
@@ -186,7 +227,9 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
             stats.files_unchanged += 1
 
 def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
-              workers: int | None = None, batch_size: int | None = None):
+              workers: int | None = None, batch_size: int | None = None,
+              tqdm_position: int | None = None, quiet: bool = False,
+              hash_mode: str = 'fast'):
     """
     Incrementally scan a directory with per-device table tracking.
 
@@ -196,6 +239,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         parallel: Whether to use parallel workers
         workers: Number of parallel workers (default: CPU count)
         batch_size: Number of files to batch before writing (default: 500)
+        tqdm_position: Position for progress bar (for nested display)
+        quiet: Suppress verbose output (for nested progress bars)
+        hash_mode: 'fast' (quick_hash only), 'full' (both hashes), 'upgrade' (add sha1)
     """
     conn = connect_db(db_path)
     init_db_schema(conn)
@@ -210,9 +256,10 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     # 3. Get filesystem UUID (persistent identifier)
     fs_uuid = get_filesystem_uuid(str(root_canonical))
 
-    print(f"📍 Scanning: {root_canonical}")
-    print(f"   Device ID: {device_id}")
-    print(f"   Filesystem UUID: {fs_uuid}")
+    if not quiet:
+        print(f"📍 Scanning: {root_canonical}")
+        print(f"   Device ID: {device_id}")
+        print(f"   Filesystem UUID: {fs_uuid}")
 
     # 4. Register/update device in registry
     device_info = register_or_update_device(
@@ -245,11 +292,13 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     scan_session_id = cursor.lastrowid
     conn.commit()
 
-    print(f"✅ Scan session: {scan_id}")
+    if not quiet:
+        print(f"✅ Scan session: {scan_id}")
 
     # 8. Load existing files from DB (scoped to root_path)
     existing_files = load_existing_files(cursor, device_id, root_canonical)
-    print(f"📊 Existing files in catalog: {len(existing_files)}")
+    if not quiet:
+        print(f"📊 Existing files in catalog: {len(existing_files)}")
 
     # 9. Walk filesystem and collect file paths
     file_paths = []
@@ -257,7 +306,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         for filename in filenames:
             file_paths.append(os.path.join(dirpath, filename))
 
-    print(f"📁 Files on filesystem: {len(file_paths)}")
+    if not quiet:
+        print(f"📁 Files on filesystem: {len(file_paths)}")
 
     # 10. Incremental scan logic
     stats = ScanStats()
@@ -269,11 +319,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     if not parallel:
         # Sequential scanning
-        for file_path in tqdm(file_paths, desc="📦 Scanning"):
-            result = _hash_file_worker(file_path, mount_point, existing_files)
+        pbar_kwargs = {"desc": "📦 Scanning", "leave": True}
+        if tqdm_position is not None:
+            pbar_kwargs["position"] = tqdm_position
+        for file_path in tqdm(file_paths, **pbar_kwargs):
+            result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
             if result is None:
                 continue
-            rel_path, size, mtime, sha1, inode, dev_id, is_new, is_updated = result
+            rel_path, size, mtime, quick_hash, sha1, inode, dev_id, is_new, is_updated = result
             seen_paths.add(rel_path)
 
             # Write immediately in sequential mode
@@ -294,8 +347,6 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         pending = set()
         batch_rows = []
         file_iter = iter(file_paths)
-        drain_deadline = None
-        drain_iters = 0
 
         try:
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -305,21 +356,34 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                         file_path = next(file_iter)
                     except StopIteration:
                         break
-                    pending.add(executor.submit(_hash_file_worker, file_path, mount_point, existing_files))
+                    pending.add(executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode))
 
-                with tqdm(total=len(file_paths), desc="📦 Scanning") as pbar:
+                pbar_kwargs = {"total": len(file_paths), "desc": "📦 Scanning", "leave": True}
+                if tqdm_position is not None:
+                    pbar_kwargs["position"] = tqdm_position
+                with tqdm(**pbar_kwargs) as pbar:
                     while pending:
                         try:
                             done, pending = wait(pending, return_when=FIRST_COMPLETED)
                         except KeyboardInterrupt:
                             interrupted = True
-                            drain_deadline = time.monotonic() + 1.0
-                            drain_iters = 10
-                            print("⚠️ Scan interrupted. Draining completed results...")
-                            done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                            print("\n⚠️ Scan interrupted. Canceling pending tasks...")
+                            # Cancel all pending futures
+                            for fut in pending:
+                                fut.cancel()
+                            # Collect any completed results quickly
+                            done, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                            pending = set()  # Clear pending set
 
                         for fut in done:
-                            result = fut.result()
+                            from concurrent.futures import CancelledError
+                            try:
+                                result = fut.result()
+                            except CancelledError:
+                                # Ignore cancelled futures
+                                pbar.update(1)
+                                continue
+
                             if result is not None:
                                 rel_path = result[0]
                                 seen_paths.add(rel_path)
@@ -332,22 +396,16 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                     conn.commit()
                             pbar.update(1)
 
-                        # Refill
+                        # Exit immediately if interrupted
                         if interrupted:
-                            if drain_deadline is None:
-                                drain_deadline = time.monotonic() + 1.0
-                                drain_iters = 10
-                            drain_iters -= 1
-                            if time.monotonic() >= drain_deadline or drain_iters <= 0:
-                                break
-                            continue
+                            break
 
                         while len(pending) < max_inflight:
                             try:
                                 file_path = next(file_iter)
                             except StopIteration:
                                 break
-                            pending.add(executor.submit(_hash_file_worker, file_path, mount_point, existing_files))
+                            pending.add(executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode))
 
         except KeyboardInterrupt:
             interrupted = True
@@ -382,7 +440,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             deleted_paths.append(existing_path)
 
     if deleted_paths:
-        print(f"🗑️  Marking {len(deleted_paths)} deleted files...")
+        if not quiet:
+            print(f"🗑️  Marking {len(deleted_paths)} deleted files...")
         for path in deleted_paths:
             cursor.execute(f"""
                 UPDATE {table_name}
@@ -478,7 +537,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         # Don't fail scan if telemetry fails
         pass
 
-    print(f"""
+    if not quiet:
+        print(f"""
 📦 Scan complete!
    Duration: {duration:.1f}s
    Scanned: {stats.files_scanned:,} files

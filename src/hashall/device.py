@@ -32,7 +32,8 @@ def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
         - path: Relative path from mount point (PRIMARY KEY)
         - size: File size in bytes
         - mtime: Modification time (Unix timestamp)
-        - sha1: SHA-1 hash of file contents
+        - quick_hash: SHA-1 of first 1MB (fast scan, always computed)
+        - sha1: Full SHA-1 hash (NULL until full hash needed)
         - inode: Inode number
         - first_seen_at: Timestamp when file was first discovered
         - last_seen_at: Timestamp when file was last seen in a scan
@@ -52,7 +53,8 @@ def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
             path TEXT PRIMARY KEY,
             size INTEGER NOT NULL,
             mtime REAL NOT NULL,
-            sha1 TEXT NOT NULL,
+            quick_hash TEXT,
+            sha1 TEXT,
             inode INTEGER NOT NULL,
             first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -62,7 +64,21 @@ def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
         )
     """)
 
+    # Migrate existing tables: add quick_hash column if missing
+    try:
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN quick_hash TEXT")
+    except Exception:
+        # Column already exists, ignore
+        pass
+
+    # Migrate existing tables: make sha1 nullable (can't alter in SQLite, already nullable in new schema)
+
     # Create indexes for efficient querying
+    cursor.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_quick_hash
+        ON {table_name}(quick_hash)
+    """)
+
     cursor.execute(f"""
         CREATE INDEX IF NOT EXISTS idx_{table_name}_sha1
         ON {table_name}(sha1)
