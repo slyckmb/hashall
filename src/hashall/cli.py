@@ -24,10 +24,17 @@ def cli():
 @click.option("--parallel", is_flag=True, help="Use thread pool to hash faster.")
 @click.option("--workers", type=int, default=None, help="Worker count for parallel scan (default: cpu_count).")
 @click.option("--batch-size", type=int, default=None, help="Batch size for parallel DB writes.")
-def scan_cmd(path, db, parallel, workers, batch_size):
+@click.option("--hash-mode", type=click.Choice(['fast', 'full', 'upgrade'], case_sensitive=False),
+              default='fast', help="Hash mode: fast (1MB only), full (both hashes), upgrade (add full to existing).")
+@click.option("--fast", "hash_mode_flag", flag_value='fast', help="Shortcut for --hash-mode=fast")
+@click.option("--full", "hash_mode_flag", flag_value='full', help="Shortcut for --hash-mode=full")
+@click.option("--upgrade", "hash_mode_flag", flag_value='upgrade', help="Shortcut for --hash-mode=upgrade")
+def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag):
     """Scan a directory and store file metadata in SQLite."""
+    # Use flag if provided, otherwise use hash_mode
+    mode = hash_mode_flag if hash_mode_flag else hash_mode
     scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
-              workers=workers, batch_size=batch_size)
+              workers=workers, batch_size=batch_size, hash_mode=mode)
 
 @cli.command("export")
 @click.argument("db_path", type=click.Path(exists=True, dir_okay=False))
@@ -247,7 +254,8 @@ def payload_siblings(torrent_hash, db):
 
 @cli.command("stats")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
-def stats_cmd(db):
+@click.option("--hash-coverage", is_flag=True, help="Show hash coverage statistics.")
+def stats_cmd(db, hash_coverage):
     """Display catalog statistics."""
     import os
     from hashall.model import connect_db
@@ -393,7 +401,185 @@ def stats_cmd(db):
     else:
         print("    (No completed scans yet)")
 
+    # Hash coverage statistics
+    if hash_coverage and devices:
+        print()
+        print("  Hash Coverage:")
+
+        total_with_quick = 0
+        total_with_full = 0
+        total_collision_groups = 0
+
+        for device in devices:
+            device_id = device['device_id']
+            table_name = f"files_{device_id}"
+
+            # Check if table exists
+            table_exists = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name=?
+            """, (table_name,)).fetchone()
+
+            if table_exists:
+                # Get hash coverage for this device
+                result = conn.execute(f"""
+                    SELECT
+                        COUNT(*) as total,
+                        SUM(CASE WHEN quick_hash IS NOT NULL THEN 1 ELSE 0 END) as has_quick,
+                        SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_full
+                    FROM {table_name}
+                    WHERE status = 'active'
+                """).fetchone()
+
+                if result:
+                    total = result['total'] or 0
+                    has_quick = result['has_quick'] or 0
+                    has_full = result['has_full'] or 0
+
+                    total_with_quick += has_quick
+                    total_with_full += has_full
+
+                    # Count collision groups for this device
+                    collision_result = conn.execute(f"""
+                        SELECT COUNT(DISTINCT quick_hash) as collision_count
+                        FROM (
+                            SELECT quick_hash
+                            FROM {table_name}
+                            WHERE status = 'active' AND quick_hash IS NOT NULL
+                            GROUP BY quick_hash
+                            HAVING COUNT(*) > 1
+                        )
+                    """).fetchone()
+
+                    if collision_result:
+                        total_collision_groups += collision_result['collision_count'] or 0
+
+        if total_active_files > 0:
+            quick_pct = (total_with_quick / total_active_files) * 100
+            full_pct = (total_with_full / total_active_files) * 100
+            pending = total_active_files - total_with_full
+
+            print(f"    Quick hash: {total_with_quick:,} ({quick_pct:.1f}%)")
+            print(f"    Full hash:  {total_with_full:,} ({full_pct:.1f}%)")
+            print(f"    Pending:    {pending:,} ({100-full_pct:.1f}%)")
+
+            if total_collision_groups > 0:
+                print(f"    Collision groups: {total_collision_groups}")
+
     conn.close()
+
+
+@cli.command("dupes")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--device", required=True, help="Device alias or device_id to scan for duplicates.")
+@click.option("--auto-upgrade/--no-auto-upgrade", default=True,
+              help="Automatically upgrade collision groups to full SHA1 (default: enabled).")
+@click.option("--show-paths", is_flag=True, help="Show full paths for duplicate files.")
+def dupes_cmd(db, device, auto_upgrade, show_paths):
+    """
+    Find duplicate files within a device.
+
+    Detects files with matching quick_hash (1MB samples), and optionally
+    auto-upgrades collision groups to full SHA1 to identify true duplicates.
+
+    Example:
+        hashall dupes --device pool --auto-upgrade
+        hashall dupes --device 49 --no-auto-upgrade --show-paths
+    """
+    from hashall.model import connect_db
+    from hashall.scan import find_duplicates
+
+    db_path = Path(db)
+
+    # Check if database exists
+    if not db_path.exists():
+        print(f"Database not found: {db_path}")
+        print("Run 'hashall scan <path>' to create a catalog.")
+        return
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+
+    # Find device by alias or device_id
+    device_row = None
+
+    # Try lookup by alias
+    cursor.execute("""
+        SELECT device_id, device_alias, mount_point
+        FROM devices WHERE device_alias = ?
+    """, (device,))
+    device_row = cursor.fetchone()
+
+    # If not found, try by device_id
+    if not device_row and device.isdigit():
+        cursor.execute("""
+            SELECT device_id, device_alias, mount_point
+            FROM devices WHERE device_id = ?
+        """, (int(device),))
+        device_row = cursor.fetchone()
+
+    if not device_row:
+        print(f"❌ Device not found: {device}")
+        print("Run 'hashall devices list' to see available devices.")
+        conn.close()
+        return
+
+    device_id = device_row['device_id']
+    device_alias = device_row['device_alias'] or f"device_{device_id}"
+
+    conn.close()
+
+    # Find duplicates
+    print(f"🔍 Finding duplicates on {device_alias}...")
+    duplicates = find_duplicates(device_id, db_path, auto_upgrade=auto_upgrade)
+
+    if not duplicates:
+        print("✅ No duplicates found!")
+        return
+
+    # Display results
+    print()
+    print(f"📊 Found {len(duplicates)} duplicate group(s):")
+    print()
+
+    total_files = 0
+    total_wasted_space = 0
+
+    for i, (sha1, files) in enumerate(duplicates.items(), 1):
+        file_count = len(files)
+        file_size = files[0]['size']  # All files have same size
+        wasted = file_size * (file_count - 1)  # Space that could be saved
+
+        total_files += file_count
+        total_wasted_space += wasted
+
+        print(f"  Group {i}: {file_count} files, {file_size:,} bytes each")
+        print(f"    SHA1: {sha1[:16]}...")
+        print(f"    Wasted space: {wasted:,} bytes")
+
+        if show_paths:
+            for f in files:
+                print(f"      • {f['path']}")
+        print()
+
+    # Summary
+    def format_size(bytes_val):
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        unit_idx = 0
+        size = float(bytes_val)
+        while size >= 1024 and unit_idx < len(units) - 1:
+            size /= 1024
+            unit_idx += 1
+        if unit_idx == 0:
+            return f"{int(size)} {units[unit_idx]}"
+        else:
+            return f"{size:.1f} {units[unit_idx]}"
+
+    print(f"📈 Summary:")
+    print(f"   Total duplicate files: {total_files:,}")
+    print(f"   Total wasted space: {format_size(total_wasted_space)} ({total_wasted_space:,} bytes)")
+    print()
+    print(f"💡 Tip: Run deduplication to hardlink duplicates and reclaim space")
 
 
 # Devices command group
