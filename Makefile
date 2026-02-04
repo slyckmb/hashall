@@ -190,6 +190,14 @@ sandbox:  ## Regenerate local test sandbox
 	@echo "🔁 Resetting test sandbox..."
 	@bash tests/generate_sandbox.sh
 
+.PHONY: targets-table
+targets-table:  ## Generate summarized Markdown table of Makefile targets and CLI equivalents
+	@python3 scripts/generate_target_table.py
+
+.PHONY: targets-full
+targets-full:  ## Generate table with full untruncated CLI commands (hides description)
+	@python3 scripts/generate_target_table.py --full
+
 .PHONY: clean
 clean:  ## Remove generated files and caches
 	@echo "🧹 Cleaning up..."
