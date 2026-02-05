@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Hierarchical auto-scan - Fast hash scanning with per-device databases.
+Hierarchical auto-scan - Fast hash scanning with unified catalog.
 
 Walks directory tree and scans each subdirectory independently with workers=8
 and fast hash mode (SHA1 of first 1MB only). Provides rapid initial scanning,
-better progress visibility, and zero database contention via per-device databases.
+better progress visibility, and uses unified catalog for cross-device features.
 
 Fast hash mode: ~100,000x faster for large files (reads 1MB instead of 100GB)
 
 Example:
   /pool/
-  ├── movies/    → Fast hash with workers=8 → ~/.hashall/catalog-pool.db
-  ├── music/     → Fast hash with workers=8 → ~/.hashall/catalog-pool.db
-  └── docs/      → Fast hash with workers=8 → ~/.hashall/catalog-pool.db
+  ├── movies/    → Fast hash with workers=8 → ~/.hashall/catalog.db (unified)
+  ├── music/     → Fast hash with workers=8 → ~/.hashall/catalog.db (unified)
+  └── docs/      → Fast hash with workers=8 → ~/.hashall/catalog.db (unified)
 """
 
 import os
@@ -90,8 +90,10 @@ def get_subdirectories(path: Path, max_depth: int = None, current_depth: int = 0
 
 def get_device_db_path(scan_path: Path) -> Path:
     """
-    Get per-device database path for a scan path.
-    Uses ~/.hashall/catalog-{device}.db to avoid I/O overhead on data drives.
+    [LEGACY] Get per-device database path for a scan path.
+
+    Note: Per-device databases are legacy. Use unified catalog (~/.hashall/catalog.db)
+    for cross-device features like rehoming, payload tracking, and link deduplication.
 
     Example: /pool/data → ~/.hashall/catalog-pool.db
              /stash/media → ~/.hashall/catalog-stash.db
@@ -219,9 +221,9 @@ How it works:
   1. Walks directory tree to find all subdirectories
   2. Counts files in each directory
   3. Scans each directory independently with fast hash (quick_hash only)
-  4. Uses workers=8 optimized for fast hash (1MB reads)
+  4. Uses workers=12 optimized for fast hash (1MB reads)
   5. Shows nested progress bars (overall folders + current folder files)
-  6. Per-device databases prevent contention
+  6. Uses unified catalog (WAL mode) for cross-device features
 
 Fast hash mode:
   - Computes SHA1 of first 1MB only (not entire file)
@@ -232,7 +234,8 @@ Benefits:
   - Better progress visibility (folder-by-folder)
   - Scoped deletion detection (per-folder)
   - Resume-ability (completed folders stay done)
-  - Zero database contention (per-device databases)
+  - Unified catalog enables rehoming, payload tracking, link deduplication
+  - WAL mode provides sufficient concurrency for concurrent scans
   - Rapid initial scanning (~10-20 mins for 60k files)
 
 Examples:
@@ -277,7 +280,7 @@ Examples:
     parser.add_argument(
         "--per-device",
         action="store_true",
-        help="Use device-local database (e.g., /pool/.hashall/catalog.db) for zero contention"
+        help="[LEGACY] Use per-device database (e.g., ~/.hashall/catalog-pool.db). Not recommended - use unified catalog for cross-device features."
     )
 
     args = parser.parse_args()
