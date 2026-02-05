@@ -42,7 +42,8 @@ help:  ## Show this help message
 	@echo ""
 	@echo "Examples:"
 	@echo "  make scan-auto PATH=/pool/media         # Auto-detect optimal settings"
-	@echo "  make scan-hierarchical PATH=/pool       # Adaptive per-folder scan"
+	@echo "  make scan-hierarchical PATH=/pool       # Adaptive per-folder scan (unified)"
+	@echo "  make scan-hier-per-device PATH=/pool    # Adaptive per-folder scan (per-device DBs)"
 	@echo "  make scan-plan PATH=/pool               # Analyze & propose strategy"
 	@echo "  make scan-video PATH=/pool/movies       # Optimize for large video files"
 	@echo "  make devices                             # List all registered devices"
@@ -92,7 +93,12 @@ scan-presets:  ## Show all available scan presets and their settings
 # ============================================================================
 
 .PHONY: scan-hierarchical
-scan-hierarchical:  ## Adaptive scan - analyzes each subfolder independently
+scan-hierarchical:  ## Adaptive scan - analyzes each subfolder independently (unified)
+	@echo "🌳 Hierarchical scan with unified database: $(PATH)"
+	$(AUTO_SCAN) "$(PATH)" --db "$(DB_FILE)"
+
+.PHONY: scan-hier-per-device
+scan-hier-per-device:  ## Adaptive scan - per-device databases (legacy)
 	@echo "🌳 Hierarchical scan with device-local database: $(PATH)"
 	$(AUTO_SCAN) "$(PATH)" --per-device
 
