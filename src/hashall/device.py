@@ -33,7 +33,7 @@ def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
         - size: File size in bytes
         - mtime: Modification time (Unix timestamp)
         - quick_hash: SHA-1 of first 1MB (fast scan, always computed)
-        - sha1: Full SHA-1 hash (NULL until full hash needed)
+        - sha1: Legacy SHA-1 hash (optional)
         - sha256: Full SHA-256 hash (NULL until backfilled)
         - inode: Inode number
         - first_seen_at: Timestamp when file was first discovered

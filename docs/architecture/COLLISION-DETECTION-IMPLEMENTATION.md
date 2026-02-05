@@ -11,9 +11,9 @@
 Implemented Priority 1 from the handoff document: Collision Detection & Auto-Upgrade Logic. This enables the hashall system to:
 
 1. Detect when multiple files share the same `quick_hash` (SHA1 of first 1MB)
-2. Automatically upgrade those files to full SHA1
-3. Distinguish true duplicates (same full SHA1) from false collisions (different full SHA1)
-4. Only deduplicate files with matching full SHA1
+2. Automatically upgrade those files to full SHA256
+3. Distinguish true duplicates (same full SHA256) from false collisions (different full SHA256)
+4. Only deduplicate files with matching full SHA256
 
 ---
 
@@ -28,15 +28,15 @@ Implemented Priority 1 from the handoff document: Collision Detection & Auto-Upg
 - Performance: Fast index-based lookup
 
 **`upgrade_collision_group(quick_hash, device_id, db_path, mount_point)`**
-- Computes full SHA1 for all files in a collision group
+- Computes full SHA256 for all files in a collision group
 - Updates database with computed full hashes
-- Skips files that already have full SHA1 (idempotent)
-- Returns updated file records with full SHA1
+- Skips files that already have full SHA256 (idempotent)
+- Returns updated file records with full SHA256
 
 **`find_duplicates(device_id, db_path, auto_upgrade=True)`**
 - Finds all collision groups
-- Auto-upgrades to full SHA1 if enabled
-- Groups files by full SHA1
+- Auto-upgrades to full SHA256 if enabled
+- Groups files by full SHA256
 - Returns only groups with 2+ files (true duplicates)
 - Reports statistics on true duplicates vs false collisions
 
@@ -60,7 +60,7 @@ hashall stats --hash-coverage
 
 # Output shows:
 #   Quick hash: 61,935 (100.0%)
-#   Full hash:      542 (  0.9%)
+#   Full hash:      542 (  0.9%)  # SHA256
 #   Pending:     61,393 ( 99.1%)
 #   Collision groups: 12
 ```
@@ -73,7 +73,7 @@ hashall dupes --device pool --show-paths       # Show file paths
 
 # Output shows:
 #   Group 1: 2 files, 2,097,152 bytes each
-#     SHA1: 7dd71cee78e83659...
+#     SHA256: 7dd71cee78e83659...
 #     Wasted space: 2,097,152 bytes
 #       • duplicate_copy.dat
 #       • duplicate_original.dat
@@ -109,7 +109,7 @@ hashall dupes --device pool --show-paths       # Show file paths
 
 1. **Fast Scan Phase:**
    - Compute quick_hash (SHA1 of first 1MB) for all files
-   - Store in database with sha1=NULL
+   - Store in database with sha256=NULL (sha1 optional legacy)
    - Fast: ~3000 files/sec (cached), ~84 files/sec (cold cache)
 
 2. **Collision Detection Phase:**
@@ -118,13 +118,13 @@ hashall dupes --device pool --show-paths       # Show file paths
    - Expected collision rate: <0.1% with 1MB samples
 
 3. **Auto-Upgrade Phase:**
-   - For each collision group, compute full SHA1
-   - Update database: `UPDATE files_X SET sha1 = ? WHERE path = ?`
-   - Only upgrades files with sha1=NULL (idempotent)
+   - For each collision group, compute full SHA256
+   - Update database: `UPDATE files_X SET sha256 = ? WHERE path = ?`
+   - Only upgrades files with sha256=NULL (idempotent)
 
 4. **Duplicate Grouping Phase:**
-   - Group files by full SHA1
-   - Separate true duplicates (same sha1) from false collisions (different sha1)
+   - Group files by full SHA256
+   - Separate true duplicates (same sha256) from false collisions (different sha256)
    - Return groups with 2+ files
 
 ### Performance Characteristics
@@ -134,7 +134,7 @@ hashall dupes --device pool --show-paths       # Show file paths
 | Initial scan (60k files) | Fast hash only | ~10-20 mins |
 | Find collisions | SQL query | <1 second |
 | Upgrade collisions (<100 files) | Full hash | ~few seconds |
-| Group by sha1 | In-memory | <1 second |
+| Group by sha256 | In-memory | <1 second |
 
 **Key Insight:** 99.9% of files stay with quick_hash only. Only 0.1% are upgraded to full hash when collisions detected.
 
@@ -146,13 +146,15 @@ CREATE TABLE files_XX (
     size INTEGER NOT NULL,
     mtime REAL NOT NULL,
     quick_hash TEXT,        -- Always computed (SHA1 of first 1MB)
-    sha1 TEXT,              -- NULL until needed (full SHA1)
+    sha1 TEXT,              -- Legacy (optional)
+    sha256 TEXT,            -- NULL until needed (full SHA256)
     inode INTEGER NOT NULL,
     -- ... other fields
 );
 
 CREATE INDEX idx_files_XX_quick_hash ON files_XX(quick_hash);
 CREATE INDEX idx_files_XX_sha1 ON files_XX(sha1);
+CREATE INDEX idx_files_XX_sha256 ON files_XX(sha256);
 ```
 
 ### Error Handling
@@ -175,7 +177,7 @@ collision_false_2.dat: [SHARED_1MB][DIFFERENT_CONTENT_B * 10MB]
 
 **Result:**
 - Same quick_hash: `706184eca5...`
-- Different sha1: `833a9ee5ed...` vs `4749c5db31...`
+- Different sha256: `833a9ee5ed...` vs `4749c5db31...`
 - **Verdict:** False collision ✅
 
 ### Test Case 2: True Duplicate
@@ -187,7 +189,7 @@ duplicate_copy.dat:     [RANDOM_5MB] (exact copy)
 
 **Result:**
 - Same quick_hash: `c50444efd4...`
-- Same sha1: `5598097fdf...`
+- Same sha256: `5598097fdf...`
 - **Verdict:** True duplicate ✅
 
 ### Test Case 3: Unique File
@@ -198,7 +200,7 @@ unique.dat: [RANDOM_2MB]
 
 **Result:**
 - Has quick_hash: `882c23f72a...`
-- sha1 remains NULL (not upgraded)
+- sha256 remains NULL (not upgraded)
 - **Verdict:** Correctly skipped upgrade ✅
 
 ---
@@ -248,7 +250,7 @@ hashall stats --hash-coverage
 # Quick check (may have false positives)
 hashall dupes --device pool --no-auto-upgrade
 
-# Shows collision groups but doesn't compute full SHA1
+# Shows collision groups but doesn't compute full SHA256
 # Useful for quick estimates of duplicate candidates
 ```
 
@@ -259,7 +261,7 @@ hashall dupes --device pool --no-auto-upgrade
 ### Priority 2: Deduplication Integration ⏳
 - Implement `hashall dedup` command
 - Create hardlinks for true duplicates
-- Verify full SHA1 matches before linking
+- Verify full SHA256 matches before linking
 - Track space savings
 
 ### Priority 3: Hash Upgrade Command ⏳
@@ -294,7 +296,7 @@ hashall dupes --device pool --no-auto-upgrade
 **Expected Results:**
 - ✅ 99.9% of files stay with quick_hash only
 - ✅ < 0.1% upgraded to full hash via collision detection
-- ✅ Zero false positives in deduplication (enforced by full SHA1 match)
+- ✅ Zero false positives in deduplication (enforced by full SHA256 match)
 - ✅ Scan time: ~10-20 mins for 60k files (vs 7 hours with full hash)
 
 ---
@@ -315,17 +317,16 @@ hashall dupes --device pool --no-auto-upgrade
 
 ## Technical Notes
 
-### SHA-1 vs SHA-256
-Currently using SHA-1 for compatibility with existing codebase. For new implementations, consider SHA-256:
-- Lower collision probability (2^256 vs 2^160)
-- Future-proof (SHA-1 deprecated for security)
-- Negligible performance difference for file hashing
+### SHA1 vs SHA256
+- `quick_hash` remains SHA1 for fast 1MB sampling.
+- Full-file hashing uses SHA256 for dedup safety and payload identity.
+- SHA1 is retained only for legacy compatibility where present.
 
 ### Index Performance
-Both `quick_hash` and `sha1` columns are indexed for fast lookups:
+Both `quick_hash` and `sha256` columns are indexed for fast lookups:
 ```sql
 CREATE INDEX idx_files_XX_quick_hash ON files_XX(quick_hash);
-CREATE INDEX idx_files_XX_sha1 ON files_XX(sha1);
+CREATE INDEX idx_files_XX_sha256 ON files_XX(sha256);
 ```
 
 This makes collision detection queries O(log n) instead of O(n).

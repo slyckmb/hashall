@@ -60,6 +60,7 @@ def test_scan_export_verify_roundtrip():
             assert "size" in file_entry
             assert "mtime" in file_entry
             assert "sha1" in file_entry
+            assert "sha256" in file_entry
             assert "inode" in file_entry, "Export should include inode"
             assert "device_id" in file_entry, "Export should include device_id"
 

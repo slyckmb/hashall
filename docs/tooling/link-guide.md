@@ -161,7 +161,7 @@ HARDLINK: /pool/backup/movies/film.mkv
 
 **What it does:**
 - **fast** (default): size/mtime checks + sampled hash of first/middle/last 1MB
-- **paranoid**: full SHA1 hash of the entire file
+- **paranoid**: full SHA256 hash of the entire file
 - **none**: skips verification for maximum speed (use with care)
 
 ### 3. Existing Hardlink Preservation
@@ -321,11 +321,11 @@ Out of scope for now. Track in `docs/project/DEVELOPMENT-ROADMAP.md`.
 
 ### How Deduplication Works
 
-**Step 1: Group by SHA1**
+**Step 1: Group by SHA256**
 ```sql
-SELECT sha1, COUNT(DISTINCT inode) as inode_count
+SELECT sha256, COUNT(DISTINCT inode) as inode_count
 FROM files_49
-GROUP BY sha1
+GROUP BY sha256
 HAVING inode_count > 1;
 ```
 

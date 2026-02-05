@@ -16,7 +16,7 @@ class DuplicateGroup:
     """Group of files with same content but different inodes.
 
     Attributes:
-        hash: SHA1 hash of file content
+        hash: SHA256 hash of file content
         file_size: Size of each file in bytes
         file_count: Total number of files with this hash
         unique_inodes: Number of distinct inodes (files not yet deduplicated)
@@ -69,7 +69,7 @@ def analyze_device(
     """
     Analyze a device for deduplication opportunities.
 
-    Finds groups of files that have the same SHA1 hash but different inodes,
+    Finds groups of files that have the same SHA256 hash but different inodes,
     indicating they are duplicates that could be hardlinked together.
 
     Args:
@@ -111,10 +111,9 @@ def analyze_device(
     total_files = cursor.fetchone()[0]
 
     # Find duplicate groups (same hash, different inodes)
-    # Note: We use sha1 here, but in future this could be sha256
     query = f"""
     SELECT
-        sha1,
+        sha256,
         size,
         COUNT(*) as file_count,
         COUNT(DISTINCT inode) as unique_inodes,
@@ -122,9 +121,9 @@ def analyze_device(
         (COUNT(DISTINCT inode) - 1) * size as potential_savings
     FROM {table_name}
     WHERE status = 'active'
-      AND sha1 IS NOT NULL
+      AND sha256 IS NOT NULL
       AND size >= ?
-    GROUP BY sha1, size
+    GROUP BY sha256, size
     HAVING COUNT(DISTINCT inode) > 1
     ORDER BY potential_savings DESC
     """
@@ -146,7 +145,7 @@ def analyze_device(
 
         # Get distinct inodes for this hash
         cursor.execute(
-            f"SELECT DISTINCT inode FROM {table_name} WHERE sha1 = ? AND status = 'active'",
+            f"SELECT DISTINCT inode FROM {table_name} WHERE sha256 = ? AND status = 'active'",
             (hash_val,)
         )
         inodes = [row[0] for row in cursor.fetchall()]

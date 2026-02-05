@@ -25,7 +25,7 @@ class LinkAction:
         duplicate_inode: Inode of duplicate file
         device_id: Device ID
         file_size: Size of file in bytes
-        sha1: SHA1 hash (for verification)
+        sha256: SHA256 hash (for verification)
         bytes_to_save: Bytes saved by this action
     """
     action_type: str
@@ -35,7 +35,7 @@ class LinkAction:
     duplicate_inode: int
     device_id: int
     file_size: int
-    sha1: str
+    sha256: str
     bytes_to_save: int
 
 
@@ -192,7 +192,7 @@ def create_plan(
                 duplicate_inode=duplicate_inode,
                 device_id=device_id,
                 file_size=group.file_size,
-                sha1=group.hash,
+                sha256=group.hash,
                 bytes_to_save=group.file_size  # Each duplicate saves file_size bytes
             )
             all_actions.append(action)
@@ -266,7 +266,7 @@ def save_plan(conn: sqlite3.Connection, plan: LinkPlan) -> int:
                     action.duplicate_inode,
                     action.device_id,
                     action.file_size,
-                    action.sha1,  # sha256 column can be NULL for now
+                    action.sha256,
                     action.bytes_to_save,
                     'pending'  # status
                 )

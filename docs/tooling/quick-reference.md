@@ -214,7 +214,7 @@ hashall link plan "Retry" --device /pool
 
 ### Hardlinks
 - **Same inode** = already hardlinked
-- **Different inode, same SHA1** = dedup opportunity
+- **Different inode, same SHA256** = dedup opportunity
 - **Cross-device** = cannot hardlink (different filesystems)
 
 ### Link Plans

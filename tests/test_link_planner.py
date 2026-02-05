@@ -48,6 +48,7 @@ def test_db():
             mtime REAL NOT NULL,
             quick_hash TEXT,
             sha1 TEXT,
+            sha256 TEXT,
             inode INTEGER NOT NULL,
             status TEXT DEFAULT 'active',
             first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -70,11 +71,11 @@ def test_db():
         ('/test/unique.txt', 2000, 'hash3', 301),
     ]
 
-    for path, size, sha1, inode in test_data:
+    for path, size, sha256, inode in test_data:
         cursor.execute("""
-            INSERT INTO files_99 (path, size, sha1, inode, mtime, status)
+            INSERT INTO files_99 (path, size, sha256, inode, mtime, status)
             VALUES (?, ?, ?, ?, 1234567890.0, 'active')
-        """, (path, size, sha1, inode))
+        """, (path, size, sha256, inode))
 
     # Create link_plans table
     cursor.execute("""
@@ -137,7 +138,7 @@ def test_link_action_creation():
         duplicate_inode=200,
         device_id=99,
         file_size=1000,
-        sha1='testhash',
+        sha256='testhash',
         bytes_to_save=1000
     )
 
@@ -260,13 +261,14 @@ def test_create_plan_no_duplicates(test_db):
             size INTEGER NOT NULL,
             mtime REAL NOT NULL,
             sha1 TEXT,
+            sha256 TEXT,
             inode INTEGER NOT NULL,
             status TEXT DEFAULT 'active'
         )
     """)
 
     cursor.execute("""
-        INSERT INTO files_100 (path, size, sha1, inode, mtime)
+        INSERT INTO files_100 (path, size, sha256, inode, mtime)
         VALUES ('/unique.txt', 1000, 'unique_hash', 1, 1234567890.0)
     """)
 
@@ -333,13 +335,14 @@ def test_save_plan_empty(test_db):
             size INTEGER NOT NULL,
             mtime REAL NOT NULL,
             sha1 TEXT,
+            sha256 TEXT,
             inode INTEGER NOT NULL,
             status TEXT DEFAULT 'active'
         )
     """)
 
     cursor.execute("""
-        INSERT INTO files_100 (path, size, sha1, inode, mtime)
+        INSERT INTO files_100 (path, size, sha256, inode, mtime)
         VALUES ('/unique.txt', 1000, 'unique_hash', 1, 1234567890.0)
     """)
 
@@ -387,13 +390,14 @@ def test_format_plan_summary_no_duplicates(test_db):
             size INTEGER NOT NULL,
             mtime REAL NOT NULL,
             sha1 TEXT,
+            sha256 TEXT,
             inode INTEGER NOT NULL,
             status TEXT DEFAULT 'active'
         )
     """)
 
     cursor.execute("""
-        INSERT INTO files_100 (path, size, sha1, inode, mtime)
+        INSERT INTO files_100 (path, size, sha256, inode, mtime)
         VALUES ('/unique.txt', 1000, 'unique_hash', 1, 1234567890.0)
     """)
 

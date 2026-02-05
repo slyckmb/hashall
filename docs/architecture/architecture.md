@@ -59,7 +59,7 @@ User: hashall scan /pool
        ↓
 ┌──────────────────────────────────────┐
 │ For each file:                        │
-│ - Compute SHA1 (+ SHA256) hash        │
+│ - Compute SHA256 hash                 │
 │ - Get inode, device_id, size, mtime   │
 │ - Check if exists in catalog          │
 └──────────────────────────────────────┘
@@ -89,7 +89,7 @@ User: hashall link analyze
        ↓
 ┌──────────────────────────────────────┐
 │ Query catalog:                        │
-│ - Group files by SHA1 (SHA256 optional) │
+│ - Group files by SHA256              │
 │ - Count unique (device_id, inode)     │
 │ - Identify duplicates vs hardlinks    │
 └──────────────────────────────────────┘
@@ -218,7 +218,7 @@ scan_roots (
 -- Per-device file tables (created dynamically)
 files_<device_id> (
     path PRIMARY KEY,               -- Relative to mount_point
-    size, mtime, sha1, inode,       -- File metadata
+    size, mtime, sha256, sha1, inode, -- File metadata (sha1 legacy)
     first_seen_at, last_seen_at,    -- Tracking timestamps
     status,                         -- 'active', 'deleted', 'moved'
     discovered_under                -- Root where file was found
@@ -247,7 +247,7 @@ link_actions (id, plan_id, action_type, source_path, ...)
 
 ```python
 # Query existing files from catalog
-existing_files = query(f"SELECT path, inode, size, mtime, sha1 FROM files_{device_id}")
+existing_files = query(f"SELECT path, inode, size, mtime, sha256, sha1 FROM files_{device_id}")
 
 # Build lookup maps
 existing_by_path = {f.path: f for f in existing_files}
@@ -283,7 +283,7 @@ if path in existing_by_path:
 
     if old.size != stat.st_size or old.mtime != stat.st_mtime:
         # File was modified
-        UPDATE files SET size=?, mtime=?, sha1=?, last_seen=?
+        UPDATE files SET size=?, mtime=?, sha256=?, sha1=?, last_seen=?
         stats['modified'] += 1
     else:
         # File unchanged
@@ -291,7 +291,7 @@ if path in existing_by_path:
         stats['unchanged'] += 1
 else:
     # New file
-    INSERT INTO files (path, inode, size, mtime, sha1, first_seen, last_seen)
+    INSERT INTO files (path, inode, size, mtime, sha256, sha1, first_seen, last_seen)
     stats['added'] += 1
 ```
 
@@ -450,7 +450,7 @@ hashall scan /pool/torrents
 
 ```
 scan_sessions (scan_id, root_path, started_at, treehash)
-files (path, scan_session_id, size, mtime, sha1, sha256, inode, device_id)
+files (path, scan_session_id, size, mtime, sha256, sha1, inode, device_id)
 ```
 
 **Problems:**
@@ -463,7 +463,7 @@ files (path, scan_session_id, size, mtime, sha1, sha256, inode, device_id)
 
 ```
 devices (device_id, mount_point, ...)
-files_<device_id> (path, size, mtime, sha1, sha256, inode, ...)
+files_<device_id> (path, size, mtime, sha256, sha1, inode, ...)
 ```
 
 **Benefits:**
@@ -502,7 +502,7 @@ files_<device_id> (path, size, mtime, sha1, sha256, inode, ...)
 | Music library | 3,804 | 8s (475/s) | 2s (1902/s) | 51x faster |
 | Ebook library | 57,156 | 115s (497/s) | 28s (2041/s) | 23x faster |
 
-**Bottleneck:** Initial scan is CPU-bound (SHA1). Rescans are I/O-bound (stat calls).
+**Bottleneck:** Initial scan is CPU-bound (SHA256). Rescans are I/O-bound (stat calls).
 
 ### Catalog Size
 
@@ -518,7 +518,7 @@ files_<device_id> (path, size, mtime, sha1, sha256, inode, ...)
 ### Query Performance
 
 Direct DB queries (no JSON parsing):
-- Find duplicates: <100ms (indexed on sha1)
+- Find duplicates: <100ms (indexed on sha256)
 - Find hardlinks: <50ms (indexed on inode)
 - Generate plan: <500ms (50k files)
 - Load existing files: <200ms (50k files, indexed by path)

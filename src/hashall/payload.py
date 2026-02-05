@@ -23,7 +23,7 @@ class PayloadFile:
     """Represents a file within a payload."""
     relative_path: str
     size: int
-    sha1: Optional[str]  # None if not yet scanned
+    sha256: Optional[str]  # None if not yet scanned
 
 
 @dataclass
@@ -60,29 +60,29 @@ def compute_payload_hash(files: List[PayloadFile]) -> Optional[str]:
         files: List of PayloadFile objects
 
     Returns:
-        SHA256 hex digest, or None if any file is missing SHA1
+        SHA256 hex digest, or None if any file is missing SHA256
 
     Algorithm:
-        1. Check all files have SHA1
-        2. Sort by (relative_path, size, sha1)
+        1. Check all files have SHA256
+        2. Sort by (relative_path, size, sha256)
         3. Hash the sorted tuple list
     """
     # Check completeness
     for f in files:
-        if f.sha1 is None:
+        if f.sha256 is None:
             return None  # Incomplete payload
 
     # Sort files for deterministic output
     sorted_files = sorted(
         files,
-        key=lambda f: (f.relative_path, f.size, f.sha1)
+        key=lambda f: (f.relative_path, f.size, f.sha256)
     )
 
     # Compute hash of sorted file metadata
     hasher = hashlib.sha256()
     for f in sorted_files:
-        # Encode as: path|size|sha1\n
-        entry = f"{f.relative_path}|{f.size}|{f.sha1}\n"
+        # Encode as: path|size|sha256\n
+        entry = f"{f.relative_path}|{f.size}|{f.sha256}\n"
         hasher.update(entry.encode('utf-8'))
 
     return hasher.hexdigest()
@@ -120,7 +120,7 @@ def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str)
     # Query files from device-specific table
     # Only get active files (exclude deleted files)
     query = f"""
-        SELECT path, size, sha1
+        SELECT path, size, sha256
         FROM {table_name}
         WHERE status = 'active' AND (path = ? OR path LIKE ?)
         ORDER BY path
@@ -143,7 +143,7 @@ def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str)
         files.append(PayloadFile(
             relative_path=relative_path,
             size=row[1],
-            sha1=row[2]
+            sha256=row[2]
         ))
 
     return files

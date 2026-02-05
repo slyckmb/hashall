@@ -16,17 +16,28 @@ def verify_paths(
     console.rule("[🔍] Diffing Files")
 
     cursor = conn.cursor()
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(files)").fetchall()}
+    if "sha256" in columns:
+        select_cols = "path, size, mtime, sha256, sha1"
+    else:
+        select_cols = "path, size, mtime, sha1"
+
     src_rows = cursor.execute(
-        "SELECT path, size, mtime, sha1 FROM files WHERE scan_session_id = ?",
+        f"SELECT {select_cols} FROM files WHERE scan_session_id = ?",
         (src_session_id,)
     ).fetchall()
     dst_rows = cursor.execute(
-        "SELECT path, size, mtime, sha1 FROM files WHERE scan_session_id = ?",
+        f"SELECT {select_cols} FROM files WHERE scan_session_id = ?",
         (dst_session_id,)
     ).fetchall()
 
-    src_map = {r["path"]: r for r in src_rows}
-    dst_map = {r["path"]: r for r in dst_rows}
+    def extract_hash(row):
+        if "sha256" in columns:
+            return row["sha256"] or row["sha1"]
+        return row["sha1"]
+
+    src_map = {r["path"]: {**r, "file_hash": extract_hash(r)} for r in src_rows}
+    dst_map = {r["path"]: {**r, "file_hash": extract_hash(r)} for r in dst_rows}
 
     all_paths = sorted(set(src_map) | set(dst_map))
     mismatches = []
@@ -40,7 +51,7 @@ def verify_paths(
         elif dst and not src:
             mismatches.append((path, "unexpected"))
         elif src and dst:
-            if src["sha1"] != dst["sha1"] or src["size"] != dst["size"] or int(src["mtime"]) != int(dst["mtime"]):
+            if src["file_hash"] != dst["file_hash"] or src["size"] != dst["size"] or int(src["mtime"]) != int(dst["mtime"]):
                 mismatches.append((path, "changed"))
 
     for path, status in mismatches:

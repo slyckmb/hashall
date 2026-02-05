@@ -47,7 +47,7 @@ def verify_trees(
     rsync_source: Path = None,
     auto_export: bool = True,
 ):
-    """Verify that destination matches source using SHA1 & smart scan fallback."""
+    """Verify that destination matches source using SHA256 & smart scan fallback."""
     console.rule("🌲 Hashall Tree Verification")
     console.print(f"📂 Source: {src_root}")
     console.print(f"📁 Destination: {dst_root}")

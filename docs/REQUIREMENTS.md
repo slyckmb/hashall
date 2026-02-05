@@ -285,7 +285,7 @@ A torrent's data is **eligible to move to `/pool`** if:
 - Single-file torrent → that file
 - Multi-file torrent → directory tree
 
-**Payload Hash:** SHA256 of sorted `(path, size, sha1)` tuples
+**Payload Hash:** SHA256 of sorted `(path, size, sha256)` tuples
 - Uniquely identifies content independent of torrent metadata
 - Multiple torrents can share the same payload_hash (siblings)
 
@@ -442,7 +442,7 @@ Does identical payload exist on stash?
 - Never across devices (hardlinks cannot span filesystems)
 
 **Detection:**
-- hashall scans files, computes SHA1 (and SHA256 during migration)
+- hashall scans files, computes SHA256
 - Groups files by hash within same device_id
 - Identifies files with same hash but different inodes (duplicates)
 
@@ -466,7 +466,7 @@ Does identical payload exist on stash?
 **Goal:** Informational awareness, eventual elimination
 
 **Detection:**
-- hashall queries for files with same hash across different device_ids (SHA1 today)
+- hashall queries for files with same SHA256 across different device_ids
 - Reports duplicates but does NOT automatically deduplicate (cannot hardlink across devices)
 
 **Long-Term Goal:**
@@ -543,7 +543,7 @@ catalog.db
 
 ### 7.2 Hash Algorithm Standard
 
-**Decision: SHA256 for file hashing (dual-write during migration)**
+**Decision: SHA256 for file hashing (cutover complete)**
 
 **Rationale:**
 - SHA1 is cryptographically deprecated (collision attacks exist)
@@ -553,15 +553,14 @@ catalog.db
 - Better collision detection for large file sets
 
 **Implementation:**
-- **File hashes:** SHA1 + SHA256 during migration (dual-write)
-  - fast-hash: Quick initial scan using partial file content (SHA1 sample)
-  - Full SHA1 + SHA256 computed for changed/new files (or upgrade mode)
-- **Payload hashes:** SHA256 of sorted `(path, size, sha1)` tuples
+- **File hashes:** SHA256 (primary)
+  - fast-hash: Quick initial scan using partial file content (sample hash)
+  - Full SHA256 computed for changed/new files (or upgrade mode)
+- **Payload hashes:** SHA256 of sorted `(path, size, sha256)` tuples
 - **Incremental optimization:** Skip rehashing if file unchanged (mtime + size check)
 
 **Migration Note (current):**
-- SHA1 remains for payload identity inputs
-- SHA256 is added to per-device tables and backfilled
+- SHA1 retained only for legacy compatibility (optional)
 - CLI includes `sha256-backfill` and `sha256-verify` for migration + spot-checks
 
 ### 7.3 Incremental Scanning
@@ -572,8 +571,8 @@ catalog.db
 
 **Initial Scan:**
 1. Walk filesystem tree
-2. Compute SHA1 + SHA256 for every file (or upgrade later)
-3. Store: path, inode, device_id, size, mtime, sha1, sha256
+2. Compute SHA256 for every file (or upgrade later)
+3. Store: path, inode, device_id, size, mtime, sha256 (sha1 optional legacy)
 4. Detect filesystem UUID for persistent device identity
 5. Performance: ~20-30 files/sec (sequential), ~100-150 files/sec (parallel 8 workers)
 
@@ -583,8 +582,8 @@ catalog.db
    - Check if exists in catalog (by path + device_id)
    - Compare size + mtime
    - If unchanged → skip hash computation, use cached hashes
-   - If changed → recompute SHA1 + SHA256, update catalog
-   - If new → compute SHA1 + SHA256, insert into catalog
+   - If changed → recompute SHA256, update catalog
+   - If new → compute SHA256, insert into catalog
 3. Detect deletions (files in catalog but not on filesystem, scoped to scan root)
 4. Performance: ~500-1000 files/sec (sequential), ~2000-5000 files/sec (parallel)
 
@@ -608,7 +607,7 @@ catalog.db
 **Tables:**
 - `payloads`: Unique content fingerprints
   - `payload_id`: Integer primary key
-  - `payload_hash`: SHA256 of sorted `(path, size, sha1)` tuples
+  - `payload_hash`: SHA256 of sorted `(path, size, sha256)` tuples
   - `root_path`: Primary location on disk
   - `file_count`: Number of files in payload
   - `total_bytes`: Total size of payload
@@ -850,7 +849,7 @@ The system must be:
 
 **Payload:** The on-disk content a torrent points to. Single-file torrent = that file; multi-file torrent = directory tree. Identity is payload_hash.
 
-**Payload Hash:** SHA256 of sorted `(path, size, sha1)` tuples. Uniquely identifies content independent of torrent metadata. Payload hash is `NULL` until all file-level SHA1s are present.
+**Payload Hash:** SHA256 of sorted `(path, size, sha256)` tuples. Uniquely identifies content independent of torrent metadata. Payload hash is `NULL` until all file-level SHA256s are present.
 
 **Payload Siblings:** Multiple torrents (different infohashes) with identical payload_hash. Examples: v1 vs v2, different piece sizes, different trackers.
 
@@ -876,7 +875,7 @@ The system must be:
 - ✅ Unified catalog model with per-device tables
 - ✅ Filesystem UUID tracking (persistent across reboots)
 - ✅ Incremental scanning (10-100x speedup on rescans)
-- ✅ Dual-write file hashing (SHA1 + SHA256)
+- ✅ SHA256 file hashing (SHA1 legacy retained)
 - ✅ Parallel scanning (multi-threaded hashing, 4-5x faster)
 - ✅ Scoped deletion detection
 - ✅ Hardlink tracking (inode + device_id)
@@ -910,14 +909,12 @@ The system must be:
 
 ### 11.2 In Progress 🚧
 
-- 🚧 Final cutover to SHA256-only file hashing (post-backfill)
 - 🚧 Subtree treehash for fast directory comparison
 - 🚧 Advanced torrent view building (complex layouts, renamed files)
 
 ### 11.3 Planned 📋
 
 **hashall:**
-- 📋 SHA256-only payload identity (replace SHA1 input once migration complete)
 - 📋 Web UI for browsing catalog
 - 📋 Automated deduplication schedules
 - 📋 Advanced filters (size, date, patterns)

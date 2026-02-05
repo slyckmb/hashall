@@ -75,7 +75,12 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
         has_inode = "inode" in columns
         has_device_id = "device_id" in columns
 
-        select_cols = ["path", "sha1"]
+        select_cols = ["path"]
+        if "sha256" in columns:
+            select_cols.append("sha256")
+            select_cols.append("sha1")
+        else:
+            select_cols.append("sha1")
         if has_inode:
             select_cols.append("inode")
         if has_device_id:
@@ -89,10 +94,18 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
         files = {}
         for row in rows:
             path = row[0]
-            sha1 = row[1]
-            inode = row[2] if has_inode else None
-            device_id = row[3] if has_inode and has_device_id else (row[2] if has_device_id else None)
-            files[path] = {"hash": sha1, "inode": inode, "device_id": device_id}
+            if "sha256" in columns:
+                file_hash = row[1] or row[2]
+                inode_idx = 3
+            else:
+                file_hash = row[1]
+                inode_idx = 2
+            inode = row[inode_idx] if has_inode else None
+            if has_inode and has_device_id:
+                device_id = row[inode_idx + 1]
+            else:
+                device_id = row[inode_idx] if has_device_id else None
+            files[path] = {"hash": file_hash, "inode": inode, "device_id": device_id}
         return files
 
     def load_from_device_table(session_id: int):
@@ -127,7 +140,7 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
         if rel_root_str == ".":
             rows = cursor.execute(
                 f"""
-                SELECT path, sha1, inode
+                SELECT path, sha256, sha1, inode
                 FROM {table_name}
                 WHERE status = 'active'
                 """
@@ -135,7 +148,7 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
         else:
             rows = cursor.execute(
                 f"""
-                SELECT path, sha1, inode
+                SELECT path, sha256, sha1, inode
                 FROM {table_name}
                 WHERE status = 'active' AND (path = ? OR path LIKE ?)
                 """,
@@ -152,7 +165,8 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
             else:
                 rel_path = path
             display_path = "/" + rel_path.lstrip("/")
-            files[display_path] = {"hash": row[1], "inode": row[2], "device_id": device_id}
+            file_hash = row[1] or row[2]
+            files[display_path] = {"hash": file_hash, "inode": row[3], "device_id": device_id}
         return files
 
     if table_exists("files"):

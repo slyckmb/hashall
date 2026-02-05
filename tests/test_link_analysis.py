@@ -50,6 +50,7 @@ def test_db():
             mtime REAL NOT NULL,
             quick_hash TEXT,
             sha1 TEXT,
+            sha256 TEXT,
             inode INTEGER NOT NULL,
             status TEXT DEFAULT 'active',
             first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -69,11 +70,11 @@ def test_db():
         ('/test/dup2.txt', 500, 'hash3', 302),  # Duplicate of dup1
     ]
 
-    for path, size, sha1, inode in test_data:
+    for path, size, sha256, inode in test_data:
         cursor.execute("""
-            INSERT INTO files_99 (path, size, sha1, inode, mtime, status)
+            INSERT INTO files_99 (path, size, sha256, inode, mtime, status)
             VALUES (?, ?, ?, ?, 1234567890.0, 'active')
-        """, (path, size, sha1, inode))
+        """, (path, size, sha256, inode))
 
     conn.commit()
     yield conn
@@ -213,6 +214,7 @@ def test_no_duplicates(test_db):
             size INTEGER NOT NULL,
             mtime REAL NOT NULL,
             sha1 TEXT,
+            sha256 TEXT,
             inode INTEGER NOT NULL,
             status TEXT DEFAULT 'active'
         )
@@ -220,10 +222,10 @@ def test_no_duplicates(test_db):
 
     # Insert files with unique hashes
     cursor.execute("""
-        INSERT INTO files_100 (path, size, sha1, inode, mtime)
+        INSERT INTO files_100 (path, size, sha256, sha1, inode, mtime)
         VALUES
-            ('/unique1.txt', 1000, 'unique_hash_1', 1, 1234567890.0),
-            ('/unique2.txt', 2000, 'unique_hash_2', 2, 1234567890.0)
+            ('/unique1.txt', 1000, 'unique_hash_1', 'legacy_hash_1', 1, 1234567890.0),
+            ('/unique2.txt', 2000, 'unique_hash_2', 'legacy_hash_2', 2, 1234567890.0)
     """)
 
     test_db.commit()

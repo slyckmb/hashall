@@ -5,7 +5,7 @@
 -- Payloads: unique content instances on disk
 CREATE TABLE IF NOT EXISTS payloads (
     payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    payload_hash TEXT,                      -- SHA256 of sorted (path, size, sha1) tuples; NULL if incomplete
+    payload_hash TEXT,                      -- SHA256 of sorted (path, size, sha256) tuples; NULL if incomplete
     device_id INTEGER,                      -- Physical device/filesystem ID
     root_path TEXT NOT NULL,                -- Canonical path relative to device mount (or absolute for now)
     file_count INTEGER NOT NULL DEFAULT 0,  -- Number of files in this payload

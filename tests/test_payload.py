@@ -37,11 +37,11 @@ def test_db():
         ("/test/root/subdir/file3.txt", 300, "ccc333", 12347),
     ]
 
-    for path, size, sha1, inode in test_files:
+    for path, size, sha256, inode in test_files:
         cursor.execute(f"""
-            INSERT INTO files_{device_id} (path, size, mtime, sha1, inode, status)
+            INSERT INTO files_{device_id} (path, size, mtime, sha256, inode, status)
             VALUES (?, ?, 1234567890.0, ?, ?, 'active')
-        """, (path, size, sha1, inode))
+        """, (path, size, sha256, inode))
 
     conn.commit()
 
@@ -86,10 +86,10 @@ def test_compute_payload_hash_sorted():
 
 
 def test_compute_payload_hash_incomplete():
-    """Test that incomplete files (missing SHA1) return None."""
+    """Test that incomplete files (missing SHA256) return None."""
     files = [
         PayloadFile("a.txt", 100, "aaa111"),
-        PayloadFile("b.txt", 200, None),  # Missing SHA1
+        PayloadFile("b.txt", 200, None),  # Missing SHA256
     ]
 
     hash_result = compute_payload_hash(files)

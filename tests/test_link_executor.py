@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hashall.link_executor import (
-    compute_sha1,
+    compute_sha256,
     compute_fast_hash_sample,
     verify_files_exist,
     verify_file_unchanged,
@@ -25,22 +25,22 @@ from hashall.link_executor import (
 from hashall.link_query import ActionInfo
 
 
-def test_compute_sha1():
-    """Test SHA1 hash computation."""
+def test_compute_sha256():
+    """Test SHA256 hash computation."""
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
         f.write("test content\n")
         temp_path = Path(f.name)
 
     try:
-        hash_val = compute_sha1(temp_path)
-        assert hash_val == "4fe2b8dd12cd9cd6a413ea960cd8c09c25f19527"
+        hash_val = compute_sha256(temp_path)
+        assert hash_val == "a1fff0ffefb9eace7230c24e50731f0a91c62f9cefdfe77121c2f607125dffae"
     finally:
         temp_path.unlink()
 
 
-def test_compute_sha1_file_not_found():
-    """Test SHA1 computation with missing file."""
-    hash_val = compute_sha1(Path("/nonexistent/file.txt"))
+def test_compute_sha256_file_not_found():
+    """Test SHA256 computation with missing file."""
+    hash_val = compute_sha256(Path("/nonexistent/file.txt"))
     assert hash_val is None
 
 
@@ -80,7 +80,7 @@ def test_verify_hash_matches_success():
         temp_path = Path(f.name)
 
     try:
-        expected_hash = "4fe2b8dd12cd9cd6a413ea960cd8c09c25f19527"
+        expected_hash = "a1fff0ffefb9eace7230c24e50731f0a91c62f9cefdfe77121c2f607125dffae"
         success, error = verify_hash_matches(temp_path, expected_hash)
         assert success is True
         assert error is None
@@ -95,7 +95,7 @@ def test_verify_hash_matches_mismatch():
         temp_path = Path(f.name)
 
     try:
-        wrong_hash = "0000000000000000000000000000000000000000"
+        wrong_hash = "0" * 64
         success, error = verify_hash_matches(temp_path, wrong_hash)
         assert success is False
         assert "mismatch" in error.lower()
@@ -228,13 +228,14 @@ def test_execute_action_dry_run():
         CREATE TABLE files_99 (
             path TEXT,
             sha1 TEXT,
+            sha256 TEXT,
             status TEXT
         )
     """)
 
     cursor.execute("""
-        INSERT INTO files_99 (path, sha1, status)
-        VALUES ('file.txt', '4fe2b8dd12cd9cd6a413ea960cd8c09c25f19527', 'active')
+        INSERT INTO files_99 (path, sha256, status)
+        VALUES ('file.txt', '4ad3ef64dfb83f7a8f789bce6f30cc1f8d18491b14db4c875309b150d2a7f1d5', 'active')
     """)
     conn.commit()
 

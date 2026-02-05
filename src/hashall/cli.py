@@ -25,7 +25,7 @@ def cli():
 @click.option("--workers", type=int, default=None, help="Worker count for parallel scan (default: cpu_count).")
 @click.option("--batch-size", type=int, default=None, help="Batch size for parallel DB writes.")
 @click.option("--hash-mode", type=click.Choice(['fast', 'full', 'upgrade'], case_sensitive=False),
-              default='fast', help="Hash mode: fast (1MB only), full (SHA1+SHA256), upgrade (add full to existing).")
+              default='fast', help="Hash mode: fast (1MB only), full (SHA256 + legacy SHA1), upgrade (add full to existing).")
 @click.option("--fast", "hash_mode_flag", flag_value='fast', help="Shortcut for --hash-mode=fast")
 @click.option("--full", "hash_mode_flag", flag_value='full', help="Shortcut for --hash-mode=full")
 @click.option("--upgrade", "hash_mode_flag", flag_value='upgrade', help="Shortcut for --hash-mode=upgrade")
@@ -58,7 +58,7 @@ def export_cmd(db_path, root, out):
 @click.option("--force", is_flag=True, help="Actually perform scan and repair; otherwise dry-run.")
 @click.option("--no-export", is_flag=True, help="Don't auto-write .hashall/hashall.json after scan.")
 def verify_trees_cmd(src, dst, repair, rsync_source, db, force, no_export):
-    """Verify that DST matches SRC, using SHA1 & smart scanning"""
+    """Verify that DST matches SRC, using SHA256 where available."""
     verify_trees(
         src_root=Path(src),
         dst_root=Path(dst),
@@ -157,7 +157,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag):
             print(f"      {payload.file_count} files, {payload.total_bytes:,} bytes")
             synced_count += 1
         else:
-            print(f"   ⚠️  Payload incomplete (missing SHA1s)")
+            print(f"   ⚠️  Payload incomplete (missing SHA256s)")
             incomplete_count += 1
 
     print(f"\n✅ Sync complete!")
@@ -207,7 +207,7 @@ def payload_show(torrent_hash, db):
     if payload.payload_hash:
         print(f"   Hash: {payload.payload_hash}")
     else:
-        print(f"   Hash: (incomplete - missing SHA1s)")
+        print(f"   Hash: (incomplete - missing SHA256s)")
 
     if payload.last_built_at:
         import datetime
@@ -407,7 +407,7 @@ def stats_cmd(db, hash_coverage):
         print("  Hash Coverage:")
 
         total_with_quick = 0
-        total_with_full = 0
+        total_with_sha1 = 0
         total_with_sha256 = 0
         total_collision_groups = 0
 
@@ -432,7 +432,7 @@ def stats_cmd(db, hash_coverage):
                         SELECT
                             COUNT(*) as total,
                             SUM(CASE WHEN quick_hash IS NOT NULL THEN 1 ELSE 0 END) as has_quick,
-                            SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_full,
+                            SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_sha1,
                             SUM(CASE WHEN sha256 IS NOT NULL THEN 1 ELSE 0 END) as has_sha256
                         FROM {table_name}
                         WHERE status = 'active'
@@ -442,7 +442,7 @@ def stats_cmd(db, hash_coverage):
                         SELECT
                             COUNT(*) as total,
                             SUM(CASE WHEN quick_hash IS NOT NULL THEN 1 ELSE 0 END) as has_quick,
-                            SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_full
+                            SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_sha1
                         FROM {table_name}
                         WHERE status = 'active'
                     """).fetchone()
@@ -450,10 +450,10 @@ def stats_cmd(db, hash_coverage):
                 if result:
                     total = result['total'] or 0
                     has_quick = result['has_quick'] or 0
-                    has_full = result['has_full'] or 0
+                    has_sha1 = result['has_sha1'] or 0
 
                     total_with_quick += has_quick
-                    total_with_full += has_full
+                    total_with_sha1 += has_sha1
                     if has_sha256_col:
                         total_with_sha256 += result["has_sha256"] or 0
 
@@ -474,18 +474,20 @@ def stats_cmd(db, hash_coverage):
 
         if total_active_files > 0:
             quick_pct = (total_with_quick / total_active_files) * 100
-            full_pct = (total_with_full / total_active_files) * 100
-            pending = total_active_files - total_with_full
+            # Legacy SHA1 coverage (optional)
             pending_sha256 = total_active_files - total_with_sha256
+            pending_sha1 = total_active_files - total_with_sha1
 
             print(f"    Quick hash: {total_with_quick:,} ({quick_pct:.1f}%)")
-            print(f"    Full SHA1:  {total_with_full:,} ({full_pct:.1f}%)")
             if total_with_sha256:
                 sha256_pct = (total_with_sha256 / total_active_files) * 100
                 print(f"    SHA256:     {total_with_sha256:,} ({sha256_pct:.1f}%)")
                 print(f"    Pending:    {pending_sha256:,} ({100-sha256_pct:.1f}%)")
-            else:
-                print(f"    Pending:    {pending:,} ({100-full_pct:.1f}%)")
+            if total_with_sha1:
+                sha1_pct = (total_with_sha1 / total_active_files) * 100
+                print(f"    SHA1 (legacy): {total_with_sha1:,} ({sha1_pct:.1f}%)")
+                if total_with_sha256 == 0:
+                    print(f"    Pending:    {pending_sha1:,} ({100-sha1_pct:.1f}%)")
 
             if total_collision_groups > 0:
                 print(f"    Collision groups: {total_collision_groups}")
@@ -531,14 +533,14 @@ def sha256_verify_cmd(db, device, sample):
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option("--device", required=True, help="Device alias or device_id to scan for duplicates.")
 @click.option("--auto-upgrade/--no-auto-upgrade", default=True,
-              help="Automatically upgrade collision groups to full SHA1 (default: enabled).")
+              help="Automatically upgrade collision groups to full SHA256 (default: enabled).")
 @click.option("--show-paths", is_flag=True, help="Show full paths for duplicate files.")
 def dupes_cmd(db, device, auto_upgrade, show_paths):
     """
     Find duplicate files within a device.
 
     Detects files with matching quick_hash (1MB samples), and optionally
-    auto-upgrades collision groups to full SHA1 to identify true duplicates.
+    auto-upgrades collision groups to full SHA256 to identify true duplicates.
 
     Example:
         hashall dupes --device pool --auto-upgrade
@@ -603,7 +605,7 @@ def dupes_cmd(db, device, auto_upgrade, show_paths):
     total_files = 0
     total_wasted_space = 0
 
-    for i, (sha1, files) in enumerate(duplicates.items(), 1):
+    for i, (sha256, files) in enumerate(duplicates.items(), 1):
         file_count = len(files)
         file_size = files[0]['size']  # All files have same size
         wasted = file_size * (file_count - 1)  # Space that could be saved
@@ -612,7 +614,7 @@ def dupes_cmd(db, device, auto_upgrade, show_paths):
         total_wasted_space += wasted
 
         print(f"  Group {i}: {file_count} files, {file_size:,} bytes each")
-        print(f"    SHA1: {sha1[:16]}...")
+        print(f"    SHA256: {sha256[:16]}...")
         print(f"    Wasted space: {wasted:,} bytes")
 
         if show_paths:
@@ -656,7 +658,7 @@ def link_analyze_cmd(db, device, min_size, format):
     """
     Analyze catalog for deduplication opportunities.
 
-    Identifies files with same content (SHA1) but different inodes on the same device.
+    Identifies files with same content (SHA256) but different inodes on the same device.
     Reports potential space savings from hardlinking duplicates.
 
     Examples:
@@ -959,7 +961,7 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, yes):
     VERIFICATION MODES:
     - fast: Size/mtime checks + first/middle/last 1MB hash sampling
             (3MB read for 100GB file = 33,000x faster than full hash)
-    - paranoid: Full SHA1 hash of entire files (slow for large files)
+    - paranoid: Full SHA256 hash of entire files (slow for large files)
     - none: Skip verification, trust planning phase (fastest)
 
     Examples:

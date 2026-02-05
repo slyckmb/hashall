@@ -13,13 +13,19 @@ def write_rsync_manifest(db_path: Path, scan_id_src: int, scan_id_dst: int, mani
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    query = """
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(files)").fetchall()}
+    if "sha256" in columns:
+        hash_clause = "COALESCE(f2.sha256, f2.sha1) IS NULL OR COALESCE(f1.sha256, f1.sha1) != COALESCE(f2.sha256, f2.sha1)"
+    else:
+        hash_clause = "f2.sha1 IS NULL OR f1.sha1 != f2.sha1"
+
+    query = f"""
     SELECT f1.relpath
     FROM files f1
     LEFT JOIN files f2
         ON f1.relpath = f2.relpath AND f2.scan_id = ?
     WHERE f1.scan_id = ?
-      AND (f2.sha1 IS NULL OR f1.sha1 != f2.sha1)
+      AND ({hash_clause})
     ORDER BY f1.relpath;
     """
 

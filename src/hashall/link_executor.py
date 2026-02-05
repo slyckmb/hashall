@@ -44,23 +44,23 @@ class ExecutionResult:
     errors: list
 
 
-def compute_sha1(file_path: Path) -> Optional[str]:
+def compute_sha256(file_path: Path) -> Optional[str]:
     """
-    Compute SHA1 hash of a file.
+    Compute SHA256 hash of a file.
 
     Args:
         file_path: Path to file
 
     Returns:
-        SHA1 hash as hex string, or None if file cannot be read
+        SHA256 hash as hex string, or None if file cannot be read
     """
     try:
-        sha1 = hashlib.sha1()
+        hasher = hashlib.sha256()
         with open(file_path, 'rb') as f:
             while chunk := f.read(8192):
-                sha1.update(chunk)
-        return sha1.hexdigest()
-    except (OSError, IOError) as e:
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except (OSError, IOError):
         return None
 
 
@@ -172,12 +172,12 @@ def verify_hash_matches(file_path: Path, expected_hash: str) -> Tuple[bool, Opti
 
     Args:
         file_path: Path to file
-        expected_hash: Expected SHA1 hash
+        expected_hash: Expected SHA256 hash
 
     Returns:
         Tuple of (success, error_message)
     """
-    actual_hash = compute_sha1(file_path)
+    actual_hash = compute_sha256(file_path)
 
     if actual_hash is None:
         return False, f"Cannot read file to verify hash: {file_path}"
@@ -331,7 +331,7 @@ def execute_action(
         dry_run: If True, simulate without making changes
         verify_mode: Verification mode:
             'fast' - Size/mtime + fast-hash sampling (default, recommended)
-            'paranoid' - Full SHA1 hash verification (slow for large files)
+            'paranoid' - Full SHA256 hash verification (slow for large files)
             'none' - Skip verification (trust planning phase)
         create_backup: If True, create .bak backup file
 
@@ -366,13 +366,14 @@ def execute_action(
 
         # Get file metadata from database for verification
         cursor.execute(
-            f"SELECT size, mtime, sha1 FROM {table_name} WHERE path = ? AND status = 'active'",
+            f"SELECT size, mtime, sha256, sha1 FROM {table_name} WHERE path = ? AND status = 'active'",
             (Path(action.canonical_path).name if mount_point else action.canonical_path,)
         )
         row = cursor.fetchone()
 
         if row:
-            expected_size, expected_mtime, expected_hash = row
+            expected_size, expected_mtime, expected_sha256, expected_sha1 = row
+            expected_hash = expected_sha256 or expected_sha1
 
             if verify_mode == 'fast':
                 # Fast verification: size/mtime + fast-hash sampling
@@ -542,7 +543,7 @@ def execute_plan(
         dry_run: If True, simulate without making changes
         verify_mode: Verification mode:
             'fast' - Size/mtime + fast-hash sampling (default, recommended)
-            'paranoid' - Full SHA1 hash verification (slow for large files)
+            'paranoid' - Full SHA256 hash verification (slow for large files)
             'none' - Skip verification (trust planning phase)
         create_backup: If True, create .bak backup files
         limit: Maximum number of actions to execute (0 = all)

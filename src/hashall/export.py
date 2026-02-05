@@ -65,12 +65,12 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
         rel_root_str = str(rel_root)
         if rel_root_str == ".":
             rows = conn.execute(
-                f"SELECT path, size, mtime, sha1, inode FROM {table_name} WHERE status = 'active'"
+                f"SELECT path, size, mtime, sha1, sha256, inode FROM {table_name} WHERE status = 'active'"
             ).fetchall()
         else:
             rows = conn.execute(
                 f"""
-                SELECT path, size, mtime, sha1, inode
+                SELECT path, size, mtime, sha1, sha256, inode
                 FROM {table_name}
                 WHERE status = 'active' AND (path = ? OR path LIKE ?)
                 """,
@@ -93,6 +93,7 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
                 "size": row["size"],
                 "mtime": row["mtime"],
                 "sha1": row["sha1"],
+                "sha256": row["sha256"],
                 "inode": row["inode"],
                 "device_id": session_device_id,
             })
@@ -105,6 +106,8 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
             select_cols.append("inode")
         if "device_id" in columns:
             select_cols.append("device_id")
+        if "sha256" in columns:
+            select_cols.append("sha256")
 
         rows = conn.execute(
             f"SELECT {', '.join(select_cols)} FROM files WHERE scan_session_id = ?",
@@ -117,6 +120,8 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
                 row_dict["inode"] = None
             if "device_id" not in row_dict:
                 row_dict["device_id"] = None
+            if "sha256" not in row_dict:
+                row_dict["sha256"] = None
             files_data.append(row_dict)
 
     data = {

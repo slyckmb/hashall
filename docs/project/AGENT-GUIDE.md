@@ -20,7 +20,6 @@ Hashall is a unified file catalog and payload-identity system that enables safe 
 - Collision detection (fast-hash + auto-upgrade logic)
 
 **Not complete:**
-- SHA256 migration for file hashes (still SHA1 at file level)
 - `src/hashall/diff.py` TODO logic
 
 ---
@@ -74,8 +73,8 @@ pytest tests/test_rehome.py tests/test_rehome_promotion.py tests/test_rehome_sta
 
 ## Known Constraints / Design Facts
 
-- File-level hashing uses **SHA1** today. SHA256 migration is pending.
-- Payload hash is **SHA256 of (path, size, sha1)**; payload hash is NULL if any SHA1 missing.
+- File-level hashing uses **SHA256** (SHA1 retained for legacy compatibility).
+- Payload hash is **SHA256 of (path, size, sha256)**; payload hash is NULL if any SHA256 missing.
 - Hardlinks only within the same filesystem; executor blocks cross-filesystem links.
 - Rehome promotion is **reuse-only** (no blind copy).
 
@@ -83,40 +82,22 @@ pytest tests/test_rehome.py tests/test_rehome_promotion.py tests/test_rehome_sta
 
 ## Next Work (High Priority)
 
-1. SHA256 migration (schema + migration command + dual-write/transition plan)
-2. Implement `src/hashall/diff.py`
-3. Keep docs aligned as code changes
+1. Implement `src/hashall/diff.py`
+2. Keep docs aligned as code changes
 
 ---
 
 ## Sprint 2 & 3 Checklist (Agent Execution)
 
-### Sprint 2: SHA256 Migration
+### Sprint 2: SHA256 Migration (Complete)
 
-1. Schema changes
-   - Add `sha256` column to per-device tables
-   - Add indexes for sha256 lookups
-   - Decide on dual-write period (SHA1 + SHA256)
+- Schema now includes `sha256` in per-device tables + indexes
+- Scan pipeline writes SHA256 and keeps SHA1 for legacy
+- `sha256-backfill` + `sha256-verify` CLI commands implemented
+- Payload hash uses `(path, size, sha256)`
+- Docs updated for SHA256 as primary hash
 
-2. Hashing updates
-   - Implement hash function abstraction (SHA1/SHA256)
-   - Update scan pipeline to compute SHA256 (and optionally SHA1)
-   - Ensure payload hash still uses SHA256 over `(path, size, sha1)` until migration completes
-
-3. Migration command
-   - New CLI command to backfill SHA256 for files with only SHA1
-   - Must be resumable and safe on interruption
-   - Provide progress + dry-run mode if feasible
-
-4. Validation
-   - Spot-check or verify subset of SHA256 hashes
-   - Report mismatches
-
-5. Docs
-   - Update `docs/REQUIREMENTS.md` and `docs/architecture/schema.md`
-   - Update `docs/tooling/cli.md` if new commands are added
-
-### Sprint 3: Diff Engine + Polish
+### Sprint 3: Diff Engine + Polish (Remaining)
 
 1. Implement `src/hashall/diff.py` TODO logic
 2. Add unit tests for diff behavior

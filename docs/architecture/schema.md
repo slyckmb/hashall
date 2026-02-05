@@ -12,12 +12,12 @@
 **Core**
 - `devices`: filesystem identity (fs_uuid) + device registry
 - `scan_roots`: scanned roots per filesystem (scoped deletion safety)
-- `files_<device_id>`: per-device files (path, size, mtime, sha1, sha256, inode, status)
-  - Indexes: sha1, sha256, inode, status
+- `files_<device_id>`: per-device files (path, size, mtime, sha256, sha1, inode, status)
+  - Indexes: sha256, sha1, inode, status
 
 **Aggregates**
 - `hardlink_groups`: inode groups within a device
-- `duplicate_groups`: same SHA1 across devices
+- `duplicate_groups`: same SHA256 across devices
 
 **Link Dedup**
 - `link_plans`: plan metadata
@@ -35,8 +35,8 @@
 ## Invariants
 
 - One table per device (`files_<device_id>`) is the hardlink boundary.
-- File hash is **SHA1 + SHA256** during migration; SHA256 is the target.
-- Payload hash is **SHA256 over (path, size, sha1)**; NULL if any SHA1 missing.
+- File hash is **SHA256** (primary).
+- Payload hash is **SHA256 over (path, size, sha256)**; NULL if any SHA256 missing.
 
 ---
 

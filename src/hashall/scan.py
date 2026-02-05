@@ -209,7 +209,7 @@ def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]
 
 def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, mount_point: Path) -> list:
     """
-    Upgrade all files in a collision group to full SHA1 hash.
+    Upgrade all files in a collision group to full SHA256 hash.
 
     Args:
         quick_hash: The quick_hash value shared by the collision group
@@ -218,10 +218,10 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
         mount_point: Mount point for the filesystem (to resolve absolute paths)
 
     Returns:
-        List of updated file records with full SHA1 computed
+        List of updated file records with full SHA256 computed
 
     Side effects:
-        Updates database records with computed full SHA1 values
+        Updates database records with computed full SHA256 values
     """
     conn = connect_db(db_path)
     cursor = conn.cursor()
@@ -282,24 +282,24 @@ def find_duplicates(device_id: int, db_path: Path, auto_upgrade: bool = True) ->
     Args:
         device_id: Device ID to query
         db_path: Path to catalog database
-        auto_upgrade: If True, automatically compute full SHA1 for collision groups
+        auto_upgrade: If True, automatically compute full SHA256 for collision groups
 
     Returns:
-        Dict mapping full SHA1 to list of duplicate files.
-        Only includes groups with 2+ files sharing the same full SHA1.
+        Dict mapping full SHA256 to list of duplicate files.
+        Only includes groups with 2+ files sharing the same full SHA256.
 
     Example:
         {
             'def456...': [
-                {'path': 'file1.dat', 'size': 10485760, 'sha1': 'def456...'},
-                {'path': 'file2.dat', 'size': 10485760, 'sha1': 'def456...'}
+                {'path': 'file1.dat', 'size': 10485760, 'sha256': 'def456...'},
+                {'path': 'file2.dat', 'size': 10485760, 'sha256': 'def456...'}
             ]
         }
 
     Algorithm:
         1. Find collision groups (files with same quick_hash)
-        2. If auto_upgrade: compute full SHA1 for each collision group
-        3. Group files by full SHA1
+        2. If auto_upgrade: compute full SHA256 for each collision group
+        3. Group files by full SHA256
         4. Return only groups with 2+ files (true duplicates)
     """
     from collections import defaultdict
@@ -329,28 +329,28 @@ def find_duplicates(device_id: int, db_path: Path, auto_upgrade: bool = True) ->
 
     # Auto-upgrade collision groups if requested
     if auto_upgrade:
-        print("⚡ Upgrading collision groups to full SHA1...")
+        print("⚡ Upgrading collision groups to full SHA256...")
         for quick_hash in collisions.keys():
             upgrade_collision_group(quick_hash, device_id, db_path, mount_point)
 
-        # Re-query collisions to get updated SHA1 values
+        # Re-query collisions to get updated SHA256 values
         collisions = find_quick_hash_collisions(device_id, db_path)
 
-    # Group by full SHA1
-    by_sha1 = defaultdict(list)
+    # Group by full SHA256
+    by_sha256 = defaultdict(list)
     for quick_hash, files in collisions.items():
         for file_record in files:
-            if file_record['sha1'] is not None:
-                by_sha1[file_record['sha1']].append(file_record)
+            if file_record['sha256'] is not None:
+                by_sha256[file_record['sha256']].append(file_record)
 
     # Only return groups with 2+ files (true duplicates)
     duplicates = {}
     true_dupe_count = 0
     false_collision_count = 0
 
-    for sha1, files in by_sha1.items():
+    for sha256, files in by_sha256.items():
         if len(files) >= 2:
-            duplicates[sha1] = files
+            duplicates[sha256] = files
             true_dupe_count += 1
         elif len(files) == 1:
             false_collision_count += 1
@@ -358,7 +358,7 @@ def find_duplicates(device_id: int, db_path: Path, auto_upgrade: bool = True) ->
     if true_dupe_count > 0:
         print(f"✅ True duplicates: {true_dupe_count} groups")
     if false_collision_count > 0:
-        print(f"⚠️  False collisions: {false_collision_count} groups (same quick_hash, different sha1)")
+        print(f"⚠️  False collisions: {false_collision_count} groups (same quick_hash, different sha256)")
 
     return duplicates
 
