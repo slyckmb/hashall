@@ -582,6 +582,480 @@ def dupes_cmd(db, device, auto_upgrade, show_paths):
     print(f"💡 Tip: Run deduplication to hardlink duplicates and reclaim space")
 
 
+# Link deduplication command group
+@cli.group()
+def link():
+    """Link deduplication commands (analyze, plan, execute)."""
+    pass
+
+
+@link.command("analyze")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--device", required=True, help="Device alias or device_id to analyze.")
+@click.option("--min-size", type=int, default=0, help="Minimum file size in bytes (default: 0).")
+@click.option("--format", type=click.Choice(['text', 'json']), default='text', help="Output format.")
+def link_analyze_cmd(db, device, min_size, format):
+    """
+    Analyze catalog for deduplication opportunities.
+
+    Identifies files with same content (SHA1) but different inodes on the same device.
+    Reports potential space savings from hardlinking duplicates.
+
+    Examples:
+        hashall link analyze --device pool
+        hashall link analyze --device stash --min-size 1048576  # 1MB+
+        hashall link analyze --device 49 --format json
+    """
+    from pathlib import Path
+    from hashall.model import connect_db
+    from hashall.link_analysis import analyze_device, format_analysis_text, format_analysis_json
+
+    conn = connect_db(Path(db))
+    cursor = conn.cursor()
+
+    # Resolve device (try alias first, then device_id if numeric)
+    cursor.execute(
+        "SELECT device_id FROM devices WHERE device_alias = ?",
+        (device,)
+    )
+    result_row = cursor.fetchone()
+
+    if not result_row and device.isdigit():
+        cursor.execute(
+            "SELECT device_id FROM devices WHERE device_id = ?",
+            (int(device),)
+        )
+        result_row = cursor.fetchone()
+
+    if not result_row:
+        click.echo(f"❌ Device not found: {device}", err=True)
+        click.echo(f"💡 Tip: Use 'hashall devices list' to see available devices", err=True)
+        conn.close()
+        return 1
+
+    device_id = result_row[0]
+
+    try:
+        # Run analysis
+        result = analyze_device(conn, device_id, min_size=min_size)
+
+        # Format output
+        if format == 'json':
+            click.echo(format_analysis_json(result))
+        else:
+            click.echo(format_analysis_text(result))
+
+        conn.close()
+        return 0
+
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        conn.close()
+        return 1
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        conn.close()
+        return 1
+
+
+@link.command("plan")
+@click.argument("name")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--device", required=True, help="Device alias or device_id to plan for.")
+@click.option("--min-size", type=int, default=0, help="Minimum file size in bytes (default: 0).")
+@click.option("--dry-run", is_flag=True, help="Generate plan without saving to database.")
+def link_plan_cmd(name, db, device, min_size, dry_run):
+    """
+    Create a deduplication plan.
+
+    Analyzes device and generates a plan of hardlink actions to deduplicate files.
+    Plan is saved to database and can be reviewed with 'link show-plan' command.
+
+    Examples:
+        hashall link plan "Monthly pool dedupe" --device pool
+        hashall link plan "Stash cleanup" --device stash --min-size 1048576
+        hashall link plan "Test plan" --device 49 --dry-run
+    """
+    from pathlib import Path
+    from hashall.model import connect_db
+    from hashall.link_planner import create_plan, save_plan, format_plan_summary
+
+    conn = connect_db(Path(db))
+    cursor = conn.cursor()
+
+    # Resolve device (try alias first, then device_id if numeric)
+    cursor.execute(
+        "SELECT device_id FROM devices WHERE device_alias = ?",
+        (device,)
+    )
+    result_row = cursor.fetchone()
+
+    if not result_row and device.isdigit():
+        cursor.execute(
+            "SELECT device_id FROM devices WHERE device_id = ?",
+            (int(device),)
+        )
+        result_row = cursor.fetchone()
+
+    if not result_row:
+        click.echo(f"❌ Device not found: {device}", err=True)
+        click.echo(f"💡 Tip: Use 'hashall devices list' to see available devices", err=True)
+        conn.close()
+        return 1
+
+    device_id = result_row[0]
+
+    try:
+        # Create plan
+        click.echo(f"📋 Creating deduplication plan: \"{name}\"")
+        click.echo(f"   Device: {device} ({device_id})")
+        click.echo(f"   Analyzing...")
+        click.echo()
+
+        plan = create_plan(conn, name, device_id, min_size=min_size)
+
+        if dry_run:
+            # Dry-run mode: just show plan, don't save
+            click.echo("🔍 DRY-RUN MODE (plan not saved)")
+            click.echo()
+            click.echo(format_plan_summary(plan))
+            conn.close()
+            return 0
+
+        # Save plan to database
+        plan_id = save_plan(conn, plan)
+
+        # Show summary
+        click.echo("✅ Plan created successfully!")
+        click.echo()
+        click.echo(format_plan_summary(plan, plan_id=plan_id))
+
+        conn.close()
+        return 0
+
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        conn.close()
+        return 1
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        conn.close()
+        return 1
+
+
+@link.command("list-plans")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--status", type=click.Choice(['pending', 'in_progress', 'completed', 'failed', 'cancelled']), help="Filter by status.")
+def link_list_plans_cmd(db, status):
+    """
+    List all deduplication plans.
+
+    Shows all plans sorted by creation date (newest first).
+    Optionally filter by status.
+
+    Examples:
+        hashall link list-plans
+        hashall link list-plans --status pending
+        hashall link list-plans --status completed
+    """
+    from pathlib import Path
+    from hashall.model import connect_db
+    from hashall.link_query import list_plans
+
+    conn = connect_db(Path(db))
+
+    try:
+        plans = list_plans(conn, status=status)
+
+        if not plans:
+            if status:
+                click.echo(f"No plans found with status: {status}")
+            else:
+                click.echo("No plans found")
+            click.echo("💡 Create a plan with: hashall link plan <name> --device <device>")
+            conn.close()
+            return 0
+
+        # Header
+        if status:
+            click.echo(f"📋 Plans (status: {status}):\n")
+        else:
+            click.echo(f"📋 All Plans ({len(plans)} total):\n")
+
+        # Display each plan
+        for plan in plans:
+            device_name = plan.device_alias or f"Device {plan.device_id}"
+            savings_mb = plan.total_bytes_saveable / (1024**2)
+
+            status_emoji = {
+                'pending': '⏳',
+                'in_progress': '⚡',
+                'completed': '✅',
+                'failed': '❌',
+                'cancelled': '🚫'
+            }.get(plan.status, '❓')
+
+            click.echo(f"  {status_emoji} Plan #{plan.id}: {plan.name}")
+            click.echo(f"     Device: {device_name} | Actions: {plan.actions_total:,} | Savings: {savings_mb:.1f} MB")
+            click.echo(f"     Created: {plan.created_at} | Status: {plan.status}")
+
+            if plan.is_in_progress:
+                click.echo(f"     Progress: {plan.progress_percentage:.1f}% ({plan.actions_executed}/{plan.actions_total} executed)")
+
+            click.echo()
+
+        click.echo(f"💡 View details: hashall link show-plan <plan_id>")
+
+        conn.close()
+        return 0
+
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        conn.close()
+        return 1
+
+
+@link.command("show-plan")
+@click.argument("plan_id", type=int)
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--limit", type=int, default=10, help="Number of actions to show (0 for all).")
+@click.option("--format", type=click.Choice(['text', 'json']), default='text', help="Output format.")
+def link_show_plan_cmd(plan_id, db, limit, format):
+    """
+    Display details of a deduplication plan.
+
+    Shows plan metadata, execution progress, and top actions sorted by space savings.
+    Use --limit 0 to show all actions.
+
+    Examples:
+        hashall link show-plan 1
+        hashall link show-plan 1 --limit 20
+        hashall link show-plan 1 --limit 0  # Show all actions
+        hashall link show-plan 1 --format json
+    """
+    from pathlib import Path
+    from hashall.model import connect_db
+    from hashall.link_query import get_plan, get_plan_actions, format_plan_details, format_plan_details_json
+
+    conn = connect_db(Path(db))
+
+    try:
+        # Get plan
+        plan = get_plan(conn, plan_id)
+
+        if not plan:
+            click.echo(f"❌ Plan not found: {plan_id}", err=True)
+            click.echo(f"💡 Tip: Use 'hashall link list-plans' to see available plans", err=True)
+            conn.close()
+            return 1
+
+        # Get actions
+        actions = get_plan_actions(conn, plan_id, limit=0)  # Get all, we'll limit in formatting
+
+        # Format output
+        if format == 'json':
+            click.echo(format_plan_details_json(plan, actions, limit=limit))
+        else:
+            click.echo(format_plan_details(plan, actions, limit=limit))
+
+        conn.close()
+        return 0
+
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        conn.close()
+        return 1
+
+
+@link.command("execute")
+@click.argument("plan_id", type=int)
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--dry-run", is_flag=True, help="Simulate execution without making changes.")
+@click.option("--verify", type=click.Choice(['fast', 'paranoid', 'none']), default='fast',
+              help="Verification mode: fast=size/mtime+sampling (default), paranoid=full hash (slow), none=skip")
+@click.option("--no-backup", is_flag=True, help="Skip creating .bak backup files (faster but less safe).")
+@click.option("--limit", type=int, default=0, help="Maximum number of actions to execute (0 for all).")
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
+def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, yes):
+    """
+    Execute a deduplication plan.
+
+    Replaces duplicate files with hardlinks to save space. This operation
+    modifies the filesystem, so use --dry-run first to preview.
+
+    SAFETY FEATURES:
+    - Fast verification: size/mtime + hash sampling (default, recommended)
+    - Paranoid verification: full file hash (--verify paranoid, slow)
+    - Backup file creation (use --no-backup to skip)
+    - Atomic operations with rollback on error
+    - Progress tracking in database
+
+    VERIFICATION MODES:
+    - fast: Size/mtime checks + first/middle/last 1MB hash sampling
+            (3MB read for 100GB file = 33,000x faster than full hash)
+    - paranoid: Full SHA1 hash of entire files (slow for large files)
+    - none: Skip verification, trust planning phase (fastest)
+
+    Examples:
+        # Dry-run first (safe, no changes)
+        hashall link execute 1 --dry-run
+
+        # Execute with fast verification (default, recommended)
+        hashall link execute 1
+
+        # Execute limited batch (test on 10 files first)
+        hashall link execute 1 --limit 10
+
+        # Paranoid mode (full hash, slow but 100% certain)
+        hashall link execute 1 --verify paranoid
+
+        # Maximum speed (no verification, no backups)
+        hashall link execute 1 --verify none --no-backup --yes
+    """
+    from pathlib import Path
+    from hashall.model import connect_db
+    from hashall.link_query import get_plan
+    from hashall.link_executor import execute_plan
+
+    conn = connect_db(Path(db))
+
+    try:
+        # Get plan
+        plan = get_plan(conn, plan_id)
+
+        if not plan:
+            click.echo(f"❌ Plan not found: {plan_id}", err=True)
+            click.echo(f"💡 Tip: Use 'hashall link list-plans' to see available plans", err=True)
+            conn.close()
+            return 1
+
+        if plan.status == 'completed':
+            click.echo(f"✅ Plan #{plan_id} is already completed", err=True)
+            click.echo(f"💡 View results: hashall link show-plan {plan_id}", err=True)
+            conn.close()
+            return 0
+
+        # Show plan summary
+        device_name = plan.device_alias or f"Device {plan.device_id}"
+        savings_mb = plan.total_bytes_saveable / (1024**2)
+
+        click.echo(f"🔗 Executing Plan #{plan_id}: {plan.name}")
+        click.echo(f"   Device: {device_name} ({plan.device_id})")
+        click.echo(f"   Actions: {plan.actions_total:,} hardlinks")
+        click.echo(f"   Potential savings: {savings_mb:.2f} MB")
+        click.echo()
+
+        if dry_run:
+            click.echo("🔍 DRY-RUN MODE (no changes will be made)")
+            click.echo()
+        else:
+            # Safety confirmation
+            if not yes:
+                click.echo("⚠️  WARNING: This will modify files on disk!")
+                click.echo()
+                click.echo("Safety features enabled:")
+
+                verify_desc = {
+                    'fast': '✅ Fast verification (size/mtime + hash sampling)',
+                    'paranoid': '✅ Paranoid verification (full file hash - SLOW)',
+                    'none': '❌ No verification (trust planning phase)'
+                }
+                click.echo(f"   {verify_desc.get(verify, verify)}")
+                click.echo(f"   {'✅' if not no_backup else '❌'} Backup file creation (.bak)")
+                click.echo(f"   ✅ Atomic operations with rollback")
+                click.echo()
+
+                if limit > 0:
+                    click.echo(f"Limiting to first {limit} actions")
+                    click.echo()
+
+                if not click.confirm("Do you want to continue?"):
+                    click.echo("Aborted.")
+                    conn.close()
+                    return 0
+
+        # Progress callback
+        def progress_callback(action_num, total_actions, action):
+            pct = (action_num / total_actions) * 100
+            click.echo(f"   [{action_num}/{total_actions}] ({pct:.0f}%) Processing: {Path(action.duplicate_path).name[:50]}")
+
+        # Execute plan
+        click.echo("⚡ Executing plan...")
+        click.echo()
+
+        result = execute_plan(
+            conn,
+            plan_id,
+            dry_run=dry_run,
+            verify_mode=verify,
+            create_backup=not no_backup,
+            limit=limit,
+            progress_callback=progress_callback if not dry_run else None
+        )
+
+        # Show results
+        click.echo()
+        click.echo("=" * 60)
+
+        if dry_run:
+            click.echo("🔍 DRY-RUN RESULTS:")
+        else:
+            click.echo("✅ EXECUTION COMPLETE:")
+
+        click.echo(f"   Actions executed: {result.actions_executed:,}")
+        click.echo(f"   Actions failed: {result.actions_failed:,}")
+        click.echo(f"   Actions skipped: {result.actions_skipped:,}")
+
+        saved_mb = result.bytes_saved / (1024**2)
+        saved_gb = result.bytes_saved / (1024**3)
+        if saved_gb >= 1.0:
+            click.echo(f"   Space saved: {saved_gb:.2f} GB")
+        else:
+            click.echo(f"   Space saved: {saved_mb:.2f} MB")
+
+        if result.errors:
+            click.echo()
+            click.echo(f"❌ Errors ({len(result.errors)}):")
+            for error in result.errors[:10]:  # Show first 10 errors
+                click.echo(f"   {error}")
+            if len(result.errors) > 10:
+                click.echo(f"   ... and {len(result.errors) - 10} more errors")
+
+        click.echo("=" * 60)
+        click.echo()
+
+        if dry_run:
+            click.echo(f"💡 Looks good? Execute with: hashall link execute {plan_id}")
+        elif result.actions_failed == 0:
+            click.echo(f"✅ Plan completed successfully!")
+            click.echo(f"💡 View results: hashall link show-plan {plan_id}")
+        else:
+            click.echo(f"⚠️  Plan completed with {result.actions_failed} errors")
+            click.echo(f"💡 Review errors: hashall link show-plan {plan_id}")
+
+        conn.close()
+        return 0 if result.actions_failed == 0 else 1
+
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        conn.close()
+        return 1
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        conn.close()
+        return 1
+
+
 # Devices command group
 @cli.group()
 def devices():
