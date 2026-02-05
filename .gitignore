@@ -38,6 +38,9 @@ coverage.xml
 .cache/
 pytest_cache/
 
+# 🧹 Stray artifacts
+<sqlite3.Connection object at *>
+
 # 🧠 GPTrail & Dev Symlinks
 tools/inject_staged.sh
 tools/pre-commit-gptrail.sh

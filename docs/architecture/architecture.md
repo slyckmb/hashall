@@ -14,6 +14,11 @@ Hashall uses a **unified catalog model**: one database catalogs all files across
 - Incremental updates (not snapshots)
 - Link-ready for deduplication
 
+**Why unified catalog (vs sessions):**
+- One record per file (no growth from repeated sessions)
+- Change tracking is explicit (added/modified/deleted/moved)
+- Direct SQL queries for link and payload workflows
+
 ---
 
 ## Core Concept
@@ -187,7 +192,7 @@ JSON export for archival/sharing.
 
 ## Schema Overview
 
-See `docs/schema.md` for complete details.
+See `docs/architecture/schema.md` for complete details.
 
 ### Core Tables
 
@@ -323,7 +328,7 @@ for move in moved:
 
 ## Symlink and Bind Mount Handling
 
-See `docs/symlinks-and-bind-mounts.md` for complete details.
+See `docs/tooling/symlinks-and-bind-mounts.md` for complete details.
 
 **Key strategy:** Canonical path resolution + deduplication tracking
 
@@ -550,22 +555,19 @@ hashall export old.db --root /pool --out /tmp/pool.json
 
 # Import into unified catalog
 hashall import /tmp/pool.json --device /pool
-
-# Verify
-hashall link status
 ```
 
-See `docs/unified-catalog-architecture.md` for complete migration guide.
+See `docs/architecture/architecture.md` for complete migration guide.
 
 ---
 
 ## See Also
 
-- `docs/unified-catalog-architecture.md` - Comprehensive design document
-- `docs/schema.md` - Complete database schema
-- `docs/link-guide.md` - Deduplication workflow
-- `docs/symlinks-and-bind-mounts.md` - Canonical path handling
-- `docs/cli.md` - Command reference
+- `docs/architecture/architecture.md` - Comprehensive design document
+- `docs/architecture/schema.md` - Concise database schema summary
+- `docs/tooling/link-guide.md` - Deduplication workflow
+- `docs/tooling/symlinks-and-bind-mounts.md` - Canonical path handling
+- `docs/tooling/cli.md` - Command reference
 
 ---
 

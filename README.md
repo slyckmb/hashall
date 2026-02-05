@@ -120,7 +120,7 @@ hashall link execute 1 --dry-run
 hashall link execute 1
 ```
 
-See `docs/link-guide.md` for complete workflow.
+See `docs/tooling/link-guide.md` for complete workflow.
 
 ### 5. View Device Statistics
 
@@ -166,15 +166,15 @@ hashall payload siblings <torrent_hash>
 ## 📖 Documentation
 
 ### Core Documentation
-- **[Architecture](docs/architecture.md)** - How the unified catalog works
-- **[Unified Catalog Design](docs/unified-catalog-architecture.md)** - Comprehensive design document
-- **[CLI Reference](docs/cli.md)** - All commands and options
-- **[Database Schema](docs/schema.md)** - Complete schema documentation
+- **[Architecture](docs/architecture/architecture.md)** - How the unified catalog works
+- **[Unified Catalog Design](docs/architecture/architecture.md)** - Comprehensive design document
+- **[CLI Reference](docs/tooling/cli.md)** - All commands and options
+- **[Database Schema](docs/architecture/schema.md)** - Concise schema summary (source of truth in migrations)
 
 ### Guides
-- **[Link Guide](docs/link-guide.md)** - Deduplication workflow and best practices
-- **[Symlinks & Bind Mounts](docs/symlinks-and-bind-mounts.md)** - How hashall handles them correctly
-- **[Quick Reference](docs/quick-reference.md)** - Cheat sheet for common operations
+- **[Link Guide](docs/tooling/link-guide.md)** - Deduplication workflow and best practices
+- **[Symlinks & Bind Mounts](docs/tooling/symlinks-and-bind-mounts.md)** - How hashall handles them correctly
+- **[Quick Reference](docs/tooling/quick-reference.md)** - Cheat sheet for common operations
 
 ### Historical
 - **[Archive](docs/archive/)** - Obsolete docs, session summaries, validation reports
@@ -297,7 +297,7 @@ See `benchmarks/` for detailed results and analysis.
 - **Canonical paths** - Symlinks resolved to avoid double-scanning
 - **Direct SQL** - No JSON intermediates, fast queries
 
-See `docs/architecture.md` for complete details.
+See `docs/architecture/architecture.md` for complete details.
 
 ---
 
@@ -313,7 +313,7 @@ hashall export old.db --root /pool --out /tmp/pool.json
 hashall import /tmp/pool.json --device /pool
 ```
 
-See `docs/unified-catalog-architecture.md` for migration guide.
+See `docs/architecture/architecture.md` for migration guide.
 
 ---
 
@@ -349,7 +349,7 @@ See `docs/unified-catalog-architecture.md` for migration guide.
 ## 🤝 Contributing
 
 Contributions welcome! Please:
-1. Read `docs/architecture.md` to understand the unified catalog model
+1. Read `docs/architecture/architecture.md` to understand the unified catalog model
 2. Check existing issues or create a new one
 3. Submit PRs with tests and documentation
 

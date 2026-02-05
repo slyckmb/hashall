@@ -62,9 +62,9 @@ Documents describing work that has been completed:
 
 See the main `docs/` directory for current documentation:
 - `architecture.md` - Current unified catalog design
-- `schema.md` - Current database schema
+- `docs/architecture/schema.md` - Concise schema summary (active)
 - `cli.md` - Current CLI reference
-- `unified-catalog-architecture.md` - Comprehensive unified catalog design
+- `docs/architecture/architecture.md` - Canonical unified catalog architecture (active)
 - `symlinks-and-bind-mounts.md` - Canonical path handling
 - `conductor-guide.md` - Deduplication workflow
 

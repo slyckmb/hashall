@@ -1,6 +1,6 @@
 # Hashall Quick Reference
 **Version:** 0.5.0 (Unified Catalog)
-**Last Updated:** 2026-01-31
+**Last Updated:** 2026-02-04
 
 A cheat sheet for common hashall operations.
 
@@ -21,7 +21,7 @@ hashall link plan "Monthly dedupe" --device /pool
 
 # Execute (dry-run first!)
 hashall link execute 1 --dry-run
-hashall link execute 1 --force
+hashall link execute 1
 ```
 
 ---
@@ -47,14 +47,21 @@ hashall scan /pool && hashall scan /stash && hashall scan /backup
 # Analyze single device
 hashall link analyze --device /pool
 
-# Analyze all devices
-hashall link analyze
+# Analyze with a minimum size
+hashall link analyze --device /pool --min-size 1048576
+```
 
-# Cross-device duplicates
-hashall link analyze --cross-device
+### Payloads
 
-# Check catalog status
-hashall link status
+```bash
+# Sync payloads from qBittorrent
+hashall payload sync
+
+# Show payload for a torrent
+hashall payload show <torrent_hash>
+
+# List sibling torrents (same payload)
+hashall payload siblings <torrent_hash>
 ```
 
 ### Deduplication
@@ -69,17 +76,20 @@ hashall link show-plan 1 --limit 50
 
 # Execute (ALWAYS dry-run first!)
 hashall link execute 1 --dry-run
-hashall link execute 1 --force
+hashall link execute 1
+
+# Paranoid verification (full hash)
+hashall link execute 1 --verify paranoid
 ```
 
 ---
 
 ## Useful Queries
 
-### Show All Devices
+### Show Catalog Stats
 
 ```bash
-hashall link status
+hashall stats
 ```
 
 ### Show Recent Scan Activity
@@ -127,23 +137,15 @@ LIMIT 20;
 - [ ] `hashall link plan "Monthly dedupe" --device /pool` - Create plan
 - [ ] `hashall link show-plan <id>` - Review actions
 - [ ] `hashall link execute <id> --dry-run` - Test
-- [ ] `hashall link execute <id> --force` - Execute
+- [ ] `hashall link execute <id>` - Execute
 
 ### Initial Setup
 
 - [ ] `hashall scan /pool` - Scan first device
 - [ ] `hashall scan /stash` - Scan second device
 - [ ] `hashall scan /backup` - Scan third device
-- [ ] `hashall link status` - Verify catalog
+- [ ] `hashall stats` - Verify catalog
 - [ ] Review dedup opportunities
-
-### Cross-Device Audit
-
-- [ ] `hashall scan /pool` - Update first device
-- [ ] `hashall scan /stash` - Update second device
-- [ ] `hashall link analyze --cross-device` - Find duplicates
-- [ ] Review results (informational only)
-- [ ] Decide: delete or consolidate?
 
 ---
 
@@ -151,8 +153,8 @@ LIMIT 20;
 
 ### "Device not found"
 ```bash
-# Check registered devices
-hashall link status
+# Check catalog stats
+hashall stats
 
 # Rescan the device
 hashall scan /pool
@@ -213,12 +215,11 @@ hashall link plan "Retry" --device /pool
 ### Hardlinks
 - **Same inode** = already hardlinked
 - **Different inode, same SHA1** = dedup opportunity
-- **Cross-device** = can't hardlink (different filesystems)
+- **Cross-device** = cannot hardlink (different filesystems)
 
 ### Link Plans
 - **NOOP** - Already optimal, no action
 - **HARDLINK** - Can link, same device
-- **COPY_THEN_HARDLINK** - Cross-device (not implemented)
 - **SKIP** - Safety issue, manual review
 
 ---
@@ -249,7 +250,7 @@ hashall link plan "Retry" --device /pool
 - **[Full CLI Reference](cli.md)** - All commands and options
 - **[Link Guide](link-guide.md)** - Complete workflow
 - **[Architecture](architecture.md)** - How it works
-- **[Schema](schema.md)** - Database design
+- **[Schema](../architecture/schema.md)** - Database design
 
 ---
 

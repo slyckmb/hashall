@@ -4,6 +4,8 @@
 **Purpose:** Orchestrate safe rehome of seed payloads between stash and pool
 **Status:** Production - Demotion + Promotion (reuse-only) with qBittorrent relocation
 
+**Requirements:** See `docs/REQUIREMENTS.md` for the authoritative rehome requirements.
+
 ---
 
 ## Overview
@@ -35,116 +37,14 @@ Rehome is an external orchestration tool that moves seed payloads between tiers:
 
 ---
 
-## Architecture
+## Scope (Operator View)
 
-### Data Flow
+Rehome follows a **plan → apply** workflow and produces one of three decisions:
+- **BLOCK** when external consumers exist or promotion would require a blind copy
+- **REUSE** when identical payload already exists on the target device
+- **MOVE** when the payload must be relocated to the target device
 
-```
-User: rehome plan --demote --torrent-hash abc123...
-       ↓
-┌─────────────────────────────────────────┐
-│ 1. Query hashall catalog                │
-│    - Resolve torrent → payload          │
-│    - Get payload hash, location, size   │
-│    - Find sibling torrents              │
-└─────────────────────────────────────────┘
-       ↓
-┌─────────────────────────────────────────┐
-│ 2. Check for external consumers         │
-│    - Find all hardlinks for each file   │
-│    - Check if any outside seeding domain│
-│    - BLOCK if external consumers exist  │
-└─────────────────────────────────────────┘
-       ↓
-┌─────────────────────────────────────────┐
-│ 3. Check if payload exists on pool      │
-│    - Query by payload_hash              │
-│    - Decision: REUSE or MOVE            │
-└─────────────────────────────────────────┘
-       ↓
-┌─────────────────────────────────────────┐
-│ 4. Generate plan JSON                   │
-│    - Decision + reasons                 │
-│    - Source and target paths            │
-│    - All affected torrents              │
-│    - Steps to execute                   │
-└─────────────────────────────────────────┘
-```
-
-### Decision Logic
-
-```
-┌─────────────────────────────────────────┐
-│ Payload on stash, want to demote        │
-└──────────────┬──────────────────────────┘
-               │
-               ▼
-       ┌───────────────────┐
-       │ External consumers?│
-       └───────┬───────────┘
-               │
-         Yes   │   No
-      ┌────────┴────────┐
-      ▼                 ▼
-  ┌──────┐      ┌────────────────┐
-  │BLOCK │      │ Exists on pool? │
-  └──────┘      └────┬────────────┘
-                     │
-               Yes   │   No
-              ┌──────┴──────┐
-              ▼             ▼
-          ┌──────┐      ┌──────┐
-          │REUSE │      │MOVE  │
-          └──────┘      └──────┘
-```
-
----
-
-## Concepts
-
-### Payload Identity
-
-A **payload** is the on-disk content tree a torrent points to:
-- Single-file torrent → that file
-- Multi-file torrent → directory tree
-
-**Payload hash:** SHA256 of sorted (path, size, sha1) tuples
-**Payload siblings:** Multiple torrents with same payload_hash
-
-See `docs/DEVLOG.md` Stage 2 for payload identity details.
-
-### External Consumer
-
-A file has an **external consumer** if any hardlink points to a path outside the configured seeding domain root(s).
-
-**Example:**
-```
-Seeding domain: /stash/torrents/seeding/
-
-File: /stash/torrents/seeding/Movie.2024/video.mkv (inode 1234)
-Hardlinks:
-  - /stash/torrents/seeding/Movie.2024/video.mkv ✅ (inside domain)
-  - /media/exports/Movie.mkv ❌ (outside domain - EXTERNAL CONSUMER)
-
-Result: BLOCKED (cannot demote because external consumer exists)
-```
-
-### Demotion
-
-**Demotion** means:
-- A payload currently on **stash** (high-tier storage)
-- With **no external consumers**
-- Is moved to **pool** (lower-tier storage)
-- All sibling torrents are updated to point to pool location
-- No duplicate bytes are created
-
-### Promotion (Reuse-Only)
-
-**Promotion** means:
-- A payload currently on **pool** (lower-tier storage)
-- A matching payload **already exists on stash**
-- All sibling torrents are updated to point to stash location
-- **No blind copy**: if stash payload is missing, promotion is BLOCKED
+Decision logic and safety constraints are defined in `docs/REQUIREMENTS.md`.
 
 ---
 
@@ -418,6 +318,25 @@ rehome apply rehome-plan-tag-~noHL.json --dryrun
 rehome apply rehome-plan-tag-~noHL.json --force
 ```
 
+### Promotion (Reuse-Only)
+
+```bash
+# Promote a payload from pool → stash (reuse-only)
+rehome plan --promote \
+  --torrent-hash abc123def456 \
+  --seeding-root /pool/torrents/seeding \
+  --stash-device 50 \
+  --pool-device 49
+
+# Dry-run
+rehome apply rehome-plan-promote-abc123de.json --dryrun
+
+# Execute (optional cleanup)
+rehome apply rehome-plan-promote-abc123de.json --force \
+  --cleanup-source-views \
+  --cleanup-empty-dirs
+```
+
 ---
 
 ## Plan File Format
@@ -570,26 +489,12 @@ hashall payload sync
 
 ---
 
-## Known Limitations
+## Known Limitations (Current)
 
-### Current Constraints (Stage 4)
-
-1. **Demotion only** - No promotion (pool → stash)
-2. **Manual cleanup** - Stash-side cleanup requires user verification
-3. **No fuzzy matching** - Exact payload_hash match only
-4. **Basic view building** - Assumes torrent name = directory name
-5. **Sequential batch processing** - Batch plans execute serially, not in parallel
-
-### Future Enhancements (Stage 4+)
-
-- Batch demotion (process multiple torrents in one plan)
-- Promotion (pool → stash for active torrents)
-- Automatic stash cleanup after verification
-- Full qBittorrent integration (torrent relocation)
-- Smart view building (hardlink forests for complex layouts)
-- Fuzzy payload matching (similar but not identical content)
-- Web UI for plan review and approval
-- Undo/rollback capability
+- **No fuzzy matching**: Exact payload_hash match only
+- **Basic view building**: Assumes torrent name matches directory name
+- **Sequential batch processing**: Batch plans execute serially
+- **Automation not built-in**: No scheduler; run manually or via external automation
 
 ---
 
@@ -624,29 +529,12 @@ Blocking is the safe default. Users can remove external consumers if demotion is
 
 ## See Also
 
-- `docs/DEVLOG.md` - Stage 2 (Payload Identity), Stage 3 (Rehome)
-- `docs/schema.md` - Payload and torrent_instances tables
+- `docs/REQUIREMENTS.md` - Authoritative rehome requirements and constraints
+- `docs/project/AGENT-GUIDE.md` - Current status and code entry points
+- `docs/architecture/schema.md` - Payload and torrent_instances tables
 - `tests/test_rehome.py` - Test coverage and examples
 - `src/rehome/` - Implementation
 
 ---
 
 **Questions or issues?** File a GitHub issue with the `rehome` label.
-### Promotion (Reuse-Only)
-
-```bash
-# Promote a payload from pool → stash (reuse-only)
-rehome plan --promote \
-  --torrent-hash abc123def456 \
-  --seeding-root /pool/torrents/seeding \
-  --stash-device 50 \
-  --pool-device 49
-
-# Dry-run
-rehome apply rehome-plan-promote-abc123de.json --dryrun
-
-# Execute (optional cleanup)
-rehome apply rehome-plan-promote-abc123de.json --force \\
-  --cleanup-source-views \\
-  --cleanup-empty-dirs
-```

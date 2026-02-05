@@ -17,7 +17,7 @@ The term "link" better describes the core functionality: creating **hardlinks** 
 ### Changes Made
 
 #### Documentation
-- Renamed `docs/conductor-guide.md` → `docs/link-guide.md`
+- Renamed `docs/conductor-guide.md` → `docs/tooling/link-guide.md`
 - Updated all command references: `hashall conductor` → `hashall link`
 - Updated table names in schema docs: `conductor_plans` → `link_plans`, `conductor_actions` → `link_actions`
 - Updated all conceptual references to the subsystem from "conductor" to "link"
@@ -29,12 +29,12 @@ The term "link" better describes the core functionality: creating **hardlinks** 
 
 #### Files Modified
 - README.md
-- docs/architecture.md
-- docs/cli.md
-- docs/quick-reference.md
-- docs/schema.md
-- docs/unified-catalog-architecture.md
-- docs/link-guide.md (renamed from conductor-guide.md)
+- docs/architecture/architecture.md
+- docs/tooling/cli.md
+- docs/tooling/quick-reference.md
+- docs/architecture/schema.md
+- docs/architecture/architecture.md
+- docs/tooling/link-guide.md (renamed from conductor-guide.md)
 - scripts/link_plan.py (renamed from conductor_plan.py)
 - scripts/analyze_export.py
 
@@ -311,7 +311,7 @@ All tests use mocked database fixtures (no real qBittorrent or filesystem change
 
 #### Documentation
 
-Created `docs/REHOME.md`:
+Created `docs/tooling/REHOME.md`:
 - Overview and architecture
 - Payload identity and external consumer concepts
 - Command reference (`rehome plan`, `rehome apply`)
@@ -481,11 +481,11 @@ pytest tests/test_rehome.py -v
 - `src/rehome/planner.py`
 - `src/rehome/executor.py`
 - `tests/test_rehome.py`
-- `docs/REHOME.md`
+- `docs/tooling/REHOME.md`
 
 **Modified files**:
 - `pyproject.toml` (added rehome package + entry point + requests dependency)
-- `docs/DEVLOG.md` (this entry)
+- `docs/archive/project/DEVLOG.md` (this entry)
 
 ---
 
@@ -575,14 +575,14 @@ All tests use mocked HTTP responses (no live qBittorrent required).
 
 #### Documentation
 
-**Updated `docs/REHOME.md`**:
+**Updated `docs/tooling/REHOME.md`**:
 - Added "qBittorrent Integration" section documenting auth pattern and relocation flow
 - Documented batch modes: `--payload-hash` and `--tag`
 - Added workflow examples for batch demotion
 - Updated version to 0.2.0 (Stage 4)
 - Removed "stubbed qBittorrent" from limitations
 
-**Updated `docs/DEVLOG.md`**:
+**Updated `docs/archive/project/DEVLOG.md`**:
 - This entry
 
 ### Key Concepts
@@ -719,8 +719,8 @@ pytest tests/test_rehome.py tests/test_rehome_stage4.py -v
 - `src/rehome/executor.py` - Replaced stubs with real relocation, added rollback
 - `src/rehome/planner.py` - Added batch planning methods
 - `src/rehome/cli.py` - Added --payload-hash and --tag options, batch plan handling
-- `docs/REHOME.md` - Documented qBit integration and batch modes
-- `docs/DEVLOG.md` - This entry
+- `docs/tooling/REHOME.md` - Documented qBit integration and batch modes
+- `docs/archive/project/DEVLOG.md` - This entry
 
 **New files**:
 - `tests/test_rehome_stage4.py` - Tests for qBit integration and batch demotion
@@ -803,7 +803,7 @@ Added **promotion workflows** (pool → stash) with a strict **no-blind-copy** r
 
 #### Documentation
 
-**Updated `docs/REHOME.md`**:
+**Updated `docs/tooling/REHOME.md`**:
 - Added promotion section with no-blind-copy rule
 - Documented cleanup flags and behavior
 - Updated plan format with `direction` and `no_blind_copy`
@@ -1028,10 +1028,10 @@ For new users: Just start using the new `scan` command.
 ### Documentation Updates
 
 **Updated files:**
-- `docs/architecture.md` - Added filesystem UUID section, updated performance metrics
-- `docs/schema.md` - Documented new tables (devices, scan_roots, scan_sessions)
-- `docs/cli.md` - Updated scan command, added devices/stats commands
-- `docs/DEVLOG.md` - This entry
+- `docs/architecture/architecture.md` - Added filesystem UUID section, updated performance metrics
+- `docs/architecture/schema.md` - Documented new tables (devices, scan_roots, scan_sessions)
+- `docs/tooling/cli.md` - Updated scan command, added devices/stats commands
+- `docs/archive/project/DEVLOG.md` - This entry
 - `README.md` - Updated features, performance claims, workflows
 
 **Key documentation improvements:**
@@ -1064,10 +1064,10 @@ For new users: Just start using the new `scan` command.
 - `src/hashall/scan.py` - Incremental scan logic
 - `src/hashall/cli.py` - Added devices/stats commands
 - `src/hashall/model.py` - Schema changes
-- `docs/architecture.md` - Updated with filesystem UUID section
-- `docs/schema.md` - New table documentation
-- `docs/cli.md` - New commands
-- `docs/DEVLOG.md` - This entry
+- `docs/architecture/architecture.md` - Updated with filesystem UUID section
+- `docs/architecture/schema.md` - New table documentation
+- `docs/tooling/cli.md` - New commands
+- `docs/archive/project/DEVLOG.md` - This entry
 - `README.md` - Performance claims, features, workflows
 
 ### Testing

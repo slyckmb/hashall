@@ -297,36 +297,28 @@ hashall link analyze [OPTIONS]
 ```
 
 **Options:**
-- `--device PATH` - Analyze specific device only
-- `--cross-device` - Include cross-device duplicates
-- `--min-size BYTES` - Minimum file size (future)
-- `--limit N` - Show top N opportunities
+- `--db PATH` - SQLite DB path (default: `~/.hashall/catalog.db`)
+- `--device TEXT` - Device alias or device_id to analyze (required)
+- `--min-size BYTES` - Minimum file size in bytes
+- `--format {text|json}` - Output format
 
 **Example:**
 ```bash
-# Analyze single device
-hashall link analyze --device /pool
-
-# Analyze all devices
-hashall link analyze --cross-device
-
-# Quick summary
-hashall link analyze --limit 10
+hashall link analyze --device pool
+hashall link analyze --device stash --min-size 1048576
+hashall link analyze --device 49 --format json
 ```
 
 **Output:**
 ```
-📊 Registered Devices:
-  /pool   (device 49) - 50,000 files, 500 GB
-  /stash  (device 50) - 30,000 files, 300 GB
+🔍 Analyzing device: stash
+   Mount point: /stash/media/torrents/archive
+   Total files: 4,810
 
-🔍 Same-device deduplication opportunities:
-  /pool:
-    abc123... - 3 inodes, 5 paths, save 10 GB
-    def456... - 2 inodes, 3 paths, save 5 GB
-
-🌐 Cross-device duplicates:
-  xyz789... - 2.5 GB × 3 copies across 2 devices
+📊 Deduplication Analysis:
+   Duplicate groups found: 101
+   Total duplicates: 205 files
+   Potential space savings: 0.01 GB
 ```
 
 ---
@@ -343,18 +335,16 @@ hashall link plan NAME [OPTIONS]
 - `NAME` - Human-readable plan name
 
 **Options:**
-- `--device PATH` - Target specific device
-- `--cross-device` - Include cross-device analysis
-- `--same-device` - Include same-device opportunities (default: true)
-- `--min-savings BYTES` - Minimum savings threshold (future)
+- `--db PATH` - SQLite DB path (default: `~/.hashall/catalog.db`)
+- `--device TEXT` - Device alias or device_id to plan for (required)
+- `--min-size BYTES` - Minimum file size in bytes
+- `--dry-run` - Generate plan without saving to database
 
 **Example:**
 ```bash
-# Plan for single device
-hashall link plan "Monthly /pool dedupe" --device /pool
-
-# Cross-device audit (informational)
-hashall link plan "Cross-device audit" --cross-device --same-device=false
+hashall link plan "Monthly /pool dedupe" --device pool
+hashall link plan "Stash cleanup" --device stash --min-size 1048576
+hashall link plan "Test plan" --device 49 --dry-run
 ```
 
 **Output:**
@@ -379,13 +369,16 @@ hashall link show-plan PLAN_ID [OPTIONS]
 - `PLAN_ID` - Plan to display
 
 **Options:**
-- `--limit N` - Show top N actions (default: 20)
-- `--format {text|json}` - Output format (future)
+- `--db PATH` - SQLite DB path (default: `~/.hashall/catalog.db`)
+- `--limit N` - Number of actions to show (0 for all)
+- `--format {text|json}` - Output format
 
 **Example:**
 ```bash
 hashall link show-plan 1
 hashall link show-plan 1 --limit 50
+hashall link show-plan 1 --limit 0
+hashall link show-plan 1 --format json
 ```
 
 **Output:**
@@ -409,6 +402,26 @@ Top 20 Actions:
 
 ---
 
+### `link list-plans`
+
+List all deduplication plans.
+
+```bash
+hashall link list-plans [OPTIONS]
+```
+
+**Options:**
+- `--db PATH` - SQLite DB path (default: `~/.hashall/catalog.db`)
+- `--status {pending|in_progress|completed|failed|cancelled}` - Filter by status
+
+**Example:**
+```bash
+hashall link list-plans
+hashall link list-plans --status pending
+```
+
+---
+
 ### `link execute`
 
 Execute a deduplication plan.
@@ -421,16 +434,26 @@ hashall link execute PLAN_ID [OPTIONS]
 - `PLAN_ID` - Plan to execute
 
 **Options:**
-- `--dry-run` - Preview without making changes (default)
-- `--force` - Actually execute (DANGEROUS - review first!)
+- `--db PATH` - SQLite DB path (default: `~/.hashall/catalog.db`)
+- `--dry-run` - Simulate execution without making changes
+- `--verify {fast|paranoid|none}` - Verification mode
+- `--no-backup` - Skip creating .bak backups (faster, less safe)
+- `--limit N` - Maximum number of actions to execute (0 for all)
+- `--yes` - Skip confirmation prompt
 
 **Example:**
 ```bash
-# Always dry-run first!
+# Always dry-run first
 hashall link execute 1 --dry-run
 
-# Execute for real
-hashall link execute 1 --force
+# Execute with default verification (fast)
+hashall link execute 1
+
+# Paranoid verification (full hash)
+hashall link execute 1 --verify paranoid
+
+# Maximum speed (no verification, no backups)
+hashall link execute 1 --verify none --no-backup --yes
 ```
 
 **Output (dry-run):**
@@ -465,44 +488,62 @@ HARDLINK: /pool/backup/movies/film.mkv
 
 ---
 
-### `link status`
+### `payload sync`
 
-Show catalog and device status.
+Sync torrent instances from qBittorrent and map to payloads.
 
 ```bash
-hashall link status [OPTIONS]
+hashall payload sync [OPTIONS]
 ```
 
 **Options:**
-- `--device PATH` - Show specific device only
-- `--verbose` - Show detailed statistics
+- `--db PATH` - SQLite DB path (default: `~/.hashall/catalog.db`)
+- `--qbit-url URL` - qBittorrent URL (default: `http://localhost:8080`)
+- `--qbit-user USER` - qBittorrent username (default: `admin`)
+- `--qbit-pass PASS` - qBittorrent password
+- `--category TEXT` - Filter torrents by category
+- `--tag TEXT` - Filter torrents by tag
 
 **Example:**
 ```bash
-hashall link status
-hashall link status --device /pool
+hashall payload sync
+hashall payload sync --tag ~noHL
 ```
 
-**Output:**
+---
+
+### `payload show`
+
+Display payload information for a torrent hash.
+
+```bash
+hashall payload show [OPTIONS] TORRENT_HASH
 ```
-📊 Hashall Catalog Status
 
-Devices:
-  /pool   (device 49)
-    Files: 50,000
-    Size: 500 GB
-    Hardlink groups: 1,200 (saving 25 GB)
-    Last scan: 2026-01-31 10:30:00
+**Options:**
+- `--db PATH` - SQLite DB path (default: `~/.hashall/catalog.db`)
 
-  /stash  (device 50)
-    Files: 30,000
-    Size: 300 GB
-    Hardlink groups: 800 (saving 15 GB)
-    Last scan: 2026-01-31 09:15:00
+**Example:**
+```bash
+hashall payload show abc123def456
+```
 
-Deduplication Opportunities:
-  Same-device: 45.2 GB saveable
-  Cross-device: 12.3 GB duplicate content
+---
+
+### `payload siblings`
+
+List all torrent hashes that map to the same payload.
+
+```bash
+hashall payload siblings [OPTIONS] TORRENT_HASH
+```
+
+**Options:**
+- `--db PATH` - SQLite DB path (default: `~/.hashall/catalog.db`)
+
+**Example:**
+```bash
+hashall payload siblings abc123def456
 ```
 
 ---
@@ -562,7 +603,7 @@ hashall link show-plan <plan_id>
 
 # 5. Execute
 hashall link execute <plan_id> --dry-run
-hashall link execute <plan_id> --force
+hashall link execute <plan_id>
 ```
 
 ### Initial Setup
@@ -573,19 +614,8 @@ hashall scan /pool
 hashall scan /stash
 hashall scan /backup
 
-# Check status
-hashall link status
-```
-
-### Cross-Device Audit
-
-```bash
-# Find duplicates across devices
-hashall link analyze --cross-device
-
-# Create informational report
-hashall link plan "Audit 2026-01" --cross-device
-hashall link show-plan <plan_id>
+# Check catalog stats
+hashall stats
 ```
 
 ---
@@ -616,10 +646,10 @@ source ~/.hashall-completion.bash
 
 ## See Also
 
-- `docs/link-guide.md` - Complete link workflow
-- `docs/architecture.md` - How hashall works
-- `docs/schema.md` - Database schema
-- `docs/quick-reference.md` - Cheat sheet
+- `docs/tooling/link-guide.md` - Complete link workflow
+- `docs/architecture/architecture.md` - How hashall works
+- `docs/architecture/schema.md` - Database schema
+- `docs/tooling/quick-reference.md` - Cheat sheet
 
 ---
 

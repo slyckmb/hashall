@@ -254,8 +254,8 @@ Based on benchmark results, here are recommended optimizations:
 
 ## Related Documentation
 
-- [Architecture](../docs/architecture.md) - Overall system design
-- [CLI Reference](../docs/cli.md) - Command-line usage
+- [Architecture](../docs/architecture/architecture.md) - Overall system design
+- [CLI Reference](../docs/tooling/cli.md) - Command-line usage
 - [Scan Implementation](../src/hashall/scan.py) - Source code
 
 ## Contributing

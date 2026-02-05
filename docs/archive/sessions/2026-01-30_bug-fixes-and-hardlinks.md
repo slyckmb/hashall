@@ -1,7 +1,7 @@
 # Hashall Coding Session — Completion Summary (2026-01-30)
 
 > **Note:** This is a session summary document, not a reference document.
-> For current architecture, see `docs/architecture.md`.
+> For current architecture, see `docs/architecture/architecture.md`.
 **Date:** 2026-01-30
 **Session:** Main branch reliability improvements
 **Baseline:** 155d0ff (merge: dev/smart-verify into main)

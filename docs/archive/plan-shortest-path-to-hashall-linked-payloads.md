@@ -52,9 +52,9 @@ Stop calling it “Conductor”. Make the CLI reflect reality: it’s a **hardli
 
 ### Docs to Update
 
-- `docs/cli.md` (command rename + examples)
-- `docs/conductor-guide.md` → rename to `docs/link-guide.md` (or keep filename but content updated)
-- `docs/architecture.md` (component naming + roles)
+- `docs/tooling/cli.md` (command rename + examples)
+- `docs/conductor-guide.md` → rename to `docs/tooling/link-guide.md` (or keep filename but content updated)
+- `docs/architecture/architecture.md` (component naming + roles)
 
 ### Tests
 
@@ -133,10 +133,10 @@ Add tables (names can vary, but keep semantics):
 
 ### Docs to Update
 
-- `docs/architecture.md` (payload concept + tables + flow)
-- `docs/schema.md` (new tables)
-- `docs/cli.md` (new commands + examples)
-- `docs/quick-reference.md` (short recipes)
+- `docs/architecture/architecture.md` (payload concept + tables + flow)
+- `docs/architecture/schema.md` (new tables)
+- `docs/tooling/cli.md` (new commands + examples)
+- `docs/tooling/quick-reference.md` (short recipes)
 
 ### Tests
 
@@ -223,9 +223,9 @@ Start simple:
 
 ### Docs to Update
 
-- New: `docs/REHOME.md` in rehome repo
+- New: `docs/tooling/REHOME.md` in rehome repo
 - Update hashall docs to mention external orchestrator integration:
-  - `docs/architecture.md` and/or `docs/quick-reference.md`
+  - `docs/architecture/architecture.md` and/or `docs/tooling/quick-reference.md`
 
 ### Tests
 
@@ -379,7 +379,7 @@ Commits:
 Each stage can be handed to a separate CLI agent using the same structure:
 
 1. Read current docs:
-   - hashall: `docs/architecture.md`, `docs/schema.md`, `docs/cli.md`
+   - hashall: `docs/architecture/architecture.md`, `docs/architecture/schema.md`, `docs/tooling/cli.md`
 2. Implement stage scope only (no extra refactors).
 3. Update docs as specified.
 4. Add/extend tests.
@@ -387,7 +387,7 @@ Each stage can be handed to a separate CLI agent using the same structure:
    - WHAT changed
    - WHY (tie to stage objective)
    - NOTES on behavior compatibility / risk
-6. Provide a short “Next agent” note in `docs/DEVLOG.md` (or repo equivalent).
+6. Provide a short “Next agent” note in `docs/archive/project/DEVLOG.md` (or repo equivalent).
 
 ---
 

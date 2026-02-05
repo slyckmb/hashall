@@ -1,6 +1,6 @@
 # Hashall Link Guide
 **Version:** 0.5.0 (Unified Catalog Model)
-**Last Updated:** 2026-01-31
+**Last Updated:** 2026-02-04
 
 ---
 
@@ -9,7 +9,6 @@
 **Link** is hashall's same-device hardlink planning and execution system. It analyzes your file catalog to find:
 - Duplicate files that can be hardlinked
 - Existing hardlinks (already optimized)
-- Cross-device duplicates (informational)
 - Space-saving opportunities
 
 **Key principle:** Link never modifies files without explicit approval. All operations go through a plan→review→execute workflow.
@@ -29,18 +28,7 @@
 
 **Result:** Link can hardlink these to save 5GB.
 
-### 2. Cross-Device Analysis
-**Scenario:** You want to know what files exist on multiple devices.
-
-**Example:**
-```
-/pool/archive/file.mp4   (device 49)
-/stash/archive/file.mp4  (device 50) ← same content, different device
-```
-
-**Result:** Link identifies the duplicate but flags it as cross-device (can't hardlink, but you can delete one copy).
-
-### 3. Hardlink Verification
+### 2. Hardlink Verification
 **Scenario:** You want to verify existing hardlinks are intact.
 
 **Example:**
@@ -71,23 +59,18 @@ This builds the unified catalog at `~/.hashall/catalog.db`.
 ```bash
 # Analyze a single device for deduplication
 hashall link analyze --device /pool
-
-# Analyze across multiple devices
-hashall link analyze --cross-device
 ```
 
 **Output example:**
 ```
-📊 Registered Devices:
-  /pool           (device 49) - 50,000 files, 500 GB
-  /stash          (device 50) - 30,000 files, 300 GB
+🔍 Analyzing device: pool
+   Mount point: /pool
+   Total files: 50,000
 
-🔍 Same-device deduplication opportunities:
-  /pool:
-    abc123... - 3 inodes, 5 paths, save 10 GB
-
-🌐 Cross-device duplicate files:
-  def456... - 2.5 GB × 3 copies across 2 devices
+📊 Deduplication Analysis:
+   Duplicate groups found: 250
+   Total duplicates: 430 files
+   Potential space savings: 45.2 GB
 ```
 
 ### Step 3: Create a Plan
@@ -95,9 +78,6 @@ hashall link analyze --cross-device
 ```bash
 # Generate plan for single device
 hashall link plan "Monthly /pool dedupe" --device /pool
-
-# Generate plan across devices
-hashall link plan "Cross-device analysis" --cross-device
 ```
 
 **Output:**
@@ -161,8 +141,6 @@ HARDLINK: /pool/backup/movies/film.mkv
 ═══════════════════════════════════════════════════
 ✅ Executed: 248
 ❌ Failed: 2
-
-See /tmp/link_plan_1_execution.log for details
 ```
 
 ---
@@ -174,14 +152,17 @@ See /tmp/link_plan_1_execution.log for details
 
 **Why:** Hardlinks only work within a single filesystem.
 
-**What it does:** Cross-device duplicates are flagged for manual review or deletion, never auto-hardlinked.
+**What it does:** The executor blocks any cross-filesystem hardlink attempt.
 
-### 2. SHA1 Collision Detection
-**Guarantee:** Before hardlinking, link verifies SHA1 + size match.
+### 2. Verification Modes
+**Guarantee:** Link verifies file content before linking, unless you explicitly disable verification.
 
-**Why:** Protect against hash collisions (extremely rare but theoretically possible).
+**Why:** Protect against files changing between plan and execution.
 
-**What it does:** Rejects any mismatches as potential collisions.
+**What it does:**
+- **fast** (default): size/mtime checks + sampled hash of first/middle/last 1MB
+- **paranoid**: full SHA1 hash of the entire file
+- **none**: skips verification for maximum speed (use with care)
 
 ### 3. Existing Hardlink Preservation
 **Guarantee:** Never attempts to hardlink files that are already hardlinked.
@@ -197,85 +178,25 @@ See /tmp/link_plan_1_execution.log for details
 
 **What it does:**
 ```bash
-mv target.mkv target.mkv.bak
+ln target.mkv target.mkv.bak
+rm target.mkv
 ln source.mkv target.mkv
 # If success: rm target.mkv.bak
-# If failure: mv target.mkv.bak target.mkv
+# If failure: ln target.mkv.bak target.mkv
 ```
 
-### 5. Dry-Run by Default
-**Guarantee:** All operations preview changes before execution.
+### 5. Explicit Execution & Confirmation
+**Guarantee:** No filesystem changes occur unless you run `link execute` and confirm.
 
 **Why:** Let users review and approve before making changes.
 
-**What it does:** Generates plan file, requires `--force` or explicit execute command.
+**What it does:** Use `--dry-run` to preview, then run without `--dry-run` and confirm (or pass `--yes`).
 
 ---
 
 ## Command Reference
 
-### `hashall link analyze`
-Find deduplication opportunities.
-
-```bash
-hashall link analyze [--device PATH] [--cross-device]
-```
-
-**Options:**
-- `--device PATH` - Analyze single device
-- `--cross-device` - Include cross-device duplicates
-
-### `hashall link plan`
-Create a deduplication plan.
-
-```bash
-hashall link plan NAME [--device PATH] [--cross-device] [--same-device]
-```
-
-**Options:**
-- `NAME` - Human-readable plan name
-- `--device PATH` - Target single device (default: all)
-- `--same-device` - Include same-device hardlink opportunities (default: true)
-- `--cross-device` - Include cross-device analysis (default: false)
-
-**Returns:** Plan ID for later reference
-
-### `hashall link show-plan`
-Display plan details.
-
-```bash
-hashall link show-plan PLAN_ID [--limit N]
-```
-
-**Options:**
-- `PLAN_ID` - Plan to display
-- `--limit N` - Show top N actions (default: 20)
-
-### `hashall link execute`
-Execute a plan.
-
-```bash
-hashall link execute PLAN_ID [--dry-run] [--force]
-```
-
-**Options:**
-- `PLAN_ID` - Plan to execute
-- `--dry-run` - Preview without making changes (default)
-- `--force` - Actually execute (DANGEROUS - review plan first!)
-
-### `hashall link status`
-Show catalog status.
-
-```bash
-hashall link status [--device PATH]
-```
-
-Displays:
-- Registered devices
-- File counts
-- Total space
-- Hardlink statistics
-- Potential savings
+For full CLI options and flags, see `docs/tooling/cli.md`.
 
 ---
 
@@ -303,25 +224,7 @@ hashall link execute 1 --dry-run
 hashall link execute 1
 ```
 
-### Workflow 2: Cross-Device Audit
-
-```bash
-# 1. Scan all devices
-hashall scan /pool
-hashall scan /stash
-hashall scan /backup
-
-# 2. Find cross-device duplicates
-hashall link analyze --cross-device
-
-# 3. Export report
-hashall link plan "Cross-device audit" --cross-device --same-device=false
-
-# 4. Review (won't hardlink, just informs)
-hashall link show-plan 2
-```
-
-### Workflow 3: Verify Existing Hardlinks
+### Workflow 2: Verify Existing Hardlinks
 
 ```bash
 # 1. Scan
@@ -339,15 +242,15 @@ hashall link show-plan 3 | grep "NOOP"
 
 ## Troubleshooting
 
-### "Cross-device hardlink attempt detected"
-**Cause:** Plan tried to hardlink across devices (should never happen - safety check).
+### "Cross-filesystem hardlink rejected"
+**Cause:** The files are on different filesystems, so hardlinks are not possible.
 
-**Solution:** This is a bug. Report it. Link should flag cross-device as informational only.
+**Solution:** Re-scan and re-plan for a single device. The executor will always block cross-filesystem links.
 
-### "SHA1 mismatch despite matching hash"
-**Cause:** Possible hash collision or file corruption.
+### "Verification mismatch"
+**Cause:** File content or metadata changed between planning and execution.
 
-**Solution:** Do NOT proceed. Investigate the files manually. This is extremely rare.
+**Solution:** Re-scan and re-create the plan. If you still see mismatches, run with `--verify paranoid` for certainty.
 
 ### "Target file missing during execution"
 **Cause:** File was deleted between plan creation and execution.
@@ -382,10 +285,8 @@ hashall link show-plan 3 | grep "NOOP"
 - Verify your dedup strategy is working
 - No action needed = good!
 
-### 5. Monitor Cross-Device Duplicates
-- They can't be auto-deduplicated
-- Manual decision required (delete? consolidate?)
-- Track to avoid unnecessary copies
+### 5. Cross-Device Duplicates (Not in Sprint 1)
+Link only plans and executes within a single device in Sprint 1.
 
 ### 6. Keep Catalog Updated
 - Scan after major file operations
@@ -396,26 +297,23 @@ hashall link show-plan 3 | grep "NOOP"
 
 ## Advanced Topics
 
-### Custom Filters (Future)
-Future versions will support:
+### Custom Filters
+Currently supported:
 ```bash
-hashall link plan "Large files only" --min-size 1GB
+hashall link plan "Large files only" --device /pool --min-size 1073741824
+```
+
+Planned for future versions:
+```bash
 hashall link plan "Recent files" --mtime-since "2026-01"
 hashall link plan "Specific paths" --include "*/media/*"
 ```
 
 ### Automated Execution (Future)
-Future versions will support:
-```bash
-hashall link auto-execute --weekly --device /pool --min-savings 10GB
-```
+Out of scope for now. Track in `docs/project/DEVELOPMENT-ROADMAP.md`.
 
 ### Reporting (Future)
-Future versions will support:
-```bash
-hashall link report --format json --out report.json
-hashall link report --format html --out report.html
-```
+Out of scope for now. Track in `docs/project/DEVELOPMENT-ROADMAP.md`.
 
 ---
 
@@ -432,16 +330,16 @@ HAVING inode_count > 1;
 ```
 
 **Step 2: For Each Group**
-- Pick "canonical" file (lexically first path)
+- Pick "canonical" file (lowest inode, then shortest path, then alphabetical)
 - Plan `ln` operations for all other inodes
 - Calculate space savings
 
 **Step 3: Execute Plan**
 ```bash
 for action in plan:
-    backup(action.target)
+    verify(action.source, action.target)
+    backup(action.target)  # .bak hardlink
     ln(action.source, action.target)
-    verify(action.target)
     cleanup(backup)
 ```
 
@@ -498,10 +396,10 @@ hashall link execute 1
 
 ## See Also
 
-- `docs/unified-catalog-architecture.md` - How the catalog works
-- `docs/schema.md` - Database schema details
-- `docs/symlinks-and-bind-mounts.md` - How symlinks are handled
-- `docs/cli.md` - Complete CLI reference
+- `docs/architecture/architecture.md` - How the catalog works
+- `docs/architecture/schema.md` - Database schema details
+- `docs/tooling/symlinks-and-bind-mounts.md` - How symlinks are handled
+- `docs/tooling/cli.md` - Complete CLI reference
 
 ---
 
