@@ -1,6 +1,6 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 import unittest
-from src.hashall import diff
+from hashall import diff
 
 class TestDiffLogic(unittest.TestCase):
 
@@ -37,6 +37,11 @@ class TestDiffLogic(unittest.TestCase):
         result = diff.diff_sessions(self.src_files, self.dest_files)
         self.assertNotIn("/hardlink2", result["changed"])
         self.assertNotIn("/hardlink2", result["added"])
+
+    def test_hardlink_not_removed(self):
+        # Same inode+device present under different path should not be removed
+        result = diff.diff_sessions(self.src_files, self.dest_files)
+        self.assertNotIn("/hardlink1", result["removed"])
 
     def test_device_id_mismatch_is_change(self):
         self.dest_files["/alpha.txt"]["device_id"] = 9  # mismatch

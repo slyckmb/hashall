@@ -12,7 +12,8 @@
 **Core**
 - `devices`: filesystem identity (fs_uuid) + device registry
 - `scan_roots`: scanned roots per filesystem (scoped deletion safety)
-- `files_<device_id>`: per-device files (path, size, mtime, sha1, inode, status)
+- `files_<device_id>`: per-device files (path, size, mtime, sha1, sha256, inode, status)
+  - Indexes: sha1, sha256, inode, status
 
 **Aggregates**
 - `hardlink_groups`: inode groups within a device
@@ -34,7 +35,7 @@
 ## Invariants
 
 - One table per device (`files_<device_id>`) is the hardlink boundary.
-- File hash is **SHA1** today; SHA256 migration is pending.
+- File hash is **SHA1 + SHA256** during migration; SHA256 is the target.
 - Payload hash is **SHA256 over (path, size, sha1)**; NULL if any SHA1 missing.
 
 ---
@@ -44,3 +45,4 @@
 - `src/hashall/migrations/0006_add_payload_tables.sql`
 - `src/hashall/migrations/0007_incremental_scanning.sql`
 - `src/hashall/migrations/0008_add_link_tables.sql`
+- `src/hashall/migrations/0009_sha256_backfill.sql`

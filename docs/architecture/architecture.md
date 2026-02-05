@@ -1,6 +1,6 @@
 # Hashall Architecture
 **Model:** Unified Catalog (as of v0.5.0)
-**Last Updated:** 2026-02-01
+**Last Updated:** 2026-02-05
 
 ---
 
@@ -59,7 +59,7 @@ User: hashall scan /pool
        ↓
 ┌──────────────────────────────────────┐
 │ For each file:                        │
-│ - Compute SHA1 hash                   │
+│ - Compute SHA1 (+ SHA256) hash        │
 │ - Get inode, device_id, size, mtime   │
 │ - Check if exists in catalog          │
 └──────────────────────────────────────┘
@@ -89,7 +89,7 @@ User: hashall link analyze
        ↓
 ┌──────────────────────────────────────┐
 │ Query catalog:                        │
-│ - Group files by SHA1                 │
+│ - Group files by SHA1 (SHA256 optional) │
 │ - Count unique (device_id, inode)     │
 │ - Identify duplicates vs hardlinks    │
 └──────────────────────────────────────┘
@@ -450,7 +450,7 @@ hashall scan /pool/torrents
 
 ```
 scan_sessions (scan_id, root_path, started_at, treehash)
-files (path, scan_session_id, size, mtime, sha1, inode, device_id)
+files (path, scan_session_id, size, mtime, sha1, sha256, inode, device_id)
 ```
 
 **Problems:**
@@ -463,7 +463,7 @@ files (path, scan_session_id, size, mtime, sha1, inode, device_id)
 
 ```
 devices (device_id, mount_point, ...)
-files_<device_id> (path, size, mtime, sha1, inode, ...)
+files_<device_id> (path, size, mtime, sha1, sha256, inode, ...)
 ```
 
 **Benefits:**
@@ -479,14 +479,14 @@ files_<device_id> (path, size, mtime, sha1, inode, ...)
 ### Incremental Scan Performance
 
 **Initial Scan** (all files hashed):
-- Sequential: ~20-30 files/s (CPU-bound by SHA1)
+- Sequential: ~20-30 files/s (CPU-bound by full hashing)
 - Parallel (8 workers): ~100-150 files/s (4-5x speedup)
 
 **Incremental Rescan** (unchanged files skipped):
 - Sequential: ~500-1000 files/s (metadata-only checks)
 - Parallel (8 workers): ~2000-5000 files/s (10-100x faster than initial scan)
 
-**Key insight:** Incremental scanning skips SHA1 computation for unchanged files (same size+mtime), making rescans dramatically faster.
+**Key insight:** Incremental scanning skips full hash computation for unchanged files (same size+mtime), making rescans dramatically faster.
 
 ### Real-World Benchmarks
 

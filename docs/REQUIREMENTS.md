@@ -1,7 +1,7 @@
 # Seed Data Management System - Requirements & Implementation
 
 **Version:** 1.0 (Living Document)
-**Last Updated:** 2026-02-02
+**Last Updated:** 2026-02-05
 **Status:** Active Development - Core features implemented, refinements in progress
 
 ---
@@ -442,7 +442,7 @@ Does identical payload exist on stash?
 - Never across devices (hardlinks cannot span filesystems)
 
 **Detection:**
-- hashall scans files, computes SHA256 hashes
+- hashall scans files, computes SHA1 (and SHA256 during migration)
 - Groups files by hash within same device_id
 - Identifies files with same hash but different inodes (duplicates)
 
@@ -466,7 +466,7 @@ Does identical payload exist on stash?
 **Goal:** Informational awareness, eventual elimination
 
 **Detection:**
-- hashall queries for files with same SHA256 across different device_ids
+- hashall queries for files with same hash across different device_ids (SHA1 today)
 - Reports duplicates but does NOT automatically deduplicate (cannot hardlink across devices)
 
 **Long-Term Goal:**
@@ -543,7 +543,7 @@ catalog.db
 
 ### 7.2 Hash Algorithm Standard
 
-**Decision: SHA256 for all hashing operations**
+**Decision: SHA256 for file hashing (dual-write during migration)**
 
 **Rationale:**
 - SHA1 is cryptographically deprecated (collision attacks exist)
@@ -553,17 +553,16 @@ catalog.db
 - Better collision detection for large file sets
 
 **Implementation:**
-- **File hashes:** SHA256 (with fast-hash for speed)
-  - fast-hash: Quick initial scan using partial file content
-  - Full SHA256 computed for changed/new files
+- **File hashes:** SHA1 + SHA256 during migration (dual-write)
+  - fast-hash: Quick initial scan using partial file content (SHA1 sample)
+  - Full SHA1 + SHA256 computed for changed/new files (or upgrade mode)
 - **Payload hashes:** SHA256 of sorted `(path, size, sha1)` tuples
 - **Incremental optimization:** Skip rehashing if file unchanged (mtime + size check)
 
-**Migration Note:**
-- Current implementation uses SHA1 (legacy)
-- Migration to SHA256 planned
-- CLI agents should implement new features with SHA256
-- Migration tool needed to convert existing catalog entries
+**Migration Note (current):**
+- SHA1 remains for payload identity inputs
+- SHA256 is added to per-device tables and backfilled
+- CLI includes `sha256-backfill` and `sha256-verify` for migration + spot-checks
 
 ### 7.3 Incremental Scanning
 
@@ -573,8 +572,8 @@ catalog.db
 
 **Initial Scan:**
 1. Walk filesystem tree
-2. Compute SHA1 for every file (SHA256 after migration)
-3. Store: path, inode, device_id, size, mtime, sha1
+2. Compute SHA1 + SHA256 for every file (or upgrade later)
+3. Store: path, inode, device_id, size, mtime, sha1, sha256
 4. Detect filesystem UUID for persistent device identity
 5. Performance: ~20-30 files/sec (sequential), ~100-150 files/sec (parallel 8 workers)
 
@@ -583,9 +582,9 @@ catalog.db
 2. For each file:
    - Check if exists in catalog (by path + device_id)
    - Compare size + mtime
-   - If unchanged → skip hash computation, use cached SHA1
-   - If changed → recompute SHA1, update catalog
-   - If new → compute SHA1, insert into catalog
+   - If unchanged → skip hash computation, use cached hashes
+   - If changed → recompute SHA1 + SHA256, update catalog
+   - If new → compute SHA1 + SHA256, insert into catalog
 3. Detect deletions (files in catalog but not on filesystem, scoped to scan root)
 4. Performance: ~500-1000 files/sec (sequential), ~2000-5000 files/sec (parallel)
 
@@ -877,7 +876,7 @@ The system must be:
 - ✅ Unified catalog model with per-device tables
 - ✅ Filesystem UUID tracking (persistent across reboots)
 - ✅ Incremental scanning (10-100x speedup on rescans)
-- ✅ SHA1 file hashing (SHA256 migration planned)
+- ✅ Dual-write file hashing (SHA1 + SHA256)
 - ✅ Parallel scanning (multi-threaded hashing, 4-5x faster)
 - ✅ Scoped deletion detection
 - ✅ Hardlink tracking (inode + device_id)
@@ -911,14 +910,14 @@ The system must be:
 
 ### 11.2 In Progress 🚧
 
-- 🚧 SHA256 migration (replace SHA1 for file hashes)
+- 🚧 Final cutover to SHA256-only file hashing (post-backfill)
 - 🚧 Subtree treehash for fast directory comparison
 - 🚧 Advanced torrent view building (complex layouts, renamed files)
 
 ### 11.3 Planned 📋
 
 **hashall:**
-- 📋 Migration tool (SHA1 → SHA256 catalog conversion)
+- 📋 SHA256-only payload identity (replace SHA1 input once migration complete)
 - 📋 Web UI for browsing catalog
 - 📋 Automated deduplication schedules
 - 📋 Advanced filters (size, date, patterns)

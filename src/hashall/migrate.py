@@ -1,7 +1,7 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 import sqlite3
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, UTC
 
 def ensure_migration_table(conn):
     conn.execute("""
@@ -32,7 +32,10 @@ def apply_migrations(db_path: Path, migrations_path: Path):
         try:
             print(f"🔧 Applying migration: {name}")
             conn.executescript(sql)
-            conn.execute("INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)", (name, datetime.utcnow().isoformat()))
+            conn.execute(
+                "INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)",
+                (name, datetime.now(UTC).isoformat())
+            )
             conn.commit()
         except sqlite3.OperationalError as e:
             msg = str(e).lower()

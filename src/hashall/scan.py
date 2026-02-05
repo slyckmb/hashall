@@ -39,7 +39,7 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
         root_path: Root path to scope the query to
 
     Returns:
-        dict: {path: {size, mtime, quick_hash, sha1}} for files under root_path
+        dict: {path: {size, mtime, quick_hash, sha1, sha256}} for files under root_path
 
     Edge cases:
         - Mount point not found -> return empty dict
@@ -70,26 +70,27 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
     # Special case: if rel_root is ".", get all files (root == mount point)
     if rel_root_str == ".":
         cursor.execute(f"""
-            SELECT path, size, mtime, quick_hash, sha1
+            SELECT path, size, mtime, quick_hash, sha1, sha256
             FROM {table_name}
             WHERE status = 'active'
         """)
     else:
         # Use both exact match and prefix match to get all files under the path
         cursor.execute(f"""
-            SELECT path, size, mtime, quick_hash, sha1
+            SELECT path, size, mtime, quick_hash, sha1, sha256
             FROM {table_name}
             WHERE status = 'active' AND (path = ? OR path LIKE ?)
         """, (rel_root_str, f"{rel_root_str}/%"))
 
-    # Build dict: {path: {size, mtime, quick_hash, sha1}}
+    # Build dict: {path: {size, mtime, quick_hash, sha1, sha256}}
     existing = {}
     for row in cursor.fetchall():
         existing[row[0]] = {
             'size': row[1],
             'mtime': row[2],
             'quick_hash': row[3],
-            'sha1': row[4]
+            'sha1': row[4],
+            'sha256': row[5]
         }
 
     return existing
@@ -122,6 +123,26 @@ def compute_sha1(file_path):
     return h.hexdigest()
 
 
+def compute_sha256(file_path):
+    """Compute full SHA256 hash of entire file."""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(8192):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_full_hashes(file_path):
+    """Compute full SHA1 + SHA256 hashes in a single pass."""
+    h1 = hashlib.sha1()
+    h256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(8192):
+            h1.update(chunk)
+            h256.update(chunk)
+    return h1.hexdigest(), h256.hexdigest()
+
+
 def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]:
     """
     Find collision groups where multiple files share the same quick_hash.
@@ -132,18 +153,19 @@ def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]
 
     Returns:
         Dict mapping quick_hash to list of file records with that hash.
-        Each file record is a dict with keys: path, size, mtime, quick_hash, sha1
+        Each file record is a dict with keys: path, size, mtime, quick_hash, sha1, sha256
 
     Example:
         {
             'abc123...': [
-                {'path': 'file1.dat', 'size': 1048576, 'quick_hash': 'abc123...', 'sha1': None},
-                {'path': 'file2.dat', 'size': 1048576, 'quick_hash': 'abc123...', 'sha1': None}
+                {'path': 'file1.dat', 'size': 1048576, 'quick_hash': 'abc123...', 'sha1': None, 'sha256': None},
+                {'path': 'file2.dat', 'size': 1048576, 'quick_hash': 'abc123...', 'sha1': None, 'sha256': None}
             ]
         }
     """
     conn = connect_db(db_path)
     cursor = conn.cursor()
+    ensure_files_table(cursor, device_id)
     table_name = f"files_{device_id}"
 
     # Find all quick_hash values with multiple files
@@ -163,7 +185,7 @@ def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]
     collisions = {}
     for quick_hash in collision_hashes:
         cursor.execute(f"""
-            SELECT path, size, mtime, quick_hash, sha1
+            SELECT path, size, mtime, quick_hash, sha1, sha256
             FROM {table_name}
             WHERE quick_hash = ? AND status = 'active'
             ORDER BY path
@@ -176,7 +198,8 @@ def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]
                 'size': row[1],
                 'mtime': row[2],
                 'quick_hash': row[3],
-                'sha1': row[4]
+                'sha1': row[4],
+                'sha256': row[5]
             })
         collisions[quick_hash] = files
 
@@ -202,11 +225,12 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
     """
     conn = connect_db(db_path)
     cursor = conn.cursor()
+    ensure_files_table(cursor, device_id)
     table_name = f"files_{device_id}"
 
     # Get all files with this quick_hash
     cursor.execute(f"""
-        SELECT path, size, mtime, quick_hash, sha1
+        SELECT path, size, mtime, quick_hash, sha1, sha256
         FROM {table_name}
         WHERE quick_hash = ? AND status = 'active'
     """, (quick_hash,))
@@ -218,27 +242,29 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
             'size': row[1],
             'mtime': row[2],
             'quick_hash': row[3],
-            'sha1': row[4]
+            'sha1': row[4],
+            'sha256': row[5]
         }
         files.append(file_record)
 
     # Compute full hash for any file missing it
     updated_files = []
     for file_record in files:
-        if file_record['sha1'] is None:
+        if file_record['sha1'] is None or file_record['sha256'] is None:
             # Resolve absolute path
             abs_path = mount_point / file_record['path']
             try:
-                full_sha1 = compute_sha1(abs_path)
+                full_sha1, full_sha256 = compute_full_hashes(abs_path)
 
                 # Update database
                 cursor.execute(f"""
                     UPDATE {table_name}
-                    SET sha1 = ?, last_modified_at = datetime('now')
+                    SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
                     WHERE path = ?
-                """, (full_sha1, file_record['path']))
+                """, (full_sha1, full_sha256, file_record['path']))
 
                 file_record['sha1'] = full_sha1
+                file_record['sha256'] = full_sha256
                 updated_files.append(file_record)
             except Exception as e:
                 print(f"⚠️  Could not upgrade {abs_path}: {e}")
@@ -246,7 +272,7 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
     conn.commit()
     conn.close()
 
-    return files  # Return all files (updated and already had sha1)
+    return files  # Return all files (updated and already had full hashes)
 
 
 def find_duplicates(device_id: int, db_path: Path, auto_upgrade: bool = True) -> Dict[str, list]:
@@ -344,11 +370,11 @@ def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[st
     Args:
         file_path: Absolute path to the file
         mount_point: Mount point for the filesystem (to compute relative path)
-        existing_files: Dict of {rel_path: {size, mtime, quick_hash, sha1}} from database
-        hash_mode: 'fast' (quick_hash only), 'full' (both), or 'upgrade' (add sha1 to existing quick_hash)
+        existing_files: Dict of {rel_path: {size, mtime, quick_hash, sha1, sha256}} from database
+        hash_mode: 'fast' (quick_hash only), 'full' (both), or 'upgrade' (add full hashes to existing quick_hash)
 
     Returns:
-        Tuple of (rel_path, size, mtime, quick_hash, sha1, inode, device_id, is_new, is_updated)
+        Tuple of (rel_path, size, mtime, quick_hash, sha1, sha256, inode, device_id, is_new, is_updated)
         or None on error
     """
     try:
@@ -363,22 +389,26 @@ def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[st
             # File unchanged - reuse existing hashes
             quick_hash = existing.get('quick_hash')
             sha1 = existing.get('sha1')
+            sha256 = existing.get('sha256')
 
             # If upgrading and no full hash yet, compute it
-            if hash_mode == 'upgrade' and not sha1:
-                sha1 = compute_sha1(file_path)
-                return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, stat.st_ino, stat.st_dev, False, True)
+            if hash_mode == 'upgrade' and (sha1 is None or sha256 is None):
+                sha1, sha256 = compute_full_hashes(file_path)
+                return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, sha256, stat.st_ino, stat.st_dev, False, True)
 
-            return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, stat.st_ino, stat.st_dev, False, False)
+            return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, sha256, stat.st_ino, stat.st_dev, False, False)
 
         # File is new or modified - compute hashes based on mode
         quick_hash = compute_quick_hash(file_path)
-        sha1 = compute_sha1(file_path) if hash_mode == 'full' else None
+        sha1 = None
+        sha256 = None
+        if hash_mode == 'full':
+            sha1, sha256 = compute_full_hashes(file_path)
 
         is_new = existing is None
         is_updated = not is_new
 
-        return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, stat.st_ino, stat.st_dev, is_new, is_updated)
+        return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, sha256, stat.st_ino, stat.st_dev, is_new, is_updated)
     except Exception as e:
         print(f"⚠️ Could not process: {file_path} ({e})")
         return None
@@ -400,25 +430,26 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
     root_str = str(root_canonical)
 
     for row in rows:
-        rel_path, size, mtime, quick_hash, sha1, inode, device_id, is_new, is_updated = row
+        rel_path, size, mtime, quick_hash, sha1, sha256, inode, device_id, is_new, is_updated = row
 
         if is_new:
             # Insert new file or re-activate deleted file
             cursor.execute(f"""
                 INSERT INTO {table_name}
-                (path, size, mtime, quick_hash, sha1, inode, first_seen_at, last_seen_at, last_modified_at, status, discovered_under)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), 'active', ?)
+                (path, size, mtime, quick_hash, sha1, sha256, inode, first_seen_at, last_seen_at, last_modified_at, status, discovered_under)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), 'active', ?)
                 ON CONFLICT(path) DO UPDATE SET
                     size = excluded.size,
                     mtime = excluded.mtime,
                     quick_hash = excluded.quick_hash,
                     sha1 = excluded.sha1,
+                    sha256 = excluded.sha256,
                     inode = excluded.inode,
                     last_seen_at = datetime('now'),
                     last_modified_at = datetime('now'),
                     status = 'active',
                     discovered_under = excluded.discovered_under
-            """, (rel_path, size, mtime, quick_hash, sha1, inode, root_str))
+            """, (rel_path, size, mtime, quick_hash, sha1, sha256, inode, root_str))
             stats.files_added += 1
             stats.bytes_hashed += size
 
@@ -426,10 +457,10 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
             # Update existing file (metadata or hash changed)
             cursor.execute(f"""
                 UPDATE {table_name}
-                SET size = ?, mtime = ?, quick_hash = ?, sha1 = ?, inode = ?,
+                SET size = ?, mtime = ?, quick_hash = ?, sha1 = ?, sha256 = ?, inode = ?,
                     last_seen_at = datetime('now'), last_modified_at = datetime('now'), status = 'active'
                 WHERE path = ?
-            """, (size, mtime, quick_hash, sha1, inode, rel_path))
+            """, (size, mtime, quick_hash, sha1, sha256, inode, rel_path))
             stats.files_updated += 1
             stats.bytes_hashed += size
 
@@ -457,7 +488,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         batch_size: Number of files to batch before writing (default: 500)
         tqdm_position: Position for progress bar (for nested display)
         quiet: Suppress verbose output (for nested progress bars)
-        hash_mode: 'fast' (quick_hash only), 'full' (both hashes), 'upgrade' (add sha1)
+        hash_mode: 'fast' (quick_hash only), 'full' (both hashes), 'upgrade' (add full hashes)
     """
     conn = connect_db(db_path)
     init_db_schema(conn)
@@ -542,8 +573,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
             if result is None:
                 continue
-            rel_path, size, mtime, quick_hash, sha1, inode, dev_id, is_new, is_updated = result
-            seen_paths.add(rel_path)
+            seen_paths.add(result[0])
 
             # Write immediately in sequential mode
             _write_batch(cursor, table_name, root_canonical, [result], stats)

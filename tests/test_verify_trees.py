@@ -1,7 +1,7 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 import unittest
 from unittest.mock import MagicMock
-from src.hashall import verify_trees
+from hashall import verify_trees
 
 class TestVerifyTrees(unittest.TestCase):
 

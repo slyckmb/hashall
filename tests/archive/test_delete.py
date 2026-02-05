@@ -3,7 +3,10 @@ import os
 import shutil
 import yaml
 from pathlib import Path
-from gptrail.utils.trail import remove_slug_entry
+import pytest
+
+gptrail = pytest.importorskip("gptrail.utils.trail")
+remove_slug_entry = gptrail.remove_slug_entry
 
 TRAIL_DIR = Path(".gpt")
 TRAIL_FILE = TRAIL_DIR / "trail.yaml"

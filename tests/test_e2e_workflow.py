@@ -88,13 +88,20 @@ def test_scan_export_verify_roundtrip():
             (str(dst),)
         ).fetchone()
 
-        src_count = cursor.execute(
-            "SELECT COUNT(*) FROM files WHERE scan_session_id = ?",
+        src_device_id = conn.execute(
+            "SELECT device_id FROM scan_sessions WHERE id = ?",
             (src_session["id"],)
         ).fetchone()[0]
-        dst_count = cursor.execute(
-            "SELECT COUNT(*) FROM files WHERE scan_session_id = ?",
+        dst_device_id = conn.execute(
+            "SELECT device_id FROM scan_sessions WHERE id = ?",
             (dst_session["id"],)
+        ).fetchone()[0]
+
+        src_count = cursor.execute(
+            f"SELECT COUNT(*) FROM files_{src_device_id} WHERE status = 'active'"
+        ).fetchone()[0]
+        dst_count = cursor.execute(
+            f"SELECT COUNT(*) FROM files_{dst_device_id} WHERE status = 'active'"
         ).fetchone()[0]
 
         assert src_count == 3, "Source should have 3 files"

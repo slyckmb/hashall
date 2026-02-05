@@ -37,6 +37,7 @@ def init_db_schema(conn):
         size INTEGER NOT NULL,
         mtime REAL NOT NULL,
         sha1 TEXT,
+        sha256 TEXT,
         scan_session_id INTEGER,
         PRIMARY KEY (path, scan_session_id),
         FOREIGN KEY (scan_session_id) REFERENCES scan_sessions(id)

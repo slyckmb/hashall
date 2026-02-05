@@ -71,7 +71,7 @@ def test_ensure_files_table_has_correct_schema(test_db):
 
     # Verify required columns exist
     required_columns = [
-        'path', 'size', 'mtime', 'sha1', 'inode',
+        'path', 'size', 'mtime', 'sha1', 'sha256', 'inode',
         'first_seen_at', 'last_seen_at', 'last_modified_at',
         'status', 'discovered_under'
     ]
@@ -85,7 +85,8 @@ def test_ensure_files_table_has_correct_schema(test_db):
     # Verify NOT NULL constraints
     assert column_dict['size'][3] == 1, "size should be NOT NULL"
     assert column_dict['mtime'][3] == 1, "mtime should be NOT NULL"
-    assert column_dict['sha1'][3] == 1, "sha1 should be NOT NULL"
+    assert column_dict['sha1'][3] == 0, "sha1 should be nullable"
+    assert column_dict['sha256'][3] == 0, "sha256 should be nullable"
     assert column_dict['inode'][3] == 1, "inode should be NOT NULL"
 
     # Verify default values
@@ -109,6 +110,7 @@ def test_ensure_files_table_creates_indexes(test_db):
     # Verify required indexes exist
     expected_indexes = {
         f"idx_{table_name}_sha1",
+        f"idx_{table_name}_sha256",
         f"idx_{table_name}_inode",
         f"idx_{table_name}_status"
     }

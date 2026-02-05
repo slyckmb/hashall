@@ -95,38 +95,104 @@ class DemotionPlanner:
             SELECT device_id FROM payloads WHERE root_path = ?
         """, (root_path,)).fetchone()[0]
 
-        # Use per-device table
-        table_name = f"files_{device_id}"
+        def _table_exists(name: str) -> bool:
+            return conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            ).fetchone() is not None
 
-        # Get all files under root_path from the per-device files table
-        query = f"""
-            SELECT DISTINCT path, inode
-            FROM {table_name}
-            WHERE (path = ? OR path LIKE ?)
-            ORDER BY path
-        """
-        pattern = f"{root_path}/%"
-        file_rows = conn.execute(query, (root_path, pattern)).fetchall()
+        # Prefer per-device table if present, otherwise fallback to legacy files table
+        table_name = f"files_{device_id}"
+        use_device_table = _table_exists(table_name)
+        use_legacy_table = _table_exists("files")
+
+        if not use_device_table and not use_legacy_table:
+            return []
+
+        if use_device_table:
+            # Resolve root_path relative to mount point when available.
+            # Some test fixtures omit the devices table and store absolute paths
+            # directly in files_{device_id}.
+            mount_point = None
+            if _table_exists("devices"):
+                device_row = conn.execute(
+                    "SELECT mount_point FROM devices WHERE device_id = ?",
+                    (device_id,),
+                ).fetchone()
+                if device_row:
+                    mount_point = Path(device_row[0])
+
+            if mount_point is not None:
+                try:
+                    rel_root = Path(root_path).resolve().relative_to(mount_point)
+                except ValueError:
+                    return []
+                rel_root_str = str(rel_root)
+                def _to_abs(p: str) -> str:
+                    return str((mount_point / p).resolve())
+            else:
+                # Absolute paths stored in files_{device_id}
+                rel_root_str = root_path
+                def _to_abs(p: str) -> str:
+                    return str(Path(p).resolve())
+
+            pattern = f"{rel_root_str}/%"
+            query = f"""
+                SELECT DISTINCT path, inode
+                FROM {table_name}
+                WHERE (path = ? OR path LIKE ?)
+                ORDER BY path
+            """
+            file_rows = conn.execute(query, (rel_root_str, pattern)).fetchall()
+
+        else:
+            # Legacy table stores absolute paths
+            pattern = f"{root_path}/%"
+            query = """
+                SELECT DISTINCT path, inode
+                FROM files
+                WHERE (path = ? OR path LIKE ?)
+                ORDER BY path
+            """
+            file_rows = conn.execute(query, (root_path, pattern)).fetchall()
+
+            def _to_abs(p: str) -> str:
+                return str(Path(p).resolve())
 
         external_consumers = []
 
         # For each file, check if its inode has any paths outside seeding domain
         for file_path, inode in file_rows:
             # Find all paths with same inode (hardlinks)
-            hardlink_query = f"""
-                SELECT DISTINCT path
-                FROM {table_name}
-                WHERE inode = ?
-                ORDER BY path
-            """
-            hardlink_paths = [row[0] for row in conn.execute(hardlink_query, (inode,)).fetchall()]
+            if use_device_table:
+                hardlink_query = f"""
+                    SELECT DISTINCT path
+                    FROM {table_name}
+                    WHERE inode = ?
+                    ORDER BY path
+                """
+                hardlink_paths = [
+                    _to_abs(row[0]) for row in conn.execute(hardlink_query, (inode,)).fetchall()
+                ]
+                file_path_abs = _to_abs(file_path)
+            else:
+                hardlink_query = """
+                    SELECT DISTINCT path
+                    FROM files
+                    WHERE inode = ?
+                    ORDER BY path
+                """
+                hardlink_paths = [
+                    _to_abs(row[0]) for row in conn.execute(hardlink_query, (inode,)).fetchall()
+                ]
+                file_path_abs = _to_abs(file_path)
 
             # Filter for external paths
             external_paths = [p for p in hardlink_paths if self._is_external_path(p)]
 
             if external_paths:
                 external_consumers.append(ExternalConsumer(
-                    file_path=file_path,
+                    file_path=file_path_abs,
                     external_link_paths=external_paths
                 ))
 

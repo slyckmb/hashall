@@ -25,7 +25,7 @@ def cli():
 @click.option("--workers", type=int, default=None, help="Worker count for parallel scan (default: cpu_count).")
 @click.option("--batch-size", type=int, default=None, help="Batch size for parallel DB writes.")
 @click.option("--hash-mode", type=click.Choice(['fast', 'full', 'upgrade'], case_sensitive=False),
-              default='fast', help="Hash mode: fast (1MB only), full (both hashes), upgrade (add full to existing).")
+              default='fast', help="Hash mode: fast (1MB only), full (SHA1+SHA256), upgrade (add full to existing).")
 @click.option("--fast", "hash_mode_flag", flag_value='fast', help="Shortcut for --hash-mode=fast")
 @click.option("--full", "hash_mode_flag", flag_value='full', help="Shortcut for --hash-mode=full")
 @click.option("--upgrade", "hash_mode_flag", flag_value='upgrade', help="Shortcut for --hash-mode=upgrade")
@@ -408,6 +408,7 @@ def stats_cmd(db, hash_coverage):
 
         total_with_quick = 0
         total_with_full = 0
+        total_with_sha256 = 0
         total_collision_groups = 0
 
         for device in devices:
@@ -421,15 +422,30 @@ def stats_cmd(db, hash_coverage):
             """, (table_name,)).fetchone()
 
             if table_exists:
+                # Detect available columns (sha256 may not exist yet)
+                columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")}
+                has_sha256_col = "sha256" in columns
+
                 # Get hash coverage for this device
-                result = conn.execute(f"""
-                    SELECT
-                        COUNT(*) as total,
-                        SUM(CASE WHEN quick_hash IS NOT NULL THEN 1 ELSE 0 END) as has_quick,
-                        SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_full
-                    FROM {table_name}
-                    WHERE status = 'active'
-                """).fetchone()
+                if has_sha256_col:
+                    result = conn.execute(f"""
+                        SELECT
+                            COUNT(*) as total,
+                            SUM(CASE WHEN quick_hash IS NOT NULL THEN 1 ELSE 0 END) as has_quick,
+                            SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_full,
+                            SUM(CASE WHEN sha256 IS NOT NULL THEN 1 ELSE 0 END) as has_sha256
+                        FROM {table_name}
+                        WHERE status = 'active'
+                    """).fetchone()
+                else:
+                    result = conn.execute(f"""
+                        SELECT
+                            COUNT(*) as total,
+                            SUM(CASE WHEN quick_hash IS NOT NULL THEN 1 ELSE 0 END) as has_quick,
+                            SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_full
+                        FROM {table_name}
+                        WHERE status = 'active'
+                    """).fetchone()
 
                 if result:
                     total = result['total'] or 0
@@ -438,6 +454,8 @@ def stats_cmd(db, hash_coverage):
 
                     total_with_quick += has_quick
                     total_with_full += has_full
+                    if has_sha256_col:
+                        total_with_sha256 += result["has_sha256"] or 0
 
                     # Count collision groups for this device
                     collision_result = conn.execute(f"""
@@ -458,15 +476,55 @@ def stats_cmd(db, hash_coverage):
             quick_pct = (total_with_quick / total_active_files) * 100
             full_pct = (total_with_full / total_active_files) * 100
             pending = total_active_files - total_with_full
+            pending_sha256 = total_active_files - total_with_sha256
 
             print(f"    Quick hash: {total_with_quick:,} ({quick_pct:.1f}%)")
-            print(f"    Full hash:  {total_with_full:,} ({full_pct:.1f}%)")
-            print(f"    Pending:    {pending:,} ({100-full_pct:.1f}%)")
+            print(f"    Full SHA1:  {total_with_full:,} ({full_pct:.1f}%)")
+            if total_with_sha256:
+                sha256_pct = (total_with_sha256 / total_active_files) * 100
+                print(f"    SHA256:     {total_with_sha256:,} ({sha256_pct:.1f}%)")
+                print(f"    Pending:    {pending_sha256:,} ({100-sha256_pct:.1f}%)")
+            else:
+                print(f"    Pending:    {pending:,} ({100-full_pct:.1f}%)")
 
             if total_collision_groups > 0:
                 print(f"    Collision groups: {total_collision_groups}")
 
     conn.close()
+
+
+@cli.command("sha256-backfill")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--device", default=None, help="Device alias or device_id to backfill.")
+@click.option("--batch-size", type=int, default=200, help="Batch size for updates.")
+@click.option("--limit", type=int, default=None, help="Max files to process (for testing).")
+@click.option("--dry-run", is_flag=True, help="Compute hashes but do not write.")
+def sha256_backfill_cmd(db, device, batch_size, limit, dry_run):
+    """Backfill SHA256 for files missing it (resumable)."""
+    from hashall.sha256_migration import backfill_sha256
+
+    backfill_sha256(
+        db_path=Path(db),
+        device=device,
+        batch_size=batch_size,
+        limit=limit,
+        dry_run=dry_run,
+    )
+
+
+@cli.command("sha256-verify")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--device", default=None, help="Device alias or device_id to verify.")
+@click.option("--sample", type=int, default=50, help="Number of files to sample per device.")
+def sha256_verify_cmd(db, device, sample):
+    """Spot-check stored SHA256 values against disk contents."""
+    from hashall.sha256_migration import verify_sha256
+
+    verify_sha256(
+        db_path=Path(db),
+        device=device,
+        sample=sample,
+    )
 
 
 @cli.command("dupes")

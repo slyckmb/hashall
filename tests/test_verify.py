@@ -1,8 +1,7 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
-import unittest
-from unittest.mock import patch, MagicMock
-import sys
-from src.hashall import verify
+import pytest
+
+pytest.skip("Legacy verify CLI removed; use `hashall verify-trees` instead.", allow_module_level=True)
 
 class TestVerifyCLI(unittest.TestCase):
 

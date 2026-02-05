@@ -1,6 +1,6 @@
 # Hashall CLI Reference
 **Version:** 0.5.0 (Unified Catalog with Incremental Scanning)
-**Last Updated:** 2026-02-01
+**Last Updated:** 2026-02-05
 
 ---
 
@@ -284,6 +284,56 @@ Hashall Catalog Statistics
   Scan History:
     Last Scan: 2026-02-01 14:30:00 (pool)
     Total Scans: 47
+```
+
+---
+
+### `sha256-backfill`
+
+Backfill SHA256 for files missing it (resumable).
+
+```bash
+hashall sha256-backfill [OPTIONS]
+```
+
+**Options:**
+- `--db PATH` - Database path (default: `~/.hashall/catalog.db`)
+- `--device TEXT` - Device alias or device_id to backfill
+- `--batch-size N` - Batch size for updates (default: 200)
+- `--limit N` - Max files to process (optional)
+- `--dry-run` - Compute hashes but do not write
+
+**Example:**
+```bash
+# Backfill all devices
+hashall sha256-backfill
+
+# Backfill a single device
+hashall sha256-backfill --device pool
+
+# Dry-run (no writes)
+hashall sha256-backfill --dry-run --limit 100
+```
+
+---
+
+### `sha256-verify`
+
+Spot-check stored SHA256 hashes against on-disk content.
+
+```bash
+hashall sha256-verify [OPTIONS]
+```
+
+**Options:**
+- `--db PATH` - Database path (default: `~/.hashall/catalog.db`)
+- `--device TEXT` - Device alias or device_id to verify
+- `--sample N` - Files to sample per device (default: 50)
+
+**Example:**
+```bash
+hashall sha256-verify --sample 100
+hashall sha256-verify --device stash
 ```
 
 ---

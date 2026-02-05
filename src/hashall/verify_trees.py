@@ -8,6 +8,7 @@ from hashall.model import connect_db, load_json_scan_into_db
 from hashall.scan import scan_path
 from hashall.export import export_json
 from hashall.verify import verify_paths
+from hashall.diff import diff_sessions
 
 console = Console()
 
@@ -90,3 +91,13 @@ def verify_trees(
         src_session_id=src_session,
         dst_session_id=dst_session,
     )
+
+
+def compare_sessions(src_session, dest_session):
+    """
+    Compare two in-memory session objects with .files maps.
+
+    Expected format:
+        session.files = {path: {"hash": str, "inode": int, "device_id": int | None}}
+    """
+    return diff_sessions(src_session.files, dest_session.files)

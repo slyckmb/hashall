@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS files (
     size INTEGER NOT NULL,
     mtime REAL NOT NULL,
     sha1 TEXT,
+    sha256 TEXT,
     scan_session_id INTEGER,
     inode INTEGER,
     device_id INTEGER,
