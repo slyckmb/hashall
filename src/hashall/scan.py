@@ -473,6 +473,26 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
             """, (rel_path,))
             stats.files_unchanged += 1
 
+
+def _emit(quiet: bool, message: str) -> None:
+    if not quiet:
+        print(message)
+
+
+def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: bool) -> dict:
+    kwargs = {
+        "desc": "📦 Scanning",
+        "leave": not quiet,
+        "dynamic_ncols": True,
+        "unit": " files",
+        "total": total,
+        "disable": quiet and tqdm_position is None,
+    }
+    if tqdm_position is not None:
+        kwargs["position"] = tqdm_position
+    return kwargs
+
+
 def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
               workers: int | None = None, batch_size: int | None = None,
               tqdm_position: int | None = None, quiet: bool = False,
@@ -503,10 +523,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     # 3. Get filesystem UUID (persistent identifier)
     fs_uuid = get_filesystem_uuid(str(root_canonical))
 
-    if not quiet:
-        print(f"📍 Scanning: {root_canonical}")
-        print(f"   Device ID: {device_id}")
-        print(f"   Filesystem UUID: {fs_uuid}")
+    _emit(quiet, f"📍 Scanning: {root_canonical}")
+    _emit(quiet, f"   Device ID: {device_id} | Filesystem UUID: {fs_uuid}")
 
     # 4. Register/update device in registry
     device_info = register_or_update_device(
@@ -539,13 +557,11 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     scan_session_id = cursor.lastrowid
     conn.commit()
 
-    if not quiet:
-        print(f"✅ Scan session: {scan_id}")
+    _emit(quiet, f"✅ Scan session: {scan_id}")
 
     # 8. Load existing files from DB (scoped to root_path)
     existing_files = load_existing_files(cursor, device_id, root_canonical)
-    if not quiet:
-        print(f"📊 Existing files in catalog: {len(existing_files)}")
+    _emit(quiet, f"📊 Existing files in catalog: {len(existing_files)}")
 
     # 9. Walk filesystem and collect file paths
     file_paths = []
@@ -553,8 +569,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         for filename in filenames:
             file_paths.append(os.path.join(dirpath, filename))
 
-    if not quiet:
-        print(f"📁 Files on filesystem: {len(file_paths)}")
+    _emit(quiet, f"📁 Files on filesystem: {len(file_paths)}")
 
     # 10. Incremental scan logic
     stats = ScanStats()
@@ -566,9 +581,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     if not parallel:
         # Sequential scanning
-        pbar_kwargs = {"desc": "📦 Scanning", "leave": True}
-        if tqdm_position is not None:
-            pbar_kwargs["position"] = tqdm_position
+        pbar_kwargs = _progress_kwargs(
+            total=len(file_paths), tqdm_position=tqdm_position, quiet=quiet
+        )
         for file_path in tqdm(file_paths, **pbar_kwargs):
             result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
             if result is None:
@@ -604,16 +619,16 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                         break
                     pending.add(executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode))
 
-                pbar_kwargs = {"total": len(file_paths), "desc": "📦 Scanning", "leave": True}
-                if tqdm_position is not None:
-                    pbar_kwargs["position"] = tqdm_position
+                pbar_kwargs = _progress_kwargs(
+                    total=len(file_paths), tqdm_position=tqdm_position, quiet=quiet
+                )
                 with tqdm(**pbar_kwargs) as pbar:
                     while pending:
                         try:
                             done, pending = wait(pending, return_when=FIRST_COMPLETED)
                         except KeyboardInterrupt:
                             interrupted = True
-                            print("\n⚠️ Scan interrupted. Canceling pending tasks...")
+                            pbar.write("⚠️ Scan interrupted. Canceling pending tasks...")
                             # Cancel all pending futures
                             for fut in pending:
                                 fut.cancel()
@@ -686,8 +701,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             deleted_paths.append(existing_path)
 
     if deleted_paths:
-        if not quiet:
-            print(f"🗑️  Marking {len(deleted_paths)} deleted files...")
+        _emit(quiet, f"🗑️  Marking {len(deleted_paths)} deleted files...")
         for path in deleted_paths:
             cursor.execute(f"""
                 UPDATE {table_name}
@@ -784,7 +798,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         pass
 
     if not quiet:
-        print(f"""
+        print(
+            f"""
 📦 Scan complete!
    Duration: {duration:.1f}s
    Scanned: {stats.files_scanned:,} files
@@ -793,7 +808,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
    Unchanged: {stats.files_unchanged:,}
    Deleted: {stats.files_deleted:,}
    Hashed: {stats.bytes_hashed / 1024 / 1024:.1f} MB
-    """)
+    """
+        )
 
     # Close connection to prevent resource leaks with hierarchical scanning
     conn.close()
