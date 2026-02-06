@@ -61,6 +61,27 @@ class AnalysisResult:
         return sum(g.potential_savings for g in self.duplicate_groups)
 
 
+@dataclass
+class CrossDeviceDuplicateGroup:
+    """Group of duplicate files across multiple devices."""
+    hash: str
+    file_size: int
+    file_count: int
+    device_count: int
+    entries: List[tuple]  # (device_id, path)
+
+
+@dataclass
+class CrossDeviceAnalysisResult:
+    """Result of cross-device duplicate analysis."""
+    duplicate_groups: List[CrossDeviceDuplicateGroup] = field(default_factory=list)
+
+    @property
+    def total_duplicates(self) -> int:
+        return sum(g.file_count for g in self.duplicate_groups)
+
+
+
 def analyze_device(
     conn: sqlite3.Connection,
     device_id: int,
@@ -169,6 +190,78 @@ def analyze_device(
     )
 
 
+def analyze_cross_device(conn: sqlite3.Connection, min_size: int = 0) -> CrossDeviceAnalysisResult:
+    """
+    Analyze duplicates across devices (same SHA256 on multiple device tables).
+    """
+    cursor = conn.cursor()
+
+    tables = [
+        row[0] for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'files_%'"
+        ).fetchall()
+    ]
+
+    def _table_has_sha256(name: str) -> bool:
+        cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({name})")}
+        return "sha256" in cols
+
+    selects = []
+    params = []
+    for table in tables:
+        parts = table.split("_", 1)
+        if len(parts) != 2 or not parts[1].isdigit():
+            continue
+        if not _table_has_sha256(table):
+            continue
+        device_id = int(parts[1])
+        selects.append(
+            f"SELECT {device_id} as device_id, path, size, sha256 "
+            f"FROM {table} WHERE status = 'active' AND sha256 IS NOT NULL AND size >= ?"
+        )
+        params.append(min_size)
+
+    if not selects:
+        return CrossDeviceAnalysisResult()
+
+    union_query = " UNION ALL ".join(selects)
+    query = f"""
+        WITH all_files AS (
+            {union_query}
+        )
+        SELECT sha256, size,
+               COUNT(*) as file_count,
+               COUNT(DISTINCT device_id) as device_count,
+               GROUP_CONCAT(device_id || ':' || path, '|||') as entries
+        FROM all_files
+        GROUP BY sha256, size
+        HAVING COUNT(DISTINCT device_id) > 1
+        ORDER BY size DESC
+    """
+
+    rows = cursor.execute(query, params).fetchall()
+    groups: List[CrossDeviceDuplicateGroup] = []
+    for row in rows:
+        hash_val, file_size, file_count, device_count, entries_str = row
+        entries = []
+        for entry in entries_str.split("|||") if entries_str else []:
+            device_part, _, path_part = entry.partition(":")
+            try:
+                device_id = int(device_part)
+            except ValueError:
+                continue
+            entries.append((device_id, path_part))
+        groups.append(CrossDeviceDuplicateGroup(
+            hash=hash_val,
+            file_size=file_size,
+            file_count=file_count,
+            device_count=device_count,
+            entries=entries
+        ))
+
+    return CrossDeviceAnalysisResult(duplicate_groups=groups)
+
+
 def format_analysis_text(result: AnalysisResult) -> str:
     """
     Format analysis result as human-readable text.
@@ -254,6 +347,49 @@ def format_analysis_json(result: AnalysisResult) -> str:
                     "files": g.files[:5]  # Limit for brevity
                 }
                 for g in result.duplicate_groups[:20]
+            ]
+        }
+    }
+    return json.dumps(data, indent=2)
+
+
+def format_cross_device_text(result: CrossDeviceAnalysisResult) -> str:
+    output = []
+    output.append("🌐 Cross-Device Duplicate Analysis:")
+    output.append(f"   Duplicate groups found: {len(result.duplicate_groups):,}")
+    output.append(f"   Total duplicates: {result.total_duplicates:,} files")
+    output.append("")
+
+    if result.duplicate_groups:
+        output.append("   Top 10 groups:")
+        for i, group in enumerate(result.duplicate_groups[:10], 1):
+            size_mb = group.file_size / (1024**2)
+            output.append(
+                f"   {i:2d}. {group.file_count} copies × {size_mb:.1f} MB "
+                f"across {group.device_count} devices"
+            )
+    else:
+        output.append("✅ No cross-device duplicates found")
+
+    return "\n".join(output)
+
+
+def format_cross_device_json(result: CrossDeviceAnalysisResult) -> str:
+    data = {
+        "analysis": {
+            "duplicate_groups": len(result.duplicate_groups),
+            "total_duplicates": result.total_duplicates,
+            "groups": [
+                {
+                    "hash": g.hash,
+                    "file_size": g.file_size,
+                    "file_count": g.file_count,
+                    "device_count": g.device_count,
+                    "entries": [
+                        {"device_id": d, "path": p} for d, p in g.entries
+                    ]
+                }
+                for g in result.duplicate_groups
             ]
         }
     }

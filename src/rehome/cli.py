@@ -213,6 +213,8 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
               help="Execute the plan (mutually exclusive with --dryrun)")
 @click.option("--spot-check", type=int, default=0,
               help="Spot-check N files by SHA256 after payload verification")
+@click.option("--rescan", is_flag=True,
+              help="Rescan source/target roots after execution to refresh catalog")
 @click.option("--cleanup-source-views", is_flag=True,
               help="Remove torrent views at source side (never payload roots)")
 @click.option("--cleanup-empty-dirs", is_flag=True,
@@ -221,7 +223,7 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
               help="Remove source payload root after REUSE (explicit opt-in)")
 @click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
               help="Path to hashall catalog database")
-def apply_cmd(plan_file, dryrun, force, spot_check, cleanup_source_views,
+def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views,
               cleanup_empty_dirs, cleanup_duplicate_payload, catalog):
     """
     Apply a demotion plan.
@@ -303,6 +305,7 @@ def apply_cmd(plan_file, dryrun, force, spot_check, cleanup_source_views,
                     cleanup_source_views=cleanup_source_views,
                     cleanup_empty_dirs=cleanup_empty_dirs,
                     cleanup_duplicate_payload=cleanup_duplicate_payload,
+                    rescan=rescan,
                     spot_check=spot_check
                 )
 

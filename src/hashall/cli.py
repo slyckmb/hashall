@@ -651,10 +651,11 @@ def link():
 
 @link.command("analyze")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
-@click.option("--device", required=True, help="Device alias or device_id to analyze.")
+@click.option("--device", required=False, help="Device alias or device_id to analyze.")
+@click.option("--cross-device", is_flag=True, help="Analyze duplicates across devices.")
 @click.option("--min-size", type=int, default=0, help="Minimum file size in bytes (default: 0).")
 @click.option("--format", type=click.Choice(['text', 'json']), default='text', help="Output format.")
-def link_analyze_cmd(db, device, min_size, format):
+def link_analyze_cmd(db, device, cross_device, min_size, format):
     """
     Analyze catalog for deduplication opportunities.
 
@@ -668,10 +669,36 @@ def link_analyze_cmd(db, device, min_size, format):
     """
     from pathlib import Path
     from hashall.model import connect_db
-    from hashall.link_analysis import analyze_device, format_analysis_text, format_analysis_json
+    from hashall.link_analysis import (
+        analyze_device,
+        analyze_cross_device,
+        format_analysis_text,
+        format_analysis_json,
+        format_cross_device_text,
+        format_cross_device_json,
+    )
 
     conn = connect_db(Path(db))
     cursor = conn.cursor()
+
+    if cross_device:
+        try:
+            result = analyze_cross_device(conn, min_size=min_size)
+            if format == 'json':
+                click.echo(format_cross_device_json(result))
+            else:
+                click.echo(format_cross_device_text(result))
+            conn.close()
+            return 0
+        except Exception as e:
+            click.echo(f"❌ Error: {e}", err=True)
+            conn.close()
+            return 1
+
+    if not device:
+        click.echo("❌ Must specify --device or --cross-device", err=True)
+        conn.close()
+        return 1
 
     # Resolve device (try alias first, then device_id if numeric)
     cursor.execute(

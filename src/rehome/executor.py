@@ -405,7 +405,7 @@ class DemotionExecutor:
 
     def execute(self, plan: Dict, cleanup_source_views: bool = False,
                 cleanup_empty_dirs: bool = False, cleanup_duplicate_payload: bool = False,
-                spot_check: int = 0) -> None:
+                rescan: bool = False, spot_check: int = 0) -> None:
         """
         Execute a demotion plan.
 
@@ -423,6 +423,13 @@ class DemotionExecutor:
 
         self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
 
+        run_id = None
+        run_conn = self._get_db_connection()
+        try:
+            run_id = self._record_rehome_run_start(run_conn, plan)
+        finally:
+            run_conn.close()
+
         try:
             if direction == 'promote':
                 if decision != 'REUSE':
@@ -436,6 +443,16 @@ class DemotionExecutor:
                 raise RuntimeError(f"Unknown decision: {decision}")
 
             self._apply_cleanup(plan, cleanup_source_views, cleanup_empty_dirs, cleanup_duplicate_payload)
+            self._sync_catalog_after_rehome(plan)
+            if rescan:
+                self._rescan_after_rehome(plan)
+
+            if run_id is not None:
+                run_conn = self._get_db_connection()
+                try:
+                    self._record_rehome_run_finish(run_conn, run_id, status="success", message="")
+                finally:
+                    run_conn.close()
 
             self._log("Plan execution completed successfully", "success")
             self._log(
@@ -447,8 +464,139 @@ class DemotionExecutor:
             )
 
         except Exception as e:
+            if run_id is not None:
+                run_conn = self._get_db_connection()
+                try:
+                    self._record_rehome_run_finish(run_conn, run_id, status="failed", message=str(e))
+                finally:
+                    run_conn.close()
             self._log(f"Execution failed: {e}", "error")
             raise
+
+    def _sync_catalog_after_rehome(self, plan: Dict) -> None:
+        """Update catalog records after successful relocation."""
+        conn = self._get_db_connection()
+        try:
+            relocations = self._build_relocations(conn, plan)
+
+            if plan.get("decision") == "REUSE":
+                # Reassign torrents to payload on target device
+                target_payload_row = conn.execute(
+                    """
+                    SELECT payload_id
+                    FROM payloads
+                    WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
+                    LIMIT 1
+                    """,
+                    (plan.get("payload_hash"), plan.get("target_device_id")),
+                ).fetchone()
+
+                if not target_payload_row:
+                    raise RuntimeError("Target payload not found for catalog sync")
+
+                target_payload_id = target_payload_row[0]
+
+                for r in relocations:
+                    conn.execute(
+                        """
+                        UPDATE torrent_instances
+                        SET payload_id = ?, device_id = ?, save_path = ?
+                        WHERE torrent_hash = ?
+                        """,
+                        (target_payload_id, plan.get("target_device_id"),
+                         r.get("target_save_path"), r.get("torrent_hash"))
+                    )
+
+            elif plan.get("decision") == "MOVE":
+                # Update payload location
+                conn.execute(
+                    """
+                    UPDATE payloads
+                    SET device_id = ?, root_path = ?, updated_at = julianday('now')
+                    WHERE payload_id = ?
+                    """,
+                    (plan.get("target_device_id"), plan.get("target_path"), plan.get("payload_id"))
+                )
+
+                for r in relocations:
+                    conn.execute(
+                        """
+                        UPDATE torrent_instances
+                        SET device_id = ?, save_path = ?
+                        WHERE torrent_hash = ?
+                        """,
+                        (plan.get("target_device_id"), r.get("target_save_path"), r.get("torrent_hash"))
+                    )
+
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _rescan_after_rehome(self, plan: Dict) -> None:
+        """Rescan relevant roots to refresh file tables after execution."""
+        from hashall.scan import scan_path
+
+        paths = [plan.get("source_path"), plan.get("target_path")]
+        for p in paths:
+            if not p:
+                continue
+            root = Path(p)
+            scan_root = root if root.is_dir() else root.parent
+            if not scan_root.exists():
+                continue
+            scan_path(db_path=self.catalog_path, root_path=scan_root, quiet=True)
+
+    def _record_rehome_run_start(self, conn: sqlite3.Connection, plan: Dict) -> int:
+        """Insert a rehome run record and return its ID."""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rehome_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                finished_at TEXT,
+                direction TEXT,
+                decision TEXT,
+                payload_hash TEXT,
+                payload_id INTEGER,
+                torrent_count INTEGER,
+                status TEXT,
+                message TEXT
+            )
+            """
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO rehome_runs (
+                direction, decision, payload_hash, payload_id, torrent_count, status, message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan.get("direction"),
+                plan.get("decision"),
+                plan.get("payload_hash"),
+                plan.get("payload_id"),
+                len(plan.get("affected_torrents", [])),
+                "running",
+                "",
+            )
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+    def _record_rehome_run_finish(self, conn: sqlite3.Connection, run_id: int,
+                                  status: str, message: str) -> None:
+        """Update rehome run record on completion."""
+        conn.execute(
+            """
+            UPDATE rehome_runs
+            SET finished_at = CURRENT_TIMESTAMP,
+                status = ?,
+                message = ?
+            WHERE id = ?
+            """,
+            (status, message, run_id)
+        )
+        conn.commit()
 
     def _execute_promote_reuse(self, plan: Dict, spot_check: int = 0) -> None:
         """
