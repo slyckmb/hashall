@@ -170,6 +170,13 @@ class DemotionPlanner:
                 (name,),
             ).fetchone() is not None
 
+        def _table_has_column(table: str, column: str) -> bool:
+            try:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            except sqlite3.Error:
+                return False
+            return any(row[1] == column for row in rows)
+
         # Prefer per-device table if present, otherwise fallback to legacy files table
         table_name = f"files_{device_id}"
         use_device_table = _table_exists(table_name)
@@ -228,13 +235,23 @@ class DemotionPlanner:
             if not root.is_absolute():
                 raise ValueError("Relative payload root with legacy files table")
             pattern = f"{str(root)}/%"
-            query = """
-                SELECT DISTINCT path, inode
-                FROM files
-                WHERE status = 'active' AND (path = ? OR path LIKE ?)
-                ORDER BY path
-            """
-            file_rows = conn.execute(query, (str(root), pattern)).fetchall()
+            legacy_has_status = _table_has_column("files", "status")
+            if legacy_has_status:
+                query = """
+                    SELECT DISTINCT path, inode
+                    FROM files
+                    WHERE status = 'active' AND (path = ? OR path LIKE ?)
+                    ORDER BY path
+                """
+                file_rows = conn.execute(query, (str(root), pattern)).fetchall()
+            else:
+                query = """
+                    SELECT DISTINCT path, inode
+                    FROM files
+                    WHERE path = ? OR path LIKE ?
+                    ORDER BY path
+                """
+                file_rows = conn.execute(query, (str(root), pattern)).fetchall()
 
             def _to_abs(p: str) -> str:
                 return str(canonicalize_path(Path(p)))
@@ -259,12 +276,20 @@ class DemotionPlanner:
                 ]
                 file_path_abs = _to_abs(file_path)
             else:
-                hardlink_query = """
-                    SELECT DISTINCT path
-                    FROM files
-                    WHERE inode = ? AND status = 'active'
-                    ORDER BY path
-                """
+                if legacy_has_status:
+                    hardlink_query = """
+                        SELECT DISTINCT path
+                        FROM files
+                        WHERE inode = ? AND status = 'active'
+                        ORDER BY path
+                    """
+                else:
+                    hardlink_query = """
+                        SELECT DISTINCT path
+                        FROM files
+                        WHERE inode = ?
+                        ORDER BY path
+                    """
                 hardlink_paths = [
                     _to_abs(row[0]) for row in conn.execute(hardlink_query, (inode,)).fetchall()
                 ]

@@ -129,12 +129,12 @@ class TestExternalConsumerDetection:
             VALUES ('fs-test-50', '/stash/torrents/seeding', '2026-02-06', 1);
 
             INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
-                ('{payload_root}/video.mkv', 1001, 1000000, 1234567890, 'abc123'),
-                ('{payload_root}/subtitles.srt', 1002, 5000, 1234567890, 'def456');
+                ('torrents/seeding/Movie.2024/video.mkv', 1001, 1000000, 1234567890, 'abc123'),
+                ('torrents/seeding/Movie.2024/subtitles.srt', 1002, 5000, 1234567890, 'def456');
 
             -- External hardlink for video.mkv (same inode, outside seeding domain)
             INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
-                ('/media/exports/Movie.2024.mkv', 1001, 1000000, 1234567890, 'abc123');
+                ('media/exports/Movie.2024.mkv', 1001, 1000000, 1234567890, 'abc123');
 
             -- Create payload
             INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
@@ -246,7 +246,8 @@ class TestExternalConsumerDetection:
             seeding_roots=["/stash/torrents/seeding"],
             library_roots=[],
             stash_device=50,
-            pool_device=49
+            pool_device=49,
+            pool_payload_root="/pool/torrents/content"
         )
 
         # Plan demotion
@@ -421,7 +422,8 @@ class TestReusePlan:
             seeding_roots=["/stash/torrents/seeding"],
             library_roots=[],
             stash_device=50,
-            pool_device=49
+            pool_device=49,
+            pool_payload_root="/pool/torrents/content"
         )
 
         # Plan demotion
@@ -472,7 +474,8 @@ class TestMovePlan:
             seeding_roots=["/stash/torrents/seeding"],
             library_roots=[],
             stash_device=50,
-            pool_device=49
+            pool_device=49,
+            pool_payload_root="/pool/torrents/content"
         )
 
         # Plan demotion
