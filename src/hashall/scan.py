@@ -507,28 +507,56 @@ def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: boo
     return kwargs
 
 
-class _StatusLine:
-    def __init__(self, enabled: bool, quiet: bool, tqdm_position: int | None):
-        self.enabled = (
-            enabled
-            and not quiet
-            and tqdm_position is None
-            and sys.stdout.isatty()
-        )
+class _TwoLineProgress:
+    def __init__(self, total: int, enabled: bool):
+        self.enabled = enabled and sys.stdout.isatty()
         self.file = sys.stdout if self.enabled else None
+        self.total = total
+        self.start = time.monotonic()
+        self.n = 0
+        self.path = ""
         if self.enabled:
             print("", file=self.file, flush=True)
+            print("", file=self.file, flush=True)
 
-    def update(self, text: str) -> None:
+    def _width(self) -> int:
+        try:
+            width = shutil.get_terminal_size((120, 20)).columns
+        except Exception:
+            width = 120
+        return max(10, width - 1)
+
+    def _progress_line(self, width: int) -> str:
+        elapsed = max(time.monotonic() - self.start, 1e-9)
+        line = tqdm.format_meter(
+            self.n,
+            self.total,
+            elapsed,
+            ncols=width,
+            prefix="📦 Scanning",
+            unit="files",
+        )
+        return _pad_to_width(_truncate_middle(line, width), width)
+
+    def update(self, *, path: str | None = None, advance: int = 0) -> None:
         if not self.enabled:
             return
-        self.file.write("\x1b[1A\r\x1b[2K" + text + "\x1b[1B\r")
+        if path is not None:
+            self.path = path.replace("\n", " ")
+        if advance:
+            self.n += advance
+        width = self._width()
+        status_line = _pad_to_width(_truncate_middle(self.path, width), width)
+        bar_line = self._progress_line(width)
+        self.file.write("\x1b[2A\r\x1b[2K" + status_line)
+        self.file.write("\x1b[1B\r\x1b[2K" + bar_line)
+        self.file.write("\x1b[1B\r")
         self.file.flush()
 
     def close(self) -> None:
         if not self.enabled:
             return
-        self.file.write("\x1b[1A\r\x1b[2K\x1b[1B\r")
+        self.file.write("\x1b[2A\r\x1b[2K\x1b[1B\r")
         self.file.flush()
 
 
@@ -583,16 +611,6 @@ def _pad_to_width(text: str, max_width: int) -> str:
     if pad > 0:
         return text + (" " * pad)
     return text
-
-
-def _format_status_path(path: str) -> str:
-    try:
-        width = shutil.get_terminal_size((120, 20)).columns
-    except Exception:
-        width = 120
-    width = max(10, width - 1)
-    truncated = _truncate_middle(path, width)
-    return _pad_to_width(truncated, width)
 
 
 def _canonicalize_root(
@@ -732,32 +750,50 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     # Get mount point for relative path calculation
     mount_point = effective_mount
 
-    status = _StatusLine(enabled=show_current_path, quiet=quiet, tqdm_position=tqdm_position)
+    use_two_line = show_current_path and not quiet and tqdm_position is None
+    progress = _TwoLineProgress(total=len(file_paths), enabled=use_two_line)
     progress_position = tqdm_position
-    progress_file = status.file if status.enabled else None
+    progress_file = None
 
     if not parallel:
         # Sequential scanning
-        pbar_kwargs = _progress_kwargs(
-            total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
-        )
-        for file_path in tqdm(file_paths, **pbar_kwargs):
-            if status.enabled:
-                status.update(_format_status_path(file_path))
-            result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
-            if result is None:
-                continue
-            seen_paths.add(result[0])
+        if progress.enabled:
+            for file_path in file_paths:
+                result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
+                if result is None:
+                    progress.update(path=file_path, advance=1)
+                    continue
+                seen_paths.add(result[0])
 
-            # Write immediately in sequential mode
-            _write_batch(cursor, table_name, canonical_root, [result], stats)
-            stats.files_scanned += 1
+                # Write immediately in sequential mode
+                _write_batch(cursor, table_name, canonical_root, [result], stats)
+                stats.files_scanned += 1
+                progress.update(path=file_path, advance=1)
 
-            # Commit periodically
-            if stats.files_scanned % 500 == 0:
-                conn.commit()
+                # Commit periodically
+                if stats.files_scanned % 500 == 0:
+                    conn.commit()
 
-        conn.commit()
+            conn.commit()
+        else:
+            pbar_kwargs = _progress_kwargs(
+                total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
+            )
+            for file_path in tqdm(file_paths, **pbar_kwargs):
+                result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
+                if result is None:
+                    continue
+                seen_paths.add(result[0])
+
+                # Write immediately in sequential mode
+                _write_batch(cursor, table_name, canonical_root, [result], stats)
+                stats.files_scanned += 1
+
+                # Commit periodically
+                if stats.files_scanned % 500 == 0:
+                    conn.commit()
+
+            conn.commit()
 
     else:
         # Parallel scanning
@@ -781,16 +817,13 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     pending.add(future)
                     future_to_path[future] = file_path
 
-                pbar_kwargs = _progress_kwargs(
-                    total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
-                )
-                with tqdm(**pbar_kwargs) as pbar:
+                if progress.enabled:
                     while pending:
                         try:
                             done, pending = wait(pending, return_when=FIRST_COMPLETED)
                         except KeyboardInterrupt:
                             interrupted = True
-                            pbar.write("⚠️ Scan interrupted. Canceling pending tasks...")
+                            print("⚠️ Scan interrupted. Canceling pending tasks...")
                             # Cancel all pending futures
                             for fut in pending:
                                 fut.cancel()
@@ -802,12 +835,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             from concurrent.futures import CancelledError
                             try:
                                 file_path = future_to_path.pop(fut, None)
-                                if status.enabled and file_path is not None:
-                                    status.update(_format_status_path(file_path))
                                 result = fut.result()
                             except CancelledError:
-                                # Ignore cancelled futures
-                                pbar.update(1)
+                                progress.update(advance=1)
                                 continue
 
                             if result is not None:
@@ -820,7 +850,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                     _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
                                     batch_rows.clear()
                                     conn.commit()
-                            pbar.update(1)
+                            progress.update(path=file_path, advance=1)
 
                         # Exit immediately if interrupted
                         if interrupted:
@@ -834,6 +864,57 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             future = executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode)
                             pending.add(future)
                             future_to_path[future] = file_path
+                else:
+                    pbar_kwargs = _progress_kwargs(
+                        total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
+                    )
+                    with tqdm(**pbar_kwargs) as pbar:
+                        while pending:
+                            try:
+                                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                            except KeyboardInterrupt:
+                                interrupted = True
+                                pbar.write("⚠️ Scan interrupted. Canceling pending tasks...")
+                                # Cancel all pending futures
+                                for fut in pending:
+                                    fut.cancel()
+                                # Collect any completed results quickly
+                                done, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                                pending = set()  # Clear pending set
+
+                            for fut in done:
+                                from concurrent.futures import CancelledError
+                                try:
+                                    result = fut.result()
+                                except CancelledError:
+                                    # Ignore cancelled futures
+                                    pbar.update(1)
+                                    continue
+
+                                if result is not None:
+                                    rel_path = result[0]
+                                    seen_paths.add(rel_path)
+                                    batch_rows.append(result)
+                                    stats.files_scanned += 1
+
+                                    if len(batch_rows) >= batch_size:
+                                        _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
+                                        batch_rows.clear()
+                                        conn.commit()
+                                pbar.update(1)
+
+                            # Exit immediately if interrupted
+                            if interrupted:
+                                break
+
+                            while len(pending) < max_inflight:
+                                try:
+                                    file_path = next(file_iter)
+                                except StopIteration:
+                                    break
+                                future = executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode)
+                                pending.add(future)
+                                future_to_path[future] = file_path
 
         except KeyboardInterrupt:
             interrupted = True
@@ -846,8 +927,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 batch_rows.clear()
             conn.commit()
 
-    if status.enabled:
-        status.close()
+    if progress.enabled:
+        progress.close()
 
     # 11. SCOPED deletion detection
     # Only mark files as deleted if:
