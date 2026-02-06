@@ -119,14 +119,21 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
         device_id = session[0]
         root_path = Path(session[1])
 
-        device = cursor.execute(
-            "SELECT mount_point FROM devices WHERE device_id = ?",
-            (device_id,),
-        ).fetchone()
-        if not device:
+        device_columns = {row[1] for row in cursor.execute("PRAGMA table_info(devices)").fetchall()}
+        if "preferred_mount_point" in device_columns:
+            device = cursor.execute(
+                "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()
+            mount_point = Path(device[1] or device[0]) if device else None
+        else:
+            device = cursor.execute(
+                "SELECT mount_point FROM devices WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()
+            mount_point = Path(device[0]) if device else None
+        if not mount_point:
             return {}
-
-        mount_point = Path(device[0])
         try:
             rel_root = root_path.relative_to(mount_point)
         except ValueError:

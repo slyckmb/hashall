@@ -426,6 +426,7 @@ def test_register_new_device(mock_get_fs_type, mock_get_zfs_metadata, test_db):
     assert device['fs_uuid'] == 'zfs-12345'
     assert device['device_alias'] == 'testpool'
     assert device['mount_point'] == '/testpool'
+    assert device['preferred_mount_point'] == '/testpool'
     assert device['fs_type'] == 'zfs'
     assert device['zfs_pool_name'] == 'testpool'
     assert device['zfs_dataset_name'] == 'testpool/data'
@@ -434,7 +435,7 @@ def test_register_new_device(mock_get_fs_type, mock_get_zfs_metadata, test_db):
 
     # Verify database record
     db_record = cursor.execute("""
-        SELECT fs_uuid, device_id, device_alias, mount_point, fs_type, scan_count
+        SELECT fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, fs_type, scan_count
         FROM devices WHERE fs_uuid = ?
     """, ('zfs-12345',)).fetchone()
 
@@ -443,8 +444,9 @@ def test_register_new_device(mock_get_fs_type, mock_get_zfs_metadata, test_db):
     assert db_record[1] == 49
     assert db_record[2] == 'testpool'
     assert db_record[3] == '/testpool'
-    assert db_record[4] == 'zfs'
-    assert db_record[5] == 1
+    assert db_record[4] == '/testpool'
+    assert db_record[5] == 'zfs'
+    assert db_record[6] == 1
 
 
 @patch('hashall.fs_utils.get_zfs_metadata')
@@ -684,13 +686,16 @@ def test_update_device_updates_mount_point(mock_get_fs_type, mock_get_zfs_metada
     # Initial registration
     device1 = register_or_update_device(cursor, 'zfs-mount-test', 70, '/old/mount')
     assert device1['mount_point'] == '/old/mount'
+    assert device1['preferred_mount_point'] == '/old/mount'
 
     # Update with new mount point (same device_id)
     device2 = register_or_update_device(cursor, 'zfs-mount-test', 70, '/new/mount')
     assert device2['mount_point'] == '/new/mount'
+    assert device2['preferred_mount_point'] == '/old/mount'
 
     # Verify in database
-    mount_point = cursor.execute("""
-        SELECT mount_point FROM devices WHERE fs_uuid = ?
-    """, ('zfs-mount-test',)).fetchone()[0]
+    mount_point, preferred_mount_point = cursor.execute("""
+        SELECT mount_point, preferred_mount_point FROM devices WHERE fs_uuid = ?
+    """, ('zfs-mount-test',)).fetchone()
     assert mount_point == '/new/mount'
+    assert preferred_mount_point == '/old/mount'

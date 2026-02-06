@@ -299,12 +299,12 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
 
     # Check if device exists by fs_uuid
     existing = cursor.execute("""
-        SELECT device_id, device_alias, device_id_history, scan_count
+        SELECT device_id, device_alias, device_id_history, scan_count, preferred_mount_point
         FROM devices WHERE fs_uuid = ?
     """, (fs_uuid,)).fetchone()
 
     if existing:
-        old_device_id, alias, history_json, scan_count = existing
+        old_device_id, alias, history_json, scan_count, preferred_mount_point = existing
 
         # Check if device_id changed
         if old_device_id != device_id:
@@ -328,9 +328,10 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                     device_id = ?,
                     device_id_history = ?,
                     mount_point = ?,
+                    preferred_mount_point = COALESCE(preferred_mount_point, ?),
                     updated_at = datetime('now')
                 WHERE fs_uuid = ?
-            """, (device_id, json.dumps(history), mount_point, fs_uuid))
+            """, (device_id, json.dumps(history), mount_point, mount_point, fs_uuid))
 
         else:
             # Device ID unchanged - just update scan timestamp
@@ -339,9 +340,10 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                     last_scanned_at = datetime('now'),
                     scan_count = scan_count + 1,
                     mount_point = ?,
+                    preferred_mount_point = COALESCE(preferred_mount_point, ?),
                     updated_at = datetime('now')
                 WHERE fs_uuid = ?
-            """, (mount_point, fs_uuid))
+            """, (mount_point, mount_point, fs_uuid))
 
     else:
         # New device - register it
@@ -358,14 +360,15 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
         # Insert new device record
         cursor.execute("""
             INSERT INTO devices
-            (fs_uuid, device_id, device_alias, mount_point, fs_type,
+            (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, fs_type,
              zfs_pool_name, zfs_dataset_name, zfs_pool_guid,
              first_scanned_at, last_scanned_at, scan_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1)
         """, (
             fs_uuid,
             device_id,
             alias,
+            mount_point,
             mount_point,
             fs_type,
             zfs_meta.get('pool_name'),
@@ -377,7 +380,7 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
 
     # Fetch and return complete device info
     device_info = cursor.execute("""
-        SELECT device_id, fs_uuid, device_alias, mount_point, fs_type,
+        SELECT device_id, fs_uuid, device_alias, mount_point, preferred_mount_point, fs_type,
                zfs_pool_name, zfs_dataset_name, zfs_pool_guid,
                scan_count, total_files, total_bytes
         FROM devices WHERE fs_uuid = ?
@@ -389,13 +392,14 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
             'fs_uuid': device_info[1],
             'device_alias': device_info[2],
             'mount_point': device_info[3],
-            'fs_type': device_info[4],
-            'zfs_pool_name': device_info[5],
-            'zfs_dataset_name': device_info[6],
-            'zfs_pool_guid': device_info[7],
-            'scan_count': device_info[8],
-            'total_files': device_info[9],
-            'total_bytes': device_info[10]
+            'preferred_mount_point': device_info[4],
+            'fs_type': device_info[5],
+            'zfs_pool_name': device_info[6],
+            'zfs_dataset_name': device_info[7],
+            'zfs_pool_guid': device_info[8],
+            'scan_count': device_info[9],
+            'total_files': device_info[10],
+            'total_bytes': device_info[11]
         }
     else:
         # Should not happen, but return minimal info
@@ -403,7 +407,8 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
             'device_id': device_id,
             'fs_uuid': fs_uuid,
             'device_alias': None,
-            'mount_point': mount_point
+            'mount_point': mount_point,
+            'preferred_mount_point': mount_point
         }
 
 

@@ -13,7 +13,7 @@ from datetime import datetime
 from tqdm import tqdm
 from hashall.model import connect_db, init_db_schema
 from hashall.device import register_or_update_device, ensure_files_table
-from hashall.fs_utils import get_filesystem_uuid
+from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source
 
 BATCH_SIZE = 500
 
@@ -46,19 +46,27 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
         - No files found -> return empty dict
         - Root path not under mount point -> return empty dict
     """
-    # Get mount point for the device
-    row = cursor.execute("""
-        SELECT mount_point FROM devices WHERE device_id = ?
-    """, (device_id,)).fetchone()
+    # Get mount point for the device (prefer canonical mount when available)
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(devices)").fetchall()}
+    if "preferred_mount_point" in columns:
+        row = cursor.execute("""
+            SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?
+        """, (device_id,)).fetchone()
+    else:
+        row = cursor.execute("""
+            SELECT mount_point, NULL FROM devices WHERE device_id = ?
+        """, (device_id,)).fetchone()
 
     if not row:
         return {}
 
     mount_point = Path(row[0])
+    preferred_mount_point = Path(row[1]) if row[1] else mount_point
+    effective_mount_point = preferred_mount_point if root_path.is_relative_to(preferred_mount_point) else mount_point
 
     # Calculate relative root from mount point
     try:
-        rel_root = root_path.relative_to(mount_point)
+        rel_root = root_path.relative_to(effective_mount_point)
     except ValueError:
         # root_path is not under mount_point
         return {}
@@ -493,6 +501,27 @@ def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: boo
     return kwargs
 
 
+def _canonicalize_root(
+    root_path: Path,
+    current_mount: Path,
+    preferred_mount: Path,
+    *,
+    allow_remap: bool
+) -> Path:
+    """Normalize root_path to a preferred mount point when possible."""
+    if preferred_mount == current_mount:
+        return root_path
+    if not allow_remap:
+        return root_path
+    if root_path.is_relative_to(preferred_mount):
+        return root_path
+    try:
+        rel_root = root_path.relative_to(current_mount)
+    except ValueError:
+        return root_path
+    return preferred_mount / rel_root
+
+
 def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
               workers: int | None = None, batch_size: int | None = None,
               tqdm_position: int | None = None, quiet: bool = False,
@@ -526,11 +555,25 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     _emit(quiet, f"📍 Scanning: {root_canonical}")
     _emit(quiet, f"   Device ID: {device_id} | Filesystem UUID: {fs_uuid}")
 
+    mount_point_str = get_mount_point(str(root_canonical)) or str(root_canonical)
+    mount_source = get_mount_source(str(root_canonical)) or ""
+
     # 4. Register/update device in registry
     device_info = register_or_update_device(
-        cursor, fs_uuid, device_id, str(root_canonical)
+        cursor, fs_uuid, device_id, mount_point_str
     )
     conn.commit()
+
+    current_mount = Path(device_info["mount_point"])
+    preferred_mount = Path(device_info.get("preferred_mount_point") or device_info["mount_point"])
+    canonical_root = _canonicalize_root(
+        root_canonical,
+        current_mount,
+        preferred_mount,
+        allow_remap=not mount_source.startswith("/")
+    )
+    if canonical_root != root_canonical:
+        _emit(quiet, f"   Canonical root: {canonical_root}")
 
     # 5. Ensure per-device files table exists
     table_name = ensure_files_table(cursor, device_id)
@@ -542,7 +585,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         ON CONFLICT (fs_uuid, root_path) DO UPDATE SET
             last_scanned_at = datetime('now'),
             scan_count = scan_count + 1
-    """, (fs_uuid, str(root_canonical)))
+    """, (fs_uuid, str(canonical_root)))
     conn.commit()
 
     # 7. Create scan session with new fields
@@ -553,14 +596,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         INSERT INTO scan_sessions
         (scan_id, fs_uuid, device_id, root_path, started_at, status, parallel, workers)
         VALUES (?, ?, ?, ?, datetime('now'), 'running', ?, ?)
-    """, (scan_id, fs_uuid, device_id, str(root_canonical), parallel, workers))
+    """, (scan_id, fs_uuid, device_id, str(canonical_root), parallel, workers))
     scan_session_id = cursor.lastrowid
     conn.commit()
 
     _emit(quiet, f"✅ Scan session: {scan_id}")
 
     # 8. Load existing files from DB (scoped to root_path)
-    existing_files = load_existing_files(cursor, device_id, root_canonical)
+    existing_files = load_existing_files(cursor, device_id, canonical_root)
     _emit(quiet, f"📊 Existing files in catalog: {len(existing_files)}")
 
     # 9. Walk filesystem and collect file paths
@@ -591,7 +634,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             seen_paths.add(result[0])
 
             # Write immediately in sequential mode
-            _write_batch(cursor, table_name, root_canonical, [result], stats)
+            _write_batch(cursor, table_name, canonical_root, [result], stats)
             stats.files_scanned += 1
 
             # Commit periodically
@@ -652,7 +695,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 stats.files_scanned += 1
 
                                 if len(batch_rows) >= batch_size:
-                                    _write_batch(cursor, table_name, root_canonical, batch_rows, stats)
+                                    _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
                                     batch_rows.clear()
                                     conn.commit()
                             pbar.update(1)
@@ -675,7 +718,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 for fut in list(pending):
                     fut.cancel()
             if batch_rows:
-                _write_batch(cursor, table_name, root_canonical, batch_rows, stats)
+                _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
                 batch_rows.clear()
             conn.commit()
 
@@ -687,7 +730,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     # Calculate relative root prefix
     try:
-        rel_root = root_canonical.relative_to(mount_point)
+        rel_root = canonical_root.relative_to(preferred_mount)
     except ValueError:
         rel_root = Path('.')
 

@@ -97,6 +97,52 @@ def _try_findmnt(path: str) -> Optional[str]:
     return None
 
 
+def get_mount_point(path: str) -> Optional[str]:
+    """
+    Return the mount point (TARGET) for a path using findmnt.
+
+    Returns None if findmnt is unavailable or fails.
+    """
+    try:
+        result = subprocess.run(
+            ['findmnt', '-no', 'TARGET', path],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5
+        )
+        mount_point = result.stdout.strip()
+        return mount_point or None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    except Exception:
+        pass
+    return None
+
+
+def get_mount_source(path: str) -> Optional[str]:
+    """
+    Return the mount source (SOURCE) for a path using findmnt.
+
+    Useful for detecting bind mounts when SOURCE is an absolute path.
+    """
+    try:
+        result = subprocess.run(
+            ['findmnt', '-no', 'SOURCE', path],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5
+        )
+        source = result.stdout.strip()
+        return source or None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    except Exception:
+        pass
+    return None
+
+
 def _try_zfs_guid(path: str) -> Optional[str]:
     """
     Try to get ZFS filesystem GUID.

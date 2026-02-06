@@ -124,7 +124,8 @@ def test_diff_scan_sessions_per_device_root_filter_and_hardlinks(temp_db_path):
         """
         CREATE TABLE devices (
             device_id INTEGER PRIMARY KEY,
-            mount_point TEXT NOT NULL
+            mount_point TEXT NOT NULL,
+            preferred_mount_point TEXT
         )
         """
     )
@@ -140,8 +141,8 @@ def test_diff_scan_sessions_per_device_root_filter_and_hardlinks(temp_db_path):
 
     device_id = 7
     cursor.execute(
-        "INSERT INTO devices (device_id, mount_point) VALUES (?, ?)",
-        (device_id, "/pool"),
+        "INSERT INTO devices (device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?)",
+        (device_id, "/pool", "/mnt/pool"),
     )
 
     cursor.execute(
@@ -189,11 +190,11 @@ def test_diff_scan_sessions_per_device_root_filter_and_hardlinks(temp_db_path):
     dst_id = 2
     cursor.execute(
         "INSERT INTO scan_sessions (id, device_id, root_path) VALUES (?, ?, ?)",
-        (src_id, device_id, "/pool/media"),
+        (src_id, device_id, "/mnt/pool/media"),
     )
     cursor.execute(
         "INSERT INTO scan_sessions (id, device_id, root_path) VALUES (?, ?, ?)",
-        (dst_id, device_id, "/pool/other"),
+        (dst_id, device_id, "/mnt/pool/other"),
     )
 
     conn.commit()
@@ -295,6 +296,83 @@ def test_diff_scan_sessions_per_device_detects_changes(temp_db_path):
     buckets = _entries_by_status(report)
 
     assert "/alpha.txt" in buckets["changed"]
+
+    conn.close()
+
+
+def test_diff_scan_sessions_prefers_canonical_mount_point(temp_db_path):
+    conn = sqlite3.connect(temp_db_path)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE devices (
+            device_id INTEGER PRIMARY KEY,
+            mount_point TEXT NOT NULL,
+            preferred_mount_point TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE scan_sessions (
+            id INTEGER PRIMARY KEY,
+            device_id INTEGER NOT NULL,
+            root_path TEXT NOT NULL
+        )
+        """
+    )
+
+    device_id = 3
+    cursor.execute(
+        "INSERT INTO devices (device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?)",
+        (device_id, "/mnt/pool", "/pool"),
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE files_3 (
+            path TEXT PRIMARY KEY,
+            sha256 TEXT,
+            sha1 TEXT,
+            inode INTEGER,
+            status TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO files_3 (path, sha256, sha1, inode, status)
+        VALUES (?, ?, ?, ?, 'active')
+        """,
+        ("media/alpha.txt", "hs", "ss", 1),
+    )
+    cursor.execute(
+        """
+        INSERT INTO files_3 (path, sha256, sha1, inode, status)
+        VALUES (?, ?, ?, ?, 'active')
+        """,
+        ("other/bravo.txt", "hb", "sb", 2),
+    )
+
+    src_id = 1
+    dst_id = 2
+    cursor.execute(
+        "INSERT INTO scan_sessions (id, device_id, root_path) VALUES (?, ?, ?)",
+        (src_id, device_id, "/pool/media"),
+    )
+    cursor.execute(
+        "INSERT INTO scan_sessions (id, device_id, root_path) VALUES (?, ?, ?)",
+        (dst_id, device_id, "/pool/other"),
+    )
+
+    conn.commit()
+
+    report = diff_scan_sessions(conn, src_id, dst_id)
+    buckets = _entries_by_status(report)
+
+    assert "/alpha.txt" in buckets["removed"]
+    assert "/bravo.txt" in buckets["added"]
 
     conn.close()
 
