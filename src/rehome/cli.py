@@ -40,9 +40,16 @@ def cli():
               help="Device ID for stash storage")
 @click.option("--pool-device", type=int, required=True,
               help="Device ID for pool storage")
+@click.option("--stash-seeding-root", type=click.Path(),
+              help="Base seeding root on stash (for save_path mapping)")
+@click.option("--pool-seeding-root", type=click.Path(),
+              help="Base seeding root on pool (for save_path mapping)")
+@click.option("--pool-payload-root", type=click.Path(),
+              help="Base payload root on pool (for MOVE target paths)")
 @click.option("--output", "-o", type=click.Path(),
               help="Output plan file (default: rehome-plan-<mode>.json)")
-def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_root, stash_device, pool_device, output):
+def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_root,
+             stash_device, pool_device, stash_seeding_root, pool_seeding_root, pool_payload_root, output):
     """
     Create a demotion plan for torrents.
 
@@ -74,18 +81,28 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
         click.echo(f"❌ Catalog not found: {catalog_path}", err=True)
         raise click.Abort()
 
+    # Validate mapping roots
+    if bool(stash_seeding_root) ^ bool(pool_seeding_root):
+        click.echo("❌ Must specify both --stash-seeding-root and --pool-seeding-root when using mapping", err=True)
+        raise click.Abort()
+
     # Create planner
     planner = (
         DemotionPlanner(
             catalog_path=catalog_path,
             seeding_roots=list(seeding_root),
             stash_device=stash_device,
-            pool_device=pool_device
+            pool_device=pool_device,
+            stash_seeding_root=stash_seeding_root,
+            pool_seeding_root=pool_seeding_root,
+            pool_payload_root=pool_payload_root,
         ) if demote else PromotionPlanner(
             catalog_path=catalog_path,
             seeding_roots=list(seeding_root),
             stash_device=stash_device,
-            pool_device=pool_device
+            pool_device=pool_device,
+            stash_seeding_root=stash_seeding_root,
+            pool_seeding_root=pool_seeding_root,
         )
     )
 
@@ -194,13 +211,18 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
               help="Show what would happen without making changes")
 @click.option("--force", is_flag=True,
               help="Execute the plan (mutually exclusive with --dryrun)")
+@click.option("--spot-check", type=int, default=0,
+              help="Spot-check N files by SHA256 after payload verification")
 @click.option("--cleanup-source-views", is_flag=True,
               help="Remove torrent views at source side (never payload roots)")
 @click.option("--cleanup-empty-dirs", is_flag=True,
               help="Remove empty directories under seeding roots only")
+@click.option("--cleanup-duplicate-payload", is_flag=True,
+              help="Remove source payload root after REUSE (explicit opt-in)")
 @click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
               help="Path to hashall catalog database")
-def apply_cmd(plan_file, dryrun, force, cleanup_source_views, cleanup_empty_dirs, catalog):
+def apply_cmd(plan_file, dryrun, force, spot_check, cleanup_source_views,
+              cleanup_empty_dirs, cleanup_duplicate_payload, catalog):
     """
     Apply a demotion plan.
 
@@ -271,13 +293,17 @@ def apply_cmd(plan_file, dryrun, force, cleanup_source_views, cleanup_empty_dirs
                 executor.dry_run(
                     plan,
                     cleanup_source_views=cleanup_source_views,
-                    cleanup_empty_dirs=cleanup_empty_dirs
+                    cleanup_empty_dirs=cleanup_empty_dirs,
+                    cleanup_duplicate_payload=cleanup_duplicate_payload,
+                    spot_check=spot_check
                 )
             else:
                 executor.execute(
                     plan,
                     cleanup_source_views=cleanup_source_views,
-                    cleanup_empty_dirs=cleanup_empty_dirs
+                    cleanup_empty_dirs=cleanup_empty_dirs,
+                    cleanup_duplicate_payload=cleanup_duplicate_payload,
+                    spot_check=spot_check
                 )
 
             if len(plans_to_apply) > 1:

@@ -15,6 +15,8 @@ import json
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from hashall.qbittorrent import get_qbittorrent_client
+from hashall.payload import get_files_for_path
+from rehome.view_builder import build_torrent_view
 
 
 class DemotionExecutor:
@@ -118,6 +120,163 @@ class DemotionExecutor:
 
         return Path(save_path) / root_name
 
+    def _get_torrent_save_path(self, conn: sqlite3.Connection, torrent_hash: str) -> Optional[Path]:
+        """Get the save_path for a torrent from the catalog."""
+        row = conn.execute("""
+            SELECT save_path
+            FROM torrent_instances
+            WHERE torrent_hash = ?
+        """, (torrent_hash,)).fetchone()
+        if not row or not row[0]:
+            return None
+        return Path(row[0])
+
+    def _build_views(self, payload_root: Path, view_targets: List[Dict], plan: Dict) -> None:
+        """Build torrent views using hardlinks to the payload root."""
+        if not view_targets:
+            return
+
+        for target in view_targets:
+            torrent_hash = target["torrent_hash"]
+            target_save_path = Path(target["target_save_path"])
+            root_name = target.get("root_name")
+
+            files = self.qbit_client.get_torrent_files(torrent_hash)
+            if not files:
+                raise RuntimeError(f"Failed to fetch files for torrent {torrent_hash[:16]}")
+
+            result = build_torrent_view(
+                payload_root=payload_root,
+                target_save_path=target_save_path,
+                files=files,
+                root_name=root_name,
+            )
+
+            if result.file_count != plan["file_count"] or result.total_bytes != plan["total_bytes"]:
+                raise RuntimeError(
+                    f"View build mismatch for {torrent_hash[:16]}: "
+                    f"files={result.file_count}/{plan['file_count']} "
+                    f"bytes={result.total_bytes}/{plan['total_bytes']}"
+                )
+
+    def _build_relocations(self, conn: sqlite3.Connection, plan: Dict) -> List[Dict]:
+        """Build relocation targets for all torrents in plan."""
+        relocations = []
+        view_targets = plan.get("view_targets") or []
+
+        if view_targets:
+            for target in view_targets:
+                if not target.get("source_save_path"):
+                    raise RuntimeError(f"Missing source_save_path for torrent {target['torrent_hash']}")
+                relocations.append({
+                    "torrent_hash": target["torrent_hash"],
+                    "source_save_path": target.get("source_save_path"),
+                    "target_save_path": target["target_save_path"],
+                })
+            return relocations
+
+        # Fallback: move all torrents to the payload's parent directory
+        fallback_target = str(Path(plan["target_path"]).parent)
+        for torrent_hash in plan["affected_torrents"]:
+            source_save = self._get_torrent_save_path(conn, torrent_hash)
+            if not source_save:
+                raise RuntimeError(f"Missing save_path for torrent {torrent_hash}")
+            relocations.append({
+                "torrent_hash": torrent_hash,
+                "source_save_path": str(source_save) if source_save else None,
+                "target_save_path": fallback_target,
+            })
+        return relocations
+
+    def _relocate_torrents_atomic(self, relocations: List[Dict]) -> None:
+        """
+        Atomically relocate multiple torrents.
+
+        Steps:
+        1. Pause all
+        2. Set locations for all
+        3. Resume all
+        4. Verify all
+        Rollback location changes if any step fails.
+        """
+        paused = []
+        moved = []
+
+        for r in relocations:
+            torrent_hash = r["torrent_hash"]
+            if not self.qbit_client.pause_torrent(torrent_hash):
+                for h in paused:
+                    self.qbit_client.resume_torrent(h)
+                raise RuntimeError(f"Failed to pause torrent {torrent_hash[:16]}")
+            paused.append(torrent_hash)
+
+        for r in relocations:
+            torrent_hash = r["torrent_hash"]
+            target_save_path = r["target_save_path"]
+            if not self.qbit_client.set_location(torrent_hash, target_save_path):
+                # Rollback any moved torrents
+                for m in moved:
+                    src = m.get("source_save_path")
+                    if src:
+                        self.qbit_client.set_location(m["torrent_hash"], src)
+                for h in paused:
+                    self.qbit_client.resume_torrent(h)
+                raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
+            moved.append(r)
+
+        try:
+            for h in paused:
+                if not self.qbit_client.resume_torrent(h):
+                    raise RuntimeError(f"Failed to resume torrent {h[:16]}")
+
+            # Verify locations
+            import time
+            time.sleep(1)
+            for r in relocations:
+                torrent_hash = r["torrent_hash"]
+                expected_path = Path(r["target_save_path"]).resolve()
+                torrent_info = self.qbit_client.get_torrent_info(torrent_hash)
+                if not torrent_info:
+                    raise RuntimeError(f"Failed to verify torrent {torrent_hash[:16]} after relocation")
+                actual_path = Path(torrent_info.save_path).resolve()
+                if actual_path != expected_path:
+                    raise RuntimeError(
+                        f"Torrent {torrent_hash[:16]} location verification failed: "
+                        f"expected={expected_path}, actual={actual_path}"
+                    )
+        except Exception as e:
+            # Rollback to original locations if possible
+            for m in moved:
+                src = m.get("source_save_path")
+                if src:
+                    self.qbit_client.set_location(m["torrent_hash"], src)
+            raise
+
+    def _spot_check_payload(self, payload_root: Path, device_id: int, sample: int) -> None:
+        """Spot-check a payload by verifying SHA256 on a sample of files."""
+        if sample <= 0:
+            return
+
+        conn = self._get_db_connection()
+        try:
+            files = get_files_for_path(conn, device_id, str(payload_root))
+        finally:
+            conn.close()
+
+        candidates = [f for f in files if f.sha256]
+        if not candidates:
+            raise RuntimeError("No SHA256 available for spot-check; run sha256-backfill")
+
+        sample_files = candidates[:sample]
+        for f in sample_files:
+            if payload_root.is_file():
+                abs_path = payload_root
+            else:
+                abs_path = payload_root / f.relative_path
+            actual = compute_sha256(abs_path)
+            if actual != f.sha256:
+                raise RuntimeError(f"Spot-check hash mismatch for {abs_path}")
+
     def _relocate_torrent(self, torrent_hash: str, new_path: str) -> None:
         """
         Relocate a torrent in qBittorrent.
@@ -175,7 +334,8 @@ class DemotionExecutor:
         self._log(f"  verified hash={torrent_hash[:16]} save_path={actual_path}", "success")
 
     def dry_run(self, plan: Dict, cleanup_source_views: bool = False,
-                cleanup_empty_dirs: bool = False) -> None:
+                cleanup_empty_dirs: bool = False, cleanup_duplicate_payload: bool = False,
+                spot_check: int = 0) -> None:
         """
         Perform dry-run of plan (print actions without executing).
 
@@ -189,6 +349,9 @@ class DemotionExecutor:
         self._log(f"affected_torrents={len(plan['affected_torrents'])}")
         if plan.get("no_blind_copy"):
             self._log("no_blind_copy=true")
+
+        if spot_check:
+            self._log(f"spot_check_files={spot_check}")
 
         if direction == 'promote' and decision == 'REUSE':
             self._log("ACTION: PROMOTE_REUSE (reuse existing payload on stash)")
@@ -226,7 +389,7 @@ class DemotionExecutor:
                 self._log(f"    {i+3}. Relocate torrent {torrent_hash[:16]} in qBittorrent")
                 self._log(f"    {i+3}. Verify torrent can access files")
 
-        if cleanup_source_views or cleanup_empty_dirs:
+        if cleanup_source_views or cleanup_empty_dirs or cleanup_duplicate_payload:
             self._log("CLEANUP (dry-run):")
             if cleanup_source_views:
                 self._log("  cleanup_source_views=true")
@@ -234,11 +397,15 @@ class DemotionExecutor:
             if cleanup_empty_dirs:
                 self._log("  cleanup_empty_dirs=true")
                 self._preview_cleanup_empty_dirs(plan)
+            if cleanup_duplicate_payload:
+                self._log("  cleanup_duplicate_payload=true")
+                self._preview_cleanup_duplicate_payload(plan)
 
         self._log("✅ Dry-run complete (no changes made)", "success")
 
     def execute(self, plan: Dict, cleanup_source_views: bool = False,
-                cleanup_empty_dirs: bool = False) -> None:
+                cleanup_empty_dirs: bool = False, cleanup_duplicate_payload: bool = False,
+                spot_check: int = 0) -> None:
         """
         Execute a demotion plan.
 
@@ -260,15 +427,15 @@ class DemotionExecutor:
             if direction == 'promote':
                 if decision != 'REUSE':
                     raise RuntimeError(f"Unknown promotion decision: {decision}")
-                self._execute_promote_reuse(plan)
+                self._execute_promote_reuse(plan, spot_check=spot_check)
             elif decision == 'REUSE':
-                self._execute_reuse(plan)
+                self._execute_reuse(plan, spot_check=spot_check)
             elif decision == 'MOVE':
-                self._execute_move(plan)
+                self._execute_move(plan, spot_check=spot_check)
             else:
                 raise RuntimeError(f"Unknown decision: {decision}")
 
-            self._apply_cleanup(plan, cleanup_source_views, cleanup_empty_dirs)
+            self._apply_cleanup(plan, cleanup_source_views, cleanup_empty_dirs, cleanup_duplicate_payload)
 
             self._log("Plan execution completed successfully", "success")
             self._log(
@@ -283,7 +450,7 @@ class DemotionExecutor:
             self._log(f"Execution failed: {e}", "error")
             raise
 
-    def _execute_promote_reuse(self, plan: Dict) -> None:
+    def _execute_promote_reuse(self, plan: Dict, spot_check: int = 0) -> None:
         """
         Execute a PROMOTE_REUSE plan (pool → stash).
 
@@ -303,19 +470,26 @@ class DemotionExecutor:
         if not self._verify_total_bytes(target_path, plan['total_bytes']):
             raise RuntimeError(f"Stash payload total bytes mismatch at {target_path}")
 
-        # 2. For each sibling, relocate
-        for torrent_hash in plan['affected_torrents']:
-            self._log(f"step=relocate_sibling torrent={torrent_hash[:16]}")
-            self._log(f"  build_view torrent={torrent_hash[:16]} target={target_path}")
-            try:
-                self._relocate_torrent(torrent_hash, str(target_path.parent))
-            except Exception as e:
-                self._log(f"Relocation failed for {torrent_hash[:16]}, aborting", "error")
-                raise RuntimeError(f"Failed to relocate torrent {torrent_hash[:16]}: {e}")
+        # Spot-check (optional)
+        self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
+
+        conn = self._get_db_connection()
+        try:
+            relocations = self._build_relocations(conn, plan)
+        finally:
+            conn.close()
+
+        # Build views (if mapping provided)
+        self._log("step=build_views")
+        self._build_views(target_path, plan.get("view_targets") or [], plan)
+
+        # Relocate all torrents atomically
+        self._log("step=relocate_siblings")
+        self._relocate_torrents_atomic(relocations)
 
         self._log("PROMOTE_REUSE execution complete", "success")
 
-    def _execute_reuse(self, plan: Dict) -> None:
+    def _execute_reuse(self, plan: Dict, spot_check: int = 0) -> None:
         """
         Execute a REUSE plan.
 
@@ -337,35 +511,30 @@ class DemotionExecutor:
         if not self._verify_total_bytes(target_path, plan['total_bytes']):
             raise RuntimeError(f"Pool payload total bytes mismatch at {target_path}")
 
-        # 2. For each sibling, build view and relocate
-        relocated_torrents = []
-        for torrent_hash in plan['affected_torrents']:
-            self._log(f"step=relocate_sibling torrent={torrent_hash[:16]}")
+        # Spot-check (optional)
+        self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
 
-            # Build torrent view on pool
-            # For MVP: Assume payload directory matches torrent name
-            # Future: Use hashall link to create hardlink views
-            self._log(f"  build_view torrent={torrent_hash[:16]} target={target_path}")
+        conn = self._get_db_connection()
+        try:
+            relocations = self._build_relocations(conn, plan)
+        finally:
+            conn.close()
 
-            # Relocate torrent in qBittorrent
-            try:
-                self._relocate_torrent(torrent_hash, str(target_path.parent))
-                relocated_torrents.append(torrent_hash)
-            except Exception as e:
-                # Rollback: abort execution, torrents remain on stash
-                self._log(f"Relocation failed for {torrent_hash[:16]}, aborting", "error")
-                raise RuntimeError(f"Failed to relocate torrent {torrent_hash[:16]}: {e}")
+        # Build views (if mapping provided)
+        self._log("step=build_views")
+        self._build_views(target_path, plan.get("view_targets") or [], plan)
+
+        # Relocate all torrents atomically
+        self._log("step=relocate_siblings")
+        self._relocate_torrents_atomic(relocations)
 
         # 3. Cleanup stash-side views
-        # Only cleanup after ALL torrents successfully relocated
-        self._log(f"step=cleanup_stash path={source_path} relocated={len(relocated_torrents)}")
-        # For safety, we don't auto-delete stash content in MVP
-        # User should manually verify and cleanup after confirming all torrents work
+        self._log(f"step=cleanup_stash path={source_path} relocated={len(relocations)}")
         self._log(f"  MANUAL_ACTION_REQUIRED: Verify torrents work, then delete {source_path}", "warning")
 
         self._log("REUSE execution complete", "success")
 
-    def _execute_move(self, plan: Dict) -> None:
+    def _execute_move(self, plan: Dict, spot_check: int = 0) -> None:
         """
         Execute a MOVE plan.
 
@@ -410,29 +579,31 @@ class DemotionExecutor:
         if not self._verify_total_bytes(target_path, plan['total_bytes']):
             raise RuntimeError(f"Target total bytes mismatch after move")
 
-        # 4. For each sibling, build view and relocate
-        relocated_torrents = []
-        for torrent_hash in plan['affected_torrents']:
-            self._log(f"step=relocate_sibling torrent={torrent_hash[:16]}")
+        # Spot-check (optional)
+        self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
 
-            # Build torrent view on pool
-            # For MVP: Assume torrent content is at target_path
-            # Future: Use hashall link to create hardlink views
-            self._log(f"  build_view torrent={torrent_hash[:16]} target={target_path}")
+        conn = self._get_db_connection()
+        try:
+            relocations = self._build_relocations(conn, plan)
+        finally:
+            conn.close()
 
-            # Relocate torrent in qBittorrent
+        # 4. Build views and relocate atomically
+        try:
+            self._log("step=build_views")
+            self._build_views(target_path, plan.get("view_targets") or [], plan)
+
+            self._log("step=relocate_siblings")
+            self._relocate_torrents_atomic(relocations)
+        except Exception as e:
+            # Rollback: move payload back to stash if ANY torrent fails
+            self._log("relocation_failed rolling_back_payload", "error")
             try:
-                self._relocate_torrent(torrent_hash, str(target_path.parent))
-                relocated_torrents.append(torrent_hash)
-            except Exception as e:
-                # Rollback: move payload back to stash if ANY torrent fails
-                self._log(f"Relocation failed for {torrent_hash[:16]}, rolling back", "error")
-                try:
-                    shutil.move(str(target_path), str(source_path))
-                    self._log(f"  Rolled back payload to {source_path}", "warning")
-                except Exception as rollback_error:
-                    self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
-                raise RuntimeError(f"Failed to relocate torrent {torrent_hash[:16]}: {e}")
+                shutil.move(str(target_path), str(source_path))
+                self._log(f"  Rolled back payload to {source_path}", "warning")
+            except Exception as rollback_error:
+                self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
+            raise
 
         # 5. Verify source is removed
         self._log(f"step=verify_source_removed path={source_path}")
@@ -442,9 +613,9 @@ class DemotionExecutor:
         self._log("MOVE execution complete", "success")
 
     def _apply_cleanup(self, plan: Dict, cleanup_source_views: bool,
-                       cleanup_empty_dirs: bool) -> None:
+                       cleanup_empty_dirs: bool, cleanup_duplicate_payload: bool) -> None:
         """Apply optional cleanup actions after successful relocation."""
-        if not cleanup_source_views and not cleanup_empty_dirs:
+        if not cleanup_source_views and not cleanup_empty_dirs and not cleanup_duplicate_payload:
             return
 
         seeding_roots = [Path(r) for r in plan.get('seeding_roots', [])]
@@ -456,6 +627,8 @@ class DemotionExecutor:
             self._cleanup_source_views(plan, seeding_roots, dry_run=False)
         if cleanup_empty_dirs:
             self._cleanup_empty_dirs(plan, seeding_roots, dry_run=False)
+        if cleanup_duplicate_payload:
+            self._cleanup_duplicate_payload(plan, dry_run=False)
 
     def _preview_cleanup_source_views(self, plan: Dict) -> None:
         """Preview source view cleanup actions without executing."""
@@ -472,6 +645,10 @@ class DemotionExecutor:
             self._log("  cleanup_skipped reason=no_seeding_roots", "warning")
             return
         self._cleanup_empty_dirs(plan, seeding_roots, dry_run=True)
+
+    def _preview_cleanup_duplicate_payload(self, plan: Dict) -> None:
+        """Preview duplicate payload cleanup actions without executing."""
+        self._cleanup_duplicate_payload(plan, dry_run=True)
 
     def _cleanup_source_views(self, plan: Dict, seeding_roots: List[Path],
                               dry_run: bool) -> None:
@@ -545,3 +722,35 @@ class DemotionExecutor:
                 except OSError:
                     # Directory no longer empty or failed; skip
                     self._log(f"  remove_empty_dir skip path={path}", "warning")
+
+    def _cleanup_duplicate_payload(self, plan: Dict, dry_run: bool) -> None:
+        """Remove source payload root after a REUSE plan when explicitly enabled."""
+        if plan.get("decision") != "REUSE":
+            self._log("  cleanup_duplicate skip reason=not_reuse", "warning")
+            return
+
+        source_path = Path(plan['source_path']).resolve()
+        target_path = Path(plan['target_path']).resolve() if plan.get('target_path') else None
+
+        if target_path is None:
+            self._log("  cleanup_duplicate skip reason=missing_target", "warning")
+            return
+        if source_path == target_path:
+            self._log("  cleanup_duplicate skip reason=same_path", "warning")
+            return
+        if not source_path.exists():
+            self._log("  cleanup_duplicate skip reason=missing_source", "warning")
+            return
+        if not target_path.exists():
+            self._log("  cleanup_duplicate skip reason=missing_target_path", "warning")
+            return
+
+        if dry_run:
+            self._log(f"  remove_duplicate_payload dry_run=true path={source_path}")
+            return
+
+        if source_path.is_dir():
+            shutil.rmtree(source_path)
+        else:
+            source_path.unlink()
+        self._log(f"  remove_duplicate_payload path={source_path}", "success")

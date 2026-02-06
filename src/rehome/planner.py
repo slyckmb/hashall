@@ -25,6 +25,57 @@ class ExternalConsumer:
     external_link_paths: List[str]
 
 
+def _build_view_targets(
+    conn: sqlite3.Connection,
+    torrent_hashes: List[str],
+    source_root: Optional[Path],
+    target_root: Optional[Path],
+) -> List[Dict]:
+    """
+    Build per-torrent view targets using a source→target root mapping.
+
+    Returns empty list if source/target roots are not provided.
+    """
+    if not source_root or not target_root:
+        return []
+
+    placeholders = ",".join(["?"] * len(torrent_hashes))
+    rows = conn.execute(
+        f"""
+        SELECT torrent_hash, save_path, root_name
+        FROM torrent_instances
+        WHERE torrent_hash IN ({placeholders})
+        """,
+        torrent_hashes,
+    ).fetchall()
+
+    view_targets = []
+    for torrent_hash, save_path, root_name in rows:
+        if not save_path:
+            raise ValueError(f"Missing save_path for torrent {torrent_hash}")
+
+        save_path_path = Path(save_path)
+        if save_path_path.is_absolute():
+            save_path_path = canonicalize_path(save_path_path)
+
+        if not is_under(save_path_path, source_root):
+            raise ValueError(
+                f"Torrent save_path {save_path_path} is not under source root {source_root}"
+            )
+
+        rel = save_path_path.relative_to(source_root)
+        target_save_path = (target_root / rel).resolve()
+
+        view_targets.append({
+            "torrent_hash": torrent_hash,
+            "source_save_path": str(save_path_path),
+            "target_save_path": str(target_save_path),
+            "root_name": root_name,
+        })
+
+    return view_targets
+
+
 class DemotionPlanner:
     """
     Plans demotion of payloads from stash to pool.
@@ -36,7 +87,10 @@ class DemotionPlanner:
     """
 
     def __init__(self, catalog_path: Path, seeding_roots: List[str],
-                 stash_device: int, pool_device: int):
+                 stash_device: int, pool_device: int,
+                 stash_seeding_root: Optional[str] = None,
+                 pool_seeding_root: Optional[str] = None,
+                 pool_payload_root: Optional[str] = None):
         """
         Initialize planner.
 
@@ -50,6 +104,9 @@ class DemotionPlanner:
         self.seeding_roots = [canonicalize_path(Path(r)) for r in seeding_roots]
         self.stash_device = stash_device
         self.pool_device = pool_device
+        self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
+        self.pool_seeding_root = canonicalize_path(Path(pool_seeding_root)) if pool_seeding_root else None
+        self.pool_payload_root = canonicalize_path(Path(pool_payload_root)) if pool_payload_root else None
 
     def _get_db_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -260,6 +317,7 @@ class DemotionPlanner:
                 return False
         return True
 
+
     def _payload_exists_on_pool(self, conn: sqlite3.Connection,
                                 payload_hash: str) -> Optional[str]:
         """
@@ -411,6 +469,33 @@ class DemotionPlanner:
             # 6. Check if payload exists on pool
             pool_root = self._payload_exists_on_pool(conn, payload.payload_hash)
 
+            # 6a. Build view targets (if mapping provided)
+            try:
+                view_targets = _build_view_targets(
+                    conn,
+                    sibling_hashes,
+                    self.stash_seeding_root,
+                    self.pool_seeding_root,
+                )
+            except ValueError as e:
+                return {
+                    "version": "1.0",
+                    "direction": "demote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": payload.payload_id,
+                    "payload_hash": payload.payload_hash,
+                    "reasons": [str(e)],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.stash_device,
+                    "target_device_id": self.pool_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "file_count": payload.file_count,
+                    "total_bytes": payload.total_bytes
+                }
+
             if pool_root:
                 # REUSE: Payload already on pool
                 return {
@@ -427,15 +512,34 @@ class DemotionPlanner:
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "view_targets": view_targets,
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
                 }
             else:
                 # MOVE: Need to move payload to pool
                 # Construct target path (same relative structure on pool)
-                # For MVP, we'll use a simple /pool/torrents/content/... structure
-                # This should be configurable but we'll hardcode for MVP
-                target_root = f"/pool/torrents/content/{Path(payload.root_path).name}"
+                base_root = self.pool_payload_root or self.pool_seeding_root
+                if base_root is None:
+                    return {
+                        "version": "1.0",
+                        "direction": "demote",
+                        "decision": "BLOCK",
+                        "torrent_hash": torrent_hash,
+                        "payload_id": payload.payload_id,
+                        "payload_hash": payload.payload_hash,
+                        "reasons": ["No pool payload root configured for MOVE"],
+                        "affected_torrents": sibling_hashes,
+                        "source_path": payload.root_path,
+                        "target_path": None,
+                        "source_device_id": self.stash_device,
+                        "target_device_id": self.pool_device,
+                        "seeding_roots": [str(r) for r in self.seeding_roots],
+                        "file_count": payload.file_count,
+                        "total_bytes": payload.total_bytes
+                    }
+
+                target_root = str(base_root / Path(payload.root_path).name)
 
                 return {
                     "version": "1.0",
@@ -451,6 +555,7 @@ class DemotionPlanner:
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "view_targets": view_targets,
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
                 }
@@ -579,7 +684,9 @@ class PromotionPlanner:
     """
 
     def __init__(self, catalog_path: Path, seeding_roots: List[str],
-                 stash_device: int, pool_device: int):
+                 stash_device: int, pool_device: int,
+                 stash_seeding_root: Optional[str] = None,
+                 pool_seeding_root: Optional[str] = None):
         """
         Initialize planner.
 
@@ -593,6 +700,8 @@ class PromotionPlanner:
         self.seeding_roots = [Path(r).resolve() for r in seeding_roots]
         self.stash_device = stash_device
         self.pool_device = pool_device
+        self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
+        self.pool_seeding_root = canonicalize_path(Path(pool_seeding_root)) if pool_seeding_root else None
 
     def _get_db_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -680,6 +789,34 @@ class PromotionPlanner:
                     "total_bytes": payload.total_bytes
                 }
 
+            # Build view targets (if mapping provided)
+            try:
+                view_targets = _build_view_targets(
+                    conn,
+                    sibling_hashes,
+                    self.pool_seeding_root,
+                    self.stash_seeding_root,
+                )
+            except ValueError as e:
+                return {
+                    "version": "1.0",
+                    "direction": "promote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": payload.payload_id,
+                    "payload_hash": payload.payload_hash,
+                    "reasons": [str(e)],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.pool_device,
+                    "target_device_id": self.stash_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "no_blind_copy": True,
+                    "file_count": payload.file_count,
+                    "total_bytes": payload.total_bytes
+                }
+
             return {
                 "version": "1.0",
                 "direction": "promote",
@@ -695,6 +832,7 @@ class PromotionPlanner:
                 "target_device_id": self.stash_device,
                 "seeding_roots": [str(r) for r in self.seeding_roots],
                 "no_blind_copy": True,
+                "view_targets": view_targets,
                 "file_count": payload.file_count,
                 "total_bytes": payload.total_bytes
             }

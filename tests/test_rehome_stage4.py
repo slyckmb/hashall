@@ -317,6 +317,7 @@ class TestRelocationVerification:
             hash="verify_test",
             name="Test",
             save_path="/wrong/path",  # Wrong location!
+            content_path="/wrong/path/Test",
             category="",
             tags="",
             state="uploading",

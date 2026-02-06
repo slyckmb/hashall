@@ -161,6 +161,9 @@ rehome plan --promote \
 - `--seeding-root` - Seeding domain root path(s) (can specify multiple times)
 - `--stash-device` - Device ID for stash storage
 - `--pool-device` - Device ID for pool storage
+- `--stash-seeding-root` - Base seeding root on stash (for save_path mapping)
+- `--pool-seeding-root` - Base seeding root on pool (for save_path mapping)
+- `--pool-payload-root` - Base payload root on pool (MOVE target root)
 - `--catalog` - Path to hashall catalog database (default: `~/.hashall/catalog.db`)
 - `--output` - Output plan file (default: `rehome-plan-<mode>.json`)
 
@@ -201,8 +204,10 @@ rehome apply <plan_file> --force    # Execute
 - `<plan_file>` - Path to plan JSON file (from `rehome plan`)
 - `--dryrun` - Show what would happen without making changes
 - `--force` - Execute the plan (mutually exclusive with --dryrun)
+- `--spot-check` - Spot-check N files by SHA256 after payload verification
 - `--cleanup-source-views` - Remove source-side torrent views (never payload roots)
 - `--cleanup-empty-dirs` - Remove empty directories under seeding roots only
+- `--cleanup-duplicate-payload` - Remove source payload root after REUSE (opt-in)
 - `--catalog` - Path to hashall catalog database (default: `~/.hashall/catalog.db`)
 
 **Behavior:**

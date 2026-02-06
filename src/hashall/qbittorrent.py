@@ -16,6 +16,7 @@ class QBitTorrent:
     hash: str
     name: str
     save_path: str
+    content_path: str
     category: str
     tags: str
     state: str
@@ -117,6 +118,7 @@ class QBittorrentClient:
                     hash=t.get('hash', ''),
                     name=t.get('name', ''),
                     save_path=t.get('save_path', ''),
+                    content_path=t.get('content_path', ''),
                     category=t.get('category', ''),
                     tags=t.get('tags', ''),
                     state=t.get('state', ''),
@@ -180,6 +182,9 @@ class QBittorrentClient:
         """
         if files is None:
             files = self.get_torrent_files(torrent.hash)
+
+        if torrent.content_path:
+            return str(Path(torrent.content_path))
 
         save_path = Path(torrent.save_path)
 
@@ -302,6 +307,7 @@ class QBittorrentClient:
                 hash=t.get('hash', ''),
                 name=t.get('name', ''),
                 save_path=t.get('save_path', ''),
+                content_path=t.get('content_path', ''),
                 category=t.get('category', ''),
                 tags=t.get('tags', ''),
                 state=t.get('state', ''),
