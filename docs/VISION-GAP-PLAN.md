@@ -171,8 +171,45 @@ Tests:
    - Cross-device duplicate analysis tests.
    - Treehash tests against per-device tables.
 
+## Progress Tracker (Living)
+
+### Stage 1 — Canonical Pathing + Payload Correctness
+DONE:
+- Canonical path resolver shared across scan and payload (`src/hashall/pathing.py`).
+- Scan pipeline canonicalizes roots, uses preferred mount for relpaths, skips symlinked files.
+- Payload builder converts absolute roots to relative queries when mount metadata exists.
+- External consumer detection now uses active-only rows, canonical paths, and blocks on unresolved roots.
+- Rehome blocks demotion when payload_hash is missing.
+
+TODO:
+- Add bind-mount scan coverage test (real or mocked).
+- Add external consumer detection test with bind-mount-style paths.
+- Extend scan coverage guardrails to include library roots (not just seeding roots).
+
+### Stage 2 — Rehome Safety + View Building
+DONE:
+- None yet.
+
+TODO:
+- Use qBittorrent `content_path` for payload root resolution.
+- Implement view builder for torrent layouts.
+- Make target path mapping configurable (no hard-coded pool path).
+- Make sibling relocation atomic with rollback.
+- Add optional spot-hash verification on rehome.
+- Add duplicate canonical payload cleanup after REUSE.
+- Add rehome view builder + rollback tests.
+
+### Stage 3 — Remaining Features + Auditing
+DONE:
+- None yet.
+
+TODO:
+- Cross-device duplicate detection CLI.
+- Treehash for unified catalog.
+- Rehome audit trail persistence.
+- Post-rehome catalog sync option.
+
 ## Notes and Open Decisions
 - **Canonical path format:** Decide whether `files_<device_id>.path` should remain relative to preferred mount or be stored as canonical absolute. Consistency matters more than which choice is made.
 - **Path aliasing:** A small `path_aliases` table may be cleaner than ad-hoc remap logic for `/data/media` → `/stash/media`.
 - **Migration:** If path format changes, include a one-time migration or re-scan strategy.
-
