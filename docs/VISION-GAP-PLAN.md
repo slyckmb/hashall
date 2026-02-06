@@ -202,13 +202,14 @@ TODO:
 
 ### Stage 3 — Remaining Features + Auditing
 DONE:
-- None yet.
+- Cross-device duplicate detection (`hashall link analyze --cross-device`).
+- Treehash now supports unified catalog (`files_<device_id>`).
+- Rehome audit trail persisted in `rehome_runs`.
+- Post-rehome catalog sync updates `payloads` and `torrent_instances`.
+- Optional post-rehome rescan (`--rescan`).
 
 TODO:
-- Cross-device duplicate detection CLI.
-- Treehash for unified catalog.
-- Rehome audit trail persistence.
-- Post-rehome catalog sync option.
+- Add tests for rehome audit trail and rescan paths.
 
 ## Notes and Open Decisions
 - **Canonical path format:** Decide whether `files_<device_id>.path` should remain relative to preferred mount or be stored as canonical absolute. Consistency matters more than which choice is made.
