@@ -502,6 +502,12 @@ def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: boo
     return kwargs
 
 
+def _status_line(*, enabled: bool, quiet: bool, tqdm_position: int | None):
+    if not enabled or quiet or tqdm_position is not None:
+        return None
+    return tqdm(total=0, position=0, leave=True, dynamic_ncols=True, bar_format="{desc}")
+
+
 def _canonicalize_root(
     root_path: Path,
     current_mount: Path,
@@ -526,7 +532,7 @@ def _canonicalize_root(
 def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
               workers: int | None = None, batch_size: int | None = None,
               tqdm_position: int | None = None, quiet: bool = False,
-              hash_mode: str = 'fast'):
+              hash_mode: str = 'fast', show_current_path: bool = False):
     """
     Incrementally scan a directory with per-device table tracking.
 
@@ -574,7 +580,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         root_canonical,
         current_mount,
         preferred_mount,
-        allow_remap=not mount_source.startswith("/")
+        allow_remap=bool(mount_source)
     )
     if canonical_root != root_canonical:
         _emit(quiet, f"   Canonical root: {canonical_root}")
@@ -639,12 +645,17 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     # Get mount point for relative path calculation
     mount_point = effective_mount
 
+    status = _status_line(enabled=show_current_path, quiet=quiet, tqdm_position=tqdm_position)
+    progress_position = 1 if status is not None else tqdm_position
+
     if not parallel:
         # Sequential scanning
         pbar_kwargs = _progress_kwargs(
-            total=len(file_paths), tqdm_position=tqdm_position, quiet=quiet
+            total=len(file_paths), tqdm_position=progress_position, quiet=quiet
         )
         for file_path in tqdm(file_paths, **pbar_kwargs):
+            if status is not None:
+                status.set_description_str(file_path)
             result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
             if result is None:
                 continue
@@ -668,6 +679,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         pending = set()
         batch_rows = []
         file_iter = iter(file_paths)
+        future_to_path = {}
 
         try:
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -677,10 +689,12 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                         file_path = next(file_iter)
                     except StopIteration:
                         break
-                    pending.add(executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode))
+                    future = executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode)
+                    pending.add(future)
+                    future_to_path[future] = file_path
 
                 pbar_kwargs = _progress_kwargs(
-                    total=len(file_paths), tqdm_position=tqdm_position, quiet=quiet
+                    total=len(file_paths), tqdm_position=progress_position, quiet=quiet
                 )
                 with tqdm(**pbar_kwargs) as pbar:
                     while pending:
@@ -699,6 +713,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                         for fut in done:
                             from concurrent.futures import CancelledError
                             try:
+                                file_path = future_to_path.pop(fut, None)
+                                if status is not None and file_path is not None:
+                                    status.set_description_str(file_path)
                                 result = fut.result()
                             except CancelledError:
                                 # Ignore cancelled futures
@@ -726,7 +743,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 file_path = next(file_iter)
                             except StopIteration:
                                 break
-                            pending.add(executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode))
+                            future = executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode)
+                            pending.add(future)
+                            future_to_path[future] = file_path
 
         except KeyboardInterrupt:
             interrupted = True
@@ -738,6 +757,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
                 batch_rows.clear()
             conn.commit()
+
+    if status is not None:
+        status.close()
 
     # 11. SCOPED deletion detection
     # Only mark files as deleted if:

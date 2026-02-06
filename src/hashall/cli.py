@@ -29,12 +29,14 @@ def cli():
 @click.option("--fast", "hash_mode_flag", flag_value='fast', help="Shortcut for --hash-mode=fast")
 @click.option("--full", "hash_mode_flag", flag_value='full', help="Shortcut for --hash-mode=full")
 @click.option("--upgrade", "hash_mode_flag", flag_value='upgrade', help="Shortcut for --hash-mode=upgrade")
-def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag):
+@click.option("--show-path", is_flag=True, help="Show current file path above progress bar.")
+def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path):
     """Scan a directory and store file metadata in SQLite."""
     # Use flag if provided, otherwise use hash_mode
     mode = hash_mode_flag if hash_mode_flag else hash_mode
     scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
-              workers=workers, batch_size=batch_size, hash_mode=mode)
+              workers=workers, batch_size=batch_size, hash_mode=mode,
+              show_current_path=show_path)
 
 @cli.command("export")
 @click.argument("db_path", type=click.Path(exists=True, dir_okay=False))
