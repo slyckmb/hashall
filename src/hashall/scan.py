@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 import time
 import statistics
+import shutil
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from typing import Dict, Set, Tuple
@@ -508,6 +509,28 @@ def _status_line(*, enabled: bool, quiet: bool, tqdm_position: int | None):
     return tqdm(total=0, position=0, leave=True, dynamic_ncols=True, bar_format="{desc}")
 
 
+def _truncate_middle(text: str, max_len: int) -> str:
+    if max_len <= 0 or len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    head = max_len // 2 - 1
+    tail = max_len - head - 3
+    return f"{text[:head]}...{text[-tail:]}"
+
+
+def _format_status_path(path: str) -> str:
+    try:
+        width = shutil.get_terminal_size((120, 20)).columns
+    except Exception:
+        width = 120
+    width = max(10, width - 1)
+    truncated = _truncate_middle(path, width)
+    if len(truncated) < width:
+        return truncated.ljust(width)
+    return truncated
+
+
 def _canonicalize_root(
     root_path: Path,
     current_mount: Path,
@@ -655,7 +678,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         )
         for file_path in tqdm(file_paths, **pbar_kwargs):
             if status is not None:
-                status.set_description_str(file_path)
+                status.set_description_str(_format_status_path(file_path))
             result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
             if result is None:
                 continue
@@ -715,7 +738,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             try:
                                 file_path = future_to_path.pop(fut, None)
                                 if status is not None and file_path is not None:
-                                    status.set_description_str(file_path)
+                                    status.set_description_str(_format_status_path(file_path))
                                 result = fut.result()
                             except CancelledError:
                                 # Ignore cancelled futures
