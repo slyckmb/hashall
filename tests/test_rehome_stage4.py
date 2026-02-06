@@ -209,6 +209,7 @@ class TestBatchDemotionByPayloadHash:
         planner = DemotionPlanner(
             catalog_path=db_path,
             seeding_roots=["/stash/torrents/seeding"],
+            library_roots=[],
             stash_device=50,
             pool_device=49
         )
@@ -274,6 +275,7 @@ class TestBatchDemotionByTag:
         planner = DemotionPlanner(
             catalog_path=db_path,
             seeding_roots=["/stash/torrents/seeding"],
+            library_roots=[],
             stash_device=50,
             pool_device=49
         )

@@ -182,9 +182,11 @@ DONE:
 - Rehome blocks demotion when payload_hash is missing.
 - Bind-mount scan coverage test.
 - External consumer bind-mount alias test.
+- Scan coverage guardrails include library roots (cross-seed `dataDirs`, tracker registry save_path, and explicit overrides).
+- Library roots parsing tests for cross-seed and tracker registry configs.
 
 TODO:
-- Extend scan coverage guardrails to include library roots (not just seeding roots).
+- None.
 
 ### Stage 2 — Rehome Safety + View Building
 DONE:

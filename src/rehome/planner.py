@@ -87,6 +87,7 @@ class DemotionPlanner:
     """
 
     def __init__(self, catalog_path: Path, seeding_roots: List[str],
+                 library_roots: Optional[List[str]],
                  stash_device: int, pool_device: int,
                  stash_seeding_root: Optional[str] = None,
                  pool_seeding_root: Optional[str] = None,
@@ -97,11 +98,13 @@ class DemotionPlanner:
         Args:
             catalog_path: Path to hashall catalog database
             seeding_roots: List of seeding domain root paths
+            library_roots: Optional list of library roots to verify scan coverage
             stash_device: Device ID for stash
             pool_device: Device ID for pool
         """
         self.catalog_path = catalog_path
         self.seeding_roots = [canonicalize_path(Path(r)) for r in seeding_roots]
+        self.library_roots = [canonicalize_path(Path(r)) for r in (library_roots or [])]
         self.stash_device = stash_device
         self.pool_device = pool_device
         self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
@@ -375,8 +378,9 @@ class DemotionPlanner:
             # 3. Get all sibling torrents (same payload)
             sibling_hashes = get_torrent_siblings(conn, torrent_hash)
 
-            # 3a. Ensure scan roots cover seeding domain (if available)
-            coverage = self._scan_roots_cover(conn, payload.device_id, self.seeding_roots)
+            # 3a. Ensure scan roots cover seeding + library domains (if available)
+            required_roots = self.seeding_roots + self.library_roots
+            coverage = self._scan_roots_cover(conn, payload.device_id, required_roots)
             if coverage is False:
                 return {
                     "version": "1.0",
@@ -385,13 +389,14 @@ class DemotionPlanner:
                     "torrent_hash": torrent_hash,
                     "payload_id": payload.payload_id,
                     "payload_hash": payload.payload_hash,
-                    "reasons": ["Seeding roots are not covered by scan_roots; rescan required"],
+                    "reasons": ["Seeding/library roots are not covered by scan_roots; rescan required"],
                     "affected_torrents": sibling_hashes,
                     "source_path": payload.root_path,
                     "target_path": None,
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
                 }
@@ -414,6 +419,7 @@ class DemotionPlanner:
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
                 }
@@ -442,6 +448,7 @@ class DemotionPlanner:
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
                 }
@@ -462,6 +469,7 @@ class DemotionPlanner:
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
                 }
@@ -492,6 +500,7 @@ class DemotionPlanner:
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
                 }
@@ -512,6 +521,7 @@ class DemotionPlanner:
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "view_targets": view_targets,
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
@@ -535,6 +545,7 @@ class DemotionPlanner:
                         "source_device_id": self.stash_device,
                         "target_device_id": self.pool_device,
                         "seeding_roots": [str(r) for r in self.seeding_roots],
+                        "library_roots": [str(r) for r in self.library_roots],
                         "file_count": payload.file_count,
                         "total_bytes": payload.total_bytes
                     }
@@ -555,6 +566,7 @@ class DemotionPlanner:
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "view_targets": view_targets,
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
@@ -684,6 +696,7 @@ class PromotionPlanner:
     """
 
     def __init__(self, catalog_path: Path, seeding_roots: List[str],
+                 library_roots: Optional[List[str]],
                  stash_device: int, pool_device: int,
                  stash_seeding_root: Optional[str] = None,
                  pool_seeding_root: Optional[str] = None):
@@ -693,11 +706,13 @@ class PromotionPlanner:
         Args:
             catalog_path: Path to hashall catalog database
             seeding_roots: List of seeding domain root paths
+            library_roots: Optional list of library roots to include in plan metadata
             stash_device: Device ID for stash
             pool_device: Device ID for pool
         """
         self.catalog_path = catalog_path
         self.seeding_roots = [Path(r).resolve() for r in seeding_roots]
+        self.library_roots = [canonicalize_path(Path(r)) for r in (library_roots or [])]
         self.stash_device = stash_device
         self.pool_device = pool_device
         self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
@@ -784,6 +799,7 @@ class PromotionPlanner:
                     "source_device_id": self.pool_device,
                     "target_device_id": self.stash_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "no_blind_copy": True,
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
@@ -812,6 +828,7 @@ class PromotionPlanner:
                     "source_device_id": self.pool_device,
                     "target_device_id": self.stash_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
                     "no_blind_copy": True,
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
@@ -831,6 +848,7 @@ class PromotionPlanner:
                 "source_device_id": self.pool_device,
                 "target_device_id": self.stash_device,
                 "seeding_roots": [str(r) for r in self.seeding_roots],
+                "library_roots": [str(r) for r in self.library_roots],
                 "no_blind_copy": True,
                 "view_targets": view_targets,
                 "file_count": payload.file_count,

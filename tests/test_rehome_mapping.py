@@ -87,6 +87,7 @@ def test_plan_includes_view_targets(tmp_path):
     planner = DemotionPlanner(
         catalog_path=db_path,
         seeding_roots=["/stash/torrents/seeding"],
+        library_roots=[],
         stash_device=50,
         pool_device=49,
         stash_seeding_root="/stash/torrents/seeding",

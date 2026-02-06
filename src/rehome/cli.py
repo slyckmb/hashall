@@ -10,6 +10,7 @@ from typing import Optional
 from rehome import __version__
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
+from rehome.library_roots import collect_library_roots
 
 DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
@@ -36,6 +37,12 @@ def cli():
               help="Path to hashall catalog database")
 @click.option("--seeding-root", multiple=True, required=True,
               help="Seeding domain root(s) - paths outside these are external consumers")
+@click.option("--library-root", multiple=True,
+              help="Library roots that must be scanned to detect external consumers")
+@click.option("--cross-seed-config", type=click.Path(),
+              help="Path to cross-seed config.js to import dataDirs")
+@click.option("--tracker-registry", type=click.Path(),
+              help="Path to tracker-registry.yml to import qbittorrent.save_path")
 @click.option("--stash-device", type=int, required=True,
               help="Device ID for stash storage")
 @click.option("--pool-device", type=int, required=True,
@@ -49,7 +56,8 @@ def cli():
 @click.option("--output", "-o", type=click.Path(),
               help="Output plan file (default: rehome-plan-<mode>.json)")
 def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_root,
-             stash_device, pool_device, stash_seeding_root, pool_seeding_root, pool_payload_root, output):
+             library_root, cross_seed_config, tracker_registry, stash_device, pool_device,
+             stash_seeding_root, pool_seeding_root, pool_payload_root, output):
     """
     Create a demotion plan for torrents.
 
@@ -87,10 +95,21 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
         raise click.Abort()
 
     # Create planner
+    try:
+        library_roots, library_root_sources = collect_library_roots(
+            explicit_roots=list(library_root),
+            cross_seed_config=cross_seed_config,
+            tracker_registry=tracker_registry,
+        )
+    except FileNotFoundError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+
     planner = (
         DemotionPlanner(
             catalog_path=catalog_path,
             seeding_roots=list(seeding_root),
+            library_roots=library_roots,
             stash_device=stash_device,
             pool_device=pool_device,
             stash_seeding_root=stash_seeding_root,
@@ -99,6 +118,7 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
         ) if demote else PromotionPlanner(
             catalog_path=catalog_path,
             seeding_roots=list(seeding_root),
+            library_roots=library_roots,
             stash_device=stash_device,
             pool_device=pool_device,
             stash_seeding_root=stash_seeding_root,
@@ -150,10 +170,15 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
 
     # Write plan(s) to file
     if len(plans) == 1:
+        if library_root_sources:
+            plans[0]["library_roots_sources"] = library_root_sources
         with open(output_path, 'w') as f:
             json.dump(plans[0], f, indent=2)
     else:
         # Multiple plans - write as batch
+        if library_root_sources:
+            for plan in plans:
+                plan["library_roots_sources"] = library_root_sources
         with open(output_path, 'w') as f:
             json.dump({
                 'version': '1.0',

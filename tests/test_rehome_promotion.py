@@ -106,6 +106,7 @@ class TestPromotionPlanner:
         planner = PromotionPlanner(
             catalog_path=db_path,
             seeding_roots=["/pool/torrents"],
+            library_roots=[],
             stash_device=50,
             pool_device=49
         )
@@ -145,6 +146,7 @@ class TestPromotionPlanner:
         planner = PromotionPlanner(
             catalog_path=db_path,
             seeding_roots=["/pool/torrents", "/stash/torrents"],
+            library_roots=[],
             stash_device=50,
             pool_device=49
         )
@@ -185,6 +187,7 @@ class TestPromotionPlanner:
         planner = PromotionPlanner(
             catalog_path=db_path,
             seeding_roots=["/pool/torrents", "/stash/torrents"],
+            library_roots=[],
             stash_device=50,
             pool_device=49
         )
