@@ -11,7 +11,7 @@ This prompt was written for a local CLI agent. If you are a remote Codex app age
 - Venv check (glider):
   - `if [ -z "$VIRTUAL_ENV" ]; then . /home/michael/dev/work/glider/linux-common/dotfiles/bash/bash_venv && cd /home/michael/dev/work/hashall && mkvenv; fi`
 
-# NEXT AGENT PROMPT — Stage 3 (Diff Engine + Polish)
+# NEXT AGENT PROMPT — Stage 6 (Preferred Mount Override + Validation)
 
 You are the next CLI coder agent in `~/dev/work/hashall`.
 Remote Codex override: adapt paths/commands per the preamble and `/Users/michaelbraband/.codex/AGENTS.md`.
@@ -23,6 +23,10 @@ Remote Codex override: adapt paths/commands per the preamble and `/Users/michael
 **Stage 0 Commit:** `468b593 feat(hashall): add sha256 migration tooling and diff engine`
 **Stage 1 Commit:** `8bfe2a6 chore(make): add unified scan-hierarchical target`
 **Stage 2 Commit:** `c08fa9a feat(hash): cut over file hashing to sha256`
+**Stage 3:** Diff engine considered complete; tests added for `diff_scan_sessions` (see `tests/test_diff_scan_sessions.py`).
+**Stage 4:** Scan UX cleanup applied in `src/hashall/scan.py`; DB cleanup deleted local `.hashall` DBs; read-only backups under `/pool/backup/home/michael/.hashall` remain by design.
+**Stage 5:** Sandbox diff test added (`tests/test_sandbox_diff_flow.py`) and requirements audit noted mount point drift limitations.
+**Stage 6 (in progress):** Preferred mount point support added (migration + scan/diff updates + tests). Needs override mechanism and validation.
 
 ## What’s Done (Stage 2)
 
@@ -39,22 +43,24 @@ Remote Codex override: adapt paths/commands per the preamble and `/Users/michael
 - `pytest tests/test_rehome.py tests/test_rehome_promotion.py tests/test_rehome_stage4.py -v`
 - `pytest tests/test_treehash.py -v`
 
-## Current Focus (Stage 3)
+## Current Focus (Stage 6)
 
-**Goal:** Implement `src/hashall/diff.py` fully and add robust tests.
+**Goal:** Add a safe CLI override mechanism for `preferred_mount_point` (query + update) and validate mount-point drift fixes end-to-end.
 
 Checklist:
-1. Implement diff behavior (or confirm it matches requirements).
-2. Add unit tests for diff output (added/removed/changed + hardlink/inode handling).
-3. Optional polish if time remains.
-4. Update docs if behavior changes.
+1. Implement CLI override to query/update `devices.preferred_mount_point` (read + set).
+2. Add tests for override behavior and mount-point drift scenarios.
+3. Validate scan/diff behavior after override.
+4. Update docs if behavior changes (only with approval).
 
 ## Key Files
 
-- `src/hashall/diff.py`
+- `docs/REQUIREMENTS.md` (authoritative)
+- `src/hashall/scan.py`
 - `src/hashall/verify.py`
-- `src/hashall/verify_trees.py`
-- `tests/` (add new diff tests)
+- `src/hashall/diff.py`
+- `src/hashall/cli.py` (add query + update commands)
+- `tests/` (add override + drift tests)
 - `docs/REQUIREMENTS.md` (authoritative)
 - `docs/architecture/architecture.md`
 - `docs/architecture/schema.md`
@@ -69,12 +75,9 @@ Checklist:
 ## Handoff + Stage QC (Required)
 
 Before handing off:
-- Update **this file** (`out/NEXT-AGENT-PROMPT.md`) with:
-  - What you changed (files + brief description)
-  - Tests run (commands + pass/fail)
-  - Anything left undone or blocked
-  - Any new decisions or behavior changes
-- Ensure all docs impacted by Stage 3 are updated with accurate status/context.
+- Do NOT edit handoff prompts.
+- Write a Stage 6 completion report to `out/STAGE6-REPORT.md` using the template in `docs/STAGE-REPORT-TEMPLATE.md`.
+- Always update all affected documents for this stage with accurate status/context (only with approval).
 - Pause for **Stage QC** and explicit approval before proceeding to commit.
 
 ## Commit Instructions (Required)
@@ -84,13 +87,13 @@ Follow this exact commit workflow:
 
 ## Suggested Next Steps
 
-1. Re-read `docs/REQUIREMENTS.md` and `docs/tooling/cli.md` for diff expectations.
-2. Inspect `src/hashall/diff.py` and `tests/` for gaps or missing coverage.
-3. Implement tests first if behavior is unclear; then finalize diff logic.
-4. Run targeted tests and report failures.
+1. Implement CLI surface for querying and setting preferred mount point.
+2. Implement override and add tests.
+3. Validate mount-point drift resolution end-to-end.
+4. Document gaps and remediation plan if any remain.
 
 Preferred test command (glider):
-- `cd /home/michael/dev/work/hashall && if [ -z "$VIRTUAL_ENV" ]; then . /home/michael/dev/work/glider/linux-common/dotfiles/bash/bash_venv && mkvenv; fi && pytest tests/test_diff*.py -v`
+- `cd /home/michael/dev/work/hashall && if [ -z "$VIRTUAL_ENV" ]; then . /home/michael/dev/work/glider/linux-common/dotfiles/bash/bash_venv && mkvenv; fi && pytest tests/test_scan*.py -v`
 
 ## If You Need DBs or Scan Locations
 

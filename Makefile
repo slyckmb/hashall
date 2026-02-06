@@ -204,6 +204,10 @@ targets-table:  ## Generate summarized Markdown table of Makefile targets and CL
 targets-full:  ## Generate table with full untruncated CLI commands (hides description)
 	@python3 scripts/generate_target_table.py --full
 
+.PHONY: prompts-remote
+prompts-remote:  ## Prepend remote Codex preamble to prompts under out/
+	@scripts/prepend_remote_preamble.sh
+
 .PHONY: clean
 clean:  ## Remove generated files and caches
 	@echo "🧹 Cleaning up..."
