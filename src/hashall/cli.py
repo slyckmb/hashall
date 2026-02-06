@@ -309,8 +309,16 @@ def stats_cmd(db, hash_coverage):
         SELECT
             device_alias,
             device_id,
+            fs_uuid,
+            mount_point,
+            preferred_mount_point,
+            fs_type,
+            zfs_pool_name,
+            zfs_dataset_name,
+            zfs_pool_guid,
             total_files,
-            total_bytes
+            total_bytes,
+            scan_count
         FROM devices
         ORDER BY device_alias
     """).fetchall()
@@ -326,11 +334,27 @@ def stats_cmd(db, hash_coverage):
             device_id = device['device_id']
             files = device['total_files'] or 0
             bytes_val = device['total_bytes'] or 0
+            scan_count = device['scan_count'] or 0
 
             total_active_files += files
             total_bytes += bytes_val
 
-            print(f"    {alias:15} ({device_id}): {files:,} files, {format_size(bytes_val)}")
+            print(f"    {alias:15} ({device_id}): {files:,} files, {format_size(bytes_val)}, scans: {scan_count}")
+            print(f"      fs_uuid: {device['fs_uuid']}")
+            print(f"      mount: {device['mount_point']}")
+            preferred = device['preferred_mount_point'] or device['mount_point']
+            print(f"      preferred: {preferred}")
+            if device['fs_type']:
+                print(f"      fs_type: {device['fs_type']}")
+            zfs_bits = []
+            if device['zfs_pool_name']:
+                zfs_bits.append(f"pool={device['zfs_pool_name']}")
+            if device['zfs_dataset_name']:
+                zfs_bits.append(f"dataset={device['zfs_dataset_name']}")
+            if device['zfs_pool_guid']:
+                zfs_bits.append(f"guid={device['zfs_pool_guid']}")
+            if zfs_bits:
+                print(f"      zfs: {', '.join(zfs_bits)}")
 
         print()
 
@@ -399,9 +423,37 @@ def stats_cmd(db, hash_coverage):
             timestamp = timestamp.split('.')[0]
 
         print(f"    Last Scan: {timestamp} ({device_name})")
-        print(f"    Total Scans: {total_scans['count'] if total_scans else 0}")
+        print(f"      Root (canonical): {last_scan['root_path']}")
+        print(f"      Status: {last_scan['status']}")
+        print(f"    Scan Sessions (completed): {total_scans['count'] if total_scans else 0}")
     else:
         print("    (No completed scans yet)")
+
+    # Scan roots summary
+    if devices:
+        roots_total = conn.execute("""
+            SELECT COUNT(*) as count
+            FROM scan_roots
+        """).fetchone()
+        total_roots = roots_total['count'] if roots_total else 0
+        print(f"    Distinct Roots: {total_roots}")
+
+        recent_roots = conn.execute("""
+            SELECT r.root_path, r.last_scanned_at, r.scan_count, d.device_alias
+            FROM scan_roots r
+            LEFT JOIN devices d ON d.fs_uuid = r.fs_uuid
+            ORDER BY r.last_scanned_at DESC
+            LIMIT 10
+        """).fetchall()
+
+        if recent_roots:
+            print("    Recent Roots:")
+            for row in recent_roots:
+                alias = row['device_alias'] or 'unknown'
+                ts = row['last_scanned_at']
+                if ts and '.' in ts:
+                    ts = ts.split('.')[0]
+                print(f"      {row['root_path']} (last: {ts}, scans: {row['scan_count']}, device: {alias})")
 
     # Hash coverage statistics
     if hash_coverage and devices:
