@@ -18,11 +18,11 @@
 | REQ-7.2-2 | Scan records canonical paths (7.2) | A | `out/te/phase1/logs/scan_initial_stash.txt` | PASS |
 | REQ-7.3-1 | Export JSON available (7.3) | I | Not run in Phase 0-1 | NOT RUN |
 | REQ-4.3-1 | External consumer detection blocks demotion (4.3) | T | `out/te/phase2/logs/pytest_phase2_external_consumers.txt` | PASS |
-| REQ-5.1-1 | Demotion decision REUSE/MOVE/BLOCK (5.1) | T | Phase 3 | NOT RUN |
+| REQ-5.1-1 | Demotion decision REUSE/MOVE/BLOCK (5.1) | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
 | REQ-5.1-2 | REUSE flow builds views + relocates siblings (5.1) | T | Phase 4 | NOT RUN |
 | REQ-5.1-3 | MOVE flow verifies + relocates siblings (5.1) | T | Phase 4 | NOT RUN |
 | REQ-5.2-1 | Promotion reuse-only (5.2) | T | Phase 4 | NOT RUN |
-| REQ-5.3-1 | Payload-group rehome (5.3) | T | Phase 4 | NOT RUN |
+| REQ-5.3-1 | Payload-group rehome (5.3) | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
 | REQ-6.1-1 | Same-device dedupe analysis/plan/execute (6.1) | T | Phase 5 | NOT RUN |
 | REQ-6.2-1 | Cross-device duplicate detection (6.2) | T | Phase 5 | NOT RUN |
 | REQ-6.3-1 | Sibling torrent views (6.3) | T | Phase 4 | NOT RUN |
@@ -33,8 +33,8 @@
 | ID | Success Criterion | Method | Evidence | Status |
 |---|---|---|---|---|
 | SC-F-1 | Media-linked data stays on `/stash` | T | `out/te/phase2/logs/pytest_phase2_external_consumers.txt` | PASS |
-| SC-F-2 | Seed-only data can live on `/pool` | T | Phase 3-4 | NOT RUN |
-| SC-F-3 | REUSE prevents duplication | T | Phase 3-4 | NOT RUN |
+| SC-F-2 | Seed-only data can live on `/pool` | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
+| SC-F-3 | REUSE prevents duplication | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
 | SC-F-4 | Sibling torrents as hardlink views | T | Phase 4 | NOT RUN |
 | SC-F-5 | Incremental scans 10-100x faster | T | `out/te/phase1/logs/scan_incremental_stash.txt` | NOT RUN |
 | SC-F-6 | Dedup saves measurable space | T | Phase 5 | NOT RUN |
