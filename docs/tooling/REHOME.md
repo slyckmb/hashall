@@ -207,7 +207,7 @@ rehome apply <plan_file> --force    # Execute
 - `--spot-check` - Spot-check N files by SHA256 after payload verification
 - `--cleanup-source-views` - Remove source-side torrent views (never payload roots)
 - `--cleanup-empty-dirs` - Remove empty directories under seeding roots only
-- `--cleanup-duplicate-payload` - Remove source payload root after REUSE (opt-in)
+- `--cleanup-duplicate-payload` - Remove duplicate payload roots after REUSE (opt-in, safe checks)
 - `--catalog` - Path to hashall catalog database (default: `~/.hashall/catalog.db`)
 
 **Behavior:**
@@ -245,6 +245,7 @@ rehome apply <plan_file> --force    # Execute
 - Cleanup flags are **opt-in** and **disabled by default**
 - Cleanup is **skipped on any relocation failure**
 - Cleanup actions are shown during dry-run
+- Duplicate payload cleanup only removes roots under known seeding roots and only when file count + total bytes match.
 
 **Example:**
 ```bash
@@ -358,6 +359,24 @@ Plans are JSON files with this structure:
   "payload_hash": "sha256_hash...",
   "reasons": ["Payload already exists on pool at /pool/torrents/content/Movie.2024"],
   "affected_torrents": ["abc123def456", "fedcba654321"],
+  "payload_group": [
+    {
+      "payload_id": 42,
+      "device_id": 50,
+      "root_path": "/stash/torrents/seeding/Movie.2024",
+      "file_count": 125,
+      "total_bytes": 25000000000,
+      "status": "complete"
+    },
+    {
+      "payload_id": 84,
+      "device_id": 49,
+      "root_path": "/pool/torrents/content/Movie.2024",
+      "file_count": 125,
+      "total_bytes": 25000000000,
+      "status": "complete"
+    }
+  ],
   "source_path": "/stash/torrents/seeding/Movie.2024",
   "target_path": "/pool/torrents/content/Movie.2024",
   "source_device_id": 50,
@@ -378,6 +397,7 @@ Plans are JSON files with this structure:
 - `payload_hash` - Content-based payload hash (SHA256)
 - `reasons` - Human-readable reasons for decision
 - `affected_torrents` - All sibling torrents (same payload)
+- `payload_group` - All payload roots with the same payload hash (across devices)
 - `source_path` - Current location on stash
 - `target_path` - Target location on pool (null for BLOCK)
 - `source_device_id` - Source device ID
