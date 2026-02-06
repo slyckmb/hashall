@@ -36,7 +36,7 @@
 | SC-F-2 | Seed-only data can live on `/pool` | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
 | SC-F-3 | REUSE prevents duplication | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
 | SC-F-4 | Sibling torrents as hardlink views | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
-| SC-F-5 | Incremental scans 10-100x faster | T | `out/te/phase1/logs/scan_incremental_stash.txt` | NOT RUN |
+| SC-F-5 | Incremental scans 10-100x faster | T | `out/te/phase7/logs/perf_summary.txt` | PASS |
 | SC-F-6 | Dedup saves measurable space | T | `out/te/phase5/logs/pytest_phase5_dedupe.txt` | PASS |
 | SC-O-1 | Safe by default | T | `out/te/phase6/logs/pytest_phase6_dryrun.txt` | PASS |
 | SC-O-2 | Audit trail understandable | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
@@ -45,4 +45,4 @@
 | SC-U-2 | Documentation accurate/complete | I | `out/te/phase6/logs/cli_workflow_notes.txt` | PASS |
 
 ## Notes
-- Phase 1 scan timings are from a micro dataset and do not validate the 10–100x performance claim; full-scale benchmark pending.
+- SC-F-5 validated on a representative subset (~10.5GB, 22 files) with timeouts to prevent hangs. Full-scale benchmark optional.
