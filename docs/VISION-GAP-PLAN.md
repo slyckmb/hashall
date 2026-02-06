@@ -188,16 +188,17 @@ TODO:
 
 ### Stage 2 — Rehome Safety + View Building
 DONE:
-- None yet.
+- Use qBittorrent `content_path` for payload root resolution.
+- Implement view builder for torrent layouts (`src/rehome/view_builder.py`).
+- Add configurable save_path mapping (`--stash-seeding-root`, `--pool-seeding-root`).
+- Add configurable MOVE target root (`--pool-payload-root`).
+- Make sibling relocation atomic with rollback attempts.
+- Add optional SHA256 spot-check (`--spot-check`).
+- Add duplicate payload cleanup (`--cleanup-duplicate-payload`).
 
 TODO:
-- Use qBittorrent `content_path` for payload root resolution.
-- Implement view builder for torrent layouts.
-- Make target path mapping configurable (no hard-coded pool path).
-- Make sibling relocation atomic with rollback.
-- Add optional spot-hash verification on rehome.
-- Add duplicate canonical payload cleanup after REUSE.
-- Add rehome view builder + rollback tests.
+- Add rollback tests for atomic relocation failures.
+- Add mapping tests for save_path translation.
 
 ### Stage 3 — Remaining Features + Auditing
 DONE:
