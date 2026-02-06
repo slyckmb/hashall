@@ -47,3 +47,4 @@ tools/pre-commit-gptrail.sh
 # Ignore dev-only GPTrail symlinks
 
 out/
+**/._*
