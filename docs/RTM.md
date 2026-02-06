@@ -17,7 +17,7 @@
 | REQ-7.2-1 | Incremental scan faster than initial (7.2) | T | `out/te/phase1/logs/scan_incremental_stash.txt` | PASS |
 | REQ-7.2-2 | Scan records canonical paths (7.2) | A | `out/te/phase1/logs/scan_initial_stash.txt` | PASS |
 | REQ-7.3-1 | Export JSON available (7.3) | I | Not run in Phase 0-1 | NOT RUN |
-| REQ-4.3-1 | External consumer detection blocks demotion (4.3) | T | Phase 2 | NOT RUN |
+| REQ-4.3-1 | External consumer detection blocks demotion (4.3) | T | `out/te/phase2/logs/pytest_phase2_external_consumers.txt` | PASS |
 | REQ-5.1-1 | Demotion decision REUSE/MOVE/BLOCK (5.1) | T | Phase 3 | NOT RUN |
 | REQ-5.1-2 | REUSE flow builds views + relocates siblings (5.1) | T | Phase 4 | NOT RUN |
 | REQ-5.1-3 | MOVE flow verifies + relocates siblings (5.1) | T | Phase 4 | NOT RUN |
@@ -32,7 +32,7 @@
 ## Success Criteria Mapping (Section 12)
 | ID | Success Criterion | Method | Evidence | Status |
 |---|---|---|---|---|
-| SC-F-1 | Media-linked data stays on `/stash` | T | Phase 2 | NOT RUN |
+| SC-F-1 | Media-linked data stays on `/stash` | T | `out/te/phase2/logs/pytest_phase2_external_consumers.txt` | PASS |
 | SC-F-2 | Seed-only data can live on `/pool` | T | Phase 3-4 | NOT RUN |
 | SC-F-3 | REUSE prevents duplication | T | Phase 3-4 | NOT RUN |
 | SC-F-4 | Sibling torrents as hardlink views | T | Phase 4 | NOT RUN |
