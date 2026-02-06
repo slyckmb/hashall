@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
+from hashall.pathing import canonicalize_path, to_relpath
+
 
 @dataclass
 class PayloadFile:
@@ -117,25 +119,68 @@ def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str)
         # Table doesn't exist, no files to return
         return []
 
+    def _table_exists(name: str) -> bool:
+        return conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone() is not None
+
+    # Determine mount points when available
+    mount_point = None
+    preferred_mount = None
+    if _table_exists("devices"):
+        dev_row = conn.execute(
+            "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if dev_row:
+            mount_point = Path(dev_row[0])
+            preferred_mount = Path(dev_row[1] or dev_row[0])
+
+    root = Path(root_path)
+    if root.is_absolute():
+        root = canonicalize_path(root)
+
+    # Convert root to relative path when mount points are known
+    if mount_point:
+        if root.is_absolute():
+            rel_root = to_relpath(root, preferred_mount) or to_relpath(root, mount_point)
+            if rel_root is None:
+                return []
+        else:
+            rel_root = root
+    else:
+        # Legacy/unknown mount: treat as absolute path in table
+        rel_root = root
+
+    rel_root_str = str(rel_root)
+
     # Query files from device-specific table
     # Only get active files (exclude deleted files)
-    query = f"""
-        SELECT path, size, sha256
-        FROM {table_name}
-        WHERE status = 'active' AND (path = ? OR path LIKE ?)
-        ORDER BY path
-    """
-    pattern = f"{root_path}/%"
-    rows = conn.execute(query, (root_path, pattern)).fetchall()
+    if rel_root_str == ".":
+        rows = conn.execute(
+            f"SELECT path, size, sha256 FROM {table_name} WHERE status = 'active' ORDER BY path"
+        ).fetchall()
+    else:
+        query = f"""
+            SELECT path, size, sha256
+            FROM {table_name}
+            WHERE status = 'active' AND (path = ? OR path LIKE ?)
+            ORDER BY path
+        """
+        pattern = f"{rel_root_str}/%"
+        rows = conn.execute(query, (rel_root_str, pattern)).fetchall()
 
     # Convert to PayloadFile objects
     files = []
     for row in rows:
         path = row[0]
-        # Make path relative to root
-        if path.startswith(root_path + '/'):
-            relative_path = path[len(root_path) + 1:]
-        elif path == root_path:
+        # Make path relative to payload root
+        if rel_root_str == ".":
+            relative_path = path
+        elif path.startswith(rel_root_str + '/'):
+            relative_path = path[len(rel_root_str) + 1:]
+        elif path == rel_root_str:
             relative_path = Path(path).name
         else:
             relative_path = path
@@ -162,17 +207,22 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
     Returns:
         Payload object (may be incomplete)
     """
+    # Canonicalize root path for consistent device resolution
+    root = Path(root_path)
+    if root.is_absolute():
+        root = canonicalize_path(root)
+
     # Derive device_id from root_path if not provided
     if device_id is None:
         try:
-            device_id = os.stat(root_path).st_dev
+            device_id = os.stat(root).st_dev
         except (OSError, IOError):
             # Path doesn't exist or is inaccessible
             return Payload(
                 payload_id=None,
                 payload_hash=None,
                 device_id=None,
-                root_path=root_path,
+                root_path=str(root),
                 file_count=0,
                 total_bytes=0,
                 status='incomplete',
@@ -180,14 +230,14 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
             )
 
     # Get files from device-specific table
-    files = get_files_for_path(conn, device_id, root_path)
+    files = get_files_for_path(conn, device_id, str(root))
 
     if not files:
         return Payload(
             payload_id=None,
             payload_hash=None,
             device_id=device_id,
-            root_path=root_path,
+            root_path=str(root),
             file_count=0,
             total_bytes=0,
             status='incomplete',
@@ -206,7 +256,7 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
         payload_id=None,  # Will be set on insert
         payload_hash=payload_hash,
         device_id=device_id,
-        root_path=root_path,
+        root_path=str(root),
         file_count=file_count,
         total_bytes=total_bytes,
         status=status,

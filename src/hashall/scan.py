@@ -14,6 +14,7 @@ from tqdm import tqdm
 from hashall.model import connect_db, init_db_schema
 from hashall.device import register_or_update_device, ensure_files_table
 from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source
+from hashall.pathing import canonicalize_path, is_under
 
 BATCH_SIZE = 500
 
@@ -544,7 +545,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     cursor = conn.cursor()
 
     # 1. Resolve canonical path (handle symlinks, bind mounts)
-    root_canonical = Path(root_path).resolve()
+    root_resolved = Path(root_path).resolve()
+    root_canonical = canonicalize_path(root_resolved)
 
     # 2. Get device_id (kernel-level identifier)
     device_id = os.stat(root_canonical).st_dev
@@ -553,6 +555,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     fs_uuid = get_filesystem_uuid(str(root_canonical))
 
     _emit(quiet, f"📍 Scanning: {root_canonical}")
+    if root_canonical != root_resolved:
+        _emit(quiet, f"   Bind mount source: {root_canonical}")
     _emit(quiet, f"   Device ID: {device_id} | Filesystem UUID: {fs_uuid}")
 
     mount_point_str = get_mount_point(str(root_canonical)) or str(root_canonical)
@@ -574,6 +578,11 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     )
     if canonical_root != root_canonical:
         _emit(quiet, f"   Canonical root: {canonical_root}")
+
+    # Effective mount point for relative path storage
+    effective_mount = preferred_mount if is_under(canonical_root, preferred_mount) else current_mount
+    if effective_mount != current_mount:
+        _emit(quiet, f"   Preferred mount: {effective_mount}")
 
     # 5. Ensure per-device files table exists
     table_name = ensure_files_table(cursor, device_id)
@@ -608,9 +617,17 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     # 9. Walk filesystem and collect file paths
     file_paths = []
-    for dirpath, _, filenames in os.walk(root_canonical):
+    for dirpath, dirnames, filenames in os.walk(root_canonical):
+        # Skip symlinked directories
+        dirnames[:] = [
+            d for d in dirnames
+            if not (Path(dirpath) / d).is_symlink()
+        ]
         for filename in filenames:
-            file_paths.append(os.path.join(dirpath, filename))
+            file_path = Path(dirpath) / filename
+            if file_path.is_symlink():
+                continue
+            file_paths.append(str(file_path))
 
     _emit(quiet, f"📁 Files on filesystem: {len(file_paths)}")
 
@@ -620,7 +637,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     interrupted = False  # Track if scan was interrupted
 
     # Get mount point for relative path calculation
-    mount_point = Path(device_info['mount_point'])
+    mount_point = effective_mount
 
     if not parallel:
         # Sequential scanning
