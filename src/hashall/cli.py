@@ -257,7 +257,10 @@ def payload_siblings(torrent_hash, db):
 @cli.command("stats")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option("--hash-coverage", is_flag=True, help="Show hash coverage statistics.")
-def stats_cmd(db, hash_coverage):
+@click.option("--show-roots", is_flag=True, help="Show recent scanned roots (noisy).")
+@click.option("--roots-limit", type=int, default=10, show_default=True,
+              help="Limit for recent roots list (requires --show-roots).")
+def stats_cmd(db, hash_coverage, show_roots, roots_limit):
     """Display catalog statistics."""
     import os
     from hashall.model import connect_db
@@ -341,9 +344,14 @@ def stats_cmd(db, hash_coverage):
 
             print(f"    {alias:15} ({device_id}): {files:,} files, {format_size(bytes_val)}, scans: {scan_count}")
             print(f"      fs_uuid: {device['fs_uuid']}")
-            print(f"      mount: {device['mount_point']}")
             preferred = device['preferred_mount_point'] or device['mount_point']
             print(f"      preferred: {preferred}")
+            from hashall.fs_utils import get_mount_point
+            detected_mount = get_mount_point(device['mount_point'] or preferred)
+            if detected_mount and detected_mount != preferred:
+                print(f"      mount_detected: {detected_mount}")
+            if show_roots and device['mount_point'] and device['mount_point'] != preferred:
+                print(f"      mount_recorded: {device['mount_point']}")
             if device['fs_type']:
                 print(f"      fs_type: {device['fs_type']}")
             zfs_bits = []
@@ -406,16 +414,24 @@ def stats_cmd(db, hash_coverage):
         WHERE status = 'completed'
     """).fetchone()
 
+    def _shorten_path(path_value: str, max_len: int = 100) -> str:
+        if len(path_value) <= max_len:
+            return path_value
+        head = path_value[:50]
+        tail = path_value[-40:]
+        return f"{head}...{tail}"
+
     print("  Scan History:")
     if last_scan:
         # Get device alias for the last scan
         device = conn.execute("""
-            SELECT device_alias
+            SELECT device_alias, preferred_mount_point, mount_point
             FROM devices
             WHERE fs_uuid = ?
         """, (last_scan['fs_uuid'],)).fetchone()
 
         device_name = device['device_alias'] if device else 'unknown'
+        preferred_mount = (device['preferred_mount_point'] if device else None) or (device['mount_point'] if device else None)
 
         # Format timestamp (remove microseconds if present)
         timestamp = last_scan['completed_at']
@@ -423,7 +439,18 @@ def stats_cmd(db, hash_coverage):
             timestamp = timestamp.split('.')[0]
 
         print(f"    Last Scan: {timestamp} ({device_name})")
-        print(f"      Root (canonical): {last_scan['root_path']}")
+        root_path = last_scan['root_path'] or ""
+        if preferred_mount:
+            try:
+                rel = Path(root_path).relative_to(Path(preferred_mount))
+                rel_str = "." if str(rel) == "." else str(rel)
+                root_display = f"{preferred_mount} (rel: {rel_str})"
+            except Exception:
+                root_display = root_path
+        else:
+            root_display = root_path
+        if root_display:
+            print(f"      Root (canonical): {_shorten_path(root_display)}")
         print(f"      Status: {last_scan['status']}")
         print(f"    Scan Sessions (completed): {total_scans['count'] if total_scans else 0}")
     else:
@@ -438,22 +465,23 @@ def stats_cmd(db, hash_coverage):
         total_roots = roots_total['count'] if roots_total else 0
         print(f"    Distinct Roots: {total_roots}")
 
-        recent_roots = conn.execute("""
-            SELECT r.root_path, r.last_scanned_at, r.scan_count, d.device_alias
-            FROM scan_roots r
-            LEFT JOIN devices d ON d.fs_uuid = r.fs_uuid
-            ORDER BY r.last_scanned_at DESC
-            LIMIT 10
-        """).fetchall()
+        if show_roots and total_roots > 0:
+            recent_roots = conn.execute("""
+                SELECT r.root_path, r.last_scanned_at, r.scan_count, d.device_alias
+                FROM scan_roots r
+                LEFT JOIN devices d ON d.fs_uuid = r.fs_uuid
+                ORDER BY r.last_scanned_at DESC
+                LIMIT ?
+            """, (roots_limit,)).fetchall()
 
-        if recent_roots:
-            print("    Recent Roots:")
-            for row in recent_roots:
-                alias = row['device_alias'] or 'unknown'
-                ts = row['last_scanned_at']
-                if ts and '.' in ts:
-                    ts = ts.split('.')[0]
-                print(f"      {row['root_path']} (last: {ts}, scans: {row['scan_count']}, device: {alias})")
+            if recent_roots:
+                print("    Recent Roots:")
+                for row in recent_roots:
+                    alias = row['device_alias'] or 'unknown'
+                    ts = row['last_scanned_at']
+                    if ts and '.' in ts:
+                        ts = ts.split('.')[0]
+                    print(f"      {row['root_path']} (last: {ts}, scans: {row['scan_count']}, device: {alias})")
 
     # Hash coverage statistics
     if hash_coverage and devices:
@@ -1225,6 +1253,7 @@ def devices_list(db):
             fs_uuid,
             device_id,
             mount_point,
+            preferred_mount_point,
             fs_type,
             total_files,
             total_bytes
@@ -1278,15 +1307,15 @@ def devices_list(db):
         alias = device[0] or "(none)"
         uuid_short = device[1][:8] if device[1] else "(none)"
         device_id = str(device[2])
-        mount_point = device[3] or "(none)"
-        fs_type = device[4] or "(none)"
-        files = format_count(device[5])
-        size = format_size(device[6])
+        preferred_mount = device[4] or device[3] or "(none)"
+        fs_type = device[5] or "(none)"
+        files = format_count(device[6])
+        size = format_size(device[7])
 
-        rows.append([alias, uuid_short, device_id, mount_point, fs_type, files, size])
+        rows.append([alias, uuid_short, device_id, preferred_mount, fs_type, files, size])
 
     # Calculate column widths
-    headers = ["Alias", "UUID (first 8)", "Device ID", "Mount Point", "Type", "Files", "Size"]
+    headers = ["Alias", "UUID (first 8)", "Device ID", "Preferred Mount", "Type", "Files", "Size"]
     col_widths = [len(h) for h in headers]
 
     for row in rows:
@@ -1400,7 +1429,7 @@ def devices_show(device, db):
 
     # Try lookup by alias
     cursor.execute("""
-        SELECT fs_uuid, device_id, device_alias, mount_point, fs_type,
+        SELECT fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, fs_type,
                zfs_pool_name, zfs_dataset_name, zfs_pool_guid,
                first_scanned_at, last_scanned_at, scan_count,
                total_files, total_bytes, device_id_history
@@ -1413,7 +1442,7 @@ def devices_show(device, db):
         try:
             device_id_int = int(device)
             cursor.execute("""
-                SELECT fs_uuid, device_id, device_alias, mount_point, fs_type,
+                SELECT fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, fs_type,
                        zfs_pool_name, zfs_dataset_name, zfs_pool_guid,
                        first_scanned_at, last_scanned_at, scan_count,
                        total_files, total_bytes, device_id_history
@@ -1429,7 +1458,7 @@ def devices_show(device, db):
         return
 
     # Unpack device data
-    (fs_uuid, device_id, device_alias, mount_point, fs_type,
+    (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, fs_type,
      zfs_pool_name, zfs_dataset_name, zfs_pool_guid,
      first_scanned_at, last_scanned_at, scan_count,
      total_files, total_bytes, device_id_history_json) = device_row
@@ -1453,7 +1482,14 @@ def devices_show(device, db):
     print(f"Device: {display_name}")
     print(f"  Filesystem UUID: {fs_uuid}")
     print(f"  Current Device ID: {device_id}")
-    print(f"  Mount Point: {mount_point}")
+    preferred_mount = preferred_mount_point or mount_point
+    print(f"  Preferred Mount: {preferred_mount}")
+    if mount_point and mount_point != preferred_mount:
+        print(f"  Mount (recorded): {mount_point}")
+    from hashall.fs_utils import get_mount_point
+    detected_mount = get_mount_point(mount_point or preferred_mount)
+    if detected_mount and detected_mount != preferred_mount:
+        print(f"  Mount (detected): {detected_mount}")
     print(f"  Filesystem Type: {fs_type or 'unknown'}")
 
     # ZFS metadata section (only if ZFS)

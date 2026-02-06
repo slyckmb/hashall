@@ -3,6 +3,7 @@
 import os
 import subprocess
 from typing import Optional
+from pathlib import Path
 
 
 def get_filesystem_uuid(path: str) -> str:
@@ -117,6 +118,16 @@ def get_mount_point(path: str) -> Optional[str]:
         pass
     except Exception:
         pass
+    # Fallback: walk up to nearest mount point using os.path.ismount
+    try:
+        candidate = Path(path).resolve()
+    except Exception:
+        candidate = Path(path)
+
+    for parent in [candidate, *candidate.parents]:
+        if os.path.ismount(parent):
+            return str(parent)
+
     return None
 
 
