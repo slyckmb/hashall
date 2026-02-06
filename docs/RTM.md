@@ -22,11 +22,11 @@
 | REQ-5.1-2 | REUSE flow builds views + relocates siblings (5.1) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | REQ-5.1-3 | MOVE flow verifies + relocates siblings (5.1) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | REQ-5.2-1 | Promotion reuse-only (5.2) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
-| REQ-5.3-1 | Payload-group rehome (5.3) | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
+| REQ-5.3-1 | Payload-group rehome (5.3) | T | `out/te/phase3/logs/pytest_phase3_planning.txt`; `out/te/phase10/logs/pytest_phase10_rehome.txt` | PASS |
 | REQ-6.1-1 | Same-device dedupe analysis/plan/execute (6.1) | T | `out/te/phase5/logs/pytest_phase5_dedupe.txt` | PASS |
 | REQ-6.2-1 | Cross-device duplicate detection (6.2) | T | `out/te/phase5/logs/pytest_phase5_dedupe.txt` | PASS |
 | REQ-6.3-1 | Sibling torrent views (6.3) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
-| REQ-9.1-1 | Safe defaults (dry-run, fail-fast) (9.x) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
+| REQ-9.1-1 | Safe defaults (dry-run, fail-fast) (9.x) | T | `out/te/phase4/logs/pytest_phase4_execution.txt`; `out/te/phase10/logs/pytest_phase10_rehome.txt` | PASS |
 | REQ-9.2-1 | Audit trail persisted (9.x) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 
 ## Success Criteria Mapping (Section 12)
