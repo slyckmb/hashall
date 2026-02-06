@@ -6,6 +6,7 @@ import uuid
 import time
 import statistics
 import shutil
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from typing import Dict, Set, Tuple
@@ -509,14 +510,57 @@ def _status_line(*, enabled: bool, quiet: bool, tqdm_position: int | None):
     return tqdm(total=0, position=0, leave=True, dynamic_ncols=True, bar_format="{desc}")
 
 
-def _truncate_middle(text: str, max_len: int) -> str:
-    if max_len <= 0 or len(text) <= max_len:
+def _char_width(ch: str) -> int:
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 2
+    return 1
+
+
+def _display_width(text: str) -> int:
+    return sum(_char_width(ch) for ch in text)
+
+
+def _slice_by_width(text: str, max_width: int, *, from_end: bool = False) -> str:
+    if max_width <= 0:
+        return ""
+    if not from_end:
+        width = 0
+        out = []
+        for ch in text:
+            ch_w = _char_width(ch)
+            if width + ch_w > max_width:
+                break
+            out.append(ch)
+            width += ch_w
+        return "".join(out)
+    width = 0
+    out = []
+    for ch in reversed(text):
+        ch_w = _char_width(ch)
+        if width + ch_w > max_width:
+            break
+        out.append(ch)
+        width += ch_w
+    return "".join(reversed(out))
+
+
+def _truncate_middle(text: str, max_width: int) -> str:
+    if max_width <= 0 or _display_width(text) <= max_width:
         return text
-    if max_len <= 3:
-        return text[:max_len]
-    head = max_len // 2 - 1
-    tail = max_len - head - 3
-    return f"{text[:head]}...{text[-tail:]}"
+    if max_width <= 3:
+        return _slice_by_width(text, max_width)
+    head = max_width // 2 - 1
+    tail = max_width - head - 3
+    return f"{_slice_by_width(text, head)}...{_slice_by_width(text, tail, from_end=True)}"
+
+
+def _pad_to_width(text: str, max_width: int) -> str:
+    pad = max_width - _display_width(text)
+    if pad > 0:
+        return text + (" " * pad)
+    return text
 
 
 def _format_status_path(path: str) -> str:
@@ -526,9 +570,7 @@ def _format_status_path(path: str) -> str:
         width = 120
     width = max(10, width - 1)
     truncated = _truncate_middle(path, width)
-    if len(truncated) < width:
-        return truncated.ljust(width)
-    return truncated
+    return _pad_to_width(truncated, width)
 
 
 def _canonicalize_root(
