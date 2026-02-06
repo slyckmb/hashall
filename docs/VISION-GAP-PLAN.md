@@ -196,9 +196,10 @@ DONE:
 - Add optional SHA256 spot-check (`--spot-check`).
 - Add duplicate payload cleanup (`--cleanup-duplicate-payload`).
 - Add rollback test for atomic relocation failures.
+- Add save_path mapping test.
 
 TODO:
-- Add mapping tests for save_path translation.
+- None.
 
 ### Stage 3 — Remaining Features + Auditing
 DONE:
@@ -207,9 +208,10 @@ DONE:
 - Rehome audit trail persisted in `rehome_runs`.
 - Post-rehome catalog sync updates `payloads` and `torrent_instances`.
 - Optional post-rehome rescan (`--rescan`).
+- Add tests for rehome audit trail and rescan paths.
 
 TODO:
-- Add tests for rehome audit trail and rescan paths.
+- None.
 
 ## Notes and Open Decisions
 - **Canonical path format:** Decide whether `files_<device_id>.path` should remain relative to preferred mount or be stored as canonical absolute. Consistency matters more than which choice is made.
