@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from hashall.payload import get_torrent_instance, get_payload_by_id, get_torrent_siblings
+from hashall.pathing import canonicalize_path, to_relpath, is_under
 
 
 @dataclass
@@ -46,7 +47,7 @@ class DemotionPlanner:
             pool_device: Device ID for pool
         """
         self.catalog_path = catalog_path
-        self.seeding_roots = [Path(r).resolve() for r in seeding_roots]
+        self.seeding_roots = [canonicalize_path(Path(r)) for r in seeding_roots]
         self.stash_device = stash_device
         self.pool_device = pool_device
 
@@ -64,7 +65,7 @@ class DemotionPlanner:
         Returns:
             True if path is outside all seeding roots
         """
-        path = Path(file_path).resolve()
+        path = canonicalize_path(Path(file_path))
 
         for root in self.seeding_roots:
             try:
@@ -89,11 +90,19 @@ class DemotionPlanner:
         """
         # Normalize root path
         root_path = root_path.rstrip('/')
+        if not root_path:
+            raise ValueError("Payload root path is empty")
+        root = Path(root_path)
+        if root.is_absolute():
+            root = canonicalize_path(root)
 
         # Get device_id from payload
-        device_id = conn.execute("""
+        device_row = conn.execute("""
             SELECT device_id FROM payloads WHERE root_path = ?
-        """, (root_path,)).fetchone()[0]
+        """, (root_path,)).fetchone()
+        if not device_row or device_row[0] is None:
+            raise ValueError("Payload device_id is missing; rescan catalog")
+        device_id = device_row[0]
 
         def _table_exists(name: str) -> bool:
             return conn.execute(
@@ -110,54 +119,68 @@ class DemotionPlanner:
             return []
 
         if use_device_table:
-            # Resolve root_path relative to mount point when available.
-            # Some test fixtures omit the devices table and store absolute paths
-            # directly in files_{device_id}.
+            # Resolve root_path relative to preferred mount when available.
             mount_point = None
+            preferred_mount = None
             if _table_exists("devices"):
                 device_row = conn.execute(
-                    "SELECT mount_point FROM devices WHERE device_id = ?",
+                    "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
                     (device_id,),
                 ).fetchone()
                 if device_row:
                     mount_point = Path(device_row[0])
+                    preferred_mount = Path(device_row[1] or device_row[0])
 
             if mount_point is not None:
-                try:
-                    rel_root = Path(root_path).resolve().relative_to(mount_point)
-                except ValueError:
-                    return []
+                if root.is_absolute():
+                    rel_root = to_relpath(root, preferred_mount) or to_relpath(root, mount_point)
+                    if rel_root is None:
+                        raise ValueError("Payload root is not under device mount point; rescan catalog")
+                else:
+                    rel_root = root
                 rel_root_str = str(rel_root)
+
+                base_mount = preferred_mount or mount_point
                 def _to_abs(p: str) -> str:
-                    return str((mount_point / p).resolve())
+                    path = Path(p)
+                    if path.is_absolute():
+                        return str(canonicalize_path(path))
+                    return str((base_mount / path).resolve())
             else:
-                # Absolute paths stored in files_{device_id}
-                rel_root_str = root_path
+                # No device metadata; expect absolute paths in table
+                if not root.is_absolute():
+                    raise ValueError("Relative payload root without device mount metadata")
+                rel_root_str = str(root)
                 def _to_abs(p: str) -> str:
-                    return str(Path(p).resolve())
+                    return str(canonicalize_path(Path(p)))
 
             pattern = f"{rel_root_str}/%"
             query = f"""
                 SELECT DISTINCT path, inode
                 FROM {table_name}
-                WHERE (path = ? OR path LIKE ?)
+                WHERE status = 'active' AND (path = ? OR path LIKE ?)
                 ORDER BY path
             """
             file_rows = conn.execute(query, (rel_root_str, pattern)).fetchall()
 
         else:
             # Legacy table stores absolute paths
-            pattern = f"{root_path}/%"
+            if not root.is_absolute():
+                raise ValueError("Relative payload root with legacy files table")
+            pattern = f"{str(root)}/%"
             query = """
                 SELECT DISTINCT path, inode
                 FROM files
-                WHERE (path = ? OR path LIKE ?)
+                WHERE status = 'active' AND (path = ? OR path LIKE ?)
                 ORDER BY path
             """
-            file_rows = conn.execute(query, (root_path, pattern)).fetchall()
+            file_rows = conn.execute(query, (str(root), pattern)).fetchall()
 
             def _to_abs(p: str) -> str:
-                return str(Path(p).resolve())
+                return str(canonicalize_path(Path(p)))
+
+        if not file_rows:
+            raise ValueError("No files found under payload root in catalog; rescan required")
 
         external_consumers = []
 
@@ -168,7 +191,7 @@ class DemotionPlanner:
                 hardlink_query = f"""
                     SELECT DISTINCT path
                     FROM {table_name}
-                    WHERE inode = ?
+                    WHERE inode = ? AND status = 'active'
                     ORDER BY path
                 """
                 hardlink_paths = [
@@ -179,7 +202,7 @@ class DemotionPlanner:
                 hardlink_query = """
                     SELECT DISTINCT path
                     FROM files
-                    WHERE inode = ?
+                    WHERE inode = ? AND status = 'active'
                     ORDER BY path
                 """
                 hardlink_paths = [
@@ -197,6 +220,45 @@ class DemotionPlanner:
                 ))
 
         return external_consumers
+
+    def _scan_roots_cover(self, conn: sqlite3.Connection, device_id: int,
+                          roots: List[Path]) -> Optional[bool]:
+        """
+        Check whether all provided roots are covered by scan_roots for the device.
+
+        Returns:
+            True if covered, False if not, None if cannot be determined.
+        """
+        def _table_exists(name: str) -> bool:
+            return conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            ).fetchone() is not None
+
+        if not _table_exists("devices") or not _table_exists("scan_roots"):
+            return None
+
+        device_row = conn.execute(
+            "SELECT fs_uuid FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if not device_row:
+            return None
+        fs_uuid = device_row[0]
+
+        scan_rows = conn.execute(
+            "SELECT root_path FROM scan_roots WHERE fs_uuid = ?",
+            (fs_uuid,),
+        ).fetchall()
+
+        if not scan_rows:
+            return False
+
+        scanned_roots = [canonicalize_path(Path(row[0])) for row in scan_rows]
+        for root in roots:
+            if not any(is_under(root, scanned) for scanned in scanned_roots):
+                return False
+        return True
 
     def _payload_exists_on_pool(self, conn: sqlite3.Connection,
                                 payload_hash: str) -> Optional[str]:
@@ -255,8 +317,48 @@ class DemotionPlanner:
             # 3. Get all sibling torrents (same payload)
             sibling_hashes = get_torrent_siblings(conn, torrent_hash)
 
+            # 3a. Ensure scan roots cover seeding domain (if available)
+            coverage = self._scan_roots_cover(conn, payload.device_id, self.seeding_roots)
+            if coverage is False:
+                return {
+                    "version": "1.0",
+                    "direction": "demote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": payload.payload_id,
+                    "payload_hash": payload.payload_hash,
+                    "reasons": ["Seeding roots are not covered by scan_roots; rescan required"],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.stash_device,
+                    "target_device_id": self.pool_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "file_count": payload.file_count,
+                    "total_bytes": payload.total_bytes
+                }
+
             # 4. Check for external consumers
-            external_consumers = self._detect_external_consumers(conn, payload.root_path)
+            try:
+                external_consumers = self._detect_external_consumers(conn, payload.root_path)
+            except ValueError as e:
+                return {
+                    "version": "1.0",
+                    "direction": "demote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": payload.payload_id,
+                    "payload_hash": payload.payload_hash,
+                    "reasons": [str(e)],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.stash_device,
+                    "target_device_id": self.pool_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "file_count": payload.file_count,
+                    "total_bytes": payload.total_bytes
+                }
 
             if external_consumers:
                 # BLOCK: External consumers detected
@@ -286,7 +388,27 @@ class DemotionPlanner:
                     "total_bytes": payload.total_bytes
                 }
 
-            # 5. Check if payload exists on pool
+            # 5. Require payload hash for safe decisions
+            if not payload.payload_hash:
+                return {
+                    "version": "1.0",
+                    "direction": "demote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": payload.payload_id,
+                    "payload_hash": payload.payload_hash,
+                    "reasons": ["Payload hash missing; rescan or run sha256-backfill"],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.stash_device,
+                    "target_device_id": self.pool_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "file_count": payload.file_count,
+                    "total_bytes": payload.total_bytes
+                }
+
+            # 6. Check if payload exists on pool
             pool_root = self._payload_exists_on_pool(conn, payload.payload_hash)
 
             if pool_root:
