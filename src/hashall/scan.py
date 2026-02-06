@@ -728,19 +728,41 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     # 9. Walk filesystem and collect file paths
     file_paths = []
+    dir_count = 0
+    file_count = 0
+    discovery = None
+    if not quiet:
+        discovery = tqdm(
+            total=0,
+            desc="📁 Discovering",
+            unit=" dirs",
+            dynamic_ncols=True,
+            mininterval=0.5,
+        )
+
     for dirpath, dirnames, filenames in os.walk(root_canonical):
         # Skip symlinked directories
         dirnames[:] = [
             d for d in dirnames
             if not (Path(dirpath) / d).is_symlink()
         ]
+        dir_count += 1
+        if discovery is not None:
+            discovery.update(1)
+            if dir_count % 50 == 0:
+                discovery.set_postfix(files=file_count)
         for filename in filenames:
             file_path = Path(dirpath) / filename
             if file_path.is_symlink():
                 continue
             file_paths.append(str(file_path))
+            file_count += 1
 
-    _emit(quiet, f"📁 Files on filesystem: {len(file_paths)}")
+    if discovery is not None:
+        discovery.set_postfix(files=file_count)
+        discovery.close()
+
+    _emit(quiet, f"📁 Files on filesystem: {file_count:,} in {dir_count:,} dirs")
 
     # 10. Incremental scan logic
     stats = ScanStats()
