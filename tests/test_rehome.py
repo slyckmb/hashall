@@ -107,6 +107,27 @@ class TestExternalConsumerDetection:
 
         # Insert files into per-device table (device 50 = stash)
         conn.executescript(f"""
+            CREATE TABLE devices (
+                device_id INTEGER PRIMARY KEY,
+                fs_uuid TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT
+            );
+
+            INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
+            VALUES (50, 'fs-test-50', '/stash', '/stash');
+
+            CREATE TABLE scan_roots (
+                fs_uuid TEXT,
+                root_path TEXT,
+                last_scanned_at TEXT,
+                scan_count INTEGER,
+                PRIMARY KEY (fs_uuid, root_path)
+            );
+
+            INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count)
+            VALUES ('fs-test-50', '/stash/torrents/seeding', '2026-02-06', 1);
+
             INSERT INTO files_50 (path, inode, size, mtime, sha1) VALUES
                 ('{payload_root}/video.mkv', 1001, 1000000, 1234567890, 'abc123'),
                 ('{payload_root}/subtitles.srt', 1002, 5000, 1234567890, 'def456');
@@ -142,6 +163,47 @@ class TestExternalConsumerDetection:
         assert len(plan['reasons']) > 0
         assert 'external' in plan['reasons'][0].lower() or 'outside' in plan['reasons'][0].lower()
         assert plan['payload_hash'] == 'payload_hash_123'
+
+    def test_block_when_payload_root_not_under_mount(self, tmp_path):
+        """Test that plan is BLOCKED when payload root cannot be resolved under mount."""
+        db_path = TestDatabase.create_test_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+
+        payload_root = "/stash/torrents/seeding/Movie.2024"
+
+        conn.executescript(f"""
+            CREATE TABLE devices (
+                device_id INTEGER PRIMARY KEY,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT
+            );
+
+            INSERT INTO devices (device_id, mount_point, preferred_mount_point)
+            VALUES (50, '/different', '/different');
+
+            INSERT INTO files_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('{payload_root}/video.mkv', 1001, 1000000, 1234567890, 'abc123', 'active');
+
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (1, 'payload_hash_123', 50, '{payload_root}', 1, 1000000, 'complete');
+
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+            VALUES ('torrent_bad_root', 1, 50, '/stash/torrents/seeding', 'Movie.2024');
+        """)
+        conn.commit()
+        conn.close()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/torrents/seeding"],
+            stash_device=50,
+            pool_device=49
+        )
+
+        plan = planner.plan_demotion("torrent_bad_root")
+
+        assert plan['decision'] == 'BLOCK'
+        assert "mount" in plan['reasons'][0].lower() or "rescan" in plan['reasons'][0].lower()
 
     def test_no_block_when_all_hardlinks_internal(self, tmp_path):
         """Test that plan is NOT blocked when all hardlinks are internal."""
@@ -187,6 +249,68 @@ class TestExternalConsumerDetection:
 
         # Assert NOT BLOCKED (should be MOVE since payload doesn't exist on pool)
         assert plan['decision'] != 'BLOCK'
+
+    def test_external_consumer_bind_mount_alias(self, tmp_path, monkeypatch):
+        """Bind-mount alias roots should resolve to canonical paths for external detection."""
+        db_path = TestDatabase.create_test_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+
+        payload_root = "/data/media/torrents/seeding/Movie.2024"
+        canonical_root = "/stash/media/torrents/seeding/Movie.2024"
+
+        conn.executescript(f"""
+            CREATE TABLE devices (
+                device_id INTEGER PRIMARY KEY,
+                fs_uuid TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT
+            );
+
+            INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
+            VALUES (50, 'fs-test-50', '/stash', '/stash');
+
+            CREATE TABLE scan_roots (
+                fs_uuid TEXT,
+                root_path TEXT,
+                last_scanned_at TEXT,
+                scan_count INTEGER,
+                PRIMARY KEY (fs_uuid, root_path)
+            );
+
+            INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count)
+            VALUES ('fs-test-50', '/stash/media/torrents/seeding', '2026-02-06', 1);
+
+            INSERT INTO files_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('media/torrents/seeding/Movie.2024/video.mkv', 1001, 1000000, 1234567890, 'abc123', 'active'),
+                ('media/movies/Movie.2024/video.mkv', 1001, 1000000, 1234567890, 'abc123', 'active');
+
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (1, 'payload_hash_123', 50, '{payload_root}', 1, 1000000, 'complete');
+
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+            VALUES ('torrent_bind_alias', 1, 50, '/data/media/torrents/seeding', 'Movie.2024');
+        """)
+        conn.commit()
+        conn.close()
+
+        def fake_canonicalize(path):
+            p = Path(path)
+            if str(p).startswith("/data/media"):
+                return Path(str(p).replace("/data/media", "/stash/media", 1))
+            return p
+
+        monkeypatch.setattr("rehome.planner.canonicalize_path", fake_canonicalize)
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/data/media/torrents/seeding"],
+            stash_device=50,
+            pool_device=49
+        )
+
+        plan = planner.plan_demotion("torrent_bind_alias")
+        assert plan["decision"] == "BLOCK"
+        assert any("outside" in r.lower() or "external" in r.lower() for r in plan["reasons"])
 
 
 class TestReusePlan:
