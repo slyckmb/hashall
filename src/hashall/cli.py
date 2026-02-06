@@ -110,6 +110,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag):
     if not qbit.test_connection():
         print("❌ Failed to connect to qBittorrent. Check URL and credentials.")
         print(f"   URL: {qbit.base_url}")
+        print("   Hint: uses QBITTORRENT_API_URL and /mnt/config/secrets/qbittorrent/api.env")
         return
 
     if not qbit.login():

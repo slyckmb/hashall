@@ -4,6 +4,7 @@ qBittorrent Web API integration (read-only).
 Connects to qBittorrent to retrieve torrent information for payload mapping.
 """
 
+import os
 import requests
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -42,13 +43,13 @@ class QBittorrentClient:
         session: Requests session with authentication cookie
     """
 
-    def __init__(self, base_url: str = "http://localhost:8080",
+    def __init__(self, base_url: str = "http://localhost:9003",
                  username: str = "admin", password: str = "adminpass"):
         """
         Initialize qBittorrent client.
 
         Args:
-            base_url: qBittorrent Web UI URL (default: http://localhost:8080)
+            base_url: qBittorrent Web UI URL (default: http://localhost:9003)
             username: Username (default: admin)
             password: Password (default: adminpass)
         """
@@ -351,10 +352,63 @@ def get_qbittorrent_client(base_url: Optional[str] = None,
     Returns:
         QBittorrentClient instance
     """
-    import os
+    def _parse_env_file(path: Path) -> dict:
+        data = {}
+        try:
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                data[key.strip()] = value.strip().strip('"').strip("'")
+        except Exception:
+            return {}
+        return data
 
-    base_url = base_url or os.getenv('QBITTORRENT_URL', 'http://localhost:8080')
-    username = username or os.getenv('QBITTORRENT_USER', 'admin')
-    password = password or os.getenv('QBITTORRENT_PASS', 'adminpass')
+    def _find_credentials_file() -> Optional[Path]:
+        env_path = os.getenv("QBITTORRENT_CREDENTIALS_FILE")
+        if env_path:
+            return Path(env_path)
+        candidates = [
+            Path("/mnt/config/secrets/qbittorrent/api.env"),
+            Path("/home/michael/dev/secrets/qbittorrent/api.env"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _get_env(*names: str) -> Optional[str]:
+        for name in names:
+            value = os.getenv(name)
+            if value:
+                return value
+        return None
+
+    base_url = base_url or _get_env(
+        "QBITTORRENT_API_URL",
+        "QBITTORRENT_URL",
+        "QBITTORRENT_HOST",
+        "QBITTORRENTAPI_HOST",
+    ) or "http://localhost:9003"
+
+    if base_url and "://" not in base_url:
+        base_url = f"http://{base_url}"
+
+    if not username or not password:
+        env_user = _get_env("QBITTORRENTAPI_USERNAME", "QBITTORRENT_USERNAME", "QBITTORRENT_USER")
+        env_pass = _get_env("QBITTORRENTAPI_PASSWORD", "QBITTORRENT_PASSWORD", "QBITTORRENT_PASS")
+        if env_user and env_pass:
+            username = username or env_user
+            password = password or env_pass
+        else:
+            creds_file = _find_credentials_file()
+            if creds_file:
+                data = _parse_env_file(creds_file)
+                username = username or data.get("QBITTORRENTAPI_USERNAME") or data.get("QBITTORRENT_USERNAME")
+                password = password or data.get("QBITTORRENTAPI_PASSWORD") or data.get("QBITTORRENT_PASSWORD")
+
+    username = username or "admin"
+    password = password or "adminpass"
 
     return QBittorrentClient(base_url, username, password)
