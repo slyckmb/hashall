@@ -1443,5 +1443,88 @@ def devices_show(device, db):
     conn.close()
 
 
+@devices.command("preferred-mount")
+@click.argument("device")
+@click.argument("mount_point", required=False)
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+def devices_preferred_mount(device, mount_point, db):
+    """
+    Show or set the preferred mount point for a device.
+
+    DEVICE can be either a device alias (e.g., "pool") or a device_id (e.g., "49").
+    If MOUNT_POINT is provided, updates preferred mount point.
+
+    Examples:
+        hashall devices preferred-mount pool
+        hashall devices preferred-mount 49 /mnt/pool
+    """
+    from hashall.model import connect_db
+
+    conn = connect_db(Path(db))
+    cursor = conn.cursor()
+
+    device_columns = {row[1] for row in cursor.execute("PRAGMA table_info(devices)").fetchall()}
+    if "preferred_mount_point" not in device_columns:
+        click.echo("❌ preferred_mount_point not supported in this database")
+        conn.close()
+        return
+
+    device_row = cursor.execute(
+        """
+        SELECT fs_uuid, device_id, device_alias, mount_point, preferred_mount_point
+        FROM devices WHERE device_alias = ?
+        """,
+        (device,),
+    ).fetchone()
+
+    if not device_row and device.isdigit():
+        device_row = cursor.execute(
+            """
+            SELECT fs_uuid, device_id, device_alias, mount_point, preferred_mount_point
+            FROM devices WHERE device_id = ?
+            """,
+            (int(device),),
+        ).fetchone()
+
+    if not device_row:
+        click.echo(f"❌ Device not found: {device}")
+        conn.close()
+        return
+
+    fs_uuid, device_id, device_alias, current_mount, preferred_mount = device_row
+    display_name = device_alias or f"Device {device_id}"
+    effective_preferred = preferred_mount or current_mount
+
+    if mount_point is None:
+        click.echo(f"Device: {display_name}")
+        click.echo(f"  Mount Point: {current_mount}")
+        click.echo(f"  Preferred Mount Point: {effective_preferred}")
+        conn.close()
+        return
+
+    if not Path(mount_point).is_absolute():
+        click.echo("❌ Preferred mount point must be an absolute path")
+        conn.close()
+        return
+
+    if mount_point == effective_preferred:
+        click.echo(f"Preferred mount point already set to {effective_preferred}")
+        conn.close()
+        return
+
+    cursor.execute(
+        """
+        UPDATE devices
+        SET preferred_mount_point = ?, updated_at = datetime('now')
+        WHERE fs_uuid = ?
+        """,
+        (mount_point, fs_uuid),
+    )
+    conn.commit()
+
+    click.echo(f"Updated preferred mount point: {display_name} -> {mount_point}")
+    conn.close()
+
+
 if __name__ == "__main__":
     cli()

@@ -519,7 +519,7 @@ Result: Single copy on disk, multiple torrents seeding
 **Structure:**
 ```
 catalog.db
-├── devices                    (registry: fs_uuid, device_id, alias, mount_point)
+├── devices                    (registry: fs_uuid, device_id, alias, mount_point, preferred_mount_point)
 ├── scan_roots                 (tracks which paths have been scanned)
 ├── scan_sessions              (audit trail with incremental metrics)
 ├── files_49                   (files on device 49: pool - created dynamically)
@@ -538,6 +538,7 @@ catalog.db
 **Key Concepts:**
 - **Filesystem UUID tracking:** Persistent device identity across reboots
 - **Canonical paths:** Symlinks/bind mounts resolved to real paths
+- **Preferred mount point:** Stable mount root used to mitigate mount-point drift
 - **Incremental updates:** Rescans skip unchanged files (10-100x faster)
 - **Scoped deletion:** Only marks files deleted under scanned roots (prevents false deletions)
 

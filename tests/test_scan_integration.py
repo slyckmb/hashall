@@ -377,14 +377,9 @@ def test_scoped_deletion_subdirectory(test_env):
     - Rescan only subdirectory
     - Verify only subdirectory files marked as deleted
 
-    NOTE: Due to mount_point being updated on each scan, scanning a subdirectory
-    changes the device's mount_point to that subdirectory. This causes the scoping
-    logic to consider all existing files as candidates for deletion. This is a known
-    limitation of the current implementation.
-
-    This test validates the actual current behavior: when rescanning a subdirectory
-    after the mount_point has been updated, files outside the new scope will be
-    marked as deleted.
+    NOTE: preferred_mount_point preserves the original mount scope.
+    Rescanning a subdirectory should only mark files under that subdirectory
+    as deleted, not files outside the scope.
     """
     root = test_env['root']
     db_path = test_env['db_path']
@@ -412,7 +407,6 @@ def test_scoped_deletion_subdirectory(test_env):
     sub_file2.unlink()
 
     # Rescan only the subdirectory (scoped scan)
-    # This will update mount_point to subdir, causing all files to be candidates
     scan_path(db_path=db_path, root_path=subdir)
 
     # Get scan statistics
@@ -420,9 +414,8 @@ def test_scoped_deletion_subdirectory(test_env):
     stats = get_scan_stats(db_path, scan_id)
 
     # Verify scan results
-    # Due to mount_point update, all 3 files are considered for deletion
     assert stats['scanned'] == 0, "Should have scanned 0 files (all deleted)"
-    assert stats['deleted'] == 3, "All 3 files marked as deleted (current behavior)"
+    assert stats['deleted'] == 2, "Only subdirectory files marked as deleted"
 
     # All files will be marked as deleted due to mount_point update behavior
     conn = connect_db(db_path)
@@ -435,7 +428,7 @@ def test_scoped_deletion_subdirectory(test_env):
 
     conn.close()
 
-    assert deleted_count == 3, "All files should be marked as deleted"
+    assert deleted_count == 2, "Only subdirectory files should be marked as deleted"
 
 
 def test_rescan_performance_improvement(test_env):

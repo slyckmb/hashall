@@ -252,6 +252,39 @@ Updated alias: pool -> main_pool
 
 ---
 
+### `devices preferred-mount`
+
+Show or set the preferred mount point for a device.
+
+```bash
+hashall devices preferred-mount DEVICE [MOUNT_POINT] [OPTIONS]
+```
+
+**Arguments:**
+- `DEVICE` - Device alias (e.g., "pool") or device_id (e.g., "49")
+- `MOUNT_POINT` - Optional absolute path to set as preferred mount
+
+**Options:**
+- `--db PATH` - Database path (default: `~/.hashall/hashall.sqlite3`)
+
+**Examples:**
+```bash
+# Show current + preferred mount point
+hashall devices preferred-mount pool
+
+# Set preferred mount point by alias
+hashall devices preferred-mount pool /mnt/pool
+
+# Set preferred mount point by device_id
+hashall devices preferred-mount 49 /mnt/pool
+```
+
+**Notes:**
+- Preferred mount point must be an absolute path.
+- If not set, preferred mount defaults to the current mount point.
+
+---
+
 ### `stats`
 
 Display overall catalog statistics.

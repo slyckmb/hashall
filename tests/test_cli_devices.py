@@ -461,6 +461,127 @@ class TestDevicesCLI(unittest.TestCase):
         self.assertIn("Filesystem Type: ext4", result.output)
         self.assertNotIn("ZFS Metadata:", result.output)
 
+    def test_devices_preferred_mount_show(self):
+        """Test 'devices preferred-mount' shows current and preferred mount points."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO devices (
+                fs_uuid, device_id, device_alias, mount_point, preferred_mount_point
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (
+            "pref-uuid-1",
+            60,
+            "pool",
+            "/pool",
+            "/mnt/pool"
+        ))
+        self.conn.commit()
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['devices', 'preferred-mount', 'pool', '--db', str(self.db_path)])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Device: pool", result.output)
+        self.assertIn("Mount Point: /pool", result.output)
+        self.assertIn("Preferred Mount Point: /mnt/pool", result.output)
+
+    def test_devices_preferred_mount_set_by_alias(self):
+        """Test setting preferred mount point by alias."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO devices (
+                fs_uuid, device_id, device_alias, mount_point
+            ) VALUES (?, ?, ?, ?)
+        """, (
+            "pref-uuid-2",
+            61,
+            "stash",
+            "/stash"
+        ))
+        self.conn.commit()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ['devices', 'preferred-mount', 'stash', '/mnt/stash', '--db', str(self.db_path)]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Updated preferred mount point: stash -> /mnt/stash", result.output)
+
+        cursor.execute(
+            "SELECT preferred_mount_point FROM devices WHERE fs_uuid = ?",
+            ("pref-uuid-2",)
+        )
+        preferred = cursor.fetchone()[0]
+        self.assertEqual(preferred, "/mnt/stash")
+
+    def test_devices_preferred_mount_set_by_device_id(self):
+        """Test setting preferred mount point by device_id."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO devices (
+                fs_uuid, device_id, device_alias, mount_point
+            ) VALUES (?, ?, ?, ?)
+        """, (
+            "pref-uuid-4",
+            63,
+            None,
+            "/data"
+        ))
+        self.conn.commit()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ['devices', 'preferred-mount', '63', '/mnt/data', '--db', str(self.db_path)]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Updated preferred mount point", result.output)
+
+        cursor.execute(
+            "SELECT preferred_mount_point FROM devices WHERE fs_uuid = ?",
+            ("pref-uuid-4",)
+        )
+        preferred = cursor.fetchone()[0]
+        self.assertEqual(preferred, "/mnt/data")
+
+    def test_devices_preferred_mount_rejects_relative_path(self):
+        """Test preferred-mount rejects relative paths."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO devices (
+                fs_uuid, device_id, device_alias, mount_point
+            ) VALUES (?, ?, ?, ?)
+        """, (
+            "pref-uuid-3",
+            62,
+            "backup",
+            "/backup"
+        ))
+        self.conn.commit()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ['devices', 'preferred-mount', 'backup', 'relative/path', '--db', str(self.db_path)]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Preferred mount point must be an absolute path", result.output)
+
+    def test_devices_preferred_mount_unknown_device(self):
+        """Test preferred-mount errors for unknown device."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ['devices', 'preferred-mount', 'missing-device', '--db', str(self.db_path)]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Device not found", result.output)
+
     def test_stats_command_empty_database(self):
         """Test 'stats' command with no devices."""
         runner = CliRunner()

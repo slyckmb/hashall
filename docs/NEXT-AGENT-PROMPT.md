@@ -71,6 +71,7 @@ Checklist:
 - Rehome promotion is reuse-only (no blind copy).
 - SHA1 is legacy only; SHA256 is primary.
 - `scan-hierarchical` target has been renamed to `scan-hier-per-device`; a new unified `scan-hierarchical` target exists.
+- Known TODO: end-to-end validation across multiple remount scenarios is still needed.
 
 ## Handoff + Stage QC (Required)
 

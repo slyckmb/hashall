@@ -6,7 +6,7 @@ import pytest
 import sqlite3
 import tempfile
 from pathlib import Path
-from hashall.scan import load_existing_files
+from hashall.scan import load_existing_files, _canonicalize_root
 from hashall.device import ensure_files_table
 from hashall.model import connect_db
 
@@ -27,6 +27,7 @@ def test_db():
             device_id INTEGER NOT NULL UNIQUE,
             device_alias TEXT UNIQUE,
             mount_point TEXT NOT NULL,
+            preferred_mount_point TEXT,
             fs_type TEXT,
             first_scanned_at TEXT,
             last_scanned_at TEXT,
@@ -53,9 +54,9 @@ def test_load_existing_files_returns_files_under_root(test_db):
 
     # Insert device record
     cursor.execute("""
-        INSERT INTO devices (fs_uuid, device_id, mount_point, fs_type)
-        VALUES (?, ?, ?, ?)
-    """, ("zfs-test-1", device_id, mount_point, "zfs"))
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point, fs_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, ("zfs-test-1", device_id, mount_point, mount_point, "zfs"))
 
     # Create files table
     table_name = ensure_files_table(cursor, device_id)
@@ -104,9 +105,9 @@ def test_load_existing_files_excludes_deleted_files(test_db):
 
     # Insert device record
     cursor.execute("""
-        INSERT INTO devices (fs_uuid, device_id, mount_point, fs_type)
-        VALUES (?, ?, ?, ?)
-    """, ("zfs-test-2", device_id, mount_point, "zfs"))
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point, fs_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, ("zfs-test-2", device_id, mount_point, mount_point, "zfs"))
 
     # Create files table
     table_name = ensure_files_table(cursor, device_id)
@@ -163,9 +164,9 @@ def test_load_existing_files_no_files_found(test_db):
 
     # Insert device record
     cursor.execute("""
-        INSERT INTO devices (fs_uuid, device_id, mount_point, fs_type)
-        VALUES (?, ?, ?, ?)
-    """, ("zfs-test-3", device_id, mount_point, "zfs"))
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point, fs_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, ("zfs-test-3", device_id, mount_point, mount_point, "zfs"))
 
     # Create files table but don't insert any files
     ensure_files_table(cursor, device_id)
@@ -187,9 +188,9 @@ def test_load_existing_files_path_not_under_mount(test_db):
 
     # Insert device record
     cursor.execute("""
-        INSERT INTO devices (fs_uuid, device_id, mount_point, fs_type)
-        VALUES (?, ?, ?, ?)
-    """, ("zfs-test-4", device_id, mount_point, "zfs"))
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point, fs_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, ("zfs-test-4", device_id, mount_point, mount_point, "zfs"))
 
     # Create files table
     table_name = ensure_files_table(cursor, device_id)
@@ -209,6 +210,66 @@ def test_load_existing_files_path_not_under_mount(test_db):
 
     # Should return empty dict
     assert result == {}
+
+
+def test_load_existing_files_uses_preferred_mount_point(test_db):
+    """Test that preferred_mount_point is used for root scoping."""
+    cursor = test_db
+    device_id = 60
+    mount_point = "/pool"
+    preferred_mount = "/mnt/pool"
+
+    cursor.execute("""
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point, fs_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, ("zfs-test-5", device_id, mount_point, preferred_mount, "zfs"))
+
+    table_name = ensure_files_table(cursor, device_id)
+
+    cursor.execute(f"""
+        INSERT INTO {table_name}
+        (path, size, mtime, sha1, inode, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, ("torrents/movie1.mkv", 1000, 1234.0, "abc123", 3000, "active"))
+
+    cursor.connection.commit()
+
+    root_path = Path("/mnt/pool/torrents")
+    result = load_existing_files(cursor, device_id, root_path)
+
+    assert "torrents/movie1.mkv" in result
+
+
+def test_canonicalize_root_remaps_to_preferred_mount():
+    """Preferred mount point should be used to remap drifted roots when allowed."""
+    root_path = Path("/mnt/pool/media")
+    current_mount = Path("/mnt/pool")
+    preferred_mount = Path("/pool")
+
+    canonical = _canonicalize_root(
+        root_path,
+        current_mount,
+        preferred_mount,
+        allow_remap=True
+    )
+
+    assert canonical == Path("/pool/media")
+
+
+def test_canonicalize_root_skips_remap_for_bind_mounts():
+    """Do not remap when bind mounts are detected (allow_remap=False)."""
+    root_path = Path("/mnt/pool/media")
+    current_mount = Path("/mnt/pool")
+    preferred_mount = Path("/pool")
+
+    canonical = _canonicalize_root(
+        root_path,
+        current_mount,
+        preferred_mount,
+        allow_remap=False
+    )
+
+    assert canonical == root_path
 
 
 def test_load_existing_files_root_is_mount_point(test_db):
