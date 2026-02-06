@@ -373,6 +373,63 @@ class TestExternalConsumerDetection:
         assert plan["decision"] == "BLOCK"
         assert any("scan_roots" in r or "library" in r for r in plan["reasons"])
 
+    def test_library_roots_cover_across_devices(self, tmp_path):
+        """Allow demotion when scan_roots cover roots on multiple devices."""
+        db_path = TestDatabase.create_test_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+
+        payload_root = "/stash/torrents/seeding/Movie.2024"
+
+        conn.executescript(f"""
+            CREATE TABLE devices (
+                device_id INTEGER PRIMARY KEY,
+                fs_uuid TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT
+            );
+
+            INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
+            VALUES
+                (50, 'fs-stash', '/stash', '/stash'),
+                (49, 'fs-pool', '/pool', '/pool');
+
+            CREATE TABLE scan_roots (
+                fs_uuid TEXT,
+                root_path TEXT,
+                last_scanned_at TEXT,
+                scan_count INTEGER,
+                PRIMARY KEY (fs_uuid, root_path)
+            );
+
+            INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count)
+            VALUES
+                ('fs-stash', '/stash/torrents/seeding', '2026-02-06', 1),
+                ('fs-pool', '/pool/data/seeds', '2026-02-06', 1);
+
+            INSERT INTO files_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('torrents/seeding/Movie.2024/video.mkv', 7001, 1000000, 1234567890, 'abc123', 'active');
+
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (1, 'payload_hash_123', 50, '{payload_root}', 1, 1000000, 'complete');
+
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+            VALUES ('torrent_library_multi', 1, 50, '/stash/torrents/seeding', 'Movie.2024');
+        """)
+        conn.commit()
+        conn.close()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/torrents/seeding", "/pool/data/seeds"],
+            library_roots=["/pool/data/seeds"],
+            stash_device=50,
+            pool_device=49,
+            pool_payload_root="/pool/torrents/content"
+        )
+
+        plan = planner.plan_demotion("torrent_library_multi")
+        assert plan["decision"] != "BLOCK"
+
 
 class TestReusePlan:
     """Test REUSE decision when payload exists on pool."""

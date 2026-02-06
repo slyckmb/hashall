@@ -301,3 +301,54 @@ class TestCleanupFlags:
         assert pool_view.exists()
         assert empty_pool.exists()
         assert empty_stash.exists()
+
+    def test_cleanup_duplicate_payload_removes_duplicates(self, tmp_path, monkeypatch):
+        db_path, plan, pool_view, empty_pool, empty_stash = self._setup_plan_and_db(tmp_path)
+
+        source_path = Path(plan["source_path"])
+        target_path = Path(plan["target_path"])
+
+        source_file = source_path / "video.mkv"
+        source_file.write_bytes(b"data")
+
+        dup_root = source_path.parent / "Movie.2024-dup"
+        dup_root.mkdir(parents=True, exist_ok=True)
+        dup_file = dup_root / "video.mkv"
+        dup_file.write_bytes(b"data")
+
+        plan["payload_group"] = [
+            {
+                "payload_id": 1,
+                "device_id": 49,
+                "root_path": str(source_path),
+                "file_count": plan["file_count"],
+                "total_bytes": plan["total_bytes"],
+                "status": "complete",
+            },
+            {
+                "payload_id": 2,
+                "device_id": 50,
+                "root_path": str(target_path),
+                "file_count": plan["file_count"],
+                "total_bytes": plan["total_bytes"],
+                "status": "complete",
+            },
+            {
+                "payload_id": 3,
+                "device_id": 49,
+                "root_path": str(dup_root),
+                "file_count": plan["file_count"],
+                "total_bytes": plan["total_bytes"],
+                "status": "complete",
+            },
+        ]
+        plan["seeding_roots"] = [str(source_path.parent)]
+
+        fake_client = FakeQbitClient(default_path=str(source_path.parent))
+        monkeypatch.setattr("rehome.executor.get_qbittorrent_client", lambda *args, **kwargs: fake_client)
+
+        executor = DemotionExecutor(catalog_path=db_path)
+        executor.execute(plan, cleanup_duplicate_payload=True)
+
+        assert not source_path.exists()
+        assert not dup_root.exists()
