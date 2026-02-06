@@ -180,10 +180,10 @@ DONE:
 - Payload builder converts absolute roots to relative queries when mount metadata exists.
 - External consumer detection now uses active-only rows, canonical paths, and blocks on unresolved roots.
 - Rehome blocks demotion when payload_hash is missing.
+- Bind-mount scan coverage test.
+- External consumer bind-mount alias test.
 
 TODO:
-- Add bind-mount scan coverage test (real or mocked).
-- Add external consumer detection test with bind-mount-style paths.
 - Extend scan coverage guardrails to include library roots (not just seeding roots).
 
 ### Stage 2 — Rehome Safety + View Building
@@ -195,9 +195,9 @@ DONE:
 - Make sibling relocation atomic with rollback attempts.
 - Add optional SHA256 spot-check (`--spot-check`).
 - Add duplicate payload cleanup (`--cleanup-duplicate-payload`).
+- Add rollback test for atomic relocation failures.
 
 TODO:
-- Add rollback tests for atomic relocation failures.
 - Add mapping tests for save_path translation.
 
 ### Stage 3 — Remaining Features + Auditing
