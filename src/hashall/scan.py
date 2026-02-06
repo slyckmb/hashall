@@ -7,6 +7,7 @@ import time
 import statistics
 import shutil
 import unicodedata
+import sys
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from typing import Dict, Set, Tuple
@@ -490,7 +491,7 @@ def _emit(quiet: bool, message: str) -> None:
         print(message)
 
 
-def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: bool) -> dict:
+def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: bool, file=None) -> dict:
     kwargs = {
         "desc": "📦 Scanning",
         "leave": not quiet,
@@ -501,13 +502,34 @@ def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: boo
     }
     if tqdm_position is not None:
         kwargs["position"] = tqdm_position
+    if file is not None:
+        kwargs["file"] = file
     return kwargs
 
 
-def _status_line(*, enabled: bool, quiet: bool, tqdm_position: int | None):
-    if not enabled or quiet or tqdm_position is not None:
-        return None
-    return tqdm(total=0, position=0, leave=True, dynamic_ncols=True, bar_format="{desc}")
+class _StatusLine:
+    def __init__(self, enabled: bool, quiet: bool, tqdm_position: int | None):
+        self.enabled = (
+            enabled
+            and not quiet
+            and tqdm_position is None
+            and sys.stdout.isatty()
+        )
+        self.file = sys.stdout if self.enabled else None
+        if self.enabled:
+            print("", file=self.file, flush=True)
+
+    def update(self, text: str) -> None:
+        if not self.enabled:
+            return
+        self.file.write("\x1b[1A\r\x1b[2K" + text + "\x1b[1B\r")
+        self.file.flush()
+
+    def close(self) -> None:
+        if not self.enabled:
+            return
+        self.file.write("\x1b[1A\r\x1b[2K\x1b[1B\r")
+        self.file.flush()
 
 
 def _char_width(ch: str) -> int:
@@ -710,17 +732,18 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     # Get mount point for relative path calculation
     mount_point = effective_mount
 
-    status = _status_line(enabled=show_current_path, quiet=quiet, tqdm_position=tqdm_position)
-    progress_position = 1 if status is not None else tqdm_position
+    status = _StatusLine(enabled=show_current_path, quiet=quiet, tqdm_position=tqdm_position)
+    progress_position = tqdm_position
+    progress_file = status.file if status.enabled else None
 
     if not parallel:
         # Sequential scanning
         pbar_kwargs = _progress_kwargs(
-            total=len(file_paths), tqdm_position=progress_position, quiet=quiet
+            total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
         )
         for file_path in tqdm(file_paths, **pbar_kwargs):
-            if status is not None:
-                status.set_description_str(_format_status_path(file_path))
+            if status.enabled:
+                status.update(_format_status_path(file_path))
             result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
             if result is None:
                 continue
@@ -759,7 +782,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     future_to_path[future] = file_path
 
                 pbar_kwargs = _progress_kwargs(
-                    total=len(file_paths), tqdm_position=progress_position, quiet=quiet
+                    total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
                 )
                 with tqdm(**pbar_kwargs) as pbar:
                     while pending:
@@ -779,8 +802,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             from concurrent.futures import CancelledError
                             try:
                                 file_path = future_to_path.pop(fut, None)
-                                if status is not None and file_path is not None:
-                                    status.set_description_str(_format_status_path(file_path))
+                                if status.enabled and file_path is not None:
+                                    status.update(_format_status_path(file_path))
                                 result = fut.result()
                             except CancelledError:
                                 # Ignore cancelled futures
@@ -823,7 +846,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 batch_rows.clear()
             conn.commit()
 
-    if status is not None:
+    if status.enabled:
         status.close()
 
     # 11. SCOPED deletion detection
