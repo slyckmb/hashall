@@ -14,7 +14,12 @@ from dataclasses import dataclass
 # Import hashall modules
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from hashall.payload import get_torrent_instance, get_payload_by_id, get_torrent_siblings
+from hashall.payload import (
+    get_torrent_instance,
+    get_payload_by_id,
+    get_payloads_by_hash,
+    get_torrent_siblings,
+)
 from hashall.pathing import canonicalize_path, to_relpath, is_under
 
 
@@ -28,7 +33,7 @@ class ExternalConsumer:
 def _build_view_targets(
     conn: sqlite3.Connection,
     torrent_hashes: List[str],
-    source_root: Optional[Path],
+    source_roots: List[Optional[Path]],
     target_root: Optional[Path],
 ) -> List[Dict]:
     """
@@ -36,8 +41,16 @@ def _build_view_targets(
 
     Returns empty list if source/target roots are not provided.
     """
-    if not source_root or not target_root:
+    if not target_root:
         return []
+    resolved_sources = [
+        canonicalize_path(Path(r))
+        for r in source_roots
+        if r
+    ]
+    if not resolved_sources:
+        return []
+    resolved_sources = sorted(resolved_sources, key=lambda p: len(str(p)), reverse=True)
 
     placeholders = ",".join(["?"] * len(torrent_hashes))
     rows = conn.execute(
@@ -58,9 +71,13 @@ def _build_view_targets(
         if save_path_path.is_absolute():
             save_path_path = canonicalize_path(save_path_path)
 
-        if not is_under(save_path_path, source_root):
+        source_root = next(
+            (root for root in resolved_sources if is_under(save_path_path, root)),
+            None,
+        )
+        if source_root is None:
             raise ValueError(
-                f"Torrent save_path {save_path_path} is not under source root {source_root}"
+                f"Torrent save_path {save_path_path} is not under any source root"
             )
 
         rel = save_path_path.relative_to(source_root)
@@ -306,7 +323,7 @@ class DemotionPlanner:
 
         return external_consumers
 
-    def _scan_roots_cover(self, conn: sqlite3.Connection, device_id: int,
+    def _scan_roots_cover(self, conn: sqlite3.Connection,
                           roots: List[Path]) -> Optional[bool]:
         """
         Check whether all provided roots are covered by scan_roots for the device.
@@ -323,25 +340,52 @@ class DemotionPlanner:
         if not _table_exists("devices") or not _table_exists("scan_roots"):
             return None
 
-        device_row = conn.execute(
-            "SELECT fs_uuid FROM devices WHERE device_id = ?",
-            (device_id,),
-        ).fetchone()
-        if not device_row:
+        # Ensure devices table has fs_uuid column
+        device_cols = conn.execute("PRAGMA table_info(devices)").fetchall()
+        col_names = {row[1] for row in device_cols}
+        if "fs_uuid" not in col_names:
             return None
-        fs_uuid = device_row[0]
 
         scan_rows = conn.execute(
-            "SELECT root_path FROM scan_roots WHERE fs_uuid = ?",
-            (fs_uuid,),
+            "SELECT fs_uuid, root_path FROM scan_roots"
         ).fetchall()
 
         if not scan_rows:
             return False
 
-        scanned_roots = [canonicalize_path(Path(row[0])) for row in scan_rows]
+        device_rows = conn.execute(
+            "SELECT fs_uuid, mount_point, preferred_mount_point FROM devices"
+        ).fetchall()
+        if not device_rows:
+            return None
+
+        prefixes: List[tuple[str, Path]] = []
+        for fs_uuid, mount_point, preferred in device_rows:
+            for candidate in (preferred, mount_point):
+                if not candidate:
+                    continue
+                prefixes.append((fs_uuid, canonicalize_path(Path(candidate))))
+        prefixes = sorted(prefixes, key=lambda item: len(str(item[1])), reverse=True)
+
+        scanned_by_uuid: Dict[str, List[Path]] = {}
+        for fs_uuid, root_path in scan_rows:
+            scanned_by_uuid.setdefault(fs_uuid, []).append(canonicalize_path(Path(root_path)))
+
         for root in roots:
-            if not any(is_under(root, scanned) for scanned in scanned_roots):
+            root_canon = canonicalize_path(root)
+            fs_uuid = None
+            for candidate_uuid, candidate_root in prefixes:
+                if is_under(root_canon, candidate_root):
+                    fs_uuid = candidate_uuid
+                    break
+            if fs_uuid is None:
+                return False
+
+            scanned_roots = scanned_by_uuid.get(fs_uuid, [])
+            if not scanned_roots:
+                return False
+
+            if not any(is_under(root_canon, scanned) for scanned in scanned_roots):
                 return False
         return True
 
@@ -394,19 +438,8 @@ class DemotionPlanner:
             if not payload:
                 raise ValueError(f"Payload {torrent_instance.payload_id} not found")
 
-            # 2. Verify payload is on stash
-            if payload.device_id != self.stash_device:
-                raise ValueError(
-                    f"Payload is on device {payload.device_id}, not stash ({self.stash_device})"
-                )
-
-            # 3. Get all sibling torrents (same payload)
-            sibling_hashes = get_torrent_siblings(conn, torrent_hash)
-
-            # 3a. Ensure scan roots cover seeding + library domains (if available)
-            required_roots = self.seeding_roots + self.library_roots
-            coverage = self._scan_roots_cover(conn, payload.device_id, required_roots)
-            if coverage is False:
+            # 2. Require payload hash for cross-device grouping
+            if not payload.payload_hash:
                 return {
                     "version": "1.0",
                     "direction": "demote",
@@ -414,8 +447,8 @@ class DemotionPlanner:
                     "torrent_hash": torrent_hash,
                     "payload_id": payload.payload_id,
                     "payload_hash": payload.payload_hash,
-                    "reasons": ["Seeding/library roots are not covered by scan_roots; rescan required"],
-                    "affected_torrents": sibling_hashes,
+                    "reasons": ["Payload hash missing; rescan or run sha256-backfill"],
+                    "affected_torrents": get_torrent_siblings(conn, torrent_hash),
                     "source_path": payload.root_path,
                     "target_path": None,
                     "source_device_id": self.stash_device,
@@ -426,10 +459,11 @@ class DemotionPlanner:
                     "total_bytes": payload.total_bytes
                 }
 
-            # 4. Check for external consumers
-            try:
-                external_consumers = self._detect_external_consumers(conn, payload.root_path)
-            except ValueError as e:
+            # 3. Resolve payload on stash (source of demotion)
+            stash_payloads = get_payloads_by_hash(
+                conn, payload.payload_hash, device_id=self.stash_device, status="complete"
+            )
+            if not stash_payloads:
                 return {
                     "version": "1.0",
                     "direction": "demote",
@@ -437,8 +471,10 @@ class DemotionPlanner:
                     "torrent_hash": torrent_hash,
                     "payload_id": payload.payload_id,
                     "payload_hash": payload.payload_hash,
-                    "reasons": [str(e)],
-                    "affected_torrents": sibling_hashes,
+                    "reasons": [
+                        f"Payload with hash {payload.payload_hash} not found on stash (device {self.stash_device})"
+                    ],
+                    "affected_torrents": get_torrent_siblings(conn, torrent_hash),
                     "source_path": payload.root_path,
                     "target_path": None,
                     "source_device_id": self.stash_device,
@@ -447,6 +483,57 @@ class DemotionPlanner:
                     "library_roots": [str(r) for r in self.library_roots],
                     "file_count": payload.file_count,
                     "total_bytes": payload.total_bytes
+                }
+
+            source_payload = stash_payloads[0]
+
+            # 4. Get all sibling torrents (same payload hash)
+            sibling_hashes = get_torrent_siblings(conn, torrent_hash)
+
+            # 4a. Ensure scan roots cover seeding + library domains (if available)
+            required_roots = self.seeding_roots + self.library_roots
+            coverage = self._scan_roots_cover(conn, required_roots)
+            if coverage is False:
+                return {
+                    "version": "1.0",
+                    "direction": "demote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
+                    "reasons": ["Seeding/library roots are not covered by scan_roots; rescan required"],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": source_payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.stash_device,
+                    "target_device_id": self.pool_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
+                }
+
+            # 5. Check for external consumers (stash copy)
+            try:
+                external_consumers = self._detect_external_consumers(conn, source_payload.root_path)
+            except ValueError as e:
+                return {
+                    "version": "1.0",
+                    "direction": "demote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
+                    "reasons": [str(e)],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": source_payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.stash_device,
+                    "target_device_id": self.pool_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
                 }
 
             if external_consumers:
@@ -464,50 +551,29 @@ class DemotionPlanner:
                     "direction": "demote",
                     "decision": "BLOCK",
                     "torrent_hash": torrent_hash,
-                    "payload_id": payload.payload_id,
-                    "payload_hash": payload.payload_hash,
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
                     "reasons": reasons,
                     "affected_torrents": sibling_hashes,
-                    "source_path": payload.root_path,
+                    "source_path": source_payload.root_path,
                     "target_path": None,
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
                     "library_roots": [str(r) for r in self.library_roots],
-                    "file_count": payload.file_count,
-                    "total_bytes": payload.total_bytes
-                }
-
-            # 5. Require payload hash for safe decisions
-            if not payload.payload_hash:
-                return {
-                    "version": "1.0",
-                    "direction": "demote",
-                    "decision": "BLOCK",
-                    "torrent_hash": torrent_hash,
-                    "payload_id": payload.payload_id,
-                    "payload_hash": payload.payload_hash,
-                    "reasons": ["Payload hash missing; rescan or run sha256-backfill"],
-                    "affected_torrents": sibling_hashes,
-                    "source_path": payload.root_path,
-                    "target_path": None,
-                    "source_device_id": self.stash_device,
-                    "target_device_id": self.pool_device,
-                    "seeding_roots": [str(r) for r in self.seeding_roots],
-                    "library_roots": [str(r) for r in self.library_roots],
-                    "file_count": payload.file_count,
-                    "total_bytes": payload.total_bytes
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
                 }
 
             # 6. Check if payload exists on pool
-            pool_root = self._payload_exists_on_pool(conn, payload.payload_hash)
+            pool_root = self._payload_exists_on_pool(conn, source_payload.payload_hash)
 
             # 6a. Build view targets (if mapping provided)
             try:
                 view_targets = _build_view_targets(
                     conn,
                     sibling_hashes,
-                    self.stash_seeding_root,
+                    [self.stash_seeding_root, self.pool_seeding_root],
                     self.pool_seeding_root,
                 )
             except ValueError as e:
@@ -516,18 +582,18 @@ class DemotionPlanner:
                     "direction": "demote",
                     "decision": "BLOCK",
                     "torrent_hash": torrent_hash,
-                    "payload_id": payload.payload_id,
-                    "payload_hash": payload.payload_hash,
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
                     "reasons": [str(e)],
                     "affected_torrents": sibling_hashes,
-                    "source_path": payload.root_path,
+                    "source_path": source_payload.root_path,
                     "target_path": None,
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
                     "library_roots": [str(r) for r in self.library_roots],
-                    "file_count": payload.file_count,
-                    "total_bytes": payload.total_bytes
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
                 }
 
             if pool_root:
@@ -537,19 +603,19 @@ class DemotionPlanner:
                     "direction": "demote",
                     "decision": "REUSE",
                     "torrent_hash": torrent_hash,
-                    "payload_id": payload.payload_id,
-                    "payload_hash": payload.payload_hash,
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
                     "reasons": [f"Payload already exists on pool at {pool_root}"],
                     "affected_torrents": sibling_hashes,
-                    "source_path": payload.root_path,
+                    "source_path": source_payload.root_path,
                     "target_path": pool_root,
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
                     "library_roots": [str(r) for r in self.library_roots],
                     "view_targets": view_targets,
-                    "file_count": payload.file_count,
-                    "total_bytes": payload.total_bytes
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
                 }
             else:
                 # MOVE: Need to move payload to pool
@@ -561,40 +627,40 @@ class DemotionPlanner:
                         "direction": "demote",
                         "decision": "BLOCK",
                         "torrent_hash": torrent_hash,
-                        "payload_id": payload.payload_id,
-                        "payload_hash": payload.payload_hash,
+                        "payload_id": source_payload.payload_id,
+                        "payload_hash": source_payload.payload_hash,
                         "reasons": ["No pool payload root configured for MOVE"],
                         "affected_torrents": sibling_hashes,
-                        "source_path": payload.root_path,
+                        "source_path": source_payload.root_path,
                         "target_path": None,
                         "source_device_id": self.stash_device,
                         "target_device_id": self.pool_device,
                         "seeding_roots": [str(r) for r in self.seeding_roots],
                         "library_roots": [str(r) for r in self.library_roots],
-                        "file_count": payload.file_count,
-                        "total_bytes": payload.total_bytes
+                        "file_count": source_payload.file_count,
+                        "total_bytes": source_payload.total_bytes
                     }
 
-                target_root = str(base_root / Path(payload.root_path).name)
+                target_root = str(base_root / Path(source_payload.root_path).name)
 
                 return {
                     "version": "1.0",
                     "direction": "demote",
                     "decision": "MOVE",
                     "torrent_hash": torrent_hash,
-                    "payload_id": payload.payload_id,
-                    "payload_hash": payload.payload_hash,
-                    "reasons": [f"Payload does not exist on pool, will move from {payload.root_path}"],
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
+                    "reasons": [f"Payload does not exist on pool, will move from {source_payload.root_path}"],
                     "affected_torrents": sibling_hashes,
-                    "source_path": payload.root_path,
+                    "source_path": source_payload.root_path,
                     "target_path": target_root,
                     "source_device_id": self.stash_device,
                     "target_device_id": self.pool_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
                     "library_roots": [str(r) for r in self.library_roots],
                     "view_targets": view_targets,
-                    "file_count": payload.file_count,
-                    "total_bytes": payload.total_bytes
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
                 }
 
         finally:
@@ -613,34 +679,20 @@ class DemotionPlanner:
         conn = self._get_db_connection()
 
         try:
-            # Find payload with this hash on stash
             row = conn.execute("""
-                SELECT payload_id
-                FROM payloads
-                WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
+                SELECT ti.torrent_hash
+                FROM torrent_instances ti
+                JOIN payloads p ON ti.payload_id = p.payload_id
+                WHERE p.payload_hash = ? AND p.status = 'complete'
+                ORDER BY ti.torrent_hash
                 LIMIT 1
-            """, (payload_hash, self.stash_device)).fetchone()
+            """, (payload_hash,)).fetchone()
 
             if not row:
-                raise ValueError(
-                    f"Payload with hash {payload_hash} not found on stash (device {self.stash_device})"
-                )
-
-            payload_id = row[0]
-
-            # Get all torrents for this payload
-            torrent_rows = conn.execute("""
-                SELECT torrent_hash
-                FROM torrent_instances
-                WHERE payload_id = ?
-                ORDER BY torrent_hash
-            """, (payload_id,)).fetchall()
-
-            if not torrent_rows:
                 raise ValueError(f"No torrents found for payload {payload_hash}")
 
             # Use first torrent to generate plan (all siblings share same decision)
-            first_torrent = torrent_rows[0][0]
+            first_torrent = row[0]
             plan = self.plan_demotion(first_torrent)
 
             # Mark as batch plan
@@ -665,24 +717,24 @@ class DemotionPlanner:
         conn = self._get_db_connection()
 
         try:
-            # Get all torrents with this tag on stash
             torrent_rows = conn.execute("""
-                SELECT DISTINCT ti.torrent_hash, ti.payload_id, ti.tags
+                SELECT DISTINCT ti.torrent_hash, ti.payload_id, p.payload_hash, ti.tags
                 FROM torrent_instances ti
                 JOIN payloads p ON ti.payload_id = p.payload_id
-                WHERE p.device_id = ? AND p.status = 'complete'
-                ORDER BY ti.payload_id, ti.torrent_hash
-            """, (self.stash_device,)).fetchall()
+                WHERE p.status = 'complete'
+                ORDER BY p.payload_hash, ti.payload_id, ti.torrent_hash
+            """).fetchall()
 
             if not torrent_rows:
-                raise ValueError(f"No torrents found on stash")
+                raise ValueError("No torrents found")
 
             # Filter by tag (tags are comma-separated in database)
             matching_torrents = []
-            for torrent_hash, payload_id, tags in torrent_rows:
+            for torrent_hash, payload_id, payload_hash, tags in torrent_rows:
                 tag_list = [t.strip() for t in (tags or '').split(',')]
                 if tag in tag_list:
-                    matching_torrents.append((torrent_hash, payload_id))
+                    group_key = payload_hash or f"id:{payload_id}"
+                    matching_torrents.append((torrent_hash, group_key))
 
             if not matching_torrents:
                 raise ValueError(f"No torrents with tag '{tag}' found on stash")
@@ -691,11 +743,11 @@ class DemotionPlanner:
             payloads_seen = set()
             plans = []
 
-            for torrent_hash, payload_id in matching_torrents:
-                if payload_id in payloads_seen:
+            for torrent_hash, group_key in matching_torrents:
+                if group_key in payloads_seen:
                     continue  # Already planned this payload
 
-                payloads_seen.add(payload_id)
+                payloads_seen.add(group_key)
 
                 # Generate plan for this payload
                 plan = self.plan_demotion(torrent_hash)
@@ -795,19 +847,33 @@ class PromotionPlanner:
             if not payload:
                 raise ValueError(f"Payload {torrent_instance.payload_id} not found")
 
-            # 2. Verify payload is on pool
-            if payload.device_id != self.pool_device:
-                raise ValueError(
-                    f"Payload is on device {payload.device_id}, not pool ({self.pool_device})"
-                )
+            # 2. Require payload hash for cross-device grouping
+            if not payload.payload_hash:
+                return {
+                    "version": "1.0",
+                    "direction": "promote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": payload.payload_id,
+                    "payload_hash": payload.payload_hash,
+                    "reasons": ["Payload hash missing; rescan or run sha256-backfill"],
+                    "affected_torrents": get_torrent_siblings(conn, torrent_hash),
+                    "source_path": payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.pool_device,
+                    "target_device_id": self.stash_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
+                    "no_blind_copy": True,
+                    "file_count": payload.file_count,
+                    "total_bytes": payload.total_bytes
+                }
 
-            # 3. Get all sibling torrents (same payload)
-            sibling_hashes = get_torrent_siblings(conn, torrent_hash)
-
-            # 4. Check if payload exists on stash (no blind copy)
-            stash_root = self._payload_exists_on_stash(conn, payload.payload_hash)
-
-            if not stash_root:
+            # 3. Resolve payload on pool (source of promotion)
+            pool_payloads = get_payloads_by_hash(
+                conn, payload.payload_hash, device_id=self.pool_device, status="complete"
+            )
+            if not pool_payloads:
                 return {
                     "version": "1.0",
                     "direction": "promote",
@@ -816,9 +882,9 @@ class PromotionPlanner:
                     "payload_id": payload.payload_id,
                     "payload_hash": payload.payload_hash,
                     "reasons": [
-                        "Payload does not exist on stash; promotion requires pre-existing stash payload"
+                        f"Payload with hash {payload.payload_hash} not found on pool (device {self.pool_device})"
                     ],
-                    "affected_torrents": sibling_hashes,
+                    "affected_torrents": get_torrent_siblings(conn, torrent_hash),
                     "source_path": payload.root_path,
                     "target_path": None,
                     "source_device_id": self.pool_device,
@@ -830,12 +896,43 @@ class PromotionPlanner:
                     "total_bytes": payload.total_bytes
                 }
 
+            source_payload = pool_payloads[0]
+
+            # 4. Get all sibling torrents (same payload hash)
+            sibling_hashes = get_torrent_siblings(conn, torrent_hash)
+
+            # 5. Check if payload exists on stash (no blind copy)
+            stash_root = self._payload_exists_on_stash(conn, source_payload.payload_hash)
+
+            if not stash_root:
+                return {
+                    "version": "1.0",
+                    "direction": "promote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
+                    "reasons": [
+                        "Payload does not exist on stash; promotion requires pre-existing stash payload"
+                    ],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": source_payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.pool_device,
+                    "target_device_id": self.stash_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
+                    "no_blind_copy": True,
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
+                }
+
             # Build view targets (if mapping provided)
             try:
                 view_targets = _build_view_targets(
                     conn,
                     sibling_hashes,
-                    self.pool_seeding_root,
+                    [self.stash_seeding_root, self.pool_seeding_root],
                     self.stash_seeding_root,
                 )
             except ValueError as e:
@@ -844,19 +941,19 @@ class PromotionPlanner:
                     "direction": "promote",
                     "decision": "BLOCK",
                     "torrent_hash": torrent_hash,
-                    "payload_id": payload.payload_id,
-                    "payload_hash": payload.payload_hash,
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
                     "reasons": [str(e)],
                     "affected_torrents": sibling_hashes,
-                    "source_path": payload.root_path,
+                    "source_path": source_payload.root_path,
                     "target_path": None,
                     "source_device_id": self.pool_device,
                     "target_device_id": self.stash_device,
                     "seeding_roots": [str(r) for r in self.seeding_roots],
                     "library_roots": [str(r) for r in self.library_roots],
                     "no_blind_copy": True,
-                    "file_count": payload.file_count,
-                    "total_bytes": payload.total_bytes
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
                 }
 
             return {
@@ -864,11 +961,11 @@ class PromotionPlanner:
                 "direction": "promote",
                 "decision": "REUSE",
                 "torrent_hash": torrent_hash,
-                "payload_id": payload.payload_id,
-                "payload_hash": payload.payload_hash,
+                "payload_id": source_payload.payload_id,
+                "payload_hash": source_payload.payload_hash,
                 "reasons": [f"Payload already exists on stash at {stash_root}"],
                 "affected_torrents": sibling_hashes,
-                "source_path": payload.root_path,
+                "source_path": source_payload.root_path,
                 "target_path": stash_root,
                 "source_device_id": self.pool_device,
                 "target_device_id": self.stash_device,
@@ -876,8 +973,8 @@ class PromotionPlanner:
                 "library_roots": [str(r) for r in self.library_roots],
                 "no_blind_copy": True,
                 "view_targets": view_targets,
-                "file_count": payload.file_count,
-                "total_bytes": payload.total_bytes
+                "file_count": source_payload.file_count,
+                "total_bytes": source_payload.total_bytes
             }
 
         finally:
@@ -896,34 +993,20 @@ class PromotionPlanner:
         conn = self._get_db_connection()
 
         try:
-            # Find payload with this hash on pool
             row = conn.execute("""
-                SELECT payload_id
-                FROM payloads
-                WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
+                SELECT ti.torrent_hash
+                FROM torrent_instances ti
+                JOIN payloads p ON ti.payload_id = p.payload_id
+                WHERE p.payload_hash = ? AND p.status = 'complete'
+                ORDER BY ti.torrent_hash
                 LIMIT 1
-            """, (payload_hash, self.pool_device)).fetchone()
+            """, (payload_hash,)).fetchone()
 
             if not row:
-                raise ValueError(
-                    f"Payload with hash {payload_hash} not found on pool (device {self.pool_device})"
-                )
-
-            payload_id = row[0]
-
-            # Get all torrents for this payload
-            torrent_rows = conn.execute("""
-                SELECT torrent_hash
-                FROM torrent_instances
-                WHERE payload_id = ?
-                ORDER BY torrent_hash
-            """, (payload_id,)).fetchall()
-
-            if not torrent_rows:
                 raise ValueError(f"No torrents found for payload {payload_hash}")
 
             # Use first torrent to generate plan (all siblings share same decision)
-            first_torrent = torrent_rows[0][0]
+            first_torrent = row[0]
             plan = self.plan_promotion(first_torrent)
 
             # Mark as batch plan
@@ -948,37 +1031,37 @@ class PromotionPlanner:
         conn = self._get_db_connection()
 
         try:
-            # Get all torrents with this tag on pool
             torrent_rows = conn.execute("""
-                SELECT DISTINCT ti.torrent_hash, ti.payload_id, ti.tags
+                SELECT DISTINCT ti.torrent_hash, ti.payload_id, p.payload_hash, ti.tags
                 FROM torrent_instances ti
                 JOIN payloads p ON ti.payload_id = p.payload_id
-                WHERE p.device_id = ? AND p.status = 'complete'
-                ORDER BY ti.payload_id, ti.torrent_hash
-            """, (self.pool_device,)).fetchall()
+                WHERE p.status = 'complete'
+                ORDER BY p.payload_hash, ti.payload_id, ti.torrent_hash
+            """).fetchall()
 
             if not torrent_rows:
                 raise ValueError("No torrents found on pool")
 
             # Filter by tag (tags are comma-separated in database)
             matching_torrents = []
-            for torrent_hash, payload_id, tags in torrent_rows:
+            for torrent_hash, payload_id, payload_hash, tags in torrent_rows:
                 tag_list = [t.strip() for t in (tags or '').split(',')]
                 if tag in tag_list:
-                    matching_torrents.append((torrent_hash, payload_id))
+                    group_key = payload_hash or f"id:{payload_id}"
+                    matching_torrents.append((torrent_hash, group_key))
 
             if not matching_torrents:
                 raise ValueError(f"No torrents with tag '{tag}' found on pool")
 
-            # Group by payload_id to avoid duplicate plans
+            # Group by payload hash (or payload_id fallback) to avoid duplicate plans
             payloads_seen = set()
             plans = []
 
-            for torrent_hash, payload_id in matching_torrents:
-                if payload_id in payloads_seen:
+            for torrent_hash, group_key in matching_torrents:
+                if group_key in payloads_seen:
                     continue
 
-                payloads_seen.add(payload_id)
+                payloads_seen.add(group_key)
                 plan = self.plan_promotion(torrent_hash)
                 plan['batch_mode'] = 'tag'
                 plan['batch_filter'] = tag

@@ -159,6 +159,35 @@ def test_upsert_payload(test_db):
     assert row[0] == 15
 
 
+def test_upsert_payload_device_scoped(test_db):
+    """Test that payloads are scoped by device_id + root_path."""
+    payload_a = Payload(
+        payload_id=None,
+        payload_hash="hash_a",
+        device_id=49,
+        root_path="/test/same",
+        file_count=1,
+        total_bytes=100,
+        status='complete',
+        last_built_at=1234567890.0
+    )
+    payload_b = Payload(
+        payload_id=None,
+        payload_hash="hash_b",
+        device_id=50,
+        root_path="/test/same",
+        file_count=1,
+        total_bytes=100,
+        status='complete',
+        last_built_at=1234567890.0
+    )
+
+    id_a = upsert_payload(test_db, payload_a)
+    id_b = upsert_payload(test_db, payload_b)
+
+    assert id_a != id_b
+
+
 def test_torrent_siblings(test_db):
     """Test finding torrent siblings."""
     from hashall.payload import upsert_torrent_instance, TorrentInstance
@@ -224,6 +253,68 @@ def test_torrent_siblings(test_db):
     # Test from different torrent
     siblings2 = get_torrent_siblings(test_db, "hash2")
     assert siblings == siblings2
+
+
+def test_torrent_siblings_across_devices(test_db):
+    """Test siblings across payloads with same hash on different devices."""
+    from hashall.payload import upsert_torrent_instance, TorrentInstance
+    import time
+
+    payload_hash = "shared_cross_device"
+
+    payload_a = Payload(
+        payload_id=None,
+        payload_hash=payload_hash,
+        device_id=49,
+        root_path="/test/shared_a",
+        file_count=1,
+        total_bytes=100,
+        status='complete',
+        last_built_at=time.time()
+    )
+    payload_b = Payload(
+        payload_id=None,
+        payload_hash=payload_hash,
+        device_id=50,
+        root_path="/test/shared_b",
+        file_count=1,
+        total_bytes=100,
+        status='complete',
+        last_built_at=time.time()
+    )
+
+    id_a = upsert_payload(test_db, payload_a)
+    id_b = upsert_payload(test_db, payload_b)
+
+    torrents = [
+        TorrentInstance(
+            torrent_hash="hash_a",
+            payload_id=id_a,
+            device_id=49,
+            save_path="/test",
+            root_name="torrent_a",
+            category="test",
+            tags="tag1",
+            last_seen_at=time.time()
+        ),
+        TorrentInstance(
+            torrent_hash="hash_b",
+            payload_id=id_b,
+            device_id=50,
+            save_path="/test",
+            root_name="torrent_b",
+            category="test",
+            tags="tag2",
+            last_seen_at=time.time()
+        ),
+    ]
+
+    for torrent in torrents:
+        upsert_torrent_instance(test_db, torrent)
+
+    siblings = get_torrent_siblings(test_db, "hash_a")
+    assert "hash_a" in siblings
+    assert "hash_b" in siblings
 
 
 def test_different_payloads_different_hashes():

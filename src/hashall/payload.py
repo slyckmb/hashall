@@ -275,11 +275,17 @@ def upsert_payload(conn: sqlite3.Connection, payload: Payload) -> int:
     Returns:
         payload_id (int)
     """
-    # Check if payload with this root_path already exists
-    existing = conn.execute(
-        "SELECT payload_id FROM payloads WHERE root_path = ?",
-        (payload.root_path,)
-    ).fetchone()
+    # Check if payload with this root_path already exists (scoped to device_id)
+    if payload.device_id is None:
+        existing = conn.execute(
+            "SELECT payload_id FROM payloads WHERE root_path = ? AND device_id IS NULL",
+            (payload.root_path,)
+        ).fetchone()
+    else:
+        existing = conn.execute(
+            "SELECT payload_id FROM payloads WHERE root_path = ? AND device_id = ?",
+            (payload.root_path, payload.device_id)
+        ).fetchone()
 
     if existing:
         # Update existing
@@ -356,9 +362,44 @@ def get_payload_by_id(conn: sqlite3.Connection, payload_id: int) -> Optional[Pay
     )
 
 
+def get_payloads_by_hash(conn: sqlite3.Connection, payload_hash: str,
+                         device_id: Optional[int] = None,
+                         status: Optional[str] = "complete") -> List[Payload]:
+    """Get payloads by payload_hash, optionally filtering by device and status."""
+    if not payload_hash:
+        return []
+
+    query = "SELECT * FROM payloads WHERE payload_hash = ?"
+    params: List[object] = [payload_hash]
+
+    if device_id is not None:
+        query += " AND device_id = ?"
+        params.append(device_id)
+
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+
+    query += " ORDER BY payload_id"
+    rows = conn.execute(query, params).fetchall()
+    return [
+        Payload(
+            payload_id=row[0],
+            payload_hash=row[1],
+            device_id=row[2],
+            root_path=row[3],
+            file_count=row[4],
+            total_bytes=row[5],
+            status=row[6],
+            last_built_at=row[7],
+        )
+        for row in rows
+    ]
+
+
 def get_torrent_siblings(conn: sqlite3.Connection, torrent_hash: str) -> List[str]:
     """
-    Get all torrent hashes that map to the same payload.
+    Get all torrent hashes that map to the same payload hash.
 
     Args:
         conn: Database connection
@@ -367,16 +408,36 @@ def get_torrent_siblings(conn: sqlite3.Connection, torrent_hash: str) -> List[st
     Returns:
         List of torrent hashes (including the input hash)
     """
-    # Get payload_id for this torrent
+    # Get payload_id and payload_hash for this torrent
     row = conn.execute(
-        "SELECT payload_id FROM torrent_instances WHERE torrent_hash = ?",
+        """
+        SELECT ti.payload_id, p.payload_hash
+        FROM torrent_instances ti
+        LEFT JOIN payloads p ON ti.payload_id = p.payload_id
+        WHERE ti.torrent_hash = ?
+        """,
         (torrent_hash,)
     ).fetchone()
 
     if not row:
         return []
 
-    payload_id = row[0]
+    payload_id, payload_hash = row
+
+    if payload_hash:
+        payload_rows = conn.execute(
+            "SELECT payload_id FROM payloads WHERE payload_hash = ?",
+            (payload_hash,)
+        ).fetchall()
+        payload_ids = [r[0] for r in payload_rows]
+        if not payload_ids:
+            return []
+        placeholders = ",".join(["?"] * len(payload_ids))
+        rows = conn.execute(
+            f"SELECT torrent_hash FROM torrent_instances WHERE payload_id IN ({placeholders}) ORDER BY torrent_hash",
+            payload_ids
+        ).fetchall()
+        return [r[0] for r in rows]
 
     # Get all torrents with this payload_id
     rows = conn.execute(
