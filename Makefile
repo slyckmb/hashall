@@ -19,17 +19,23 @@ PLAN_SCAN = $(PYTHON) ./hashall-plan-scan
 # Default scan path (override with PATH=/custom/path)
 PATH ?= .
 
+# Root scan defaults (override via make VAR=value)
+PARALLEL ?= 1
+WORKERS ?=
+HASH_MODE ?= fast
+SHOW_PATH ?= 1
+
+# Root scan CLI
+HASHALL_CLI := $(PYTHON) -m hashall.cli
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
 help:  ## Show this help message
 	@echo "🧰 Hashall Make Targets"
 	@echo ""
-	@echo "Smart Scan Operations (Auto-Tuning):"
-	@grep -E '^scan-(auto|video|audio|books|mixed|dry-run|presets):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
-	@echo ""
-	@echo "Advanced Hierarchical Scanning:"
-	@grep -E '^scan-(hierarchical|plan|hier):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo "Root Scan (recommended):"
+	@grep -E '^scan:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Device Management:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -37,18 +43,36 @@ help:  ## Show this help message
 	@echo "Development & Testing:"
 	@grep -E '^(bootstrap|build|test|sandbox|clean):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Legacy Operations:"
-	@grep -E '^(scan|export|verify|docker-):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo "Other Operations:"
+	@grep -E '^(export|verify|docker-):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Examples:"
-	@echo "  make scan-auto PATH=/pool/media         # Auto-detect optimal settings"
-	@echo "  make scan-hierarchical PATH=/pool       # Adaptive per-folder scan (unified)"
-	@echo "  make scan-hier-per-device PATH=/pool    # Adaptive per-folder scan (per-device DBs)"
-	@echo "  make scan-plan PATH=/pool               # Analyze & propose strategy"
-	@echo "  make scan-video PATH=/pool/movies       # Optimize for large video files"
+	@echo "  make scan PATH=/pool/media WORKERS=12   # Root scan (parallel)"
+	@echo "  make scan PATH=/pool/media HASH_MODE=full  # Full hashes"
+	@echo "  make scan PATH=/pool/media SHOW_PATH=0     # Hide current file path line"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
 	@echo ""
+
+# ============================================================================
+# Root Scan (Recommended)
+# ============================================================================
+
+SCAN_ARGS = --db "$(DB_FILE)" --hash-mode "$(HASH_MODE)"
+ifeq ($(PARALLEL),1)
+SCAN_ARGS += --parallel
+endif
+ifneq ($(WORKERS),)
+SCAN_ARGS += --workers $(WORKERS)
+endif
+ifeq ($(SHOW_PATH),1)
+SCAN_ARGS += --show-path
+endif
+
+.PHONY: scan
+scan:  ## Root scan (parallel by default). Vars: PATH, WORKERS, HASH_MODE, SHOW_PATH, PARALLEL
+	@echo "📦 Root scan: $(PATH)"
+	@$(HASHALL_CLI) scan "$(PATH)" $(SCAN_ARGS)
 
 # ============================================================================
 # Smart Scan Targets (Auto-Tuning) - RECOMMENDED
@@ -56,36 +80,43 @@ help:  ## Show this help message
 
 .PHONY: scan-auto
 scan-auto:  ## Auto-detect optimal scan settings (recommended)
+	@echo "⚠️ Deprecated: use 'make scan PATH=...' for a single root scan."
 	@echo "🔍 Auto-detecting optimal settings for: $(PATH)"
 	$(SMART_SCAN) "$(PATH)" --db "$(DB_FILE)"
 
 .PHONY: scan-video
 scan-video:  ## Scan large video files (parallel, 4 workers, optimized >50MB)
+	@echo "⚠️ Deprecated: use 'make scan PATH=... HASH_MODE=full WORKERS=4'."
 	@echo "🎬 Scanning video files: $(PATH)"
 	$(SMART_SCAN) "$(PATH)" --preset video --db "$(DB_FILE)"
 
 .PHONY: scan-audio
 scan-audio:  ## Scan medium audio files (parallel, 8 workers, optimized 5-50MB)
+	@echo "⚠️ Deprecated: use 'make scan PATH=... WORKERS=8'."
 	@echo "🎵 Scanning audio files: $(PATH)"
 	$(SMART_SCAN) "$(PATH)" --preset audio --db "$(DB_FILE)"
 
 .PHONY: scan-books
 scan-books:  ## Scan small files/books (sequential, optimized <5MB)
+	@echo "⚠️ Deprecated: use 'make scan PATH=... PARALLEL=0'."
 	@echo "📚 Scanning books/documents: $(PATH)"
 	$(SMART_SCAN) "$(PATH)" --preset books --db "$(DB_FILE)"
 
 .PHONY: scan-mixed
 scan-mixed:  ## Scan mixed content (balanced parallel settings)
+	@echo "⚠️ Deprecated: use 'make scan PATH=...'."
 	@echo "📦 Scanning mixed content: $(PATH)"
 	$(SMART_SCAN) "$(PATH)" --preset mixed --db "$(DB_FILE)"
 
 .PHONY: scan-dry-run
 scan-dry-run:  ## Show what scan would execute without running
+	@echo "⚠️ Deprecated: use 'make scan PATH=...' for actual scans."
 	@echo "🔍 Analyzing $(PATH) (dry-run mode)..."
 	$(SMART_SCAN) "$(PATH)" --dry-run --db "$(DB_FILE)"
 
 .PHONY: scan-presets
 scan-presets:  ## Show all available scan presets and their settings
+	@echo "⚠️ Deprecated: use 'make scan PATH=...'."
 	@$(SMART_SCAN) --show-presets
 
 # ============================================================================
@@ -94,26 +125,51 @@ scan-presets:  ## Show all available scan presets and their settings
 
 .PHONY: scan-hierarchical
 scan-hierarchical:  ## Adaptive scan - analyzes each subfolder independently (unified)
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical scans (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical scans may overscan. Use 'make scan PATH=...'."
 	@echo "🌳 Hierarchical scan with unified database: $(PATH)"
 	$(AUTO_SCAN) "$(PATH)" --db "$(DB_FILE)"
 
 .PHONY: scan-hier-per-device
 scan-hier-per-device:  ## Adaptive scan - per-device databases (legacy)
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical scans (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical scans may overscan. Use 'make scan PATH=...'."
 	@echo "🌳 Hierarchical scan with device-local database: $(PATH)"
 	$(AUTO_SCAN) "$(PATH)" --per-device
 
 .PHONY: scan-plan
 scan-plan:  ## Analyze tree and propose optimal scan strategy
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical planning (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical planning may overscan. Use 'make scan PATH=...'."
 	@echo "📊 Analyzing directory tree for optimal scan strategy: $(PATH)"
 	$(PLAN_SCAN) "$(PATH)" --db "$(DB_FILE)"
 
 .PHONY: scan-plan-execute
 scan-plan-execute:  ## Analyze and execute optimal scan plan
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical planning (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical planning may overscan. Use 'make scan PATH=...'."
 	@echo "🚀 Planning and executing optimal scan: $(PATH)"
 	$(PLAN_SCAN) "$(PATH)" --execute --db "$(DB_FILE)"
 
 .PHONY: scan-hier-dry
 scan-hier-dry:  ## Preview hierarchical scan plan without executing
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical scans (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical scans may overscan. Use 'make scan PATH=...'."
 	@echo "🔍 Previewing hierarchical scan plan: $(PATH)"
 	$(AUTO_SCAN) "$(PATH)" --dry-run --db "$(DB_FILE)"
 
@@ -240,13 +296,8 @@ install-dev:  ## Install with development dependencies
 	pip install -e ".[dev]"
 
 # ============================================================================
-# Legacy Operations (Pre-smart-scan)
+# Other Operations
 # ============================================================================
-
-.PHONY: scan
-scan:  ## Basic scan (legacy, use scan-auto instead)
-	@echo "📦 Scanning with basic settings..."
-	@python -m hashall.scan "$(PATH)" --db "$(DB_FILE)"
 
 .PHONY: export
 export:  ## Export hashall metadata to JSON
