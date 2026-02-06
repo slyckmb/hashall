@@ -434,6 +434,7 @@ class TestReusePlan:
         assert plan['payload_hash'] == payload_hash
         assert plan['target_path'] == pool_root
         assert plan['source_path'] == stash_root
+        assert plan.get('payload_group')
 
 
 class TestMovePlan:

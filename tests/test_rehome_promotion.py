@@ -157,6 +157,7 @@ class TestPromotionPlanner:
         assert plan["decision"] == "REUSE"
         assert plan["target_path"] == stash_root
         assert plan["no_blind_copy"] is True
+        assert plan.get("payload_group")
 
     def test_batch_promotion_includes_siblings(self, tmp_path):
         db_path = TestDatabase.create_test_db(tmp_path)

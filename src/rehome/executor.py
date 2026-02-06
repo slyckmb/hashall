@@ -872,33 +872,70 @@ class DemotionExecutor:
                     self._log(f"  remove_empty_dir skip path={path}", "warning")
 
     def _cleanup_duplicate_payload(self, plan: Dict, dry_run: bool) -> None:
-        """Remove source payload root after a REUSE plan when explicitly enabled."""
+        """Remove duplicate payload roots after a REUSE plan when explicitly enabled."""
         if plan.get("decision") != "REUSE":
             self._log("  cleanup_duplicate skip reason=not_reuse", "warning")
             return
 
-        source_path = Path(plan['source_path']).resolve()
         target_path = Path(plan['target_path']).resolve() if plan.get('target_path') else None
-
         if target_path is None:
             self._log("  cleanup_duplicate skip reason=missing_target", "warning")
-            return
-        if source_path == target_path:
-            self._log("  cleanup_duplicate skip reason=same_path", "warning")
-            return
-        if not source_path.exists():
-            self._log("  cleanup_duplicate skip reason=missing_source", "warning")
             return
         if not target_path.exists():
             self._log("  cleanup_duplicate skip reason=missing_target_path", "warning")
             return
 
-        if dry_run:
-            self._log(f"  remove_duplicate_payload dry_run=true path={source_path}")
+        seeding_roots = [Path(r).resolve() for r in plan.get('seeding_roots', [])]
+        if not seeding_roots:
+            self._log("  cleanup_duplicate skip reason=no_seeding_roots", "warning")
             return
 
-        if source_path.is_dir():
-            shutil.rmtree(source_path)
-        else:
-            source_path.unlink()
-        self._log(f"  remove_duplicate_payload path={source_path}", "success")
+        group = plan.get("payload_group") or []
+        if not group:
+            source_path = Path(plan['source_path']).resolve()
+            if source_path == target_path:
+                self._log("  cleanup_duplicate skip reason=same_path", "warning")
+                return
+            if not source_path.exists():
+                self._log("  cleanup_duplicate skip reason=missing_source", "warning")
+                return
+            if dry_run:
+                self._log(f"  remove_duplicate_payload dry_run=true path={source_path}")
+                return
+            if source_path.is_dir():
+                shutil.rmtree(source_path)
+            else:
+                source_path.unlink()
+            self._log(f"  remove_duplicate_payload path={source_path}", "success")
+            return
+
+        for entry in group:
+            root = Path(entry.get("root_path") or "").resolve()
+            if not root:
+                continue
+            if root == target_path:
+                continue
+            if not root.exists():
+                self._log(f"  cleanup_duplicate skip reason=missing_source path={root}", "warning")
+                continue
+            if not self._is_under_roots(root, seeding_roots):
+                self._log(f"  cleanup_duplicate skip reason=outside_roots path={root}", "warning")
+                continue
+            file_count = entry.get("file_count", plan.get("file_count"))
+            total_bytes = entry.get("total_bytes", plan.get("total_bytes"))
+            if not self._verify_file_count(root, file_count):
+                self._log(f"  cleanup_duplicate skip reason=file_count_mismatch path={root}", "warning")
+                continue
+            if not self._verify_total_bytes(root, total_bytes):
+                self._log(f"  cleanup_duplicate skip reason=total_bytes_mismatch path={root}", "warning")
+                continue
+
+            if dry_run:
+                self._log(f"  remove_duplicate_payload dry_run=true path={root}")
+                continue
+
+            if root.is_dir():
+                shutil.rmtree(root)
+            else:
+                root.unlink()
+            self._log(f"  remove_duplicate_payload path={root}", "success")

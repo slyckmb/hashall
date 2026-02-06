@@ -596,6 +596,19 @@ class DemotionPlanner:
                     "total_bytes": source_payload.total_bytes
                 }
 
+            # Build payload group metadata (all payloads with same hash)
+            payload_group = [
+                {
+                    "payload_id": p.payload_id,
+                    "device_id": p.device_id,
+                    "root_path": p.root_path,
+                    "file_count": p.file_count,
+                    "total_bytes": p.total_bytes,
+                    "status": p.status,
+                }
+                for p in get_payloads_by_hash(conn, source_payload.payload_hash, status=None)
+            ]
+
             if pool_root:
                 # REUSE: Payload already on pool
                 return {
@@ -614,6 +627,7 @@ class DemotionPlanner:
                     "seeding_roots": [str(r) for r in self.seeding_roots],
                     "library_roots": [str(r) for r in self.library_roots],
                     "view_targets": view_targets,
+                    "payload_group": payload_group,
                     "file_count": source_payload.file_count,
                     "total_bytes": source_payload.total_bytes
                 }
@@ -659,6 +673,7 @@ class DemotionPlanner:
                     "seeding_roots": [str(r) for r in self.seeding_roots],
                     "library_roots": [str(r) for r in self.library_roots],
                     "view_targets": view_targets,
+                    "payload_group": payload_group,
                     "file_count": source_payload.file_count,
                     "total_bytes": source_payload.total_bytes
                 }
@@ -956,6 +971,18 @@ class PromotionPlanner:
                     "total_bytes": source_payload.total_bytes
                 }
 
+            payload_group = [
+                {
+                    "payload_id": p.payload_id,
+                    "device_id": p.device_id,
+                    "root_path": p.root_path,
+                    "file_count": p.file_count,
+                    "total_bytes": p.total_bytes,
+                    "status": p.status,
+                }
+                for p in get_payloads_by_hash(conn, source_payload.payload_hash, status=None)
+            ]
+
             return {
                 "version": "1.0",
                 "direction": "promote",
@@ -973,6 +1000,7 @@ class PromotionPlanner:
                 "library_roots": [str(r) for r in self.library_roots],
                 "no_blind_copy": True,
                 "view_targets": view_targets,
+                "payload_group": payload_group,
                 "file_count": source_payload.file_count,
                 "total_bytes": source_payload.total_bytes
             }
