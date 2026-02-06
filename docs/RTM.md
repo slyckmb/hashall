@@ -23,8 +23,8 @@
 | REQ-5.1-3 | MOVE flow verifies + relocates siblings (5.1) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | REQ-5.2-1 | Promotion reuse-only (5.2) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | REQ-5.3-1 | Payload-group rehome (5.3) | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
-| REQ-6.1-1 | Same-device dedupe analysis/plan/execute (6.1) | T | Phase 5 | NOT RUN |
-| REQ-6.2-1 | Cross-device duplicate detection (6.2) | T | Phase 5 | NOT RUN |
+| REQ-6.1-1 | Same-device dedupe analysis/plan/execute (6.1) | T | `out/te/phase5/logs/pytest_phase5_dedupe.txt` | PASS |
+| REQ-6.2-1 | Cross-device duplicate detection (6.2) | T | `out/te/phase5/logs/pytest_phase5_dedupe.txt` | PASS |
 | REQ-6.3-1 | Sibling torrent views (6.3) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | REQ-9.1-1 | Safe defaults (dry-run, fail-fast) (9.x) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | REQ-9.2-1 | Audit trail persisted (9.x) | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
@@ -37,7 +37,7 @@
 | SC-F-3 | REUSE prevents duplication | T | `out/te/phase3/logs/pytest_phase3_planning.txt` | PASS |
 | SC-F-4 | Sibling torrents as hardlink views | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | SC-F-5 | Incremental scans 10-100x faster | T | `out/te/phase1/logs/scan_incremental_stash.txt` | NOT RUN |
-| SC-F-6 | Dedup saves measurable space | T | Phase 5 | NOT RUN |
+| SC-F-6 | Dedup saves measurable space | T | `out/te/phase5/logs/pytest_phase5_dedupe.txt` | PASS |
 | SC-O-1 | Safe by default | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | SC-O-2 | Audit trail understandable | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
 | SC-O-3 | Recoverable from failure | T | `out/te/phase4/logs/pytest_phase4_execution.txt` | PASS |
