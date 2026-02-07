@@ -375,7 +375,7 @@ link-verify-scope:  ## Verify latest plan scope for PATH (optional PLAN_ID)
 
 .PHONY: workflow
 workflow:  ## Show workflow done/todo for PATH
-	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)"
+	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)" --auto-verify-scope
 
 # ============================================================================
 # Rehome (Payload Moves)

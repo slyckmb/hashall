@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 from hashall.model import connect_db
@@ -151,6 +153,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Workflow status for a path.")
     parser.add_argument("path", help="Root path to check")
     parser.add_argument("--db", default=str(Path.home() / ".hashall" / "catalog.db"))
+    parser.add_argument("--auto-verify-scope", action="store_true", help="Run scope verification and update plan metadata")
     args = parser.parse_args()
 
     root_input = Path(args.path)
@@ -188,6 +191,26 @@ def main() -> int:
         plan_row = _find_recent_plan(conn, device_id, rel_root_str)
         if plan_row:
             plan_id, name, status, created_at, actions_total, actions_executed, actions_failed, actions_skipped, metadata = plan_row
+            if args.auto_verify_scope:
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "hashall.cli",
+                    "link",
+                    "verify-scope",
+                    str(root_input),
+                    "--plan-id",
+                    str(plan_id),
+                    "--db",
+                    args.db,
+                    "--max-examples",
+                    "0",
+                ]
+                subprocess.run(cmd, check=False)
+                # Refresh metadata
+                plan_row = _find_recent_plan(conn, device_id, rel_root_str)
+                if plan_row:
+                    plan_id, name, status, created_at, actions_total, actions_executed, actions_failed, actions_skipped, metadata = plan_row
             _print_item(
                 "link plan",
                 True,
