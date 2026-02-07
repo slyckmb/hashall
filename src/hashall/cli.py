@@ -16,6 +16,9 @@ DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
 
 _LOG_SETUP = False
 _LOG_FILE = None
+_LOG_PATH = None
+_RUN_HEADER_EMITTED = False
+_PIPE_BROKEN = False
 
 
 class _TeeStream:
@@ -25,13 +28,22 @@ class _TeeStream:
         self.encoding = getattr(primary, "encoding", "utf-8")
 
     def write(self, data):
+        global _PIPE_BROKEN
+        if _PIPE_BROKEN:
+            return 0
         if isinstance(data, bytes):
             text = data.decode(self.encoding, errors="replace")
         else:
             text = str(data)
-        result = self._primary.write(text)
+        try:
+            result = self._primary.write(text)
+        except BrokenPipeError:
+            _PIPE_BROKEN = True
+            return 0
         try:
             self._secondary.write(text)
+        except BrokenPipeError:
+            _PIPE_BROKEN = True
         except Exception:
             pass
         return result
@@ -41,7 +53,14 @@ class _TeeStream:
             self.write(line)
 
     def flush(self):
-        self._primary.flush()
+        global _PIPE_BROKEN
+        if _PIPE_BROKEN:
+            return
+        try:
+            self._primary.flush()
+        except BrokenPipeError:
+            _PIPE_BROKEN = True
+            return
         try:
             self._secondary.flush()
         except Exception:
@@ -58,7 +77,7 @@ class _TeeStream:
 
 
 def _setup_master_log() -> None:
-    global _LOG_SETUP, _LOG_FILE
+    global _LOG_SETUP, _LOG_FILE, _LOG_PATH
     if _LOG_SETUP:
         return
     if os.environ.get("HASHALL_LOG_DISABLED") == "1":
@@ -72,6 +91,7 @@ def _setup_master_log() -> None:
         else:
             base_dir = Path(log_dir) if log_dir else (Path.home() / ".logs" / "hashall")
             log_path = base_dir / "hashall.log"
+        _LOG_PATH = log_path
         log_path.parent.mkdir(parents=True, exist_ok=True)
         _LOG_FILE = open(log_path, "a", encoding="utf-8", buffering=1)
     except Exception:
@@ -80,6 +100,18 @@ def _setup_master_log() -> None:
     sys.stdout = _TeeStream(sys.stdout, _LOG_FILE)
     sys.stderr = _TeeStream(sys.stderr, _LOG_FILE)
     _LOG_SETUP = True
+
+
+def _emit_run_header() -> None:
+    global _RUN_HEADER_EMITTED
+    if _RUN_HEADER_EMITTED:
+        return
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    script = Path(sys.argv[0]).name or "hashall"
+    print(f"🧾 {script} v{__version__} @ {timestamp}")
+    if _LOG_PATH:
+        print(f"🧾 log: {_LOG_PATH}")
+    _RUN_HEADER_EMITTED = True
 
 
 # Initialize logging as early as possible for CLI usage.
@@ -91,6 +123,7 @@ if os.environ.get("HASHALL_LOG_DISABLED") != "1":
 def cli():
     """Hashall — file hashing, verification, and migration tools"""
     _setup_master_log()
+    _emit_run_header()
     pass
 
 @cli.command("scan")
@@ -1277,7 +1310,7 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
             verify_mode=verify,
             create_backup=not no_backup,
             limit=limit,
-            progress_callback=progress_callback if not dry_run else None,
+            progress_callback=progress_callback,
             use_jdupes=jdupes,
             jdupes_log_dir=Path(jdupes_log_dir) if jdupes_log_dir else None
         )
