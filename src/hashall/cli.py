@@ -1428,8 +1428,13 @@ def link_show_plan_cmd(plan_id, db, limit, format):
               help="Use jdupes for byte-for-byte verification + hardlinking (recommended).")
 @click.option("--jdupes-log-dir", type=click.Path(), default=None,
               help="Write per-group jdupes logs to this directory.")
+@click.option("--snapshot/--no-snapshot", default=True,
+              help="Use a ZFS snapshot for rollback when available (recommended).")
+@click.option("--snapshot-prefix", default="hashall-link",
+              help="Prefix for ZFS snapshot names.")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
-def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdupes_log_dir, yes):
+def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdupes_log_dir,
+                     snapshot, snapshot_prefix, yes):
     """
     Execute a deduplication plan.
 
@@ -1470,6 +1475,9 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
     from hashall.model import connect_db
     from hashall.link_query import get_plan
     from hashall.link_executor import execute_plan
+    from hashall.fs_utils import get_zfs_metadata
+    import subprocess
+    import datetime as dt
 
     conn = connect_db(Path(db))
 
@@ -1499,6 +1507,32 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
         click.echo(f"   Potential savings: {savings_mb:.2f} MB")
         click.echo()
 
+        # Snapshot discovery (read-only)
+        snapshot_dataset = None
+        snapshot_existing = None
+        if snapshot and plan.mount_point:
+            meta = get_zfs_metadata(plan.mount_point)
+            snapshot_dataset = meta.get("dataset_name") if meta else None
+            if snapshot_dataset:
+                try:
+                    result = subprocess.run(
+                        ["zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-r", snapshot_dataset],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                        timeout=10,
+                    )
+                    snaps = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                    matches = [
+                        s for s in snaps
+                        if s.startswith(f"{snapshot_dataset}@{snapshot_prefix}")
+                        and s.split("@")[0] == snapshot_dataset
+                    ]
+                    if matches:
+                        snapshot_existing = matches[-1]
+                except Exception:
+                    snapshot_existing = None
+
         if dry_run:
             click.echo("🔍 DRY-RUN MODE (no changes will be made)")
             click.echo()
@@ -1516,6 +1550,15 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
                 }
                 click.echo(f"   {'✅' if jdupes else '❌'} jdupes byte-for-byte verification + linking")
                 click.echo(f"   {verify_desc.get(verify, verify)}")
+                if snapshot and snapshot_dataset:
+                    snap_label = snapshot_existing or f"{snapshot_dataset}@{snapshot_prefix}-<timestamp>"
+                    click.echo(f"   ✅ ZFS snapshot (dataset: {snapshot_dataset})")
+                    click.echo(f"      {snap_label}")
+                else:
+                    if snapshot:
+                        click.echo("   ⚠️  ZFS snapshot (not available)")
+                    else:
+                        click.echo("   ❌ ZFS snapshot (disabled)")
                 click.echo(f"   {'✅' if not no_backup else '❌'} Backup file creation (.bak)")
                 click.echo(f"   ✅ Atomic operations with rollback")
                 click.echo()
@@ -1552,12 +1595,37 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
         click.echo("⚡ Executing plan...")
         click.echo()
 
+        # Snapshot (only when executing)
+        snapshot_used = None
+        create_backup = not no_backup
+        if snapshot and not dry_run and snapshot_dataset:
+            if snapshot_existing:
+                snapshot_used = snapshot_existing
+            else:
+                snap_name = f"{snapshot_prefix}-plan{plan_id}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                snapshot_used = f"{snapshot_dataset}@{snap_name}"
+                try:
+                    subprocess.run(
+                        ["zfs", "snapshot", snapshot_used],
+                        check=True,
+                        timeout=15,
+                    )
+                except Exception as e:
+                    snapshot_used = None
+                    click.echo(f"⚠️  Snapshot failed: {e}. Falling back to .bak backups.")
+
+            if snapshot_used:
+                click.echo(f"✅ Snapshot ready: {snapshot_used}")
+                if not no_backup:
+                    create_backup = False
+                    click.echo("ℹ️  Snapshot active; skipping per-file .bak backups")
+
         result = execute_plan(
             conn,
             plan_id,
             dry_run=dry_run,
             verify_mode=verify,
-            create_backup=not no_backup,
+            create_backup=create_backup,
             limit=limit,
             progress_callback=progress_callback,
             use_jdupes=jdupes,
