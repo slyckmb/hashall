@@ -31,6 +31,40 @@ SHOW_PATH ?= 1
 
 # Root scan CLI
 HASHALL_CLI := $(PYTHON) -m hashall.cli
+# Rehome CLI
+REHOME_CLI := $(PYTHON) -m rehome.cli
+
+# Rehome defaults (override via make VAR=value)
+REHOME_CATALOG ?= $(DB_FILE)
+REHOME_MODE ?=
+REHOME_TORRENT_HASH ?=
+REHOME_PAYLOAD_HASH ?=
+REHOME_TAG ?=
+REHOME_SEEDING_ROOTS ?=
+REHOME_LIBRARY_ROOTS ?=
+REHOME_CROSS_SEED_CONFIG ?=
+REHOME_TRACKER_REGISTRY ?=
+REHOME_STASH_DEVICE ?=
+REHOME_POOL_DEVICE ?=
+REHOME_STASH_SEEDING_ROOT ?=
+REHOME_POOL_SEEDING_ROOT ?=
+REHOME_POOL_PAYLOAD_ROOT ?=
+REHOME_OUTPUT ?=
+REHOME_PLAN ?=
+REHOME_SPOT_CHECK ?= 0
+REHOME_RESCAN ?= 0
+REHOME_CLEANUP_SOURCE_VIEWS ?= 0
+REHOME_CLEANUP_EMPTY_DIRS ?= 0
+REHOME_CLEANUP_DUPLICATE_PAYLOAD ?= 0
+
+REHOME_SEEDING_ARGS := $(foreach r,$(REHOME_SEEDING_ROOTS),--seeding-root "$(r)")
+REHOME_LIBRARY_ARGS := $(foreach r,$(REHOME_LIBRARY_ROOTS),--library-root "$(r)")
+REHOME_CROSS_SEED_ARG := $(if $(REHOME_CROSS_SEED_CONFIG),--cross-seed-config "$(REHOME_CROSS_SEED_CONFIG)",)
+REHOME_TRACKER_ARG := $(if $(REHOME_TRACKER_REGISTRY),--tracker-registry "$(REHOME_TRACKER_REGISTRY)",)
+REHOME_STASH_SEEDING_ARG := $(if $(REHOME_STASH_SEEDING_ROOT),--stash-seeding-root "$(REHOME_STASH_SEEDING_ROOT)",)
+REHOME_POOL_SEEDING_ARG := $(if $(REHOME_POOL_SEEDING_ROOT),--pool-seeding-root "$(REHOME_POOL_SEEDING_ROOT)",)
+REHOME_POOL_PAYLOAD_ARG := $(if $(REHOME_POOL_PAYLOAD_ROOT),--pool-payload-root "$(REHOME_POOL_PAYLOAD_ROOT)",)
+REHOME_OUTPUT_ARG := $(if $(REHOME_OUTPUT),--output "$(REHOME_OUTPUT)",)
 
 .DEFAULT_GOAL := help
 
@@ -50,6 +84,9 @@ help:  ## Show this help message
 	@echo "Deduplication:"
 	@grep -E '^(link-path|link-paths):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
+	@echo "Rehome:"
+	@grep -E '^(rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply|rehome-apply-dry|rehome-checklist):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo ""
 	@echo "Other Operations:"
 	@grep -E '^(export|verify|docker-):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
@@ -61,6 +98,7 @@ help:  ## Show this help message
 	@echo "  make link-paths PATHS='/pool/data /stash/media'  # Plan both roots"
 	@echo "  make link-paths LINK_UPGRADE_COLLISIONS=0  # Skip collision upgrade"
 	@echo "  make workflow PATH=/pool/data             # Show workflow done/todo"
+	@echo "  make rehome-checklist                     # Rehome checklist"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
 	@echo ""
@@ -332,6 +370,93 @@ link-paths:  ## Create hardlink plans for PATHS (space-separated)
 .PHONY: workflow
 workflow:  ## Show workflow done/todo for PATH
 	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)"
+
+# ============================================================================
+# Rehome (Payload Moves)
+# ============================================================================
+
+.PHONY: rehome-plan
+rehome-plan:  ## Create a rehome plan (set REHOME_MODE, REHOME_* vars)
+	@if [ -z "$(REHOME_MODE)" ]; then \
+		echo "❌ REHOME_MODE is required (demote|promote)"; \
+		exit 1; \
+	fi; \
+	if [ "$(REHOME_MODE)" != "demote" ] && [ "$(REHOME_MODE)" != "promote" ]; then \
+		echo "❌ REHOME_MODE must be demote or promote"; \
+		exit 1; \
+	fi; \
+	if [ -z "$(REHOME_SEEDING_ROOTS)" ]; then \
+		echo "❌ REHOME_SEEDING_ROOTS is required"; \
+		exit 1; \
+	fi; \
+	if [ -z "$(REHOME_STASH_DEVICE)" ] || [ -z "$(REHOME_POOL_DEVICE)" ]; then \
+		echo "❌ REHOME_STASH_DEVICE and REHOME_POOL_DEVICE are required"; \
+		exit 1; \
+	fi; \
+	if [ -z "$(REHOME_TORRENT_HASH)$(REHOME_PAYLOAD_HASH)$(REHOME_TAG)" ]; then \
+		echo "❌ One of REHOME_TORRENT_HASH, REHOME_PAYLOAD_HASH, or REHOME_TAG is required"; \
+		exit 1; \
+	fi; \
+	mode_flag="--$(REHOME_MODE)"; \
+	if [ -n "$(REHOME_TORRENT_HASH)" ]; then filter_args="--torrent-hash $(REHOME_TORRENT_HASH)"; fi; \
+	if [ -n "$(REHOME_PAYLOAD_HASH)" ]; then filter_args="--payload-hash $(REHOME_PAYLOAD_HASH)"; fi; \
+	if [ -n "$(REHOME_TAG)" ]; then filter_args="--tag $(REHOME_TAG)"; fi; \
+	$(REHOME_CLI) plan $$mode_flag $$filter_args \
+		--catalog "$(REHOME_CATALOG)" \
+		$(REHOME_SEEDING_ARGS) \
+		$(REHOME_LIBRARY_ARGS) \
+		$(REHOME_CROSS_SEED_ARG) \
+		$(REHOME_TRACKER_ARG) \
+		--stash-device $(REHOME_STASH_DEVICE) \
+		--pool-device $(REHOME_POOL_DEVICE) \
+		$(REHOME_STASH_SEEDING_ARG) \
+		$(REHOME_POOL_SEEDING_ARG) \
+		$(REHOME_POOL_PAYLOAD_ARG) \
+		$(REHOME_OUTPUT_ARG)
+
+.PHONY: rehome-plan-demote
+rehome-plan-demote:  ## Create a demotion plan (stash -> pool)
+	@$(MAKE) rehome-plan REHOME_MODE=demote
+
+.PHONY: rehome-plan-promote
+rehome-plan-promote:  ## Create a promotion plan (pool -> stash reuse only)
+	@$(MAKE) rehome-plan REHOME_MODE=promote
+
+.PHONY: rehome-apply-dry
+rehome-apply-dry:  ## Dry-run a rehome plan (set REHOME_PLAN)
+	@if [ -z "$(REHOME_PLAN)" ]; then \
+		echo "❌ REHOME_PLAN is required (path to plan json)"; \
+		exit 1; \
+	fi; \
+	$(REHOME_CLI) apply "$(REHOME_PLAN)" --dryrun \
+		--catalog "$(REHOME_CATALOG)" \
+		$(if $(REHOME_SPOT_CHECK),--spot-check $(REHOME_SPOT_CHECK),) \
+		$(if $(REHOME_CLEANUP_SOURCE_VIEWS),--cleanup-source-views,) \
+		$(if $(REHOME_CLEANUP_EMPTY_DIRS),--cleanup-empty-dirs,) \
+		$(if $(REHOME_CLEANUP_DUPLICATE_PAYLOAD),--cleanup-duplicate-payload,)
+
+.PHONY: rehome-apply
+rehome-apply:  ## Execute a rehome plan (set REHOME_PLAN)
+	@if [ -z "$(REHOME_PLAN)" ]; then \
+		echo "❌ REHOME_PLAN is required (path to plan json)"; \
+		exit 1; \
+	fi; \
+	$(REHOME_CLI) apply "$(REHOME_PLAN)" --force \
+		--catalog "$(REHOME_CATALOG)" \
+		$(if $(REHOME_SPOT_CHECK),--spot-check $(REHOME_SPOT_CHECK),) \
+		$(if $(REHOME_RESCAN),--rescan,) \
+		$(if $(REHOME_CLEANUP_SOURCE_VIEWS),--cleanup-source-views,) \
+		$(if $(REHOME_CLEANUP_EMPTY_DIRS),--cleanup-empty-dirs,) \
+		$(if $(REHOME_CLEANUP_DUPLICATE_PAYLOAD),--cleanup-duplicate-payload,)
+
+.PHONY: rehome-checklist
+rehome-checklist:  ## Show rehome checklist
+	@echo "Rehome checklist"
+	@echo "  [ ] 1) Plan: make rehome-plan-demote REHOME_TORRENT_HASH=... REHOME_SEEDING_ROOTS=\"/stash/media\" REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44"
+	@echo "  [ ] 2) Review plan JSON (jq or cat)"
+	@echo "  [ ] 3) Dry-run: make rehome-apply-dry REHOME_PLAN=rehome-plan-...json"
+	@echo "  [ ] 4) Execute: make rehome-apply REHOME_PLAN=rehome-plan-...json"
+	@echo "  [ ] 5) Optional: --spot-check N, --rescan, cleanup flags"
 
 .PHONY: export
 export:  ## Export hashall metadata to JSON
