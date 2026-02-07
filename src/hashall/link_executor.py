@@ -832,6 +832,10 @@ def execute_plan(
         for group_index, (hash_val, group_actions) in enumerate(groups.items(), start=1):
             valid = []
             log_lines = []
+            stamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+            separator = f"----- {stamp} group {group_index}/{group_total} sha={hash_val[:12]} -----"
+            print(separator)
+            log_lines.append(separator)
             log_lines.append(f"plan_id: {plan_id}")
             log_lines.append(f"group_index: {group_index}/{group_total}")
             log_lines.append(f"sha256: {hash_val}")
