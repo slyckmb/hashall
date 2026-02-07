@@ -13,6 +13,7 @@ from hashall.verify_trees import verify_trees
 from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
+DEFAULT_JDUPES_LOG_DIR = Path.home() / ".logs" / "hashall" / "jdupes"
 
 _LOG_SETUP = False
 _LOG_FILE = None
@@ -1436,7 +1437,7 @@ def link_show_plan_cmd(plan_id, db, limit, format):
 @click.option("--limit", type=int, default=0, help="Maximum number of actions to execute (0 for all).")
 @click.option("--jdupes/--no-jdupes", default=True,
               help="Use jdupes for byte-for-byte verification + hardlinking (recommended).")
-@click.option("--jdupes-log-dir", type=click.Path(), default=None,
+@click.option("--jdupes-log-dir", type=click.Path(), default=str(DEFAULT_JDUPES_LOG_DIR),
               help="Write per-group jdupes logs to this directory.")
 @click.option("--snapshot/--no-snapshot", default=True,
               help="Use a ZFS snapshot for rollback when available (recommended).")
@@ -1648,7 +1649,7 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
             limit=limit,
             progress_callback=progress_callback,
             use_jdupes=jdupes,
-            jdupes_log_dir=Path(jdupes_log_dir) if jdupes_log_dir else None
+            jdupes_log_dir=Path(jdupes_log_dir).expanduser() if jdupes_log_dir else None
         )
 
         # Show results
