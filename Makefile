@@ -22,6 +22,8 @@ PATHS ?= /pool/data /stash/media
 LINK_UPGRADE_COLLISIONS ?= 1
 LINK_MIN_SIZE ?= 0
 LINK_DRY_RUN ?= 0
+LINK_LIMIT ?= 0
+LINK_REQUIRE_EXISTING_HARDLINKS ?= 1
 
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
@@ -373,9 +375,36 @@ link-verify-scope:  ## Verify latest plan scope for PATH (optional PLAN_ID)
 	if [ -n "$(PLAN_ID)" ]; then plan_arg="--plan-id $(PLAN_ID)"; fi; \
 	$(HASHALL_CLI) link verify-scope "$(PATH)" $$plan_arg --db "$(DB_FILE)"
 
+.PHONY: link-execute
+link-execute:  ## Execute a link plan (requires PLAN_ID). Vars: PLAN_ID, LINK_DRY_RUN, LINK_LIMIT
+	@if [ -z "$(PLAN_ID)" ]; then \
+		echo "❌ PLAN_ID is required"; \
+		exit 1; \
+	fi; \
+	args=""; \
+	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	if [ "$(LINK_LIMIT)" != "0" ] && [ -n "$(LINK_LIMIT)" ]; then args="$$args --limit $(LINK_LIMIT)"; fi; \
+	$(HASHALL_CLI) link execute $(PLAN_ID) $$args --db "$(DB_FILE)"
+
+.PHONY: link-payload-empty
+link-payload-empty:  ## Create empty-payload plan for PATH (auto-detect device)
+	@device="$$(PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c 'import os,sys; from pathlib import Path; from hashall.model import connect_db; from hashall.pathing import canonicalize_path; p=Path(sys.argv[1]); db=Path(sys.argv[2]); device_id=os.stat(canonicalize_path(p)).st_dev; conn=connect_db(db); cur=conn.cursor(); row=cur.execute("SELECT device_alias FROM devices WHERE device_id = ?", (device_id,)).fetchone(); conn.close(); print(row[0] if row and row[0] else device_id)' "$(PATH)" "$(DB_FILE)")"; \
+	if [ -z "$$device" ]; then \
+		echo "❌ Could not resolve device for $(PATH)"; \
+		exit 1; \
+	fi; \
+	args="--device $$device"; \
+	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	if [ "$(LINK_REQUIRE_EXISTING_HARDLINKS)" != "1" ]; then args="$$args --no-require-existing-hardlinks"; fi; \
+	$(HASHALL_CLI) link plan-payload-empty "empty payload $(PATH)" $$args
+
 .PHONY: workflow
 workflow:  ## Show workflow done/todo for PATH
 	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)" --auto-verify-scope
+
+.PHONY: payload-sync
+payload-sync:  ## Sync qBittorrent payloads into catalog
+	@$(HASHALL_CLI) payload sync --db "$(DB_FILE)"
 
 # ============================================================================
 # Rehome (Payload Moves)

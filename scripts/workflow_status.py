@@ -144,9 +144,21 @@ def _payload_counts(conn: sqlite3.Connection, root: Path, device_id: int) -> tup
     return total, complete
 
 
-def _print_item(label: str, done: bool, detail: str, explain: str) -> None:
-    status = "[x]" if done else "[ ]"
-    print(f"{status} {label:<22} {detail:<52} {explain}")
+def _print_block(
+    label: str,
+    done: bool,
+    status: str,
+    make_cmd: str,
+    cli_cmd: str,
+    explain: str,
+) -> None:
+    checkbox = "[x]" if done else "[ ]"
+    print("-" * 70)
+    print(f"{checkbox} | {label} | {status}")
+    print(make_cmd)
+    print(cli_cmd)
+    print(explain)
+    print("-" * 70)
 
 
 def main() -> int:
@@ -184,9 +196,19 @@ def main() -> int:
             (fs_uuid, str(canonical_root)),
         ).fetchone()
         if scan_row:
-            _print_item("scan", True, f"last={scan_row[0]} scans={scan_row[1]}", "record all files under the root")
+            scan_status = f"last={scan_row[0]} scans={scan_row[1]}"
+            scan_done = True
         else:
-            _print_item("scan", False, f"make scan PATH={root_input}", "record all files under the root")
+            scan_status = "missing"
+            scan_done = False
+        _print_block(
+            "scan",
+            scan_done,
+            scan_status,
+            f"make scan PATH={root_input}",
+            f"hashall scan \"{root_input}\"",
+            "record all files under the root",
+        )
 
         plan_row = _find_recent_plan(conn, device_id, rel_root_str)
         if plan_row:
@@ -211,10 +233,12 @@ def main() -> int:
                 plan_row = _find_recent_plan(conn, device_id, rel_root_str)
                 if plan_row:
                     plan_id, name, status, created_at, actions_total, actions_executed, actions_failed, actions_skipped, metadata = plan_row
-            _print_item(
+            _print_block(
                 "link plan",
                 True,
                 f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
+                f"make link-path PATH={root_input}",
+                f"hashall link plan \"dedupe {root_input}\" --device {device_alias}",
                 "decide which duplicates should hardlink",
             )
             scope_done = False
@@ -228,74 +252,109 @@ def main() -> int:
                     )
                 except json.JSONDecodeError:
                     scope_done = False
-            _print_item(
-                "link scope verify",
+            _print_block(
+                "scope check",
                 scope_done,
-                f"hashall link verify-scope {root_input} --plan-id {plan_id}",
+                f"plan #{plan_id} scope",
+                f"make link-verify-scope PATH={root_input} PLAN_ID={plan_id}",
+                f"hashall link verify-scope \"{root_input}\" --plan-id {plan_id}",
                 "confirm plan paths are under root",
             )
-            _print_item(
-                "link execute",
+            _print_block(
+                "link exec",
                 status == "completed",
+                f"plan #{plan_id} ({status})",
+                f"make link-execute PLAN_ID={plan_id}",
                 f"hashall link execute {plan_id}",
                 "apply the plan (or dry-run first)",
             )
         else:
-            _print_item(
+            _print_block(
                 "link plan",
                 False,
+                "no plan",
+                f"make link-path PATH={root_input}",
                 f"hashall link plan \"dedupe {root_input}\" --device {device_alias}",
                 "decide which duplicates should hardlink",
             )
-            _print_item(
-                "link scope verify",
+            _print_block(
+                "scope check",
                 False,
+                "no plan",
+                f"make link-verify-scope PATH={root_input}",
                 "no plan",
                 "confirm plan paths are under root",
             )
-            _print_item("link execute", False, "no plan", "apply the plan (or dry-run first)")
+            _print_block(
+                "link exec",
+                False,
+                "no plan",
+                "make link-execute PLAN_ID=<id>",
+                "no plan",
+                "apply the plan (or dry-run first)",
+            )
 
         total_payloads, complete_payloads = _payload_counts(conn, canonical_root, device_id)
         if complete_payloads > 0:
-            _print_item(
-                "payload sync",
-                True,
-                f"complete={complete_payloads} total={total_payloads}",
-                "map torrents to payloads",
-            )
+            payload_status = f"complete={complete_payloads} total={total_payloads}"
+            payload_done = True
         else:
-            _print_item(
-                "payload sync",
-                False,
-                "hashall payload sync ...",
-                "map torrents to payloads",
-            )
+            payload_status = "not synced"
+            payload_done = False
+        _print_block(
+            "payload sync",
+            payload_done,
+            payload_status,
+            "make payload-sync",
+            "hashall payload sync",
+            "map torrents to payloads",
+        )
 
         empty_plan_row = _find_recent_empty_plan(conn, device_id, rel_root_str)
         if empty_plan_row:
             plan_id, name, status, created_at, actions_total, actions_executed, actions_failed, actions_skipped = empty_plan_row
-            _print_item(
-                "empty payload plan",
+            _print_block(
+                "empty plan",
                 True,
                 f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
+                f"make link-payload-empty PATH={root_input}",
+                f"hashall link plan-payload-empty \"empty payload {root_input}\" --device {device_alias}",
                 "plan empty-file hardlinks inside payloads",
             )
-            _print_item(
-                "empty payload execute",
+            _print_block(
+                "empty exec",
                 status == "completed",
+                f"plan #{plan_id} ({status})",
+                f"make link-execute PLAN_ID={plan_id}",
                 f"hashall link execute {plan_id}",
                 "apply empty-file hardlinks",
             )
         else:
-            _print_item(
-                "empty payload plan",
+            _print_block(
+                "empty plan",
                 False,
+                "no plan",
+                f"make link-payload-empty PATH={root_input}",
                 f"hashall link plan-payload-empty \"empty payload {root_input}\" --device {device_alias}",
                 "plan empty-file hardlinks inside payloads",
             )
-            _print_item("empty payload execute", False, "no plan", "apply empty-file hardlinks")
+            _print_block(
+                "empty exec",
+                False,
+                "no plan",
+                "make link-execute PLAN_ID=<id>",
+                "no plan",
+                "apply empty-file hardlinks",
+            )
 
-        _print_item("rehome", False, "hashall payload rehome ...", "move payloads to preferred root")
+        _print_block(
+            "rehome",
+            False,
+            "pending",
+            "make rehome-plan ...",
+            "hashall payload rehome ...",
+            "move payloads to preferred root",
+        )
 
         return 0
     finally:
