@@ -19,6 +19,9 @@ PLAN_SCAN = $(PYTHON) ./hashall-plan-scan
 # Default scan path (override with PATH=/custom/path)
 PATH ?= .
 PATHS ?= /pool/data /stash/media
+LINK_UPGRADE_COLLISIONS ?= 1
+LINK_MIN_SIZE ?= 0
+LINK_DRY_RUN ?= 0
 
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
@@ -56,6 +59,7 @@ help:  ## Show this help message
 	@echo "  make scan PATH=/pool/media SHOW_PATH=0     # Hide current file path line"
 	@echo "  make link-path PATH=/pool/data            # Plan hardlinks for a path"
 	@echo "  make link-paths PATHS='/pool/data /stash/media'  # Plan both roots"
+	@echo "  make link-paths LINK_UPGRADE_COLLISIONS=0  # Skip collision upgrade"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
 	@echo ""
@@ -307,12 +311,16 @@ install-dev:  ## Install with development dependencies
 
 .PHONY: link-path
 link-path:  ## Create a hardlink plan for PATH (auto-detect device)
-	@device="$$(PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c 'import os,sys; from pathlib import Path; from hashall.model import connect_db; from hashall.pathing import canonicalize_path; p=Path(sys.argv[1]); db=Path(sys.argv[2]); device_id=os.stat(canonicalize_path(p)).st_dev; conn=connect_db(db); cur=conn.cursor(); row=cur.execute(\"SELECT device_alias FROM devices WHERE device_id = ?\", (device_id,)).fetchone(); conn.close(); print(row[0] if row and row[0] else device_id)' "$(PATH)" "$(DB_FILE)")"; \
+	@device="$$(PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c 'import os,sys; from pathlib import Path; from hashall.model import connect_db; from hashall.pathing import canonicalize_path; p=Path(sys.argv[1]); db=Path(sys.argv[2]); device_id=os.stat(canonicalize_path(p)).st_dev; conn=connect_db(db); cur=conn.cursor(); row=cur.execute("SELECT device_alias FROM devices WHERE device_id = ?", (device_id,)).fetchone(); conn.close(); print(row[0] if row and row[0] else device_id)' "$(PATH)" "$(DB_FILE)")"; \
 	if [ -z "$$device" ]; then \
 		echo "❌ Could not resolve device for $(PATH)"; \
 		exit 1; \
 	fi; \
-	hashall link plan "dedupe $(PATH)" --device "$$device"
+	args="--device $$device"; \
+	if [ "$(LINK_UPGRADE_COLLISIONS)" != "1" ]; then args="$$args --no-upgrade-collisions"; fi; \
+	if [ "$(LINK_MIN_SIZE)" != "0" ]; then args="$$args --min-size $(LINK_MIN_SIZE)"; fi; \
+	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	$(HASHALL_CLI) link plan "dedupe $(PATH)" $$args
 
 .PHONY: link-paths
 link-paths:  ## Create hardlink plans for PATHS (space-separated)
