@@ -307,11 +307,18 @@ install-dev:  ## Install with development dependencies
 
 .PHONY: link-path
 link-path:  ## Create a hardlink plan for PATH (auto-detect device)
-	@device="$$(SCAN_PATH="$(PATH)" DB_PATH="$(DB_FILE)" python3 - <<'PY'\nimport os\nfrom pathlib import Path\nfrom hashall.model import connect_db\nfrom hashall.pathing import canonicalize_path\n\nscan_path = Path(os.environ['SCAN_PATH'])\ndb_path = Path(os.environ['DB_PATH'])\nconn = connect_db(db_path)\ncur = conn.cursor()\ncanon = canonicalize_path(scan_path)\ntry:\n    device_id = os.stat(canon).st_dev\nexcept OSError:\n    print(\"\")\n    raise SystemExit(0)\nrow = cur.execute(\"SELECT device_alias FROM devices WHERE device_id = ?\", (device_id,)).fetchone()\nconn.close()\nif row and row[0]:\n    print(row[0])\nelse:\n    print(device_id)\nPY\n)"; \\\n	if [ -z "$$device" ]; then \\\n		echo "❌ Could not resolve device for $(PATH)"; \\\n		exit 1; \\\n	fi; \\\n	hashall link plan "dedupe $(PATH)" --device "$$device"
+	@device="$$(python3 -c 'import os,sys; from pathlib import Path; from hashall.model import connect_db; from hashall.pathing import canonicalize_path; p=Path(sys.argv[1]); db=Path(sys.argv[2]); device_id=os.stat(canonicalize_path(p)).st_dev; conn=connect_db(db); cur=conn.cursor(); row=cur.execute(\"SELECT device_alias FROM devices WHERE device_id = ?\", (device_id,)).fetchone(); conn.close(); print(row[0] if row and row[0] else device_id)' "$(PATH)" "$(DB_FILE)" 2>/dev/null)"; \
+	if [ -z "$$device" ]; then \
+		echo "❌ Could not resolve device for $(PATH)"; \
+		exit 1; \
+	fi; \
+	hashall link plan "dedupe $(PATH)" --device "$$device"
 
 .PHONY: link-paths
 link-paths:  ## Create hardlink plans for PATHS (space-separated)
-	@for p in $(PATHS); do \\\n		$(MAKE) link-path PATH="$$p"; \\\n	done
+	@for p in $(PATHS); do \
+		$(MAKE) link-path PATH="$$p"; \
+	done
 
 .PHONY: export
 export:  ## Export hashall metadata to JSON
