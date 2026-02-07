@@ -116,6 +116,8 @@ def _run_jdupes(jdupes_cmd: str, list_path: Path) -> subprocess.CompletedProcess
         "-L",
         "-1",
         "-O",
+        "-P",
+        "fullhash",
         "-q",
         "--",
     ]
@@ -807,7 +809,7 @@ def execute_plan(
             log_lines.append(f"plan_id: {plan_id}")
             log_lines.append(f"sha256: {hash_val}")
             log_lines.append(f"actions: {len(group_actions)}")
-            log_lines.append(f"jdupes_cmd: {jdupes_cmd}")
+            log_lines.append(f"jdupes_cmd: {jdupes_cmd} -L -1 -O -P fullhash -q")
             for action in group_actions:
                 status, error, canonical_path, duplicate_path = _precheck_jdupes_action(
                     conn, action, plan.mount_point, verify_mode
