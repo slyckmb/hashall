@@ -834,8 +834,13 @@ def execute_plan(
             log_lines = []
             stamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
             separator = f"----- {stamp} group {group_index}/{group_total} sha={hash_val[:12]} -----"
+            border = "-" * len(separator)
+            print(border)
             print(separator)
+            print(border)
+            log_lines.append(border)
             log_lines.append(separator)
+            log_lines.append(border)
             log_lines.append(f"plan_id: {plan_id}")
             log_lines.append(f"group_index: {group_index}/{group_total}")
             log_lines.append(f"sha256: {hash_val}")
