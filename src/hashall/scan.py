@@ -770,7 +770,8 @@ def _canonicalize_root(
 def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
               workers: int | None = None, batch_size: int | None = None,
               tqdm_position: int | None = None, quiet: bool = False,
-              hash_mode: str = 'fast', show_current_path: bool = False):
+              hash_mode: str = 'fast', show_current_path: bool = False,
+              scan_nested_datasets: bool = False):
     """
     Incrementally scan a directory with per-device table tracking.
 
@@ -783,6 +784,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         tqdm_position: Position for progress bar (for nested display)
         quiet: Suppress verbose output (for nested progress bars)
         hash_mode: 'fast' (quick_hash only), 'full' (both hashes), 'upgrade' (add full hashes)
+        scan_nested_datasets: Detect nested mountpoints/datasets and scan them separately
     """
     conn = connect_db(db_path)
     init_db_schema(conn)
@@ -868,6 +870,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     file_count = 0
     skipped_other_device_examples = []
     skipped_example_limit = 5
+    nested_roots: list[Path] = []
+    nested_seen: Set[str] = set()
     discovery = None
     if not quiet:
         discovery = tqdm(
@@ -879,11 +883,25 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         )
 
     for dirpath, dirnames, filenames in os.walk(root_canonical):
-        # Skip symlinked directories
-        dirnames[:] = [
-            d for d in dirnames
-            if not (Path(dirpath) / d).is_symlink()
-        ]
+        # Skip symlinked or other-device directories (track nested datasets/mounts)
+        filtered_dirs = []
+        for d in dirnames:
+            child = Path(dirpath) / d
+            if child.is_symlink():
+                continue
+            try:
+                child_stat = child.stat()
+            except OSError:
+                continue
+            if child_stat.st_dev != device_id:
+                child_resolved = child.resolve()
+                key = str(child_resolved)
+                if key not in nested_seen:
+                    nested_seen.add(key)
+                    nested_roots.append(child_resolved)
+                continue
+            filtered_dirs.append(d)
+        dirnames[:] = filtered_dirs
         dir_count += 1
         if discovery is not None:
             discovery.update(1)
@@ -901,6 +919,19 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         discovery.close()
 
     _emit(quiet, f"📁 Files on filesystem: {file_count:,} in {dir_count:,} dirs")
+    if nested_roots:
+        _emit(quiet, f"🧭 Detected nested datasets/mounts: {len(nested_roots)}")
+        for nested in nested_roots[:5]:
+            nested_meta = get_zfs_metadata(str(nested))
+            dataset_name = nested_meta.get("dataset_name") if nested_meta else None
+            if dataset_name:
+                _emit(quiet, f"   - {nested} (dataset: {dataset_name})")
+            else:
+                _emit(quiet, f"   - {nested}")
+        if len(nested_roots) > 5:
+            _emit(quiet, f"   ... and {len(nested_roots) - 5} more")
+        if not scan_nested_datasets:
+            _emit(quiet, "   Use --scan-nested-datasets to scan them automatically")
 
     # 10. Incremental scan logic
     stats = ScanStats()
@@ -1264,6 +1295,23 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     print(f"   - {example} (dataset: {dataset})")
                 else:
                     print(f"   - {example}")
+
+    if scan_nested_datasets and nested_roots:
+        _emit(quiet, "🔁 Scanning nested datasets/mounts...")
+        for nested in nested_roots:
+            _emit(quiet, f"   ➜ {nested}")
+            scan_path(
+                db_path=db_path,
+                root_path=nested,
+                parallel=parallel,
+                workers=workers,
+                batch_size=batch_size,
+                tqdm_position=tqdm_position,
+                quiet=quiet,
+                hash_mode=hash_mode,
+                show_current_path=show_current_path,
+                scan_nested_datasets=scan_nested_datasets,
+            )
 
     # Close connection to prevent resource leaks with hierarchical scanning
     conn.close()

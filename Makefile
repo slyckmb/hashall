@@ -30,6 +30,7 @@ PARALLEL ?= 1
 WORKERS ?=
 HASH_MODE ?= fast
 SHOW_PATH ?= 1
+SCAN_NESTED_DATASETS ?= 0
 
 # Root scan CLI
 HASHALL_CLI := $(PYTHON) -m hashall.cli
@@ -132,6 +133,9 @@ SCAN_ARGS += --workers $(WORKERS)
 endif
 ifeq ($(SHOW_PATH),1)
 SCAN_ARGS += --show-path
+endif
+ifeq ($(SCAN_NESTED_DATASETS),1)
+SCAN_ARGS += --scan-nested-datasets
 endif
 
 .PHONY: scan

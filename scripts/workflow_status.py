@@ -183,6 +183,7 @@ def _scan_cli(root_input: Path, db: str) -> str:
     parallel = _env_value("PARALLEL", "1")
     workers = os.getenv("WORKERS", "")
     show_path = _env_value("SHOW_PATH", "1")
+    scan_nested = _env_value("SCAN_NESTED_DATASETS", "0")
     parts = [
         _hashall_cli(),
         "scan",
@@ -198,6 +199,8 @@ def _scan_cli(root_input: Path, db: str) -> str:
         parts.extend(["--workers", str(workers)])
     if show_path == "1":
         parts.append("--show-path")
+    if scan_nested == "1":
+        parts.append("--scan-nested-datasets")
     return " ".join(parts)
 
 
