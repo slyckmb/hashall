@@ -1067,8 +1067,10 @@ def link_show_plan_cmd(plan_id, db, limit, format):
               help="Verification mode: fast=size/mtime+sampling (default), paranoid=full hash (slow), none=skip")
 @click.option("--no-backup", is_flag=True, help="Skip creating .bak backup files (faster but less safe).")
 @click.option("--limit", type=int, default=0, help="Maximum number of actions to execute (0 for all).")
+@click.option("--jdupes/--no-jdupes", default=True,
+              help="Use jdupes for byte-for-byte verification + hardlinking (recommended).")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
-def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, yes):
+def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, yes):
     """
     Execute a deduplication plan.
 
@@ -1076,6 +1078,7 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, yes):
     modifies the filesystem, so use --dry-run first to preview.
 
     SAFETY FEATURES:
+    - jdupes byte-for-byte verification + linking (when enabled)
     - Fast verification: size/mtime + hash sampling (default, recommended)
     - Paranoid verification: full file hash (--verify paranoid, slow)
     - Backup file creation (use --no-backup to skip)
@@ -1152,6 +1155,7 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, yes):
                     'paranoid': '✅ Paranoid verification (full file hash - SLOW)',
                     'none': '❌ No verification (trust planning phase)'
                 }
+                click.echo(f"   {'✅' if jdupes else '❌'} jdupes byte-for-byte verification + linking")
                 click.echo(f"   {verify_desc.get(verify, verify)}")
                 click.echo(f"   {'✅' if not no_backup else '❌'} Backup file creation (.bak)")
                 click.echo(f"   ✅ Atomic operations with rollback")
@@ -1182,7 +1186,8 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, yes):
             verify_mode=verify,
             create_backup=not no_backup,
             limit=limit,
-            progress_callback=progress_callback if not dry_run else None
+            progress_callback=progress_callback if not dry_run else None,
+            use_jdupes=jdupes
         )
 
         # Show results

@@ -16,6 +16,10 @@ SAFETY FEATURES:
 import os
 import sqlite3
 import hashlib
+import shutil
+import subprocess
+import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Optional, Tuple
 from dataclasses import dataclass
@@ -42,6 +46,66 @@ class ExecutionResult:
     actions_skipped: int
     bytes_saved: int
     errors: list
+
+
+def _resolve_path(path: str, mount_point: Optional[str]) -> Path:
+    candidate = Path(path)
+    if mount_point and not candidate.is_absolute():
+        return Path(mount_point) / candidate
+    return candidate
+
+
+def _db_path_for_action(path: str, mount_point: Optional[str]) -> str:
+    candidate = Path(path)
+    if mount_point and candidate.is_absolute():
+        try:
+            return str(candidate.relative_to(mount_point))
+        except ValueError:
+            return path
+    return path
+
+
+def _fetch_file_metadata(
+    conn: sqlite3.Connection,
+    device_id: int,
+    db_path: str
+) -> Optional[Tuple[int, float, Optional[str], Optional[str]]]:
+    cursor = conn.cursor()
+    table_name = f"files_{device_id}"
+    cursor.execute(
+        f"SELECT size, mtime, sha256, sha1 FROM {table_name} WHERE path = ? AND status = 'active'",
+        (db_path,)
+    )
+    return cursor.fetchone()
+
+
+def _write_jdupes_list(paths: list[Path]) -> Path:
+    tmp = tempfile.NamedTemporaryFile(prefix="hashall-jdupes-", suffix=".lst", delete=False)
+    try:
+        with tmp as handle:
+            for path in paths:
+                handle.write(os.fsencode(str(path)))
+                handle.write(b"\0")
+        return Path(tmp.name)
+    except Exception:
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
+
+
+def _run_jdupes(jdupes_cmd: str, list_path: Path) -> subprocess.CompletedProcess:
+    cmd = [
+        "xargs",
+        "-0",
+        "-a",
+        str(list_path),
+        jdupes_cmd,
+        "-L",
+        "-1",
+        "-O",
+        "-q",
+        "--",
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True)
 
 
 def compute_sha256(file_path: Path) -> Optional[str]:
@@ -234,6 +298,67 @@ def verify_not_already_linked(canonical_path: Path, duplicate_path: Path) -> Tup
         return False, f"Cannot stat files: {e}"
 
 
+def _precheck_jdupes_action(
+    conn: sqlite3.Connection,
+    action: ActionInfo,
+    mount_point: Optional[str],
+    verify_mode: str
+) -> Tuple[str, Optional[str], Path, Path]:
+    canonical_path = _resolve_path(action.canonical_path, mount_point)
+    duplicate_path = _resolve_path(action.duplicate_path, mount_point)
+
+    success, error = verify_files_exist(canonical_path, duplicate_path)
+    if not success:
+        return "failed", error, canonical_path, duplicate_path
+
+    success, error = verify_same_filesystem(canonical_path, duplicate_path)
+    if not success:
+        return "failed", error, canonical_path, duplicate_path
+
+    success, error = verify_not_already_linked(canonical_path, duplicate_path)
+    if not success:
+        return "skipped", error, canonical_path, duplicate_path
+
+    if verify_mode != "none":
+        canonical_db_path = _db_path_for_action(action.canonical_path, mount_point)
+        duplicate_db_path = _db_path_for_action(action.duplicate_path, mount_point)
+        canonical_row = _fetch_file_metadata(conn, action.device_id, canonical_db_path)
+        duplicate_row = _fetch_file_metadata(conn, action.device_id, duplicate_db_path)
+        if not canonical_row or not duplicate_row:
+            return "failed", "Catalog metadata missing for verification", canonical_path, duplicate_path
+
+        canonical_size, canonical_mtime, canonical_sha256, canonical_sha1 = canonical_row
+        duplicate_size, duplicate_mtime, duplicate_sha256, duplicate_sha1 = duplicate_row
+
+        if canonical_size != duplicate_size:
+            return "failed", "Catalog size mismatch between canonical and duplicate", canonical_path, duplicate_path
+
+        if verify_mode == "fast":
+            success, error = verify_file_unchanged(canonical_path, canonical_size, canonical_mtime)
+            if not success:
+                return "failed", f"Canonical file: {error}", canonical_path, duplicate_path
+            success, error = verify_file_unchanged(duplicate_path, duplicate_size, duplicate_mtime)
+            if not success:
+                return "failed", f"Duplicate file: {error}", canonical_path, duplicate_path
+        elif verify_mode == "paranoid":
+            expected_hash = action.sha256 or canonical_sha256 or duplicate_sha256 or canonical_sha1 or duplicate_sha1
+            if not expected_hash:
+                return "failed", "Missing expected hash for paranoid verification", canonical_path, duplicate_path
+            if action.sha256 and canonical_sha256 and action.sha256 != canonical_sha256:
+                return "failed", "Canonical SHA256 mismatch in catalog", canonical_path, duplicate_path
+            if action.sha256 and duplicate_sha256 and action.sha256 != duplicate_sha256:
+                return "failed", "Duplicate SHA256 mismatch in catalog", canonical_path, duplicate_path
+
+            success, error = verify_hash_matches(canonical_path, expected_hash)
+            if not success:
+                return "failed", f"Canonical file: {error}", canonical_path, duplicate_path
+            success, error = verify_hash_matches(duplicate_path, expected_hash)
+            if not success:
+                return "failed", f"Duplicate file: {error}", canonical_path, duplicate_path
+
+    return "ok", None, canonical_path, duplicate_path
+
+
 def create_hardlink_atomic(
     canonical_path: Path,
     duplicate_path: Path,
@@ -361,56 +486,59 @@ def execute_action(
 
     # Verification strategy based on mode
     if verify_mode != 'none':
-        cursor = conn.cursor()
-        table_name = f"files_{action.device_id}"
+        canonical_db_path = _db_path_for_action(action.canonical_path, mount_point)
+        duplicate_db_path = _db_path_for_action(action.duplicate_path, mount_point)
+        canonical_row = _fetch_file_metadata(conn, action.device_id, canonical_db_path)
+        duplicate_row = _fetch_file_metadata(conn, action.device_id, duplicate_db_path)
 
-        # Get file metadata from database for verification
-        cursor.execute(
-            f"SELECT size, mtime, sha256, sha1 FROM {table_name} WHERE path = ? AND status = 'active'",
-            (Path(action.canonical_path).name if mount_point else action.canonical_path,)
-        )
-        row = cursor.fetchone()
+        if not canonical_row or not duplicate_row:
+            return False, "Catalog metadata missing for verification", 0
 
-        if row:
-            expected_size, expected_mtime, expected_sha256, expected_sha1 = row
-            expected_hash = expected_sha256 or expected_sha1
+        canonical_size, canonical_mtime, canonical_sha256, canonical_sha1 = canonical_row
+        duplicate_size, duplicate_mtime, duplicate_sha256, duplicate_sha1 = duplicate_row
+        expected_hash = action.sha256 or canonical_sha256 or duplicate_sha256 or canonical_sha1 or duplicate_sha1
 
-            if verify_mode == 'fast':
-                # Fast verification: size/mtime + fast-hash sampling
-                # Step 1: Check size/mtime (instant)
-                success, error = verify_file_unchanged(canonical_path, expected_size, expected_mtime)
-                if not success:
-                    return False, f"Canonical file: {error}", 0
+        if canonical_size != duplicate_size:
+            return False, "Catalog size mismatch between canonical and duplicate", 0
 
-                success, error = verify_file_unchanged(duplicate_path, expected_size, expected_mtime)
-                if not success:
-                    return False, f"Duplicate file: {error}", 0
+        if verify_mode == 'fast':
+            # Fast verification: size/mtime + fast-hash sampling
+            # Step 1: Check size/mtime (instant)
+            success, error = verify_file_unchanged(canonical_path, canonical_size, canonical_mtime)
+            if not success:
+                return False, f"Canonical file: {error}", 0
 
-                # Step 2: Fast-hash sampling (3MB read for 100GB file)
-                canonical_sample = compute_fast_hash_sample(canonical_path)
-                duplicate_sample = compute_fast_hash_sample(duplicate_path)
+            success, error = verify_file_unchanged(duplicate_path, duplicate_size, duplicate_mtime)
+            if not success:
+                return False, f"Duplicate file: {error}", 0
 
-                if canonical_sample is None:
-                    return False, "Cannot read canonical file for fast-hash verification", 0
-                if duplicate_sample is None:
-                    return False, "Cannot read duplicate file for fast-hash verification", 0
+            # Step 2: Fast-hash sampling (3MB read for 100GB file)
+            canonical_sample = compute_fast_hash_sample(canonical_path)
+            duplicate_sample = compute_fast_hash_sample(duplicate_path)
 
-                if canonical_sample != duplicate_sample:
-                    return False, "Fast-hash mismatch: files have different content", 0
+            if canonical_sample is None:
+                return False, "Cannot read canonical file for fast-hash verification", 0
+            if duplicate_sample is None:
+                return False, "Cannot read duplicate file for fast-hash verification", 0
 
-            elif verify_mode == 'paranoid':
-                # Paranoid verification: Full hash computation
-                # This is SLOW for large files but provides 100% certainty
-                if expected_hash:
-                    # Verify canonical file
-                    success, error = verify_hash_matches(canonical_path, expected_hash)
-                    if not success:
-                        return False, f"Canonical file: {error}", 0
+            if canonical_sample != duplicate_sample:
+                return False, "Fast-hash mismatch: files have different content", 0
 
-                    # Verify duplicate file
-                    success, error = verify_hash_matches(duplicate_path, expected_hash)
-                    if not success:
-                        return False, f"Duplicate file: {error}", 0
+        elif verify_mode == 'paranoid':
+            # Paranoid verification: Full hash computation
+            # This is SLOW for large files but provides 100% certainty
+            if not expected_hash:
+                return False, "Missing expected hash for paranoid verification", 0
+
+            # Verify canonical file
+            success, error = verify_hash_matches(canonical_path, expected_hash)
+            if not success:
+                return False, f"Canonical file: {error}", 0
+
+            # Verify duplicate file
+            success, error = verify_hash_matches(duplicate_path, expected_hash)
+            if not success:
+                return False, f"Duplicate file: {error}", 0
 
     # Dry-run mode: don't actually link
     if dry_run:
@@ -532,7 +660,9 @@ def execute_plan(
     verify_mode: str = 'fast',
     create_backup: bool = True,
     limit: int = 0,
-    progress_callback=None
+    progress_callback=None,
+    use_jdupes: bool = True,
+    jdupes_path: Optional[str] = None
 ) -> ExecutionResult:
     """
     Execute a deduplication plan.
@@ -548,6 +678,8 @@ def execute_plan(
         create_backup: If True, create .bak backup files
         limit: Maximum number of actions to execute (0 = all)
         progress_callback: Optional callback(action_num, total_actions, action)
+        use_jdupes: If True, use jdupes for byte-for-byte verification + linking
+        jdupes_path: Optional explicit path to jdupes binary
 
     Returns:
         ExecutionResult with statistics
@@ -600,38 +732,152 @@ def execute_plan(
     skipped = 0
     total_bytes_saved = 0
     errors = []
+    total_actions = len(actions)
+    processed = 0
 
-    for i, action in enumerate(actions, 1):
+    jdupes_cmd = None
+    if use_jdupes:
+        jdupes_cmd = jdupes_path or shutil.which("jdupes")
+        if not jdupes_cmd:
+            use_jdupes = False
+            errors.append("jdupes not found; falling back to internal linker")
+
+    def record(action: ActionInfo, status: str, bytes_saved: int = 0, error_message: Optional[str] = None) -> None:
+        nonlocal executed, failed, skipped, total_bytes_saved, processed
+        processed += 1
         if progress_callback:
-            progress_callback(i, len(actions), action)
+            progress_callback(processed, total_actions, action)
 
-        success, error, bytes_saved = execute_action(
-            conn, action,
-            mount_point=plan.mount_point,
-            dry_run=dry_run,
-            verify_mode=verify_mode,
-            create_backup=create_backup
-        )
-
-        if success:
-            if bytes_saved > 0:
-                executed += 1
-                total_bytes_saved += bytes_saved
-                if not dry_run:
-                    update_action_status(conn, action.id, 'completed', bytes_saved=bytes_saved)
-            else:
-                skipped += 1
-                if not dry_run:
-                    update_action_status(conn, action.id, 'skipped')
-        else:
+        if status == 'completed':
+            executed += 1
+            total_bytes_saved += bytes_saved
+        elif status == 'failed':
             failed += 1
-            errors.append(f"Action {action.id}: {error}")
-            if not dry_run:
-                update_action_status(conn, action.id, 'failed', error_message=error)
+            if error_message:
+                errors.append(f"Action {action.id}: {error_message}")
+        else:
+            skipped += 1
 
-        # Update plan progress periodically (every 10 actions)
-        if not dry_run and i % 10 == 0:
-            update_plan_progress(conn, plan_id)
+        if not dry_run:
+            if status == 'completed':
+                update_action_status(conn, action.id, 'completed', bytes_saved=bytes_saved)
+            elif status == 'failed':
+                update_action_status(conn, action.id, 'failed', error_message=error_message)
+            else:
+                update_action_status(conn, action.id, 'skipped')
+
+            if processed % 10 == 0:
+                update_plan_progress(conn, plan_id)
+
+    if use_jdupes:
+        groups = {}
+        for action in actions:
+            if not action.sha256:
+                record(action, 'failed', error_message="Missing SHA256 for jdupes linking")
+                continue
+            groups.setdefault(action.sha256, []).append(action)
+
+        for hash_val, group_actions in groups.items():
+            valid = []
+            for action in group_actions:
+                status, error, canonical_path, duplicate_path = _precheck_jdupes_action(
+                    conn, action, plan.mount_point, verify_mode
+                )
+                if status == "ok":
+                    valid.append((action, canonical_path, duplicate_path))
+                elif status == "skipped":
+                    record(action, 'skipped', error_message=error)
+                else:
+                    record(action, 'failed', error_message=error)
+
+            if not valid:
+                continue
+
+            canonical_counts = Counter(str(entry[1]) for entry in valid)
+            canonical_choice, _ = canonical_counts.most_common(1)[0]
+
+            kept = []
+            for action, canonical_path, duplicate_path in valid:
+                if str(canonical_path) != canonical_choice:
+                    record(action, 'failed', error_message="Conflicting canonical path for hash group")
+                else:
+                    kept.append((action, canonical_path, duplicate_path))
+
+            if not kept:
+                continue
+
+            paths = []
+            seen = set()
+            for path in [Path(canonical_choice)] + [dup for _, _, dup in kept]:
+                path_str = str(path)
+                if path_str in seen:
+                    continue
+                seen.add(path_str)
+                paths.append(path)
+
+            if len(paths) < 2:
+                for action, _, _ in kept:
+                    record(action, 'failed', error_message="Insufficient paths for jdupes linking")
+                continue
+
+            if dry_run:
+                for action, _, _ in kept:
+                    record(action, 'completed', bytes_saved=action.bytes_to_save)
+                continue
+
+            list_path = _write_jdupes_list(paths)
+            try:
+                result = _run_jdupes(jdupes_cmd, list_path)
+            finally:
+                list_path.unlink(missing_ok=True)
+
+            if result.returncode != 0:
+                err_text = (result.stderr or result.stdout or "").strip()
+                if err_text:
+                    err_text = err_text.splitlines()[-1]
+                group_error = f"jdupes returned {result.returncode}"
+                if err_text:
+                    group_error = f"{group_error}: {err_text}"
+                errors.append(f"Group {hash_val[:12]}: {group_error}")
+
+            not_linked = 0
+            for action, canonical_path, duplicate_path in kept:
+                try:
+                    canonical_stat = os.stat(canonical_path)
+                    duplicate_stat = os.stat(duplicate_path)
+                except OSError as e:
+                    record(action, 'failed', error_message=f"Cannot stat after jdupes: {e}")
+                    not_linked += 1
+                    continue
+
+                if canonical_stat.st_dev == duplicate_stat.st_dev and canonical_stat.st_ino == duplicate_stat.st_ino:
+                    record(action, 'completed', bytes_saved=action.bytes_to_save)
+                else:
+                    record(action, 'failed', error_message="jdupes did not link files with matching SHA256")
+                    not_linked += 1
+
+            if not_linked:
+                errors.append(
+                    f"ALERT: jdupes left {not_linked}/{len(kept)} files unlinked for hash {hash_val[:12]}"
+                )
+
+    else:
+        for action in actions:
+            success, error, bytes_saved = execute_action(
+                conn, action,
+                mount_point=plan.mount_point,
+                dry_run=dry_run,
+                verify_mode=verify_mode,
+                create_backup=create_backup
+            )
+
+            if success:
+                if bytes_saved > 0:
+                    record(action, 'completed', bytes_saved=bytes_saved)
+                else:
+                    record(action, 'skipped')
+            else:
+                record(action, 'failed', error_message=error)
 
     # Final progress update
     if not dry_run:
