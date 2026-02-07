@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from hashall.link_query import get_plan, get_plan_actions, ActionInfo
+from hashall.fs_utils import get_zfs_metadata
 
 
 @dataclass
@@ -133,6 +134,18 @@ def _write_jdupes_log(log_dir: Optional[Path], filename: str, content: str) -> N
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / filename
     log_path.write_text(content)
+
+def _zfs_dataset_for_path(path: Path, cache: dict[int, Optional[str]]) -> Optional[str]:
+    try:
+        dev = os.stat(path).st_dev
+    except OSError:
+        return None
+    if dev in cache:
+        return cache[dev]
+    meta = get_zfs_metadata(str(path))
+    dataset = meta.get("dataset_name") if meta else None
+    cache[dev] = dataset
+    return dataset
 
 def _format_prelist(paths: list[Path]) -> list[str]:
     lines: list[str] = []
@@ -792,6 +805,12 @@ def execute_plan(
         if not jdupes_cmd:
             use_jdupes = False
             errors.append("jdupes not found; falling back to internal linker")
+    zfs_expected_dataset = None
+    if plan.mount_point:
+        meta = get_zfs_metadata(str(plan.mount_point))
+        zfs_expected_dataset = meta.get("dataset_name") if meta else None
+    zfs_dataset_cache: dict[int, Optional[str]] = {}
+    zfs_mismatch_paths: list[str] = []
 
     def record(action: ActionInfo, status: str, bytes_saved: int = 0, error_message: Optional[str] = None) -> None:
         nonlocal executed, failed, skipped, total_bytes_saved, processed
@@ -889,6 +908,26 @@ def execute_plan(
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
                 continue
+
+            if zfs_expected_dataset:
+                canonical_dataset = _zfs_dataset_for_path(Path(canonical_choice), zfs_dataset_cache)
+                log_lines.append(f"zfs_expected_dataset: {zfs_expected_dataset}")
+                log_lines.append(f"zfs_canonical_dataset: {canonical_dataset or 'unknown'}")
+                if canonical_dataset and canonical_dataset != zfs_expected_dataset:
+                    zfs_mismatch_paths.append(canonical_choice)
+                    print(
+                        f"⚠️  ZFS dataset mismatch: {canonical_choice} "
+                        f"(expected {zfs_expected_dataset}, got {canonical_dataset})"
+                    )
+                for _, _, dup in kept:
+                    dup_dataset = _zfs_dataset_for_path(dup, zfs_dataset_cache)
+                    log_lines.append(f"zfs_duplicate_dataset: {dup} => {dup_dataset or 'unknown'}")
+                    if dup_dataset and dup_dataset != zfs_expected_dataset:
+                        zfs_mismatch_paths.append(str(dup))
+                        print(
+                            f"⚠️  ZFS dataset mismatch: {dup} "
+                            f"(expected {zfs_expected_dataset}, got {dup_dataset})"
+                        )
 
             paths = []
             seen = set()
@@ -1041,6 +1080,13 @@ def execute_plan(
             update_plan_progress(conn, plan_id, complete_execution=True)
         else:
             update_plan_progress(conn, plan_id)
+
+    if zfs_mismatch_paths:
+        unique_paths = list(dict.fromkeys(zfs_mismatch_paths))
+        sample = ", ".join(unique_paths[:5])
+        errors.append(
+            f"ALERT: ZFS dataset mismatch for {len(unique_paths)} file(s). Examples: {sample}"
+        )
 
     return ExecutionResult(
         plan_id=plan_id,
