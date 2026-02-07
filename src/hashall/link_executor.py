@@ -87,19 +87,14 @@ def _write_jdupes_list(paths: list[Path]) -> tuple[Path, int]:
     tmp = tempfile.NamedTemporaryFile(prefix="hashall-jdupes-", suffix=".lst", delete=False)
     try:
         seen_paths = set()
-        seen_inodes = set()
         count = 0
         with tmp as handle:
             for path in paths:
                 resolved = path.resolve()
-                stat = resolved.stat()
-                inode_key = (stat.st_dev, stat.st_ino)
-                if inode_key in seen_inodes:
-                    continue
+                resolved.stat()
                 path_str = str(resolved)
                 if path_str in seen_paths:
                     continue
-                seen_inodes.add(inode_key)
                 seen_paths.add(path_str)
                 handle.write(os.fsencode(path_str))
                 handle.write(b"\0")
@@ -120,6 +115,7 @@ def _run_jdupes(jdupes_cmd: str, list_path: Path) -> subprocess.CompletedProcess
         "-L",
         "-1",
         "-O",
+        "-H",
         "-P",
         "fullhash",
         "-q",
@@ -864,7 +860,7 @@ def execute_plan(
             log_lines.append(f"group_index: {group_index}/{group_total}")
             log_lines.append(f"sha256: {hash_val}")
             log_lines.append(f"actions: {len(group_actions)}")
-            log_lines.append(f"jdupes_cmd: {jdupes_cmd} -L -1 -O -P fullhash -q")
+            log_lines.append(f"jdupes_cmd: {jdupes_cmd} -L -1 -O -H -P fullhash -q")
             for action in group_actions:
                 status, error, canonical_path, duplicate_path = _precheck_jdupes_action(
                     conn, action, plan.mount_point, verify_mode
@@ -966,7 +962,7 @@ def execute_plan(
                     f"canonical={canonical_choice}"
                 )
                 print(
-                    f"🧪 jdupes plan: {jdupes_cmd} -L -1 -O -P fullhash -q @ {unique_paths} paths (dry-run)"
+                    f"🧪 jdupes plan: {jdupes_cmd} -L -1 -O -H -P fullhash -q @ {unique_paths} paths (dry-run)"
                 )
                 print("🧪 jdupes prelist:")
                 for line in prelist:
@@ -988,7 +984,7 @@ def execute_plan(
                 f"canonical={canonical_choice}"
             )
             print(
-                f"🧪 jdupes plan: {jdupes_cmd} -L -1 -O -P fullhash -q @ {list_count} paths"
+                f"🧪 jdupes plan: {jdupes_cmd} -L -1 -O -H -P fullhash -q @ {list_count} paths"
             )
             print("🧪 jdupes prelist:")
             for line in prelist:

@@ -21,6 +21,11 @@ echo "duplicate payload" > "$ROOT_DIR/alpha/dupe.txt"
 cp "$ROOT_DIR/alpha/dupe.txt" "$ROOT_DIR/beta/dupe.txt"
 ln "$ROOT_DIR/alpha/dupe.txt" "$ROOT_DIR/gamma/dupe_hl.txt"
 
+echo "📎 Creating hardlink cluster (canonical not in hardlink pair)..."
+echo "hardlink cluster payload" > "$ROOT_DIR/alpha/hl_canonical.txt"
+cp "$ROOT_DIR/alpha/hl_canonical.txt" "$ROOT_DIR/beta/hl_dupe.txt"
+ln "$ROOT_DIR/beta/hl_dupe.txt" "$ROOT_DIR/gamma/hl_dupe_hl.txt"
+
 RUN_VALIDATE="${HASHALL_SANDBOX_VALIDATE:-1}"
 if [ "$RUN_VALIDATE" = "1" ]; then
   echo "🔍 Validating sandbox dedupe with jdupes..."
@@ -67,6 +72,15 @@ paths = [
 stats = [p.stat() for p in paths]
 if len({(s.st_dev, s.st_ino) for s in stats}) != 1:
     raise SystemExit("jdupes validation failed: dupes not hardlinked")
+
+paths = [
+    root / "alpha/hl_canonical.txt",
+    root / "beta/hl_dupe.txt",
+    root / "gamma/hl_dupe_hl.txt",
+]
+stats = [p.stat() for p in paths]
+if len({(s.st_dev, s.st_ino) for s in stats}) != 1:
+    raise SystemExit("jdupes validation failed: hardlink cluster not unified")
 print("✅ jdupes validation passed")
 PY
   fi
