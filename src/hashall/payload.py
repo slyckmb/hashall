@@ -18,6 +18,41 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 from hashall.pathing import canonicalize_path, to_relpath
+from hashall.scan import compute_full_hashes
+
+
+def _get_mount_info(conn: sqlite3.Connection, device_id: int):
+    mount_point = None
+    preferred_mount = None
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone():
+        dev_row = conn.execute(
+            "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if dev_row:
+            mount_point = Path(dev_row[0])
+            preferred_mount = Path(dev_row[1] or dev_row[0])
+    return mount_point, preferred_mount
+
+
+def _resolve_rel_root(root_path: str, mount_point: Optional[Path], preferred_mount: Optional[Path]):
+    root = Path(root_path)
+    if root.is_absolute():
+        root = canonicalize_path(root)
+
+    if mount_point:
+        if root.is_absolute():
+            rel_root = to_relpath(root, preferred_mount) or to_relpath(root, mount_point)
+            if rel_root is None:
+                return None, root
+        else:
+            rel_root = root
+    else:
+        rel_root = root
+
+    return rel_root, root
 
 
 @dataclass
@@ -126,33 +161,13 @@ def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str)
         ).fetchone() is not None
 
     # Determine mount points when available
-    mount_point = None
-    preferred_mount = None
+    mount_point = preferred_mount = None
     if _table_exists("devices"):
-        dev_row = conn.execute(
-            "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
-            (device_id,),
-        ).fetchone()
-        if dev_row:
-            mount_point = Path(dev_row[0])
-            preferred_mount = Path(dev_row[1] or dev_row[0])
+        mount_point, preferred_mount = _get_mount_info(conn, device_id)
 
-    root = Path(root_path)
-    if root.is_absolute():
-        root = canonicalize_path(root)
-
-    # Convert root to relative path when mount points are known
-    if mount_point:
-        if root.is_absolute():
-            rel_root = to_relpath(root, preferred_mount) or to_relpath(root, mount_point)
-            if rel_root is None:
-                return []
-        else:
-            rel_root = root
-    else:
-        # Legacy/unknown mount: treat as absolute path in table
-        rel_root = root
-
+    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return []
     rel_root_str = str(rel_root)
 
     # Query files from device-specific table
@@ -262,6 +277,109 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
         status=status,
         last_built_at=time.time() if payload_hash else None
     )
+
+
+def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
+                                   device_id: Optional[int] = None) -> int:
+    """
+    Upgrade missing SHA256 values for files in a payload.
+
+    Uses inode grouping to hash once per hardlinked file set.
+    Returns number of inode groups hashed.
+    """
+    if device_id is None:
+        try:
+            device_id = os.stat(root_path).st_dev
+        except (OSError, IOError):
+            return 0
+
+    table_name = f"files_{device_id}"
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone():
+        return 0
+
+    mount_point, preferred_mount = _get_mount_info(conn, device_id)
+    rel_root, root = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return 0
+    rel_root_str = str(rel_root)
+
+    if rel_root_str == ".":
+        rows = conn.execute(
+            f"""
+            SELECT path, inode, size
+            FROM {table_name}
+            WHERE status = 'active' AND sha256 IS NULL
+            ORDER BY path
+            """
+        ).fetchall()
+    else:
+        pattern = f"{rel_root_str}/%"
+        rows = conn.execute(
+            f"""
+            SELECT path, inode, size
+            FROM {table_name}
+            WHERE status = 'active' AND sha256 IS NULL
+              AND (path = ? OR path LIKE ?)
+            ORDER BY path
+            """,
+            (rel_root_str, pattern),
+        ).fetchall()
+
+    if not rows:
+        return 0
+
+    # Group by inode (hardlinks share inode on same device)
+    inode_groups = {}
+    for row in rows:
+        path, inode, size = row[0], row[1], row[2]
+        key = (inode, size) if inode is not None else (path, size)
+        inode_groups.setdefault(key, []).append(path)
+
+    base_mount = preferred_mount or mount_point
+    if base_mount is None and root.is_absolute():
+        base_mount = Path("/")
+
+    cursor = conn.cursor()
+    upgraded = 0
+
+    for (inode, size), paths in inode_groups.items():
+        rel_path = paths[0]
+        if base_mount is None:
+            abs_path = Path(rel_path)
+        else:
+            abs_path = base_mount / rel_path
+
+        try:
+            sha1, sha256 = compute_full_hashes(str(abs_path))
+        except (OSError, IOError):
+            continue
+
+        if inode is None:
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                WHERE path = ? AND status = 'active'
+                """,
+                (sha1, sha256, rel_path),
+            )
+        else:
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                WHERE inode = ? AND size = ? AND status = 'active'
+                """,
+                (sha1, sha256, inode, size),
+            )
+
+        upgraded += 1
+
+    conn.commit()
+    return upgraded
 
 
 def upsert_payload(conn: sqlite3.Connection, payload: Payload) -> int:

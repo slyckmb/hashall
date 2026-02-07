@@ -80,12 +80,14 @@ def payload():
 
 @payload.command("sync")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
-@click.option("--qbit-url", default=None, help="qBittorrent URL (default: http://localhost:8080)")
+@click.option("--qbit-url", default=None, help="qBittorrent URL (default: http://localhost:9003)")
 @click.option("--qbit-user", default=None, help="qBittorrent username (default: admin)")
 @click.option("--qbit-pass", default=None, help="qBittorrent password")
 @click.option("--category", default=None, help="Filter torrents by category")
 @click.option("--tag", default=None, help="Filter torrents by tag")
-def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag):
+@click.option("--upgrade-missing", is_flag=True,
+              help="Hash missing SHA256s for payload files (inode-aware).")
+def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, upgrade_missing):
     """
     Sync torrent instances from qBittorrent and map to payloads.
 
@@ -97,7 +99,8 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag):
     from hashall.model import connect_db
     from hashall.qbittorrent import get_qbittorrent_client
     from hashall.payload import (
-        build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance
+        build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
+        upgrade_payload_missing_sha256
     )
 
     # Connect to database
@@ -138,6 +141,10 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag):
 
         # Build payload from database
         payload = build_payload(conn, root_path, device_id=None)
+        if payload.status != 'complete' and upgrade_missing:
+            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id)
+            if upgraded > 0:
+                payload = build_payload(conn, root_path, device_id=payload.device_id)
 
         # Insert/update payload
         payload_id = upsert_payload(conn, payload)
