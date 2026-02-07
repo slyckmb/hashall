@@ -439,6 +439,7 @@ rehome-apply-dry:  ## Dry-run a rehome plan (set REHOME_PLAN)
 rehome-apply:  ## Execute a rehome plan (set REHOME_PLAN)
 	@if [ -z "$(REHOME_PLAN)" ]; then \
 		echo "❌ REHOME_PLAN is required (path to plan json)"; \
+		echo "💡 Tip: use REHOME_OUTPUT in rehome-plan, or run 'make rehome-last-plan'"; \
 		exit 1; \
 	fi; \
 	$(REHOME_CLI) apply "$(REHOME_PLAN)" --force \
@@ -453,10 +454,36 @@ rehome-apply:  ## Execute a rehome plan (set REHOME_PLAN)
 rehome-checklist:  ## Show rehome checklist
 	@echo "Rehome checklist"
 	@echo "  [ ] 1) Plan: make rehome-plan-demote REHOME_TORRENT_HASH=... REHOME_SEEDING_ROOTS=\"/stash/media\" REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44"
-	@echo "  [ ] 2) Review plan JSON (jq or cat)"
+	@echo "  [ ] 2) Review plan JSON (make rehome-review-plan REHOME_PLAN=... or REHOME_OUTPUT=...)"
 	@echo "  [ ] 3) Dry-run: make rehome-apply-dry REHOME_PLAN=rehome-plan-...json"
 	@echo "  [ ] 4) Execute: make rehome-apply REHOME_PLAN=rehome-plan-...json"
 	@echo "  [ ] 5) Optional: --spot-check N, --rescan, cleanup flags"
+
+.PHONY: rehome-last-plan
+rehome-last-plan:  ## Print most recent rehome plan json in cwd
+	@latest="$$(ls -t rehome-plan-*.json 2>/dev/null | head -1)"; \
+	if [ -z "$$latest" ]; then \
+		echo "❌ No rehome-plan-*.json found in current directory"; \
+		exit 1; \
+	fi; \
+	echo "$$latest"
+
+.PHONY: rehome-review-plan
+rehome-review-plan:  ## Review a rehome plan (set REHOME_PLAN or REHOME_OUTPUT)
+	@plan="$(REHOME_PLAN)"; \
+	if [ -z "$$plan" ] && [ -n "$(REHOME_OUTPUT)" ]; then plan="$(REHOME_OUTPUT)"; fi; \
+	if [ -z "$$plan" ]; then \
+		plan="$$(make -s rehome-last-plan)"; \
+	fi; \
+	if [ ! -f "$$plan" ]; then \
+		echo "❌ Plan not found: $$plan"; \
+		exit 1; \
+	fi; \
+	if command -v jq >/dev/null 2>&1; then \
+		jq . "$$plan"; \
+	else \
+		cat "$$plan"; \
+	fi
 
 .PHONY: export
 export:  ## Export hashall metadata to JSON
