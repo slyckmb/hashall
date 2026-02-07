@@ -413,8 +413,15 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
         conn.close()
         return 0
 
+    progress = None
     if not quiet:
-        print(f"⚡ Upgrading {len(quick_hashes)} quick-hash collision groups...")
+        progress = tqdm(
+            total=len(quick_hashes),
+            desc="⚡ Upgrading collisions",
+            unit=" groups",
+            dynamic_ncols=True,
+            mininterval=0.5,
+        )
 
     upgraded_groups = 0
     for quick_hash in quick_hashes:
@@ -438,8 +445,11 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
             pending.append((path, inode))
 
         if not pending:
+            if progress is not None:
+                progress.update(1)
             continue
 
+        group_hashed = False
         for path, inode in pending:
             abs_path = None
             if path.startswith("/"):
@@ -472,9 +482,17 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
                     SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
                     WHERE inode = ? AND status = 'active'
                 """, (sha1, sha256, inode))
+            group_hashed = True
+        if group_hashed:
             upgraded_groups += 1
+        if progress is not None:
+            if group_hashed:
+                progress.set_postfix(upgraded=upgraded_groups)
+            progress.update(1)
 
     conn.commit()
+    if progress is not None:
+        progress.close()
     conn.close()
     return upgraded_groups
 
