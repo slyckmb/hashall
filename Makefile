@@ -74,23 +74,35 @@ REHOME_OUTPUT_ARG := $(if $(REHOME_OUTPUT),--output "$(REHOME_OUTPUT)",)
 help:  ## Show this help message
 	@echo "🧰 Hashall Make Targets"
 	@echo ""
-	@echo "Root Scan (recommended):"
-	@grep -E '^scan:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo "Meta & Docs:"
+	@grep -E '^(help|targets-table|targets-full|prompts-remote):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Device Management:"
-	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo "Scan (Root):"
+	@grep -E '^scan:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Scan Presets:"
+	@grep -E '^(scan-auto|scan-video|scan-audio|scan-books|scan-mixed|scan-dry-run|scan-presets):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Scan Hierarchical:"
+	@grep -E '^(scan-hierarchical|scan-hier-per-device|scan-plan|scan-plan-execute|scan-hier-dry):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Dedup & Link:"
+	@grep -E '^(link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Payload & Rehome:"
+	@grep -E '^(payload-sync|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Devices & Stats:"
+	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "DB & Verification:"
+	@grep -E '^(export|verify-trees|verify|diff|version|backup-db|clean-db):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Docker:"
+	@grep -E '^(docker-scan|docker-export|docker-test):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Development & Testing:"
-	@grep -E '^(bootstrap|build|test|sandbox|clean):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
-	@echo ""
-	@echo "Deduplication:"
-	@grep -E '^(link-path|link-paths|link-verify-scope):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
-	@echo ""
-	@echo "Rehome:"
-	@grep -E '^(rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply|rehome-apply-dry|rehome-checklist):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
-	@echo ""
-	@echo "Other Operations:"
-	@grep -E '^(export|verify|docker-):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(bootstrap|install|install-dev|build|test|test-fast|test-integration|test-smoke|bench|sandbox|clean):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Examples:"
 	@echo "  make scan PATH=/pool/media WORKERS=12   # Root scan (parallel)"
@@ -100,6 +112,8 @@ help:  ## Show this help message
 	@echo "  make link-paths PATHS='/pool/data /stash/media'  # Plan both roots"
 	@echo "  make link-paths LINK_UPGRADE_COLLISIONS=0  # Skip collision upgrade"
 	@echo "  make workflow PATH=/pool/data             # Show workflow done/todo"
+	@echo "  make link-execute PLAN_ID=1 LINK_LIMIT=10 # Execute 10 actions"
+	@echo "  make payload-sync                         # Sync torrents -> payloads"
 	@echo "  make rehome-checklist                     # Rehome checklist"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
