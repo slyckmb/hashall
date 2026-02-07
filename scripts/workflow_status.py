@@ -141,9 +141,9 @@ def _payload_counts(conn: sqlite3.Connection, root: Path, device_id: int) -> tup
     return total, complete
 
 
-def _print_item(label: str, done: bool, detail: str) -> None:
-    status = "DONE" if done else "TODO"
-    print(f"{status:4} {label}: {detail}")
+def _print_item(label: str, done: bool, detail: str, explain: str) -> None:
+    status = "[x]" if done else "[ ]"
+    print(f"{status} {label:<22} {detail:<52} {explain}")
 
 
 def main() -> int:
@@ -180,9 +180,9 @@ def main() -> int:
             (fs_uuid, str(canonical_root)),
         ).fetchone()
         if scan_row:
-            _print_item("scan", True, f"last={scan_row[0]} scans={scan_row[1]}")
+            _print_item("scan", True, f"last={scan_row[0]} scans={scan_row[1]}", "record all files under the root")
         else:
-            _print_item("scan", False, f"make scan PATH={root_input}")
+            _print_item("scan", False, f"make scan PATH={root_input}", "record all files under the root")
 
         plan_row = _find_recent_plan(conn, device_id, rel_root_str)
         if plan_row:
@@ -190,16 +190,23 @@ def main() -> int:
             _print_item(
                 "link plan",
                 True,
-                f"plan #{plan_id} ({status}) actions={actions_total} created={created_at} name={name}",
+                f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
+                "decide which duplicates should hardlink",
             )
             _print_item(
                 "link execute",
                 status == "completed",
                 f"hashall link execute {plan_id}",
+                "apply the plan (or dry-run first)",
             )
         else:
-            _print_item("link plan", False, f"hashall link plan \"dedupe {root_input}\" --device {device_alias}")
-            _print_item("link execute", False, "no plan")
+            _print_item(
+                "link plan",
+                False,
+                f"hashall link plan \"dedupe {root_input}\" --device {device_alias}",
+                "decide which duplicates should hardlink",
+            )
+            _print_item("link execute", False, "no plan", "apply the plan (or dry-run first)")
 
         total_payloads, complete_payloads = _payload_counts(conn, canonical_root, device_id)
         if complete_payloads > 0:
@@ -207,9 +214,15 @@ def main() -> int:
                 "payload sync",
                 True,
                 f"complete={complete_payloads} total={total_payloads}",
+                "map torrents to payloads",
             )
         else:
-            _print_item("payload sync", False, "hashall payload sync ...")
+            _print_item(
+                "payload sync",
+                False,
+                "hashall payload sync ...",
+                "map torrents to payloads",
+            )
 
         empty_plan_row = _find_recent_empty_plan(conn, device_id, rel_root_str)
         if empty_plan_row:
@@ -217,20 +230,23 @@ def main() -> int:
             _print_item(
                 "empty payload plan",
                 True,
-                f"plan #{plan_id} ({status}) actions={actions_total} created={created_at} name={name}",
+                f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
+                "plan empty-file hardlinks inside payloads",
             )
             _print_item(
                 "empty payload execute",
                 status == "completed",
                 f"hashall link execute {plan_id}",
+                "apply empty-file hardlinks",
             )
         else:
             _print_item(
                 "empty payload plan",
                 False,
                 f"hashall link plan-payload-empty \"empty payload {root_input}\" --device {device_alias}",
+                "plan empty-file hardlinks inside payloads",
             )
-            _print_item("empty payload execute", False, "no plan")
+            _print_item("empty payload execute", False, "no plan", "apply empty-file hardlinks")
 
         return 0
     finally:
