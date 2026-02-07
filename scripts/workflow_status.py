@@ -159,6 +159,123 @@ def _status_color(status: str, done: bool) -> str:
     return "32" if done else "33"
 
 
+def _env_value(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value
+
+
+def _q(value: str) -> str:
+    return f"\"{value}\""
+
+
+def _hashall_cli() -> str:
+    return f"{sys.executable} -m hashall.cli"
+
+
+def _rehome_cli() -> str:
+    return f"{sys.executable} -m rehome.cli"
+
+
+def _scan_cli(root_input: Path, db: str) -> str:
+    hash_mode = _env_value("HASH_MODE", "fast")
+    parallel = _env_value("PARALLEL", "1")
+    workers = os.getenv("WORKERS", "")
+    show_path = _env_value("SHOW_PATH", "1")
+    parts = [
+        _hashall_cli(),
+        "scan",
+        _q(str(root_input)),
+        "--db",
+        _q(db),
+        "--hash-mode",
+        _q(hash_mode),
+    ]
+    if parallel == "1":
+        parts.append("--parallel")
+    if workers:
+        parts.extend(["--workers", str(workers)])
+    if show_path == "1":
+        parts.append("--show-path")
+    return " ".join(parts)
+
+
+def _link_plan_cli(root_input: Path, device_alias: str) -> str:
+    upgrade = _env_value("LINK_UPGRADE_COLLISIONS", "1")
+    min_size = _env_value("LINK_MIN_SIZE", "0")
+    dry_run = _env_value("LINK_DRY_RUN", "0")
+    parts = [
+        _hashall_cli(),
+        "link",
+        "plan",
+        _q(f"dedupe {root_input}"),
+        "--device",
+        _q(device_alias),
+    ]
+    if upgrade != "1":
+        parts.append("--no-upgrade-collisions")
+    if min_size not in ("", "0"):
+        parts.extend(["--min-size", str(min_size)])
+    if dry_run == "1":
+        parts.append("--dry-run")
+    return " ".join(parts)
+
+
+def _link_verify_cli(root_input: Path, db: str, plan_id: int | None) -> str:
+    parts = [
+        _hashall_cli(),
+        "link",
+        "verify-scope",
+        _q(str(root_input)),
+    ]
+    if plan_id is not None:
+        parts.extend(["--plan-id", str(plan_id)])
+    parts.extend(["--db", _q(db)])
+    return " ".join(parts)
+
+
+def _link_execute_cli(db: str, plan_id: int | None) -> str:
+    if plan_id is None:
+        return "no plan"
+    dry_run = _env_value("LINK_DRY_RUN", "0")
+    limit = _env_value("LINK_LIMIT", "0")
+    parts = [
+        _hashall_cli(),
+        "link",
+        "execute",
+        str(plan_id),
+    ]
+    if dry_run == "1":
+        parts.append("--dry-run")
+    if limit not in ("", "0"):
+        parts.extend(["--limit", str(limit)])
+    parts.extend(["--db", _q(db)])
+    return " ".join(parts)
+
+
+def _payload_sync_cli(db: str) -> str:
+    return " ".join([_hashall_cli(), "payload", "sync", "--db", _q(db)])
+
+
+def _payload_empty_cli(root_input: Path, device_alias: str) -> str:
+    dry_run = _env_value("LINK_DRY_RUN", "0")
+    require_hardlinks = _env_value("LINK_REQUIRE_EXISTING_HARDLINKS", "1")
+    parts = [
+        _hashall_cli(),
+        "link",
+        "plan-payload-empty",
+        _q(f"empty payload {root_input}"),
+        "--device",
+        _q(device_alias),
+    ]
+    if dry_run == "1":
+        parts.append("--dry-run")
+    if require_hardlinks != "1":
+        parts.append("--no-require-existing-hardlinks")
+    return " ".join(parts)
+
+
 def _print_block(
     label: str,
     done: bool,
@@ -228,7 +345,7 @@ def main() -> int:
             scan_done,
             scan_status,
             f"make scan PATH={root_input}",
-            f"hashall scan \"{root_input}\"",
+            _scan_cli(root_input, args.db),
             "record all files under the root",
         )
 
@@ -260,7 +377,7 @@ def main() -> int:
                 True,
                 f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
                 f"make link-path PATH={root_input}",
-                f"hashall link plan \"dedupe {root_input}\" --device {device_alias}",
+                _link_plan_cli(root_input, device_alias),
                 "decide which duplicates should hardlink",
             )
             scope_done = False
@@ -279,7 +396,7 @@ def main() -> int:
                 scope_done,
                 f"plan #{plan_id} scope",
                 f"make link-verify-scope PATH={root_input} PLAN_ID={plan_id}",
-                f"hashall link verify-scope \"{root_input}\" --plan-id {plan_id}",
+                _link_verify_cli(root_input, args.db, plan_id),
                 "confirm plan paths are under root",
             )
             _print_block(
@@ -287,7 +404,7 @@ def main() -> int:
                 status == "completed",
                 f"plan #{plan_id} ({status})",
                 f"make link-execute PLAN_ID={plan_id}",
-                f"hashall link execute {plan_id}",
+                _link_execute_cli(args.db, plan_id),
                 "apply the plan (or dry-run first)",
             )
         else:
@@ -296,7 +413,7 @@ def main() -> int:
                 False,
                 "no plan",
                 f"make link-path PATH={root_input}",
-                f"hashall link plan \"dedupe {root_input}\" --device {device_alias}",
+                _link_plan_cli(root_input, device_alias),
                 "decide which duplicates should hardlink",
             )
             _print_block(
@@ -304,7 +421,7 @@ def main() -> int:
                 False,
                 "no plan",
                 f"make link-verify-scope PATH={root_input}",
-                "no plan",
+                _link_verify_cli(root_input, args.db, None),
                 "confirm plan paths are under root",
             )
             _print_block(
@@ -312,7 +429,7 @@ def main() -> int:
                 False,
                 "no plan",
                 "make link-execute PLAN_ID=<id>",
-                "no plan",
+                _link_execute_cli(args.db, None),
                 "apply the plan (or dry-run first)",
             )
 
@@ -328,7 +445,7 @@ def main() -> int:
             payload_done,
             payload_status,
             "make payload-sync",
-            "hashall payload sync",
+            _payload_sync_cli(args.db),
             "map torrents to payloads",
         )
 
@@ -340,7 +457,7 @@ def main() -> int:
                 True,
                 f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
                 f"make link-payload-empty PATH={root_input}",
-                f"hashall link plan-payload-empty \"empty payload {root_input}\" --device {device_alias}",
+                _payload_empty_cli(root_input, device_alias),
                 "plan empty-file hardlinks inside payloads",
             )
             _print_block(
@@ -348,7 +465,7 @@ def main() -> int:
                 status == "completed",
                 f"plan #{plan_id} ({status})",
                 f"make link-execute PLAN_ID={plan_id}",
-                f"hashall link execute {plan_id}",
+                _link_execute_cli(args.db, plan_id),
                 "apply empty-file hardlinks",
             )
         else:
@@ -357,7 +474,7 @@ def main() -> int:
                 False,
                 "no plan",
                 f"make link-payload-empty PATH={root_input}",
-                f"hashall link plan-payload-empty \"empty payload {root_input}\" --device {device_alias}",
+                _payload_empty_cli(root_input, device_alias),
                 "plan empty-file hardlinks inside payloads",
             )
             _print_block(
@@ -365,7 +482,7 @@ def main() -> int:
                 False,
                 "no plan",
                 "make link-execute PLAN_ID=<id>",
-                "no plan",
+                _link_execute_cli(args.db, None),
                 "apply empty-file hardlinks",
             )
 
@@ -374,7 +491,7 @@ def main() -> int:
             False,
             "pending",
             "make rehome-plan ...",
-            "hashall payload rehome ...",
+            f"{_rehome_cli()} plan ...",
             "move payloads to preferred root",
         )
 
