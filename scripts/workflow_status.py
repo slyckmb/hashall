@@ -248,6 +248,8 @@ def main() -> int:
             )
             _print_item("empty payload execute", False, "no plan", "apply empty-file hardlinks")
 
+        _print_item("rehome", False, "hashall payload rehome ...", "move payloads to preferred root")
+
         return 0
     finally:
         conn.close()
