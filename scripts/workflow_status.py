@@ -48,7 +48,7 @@ def _find_recent_plan(
     if rel_root_str == ".":
         return conn.execute(
             """
-            SELECT id, name, status, created_at, actions_total, actions_executed, actions_failed, actions_skipped
+            SELECT id, name, status, created_at, actions_total, actions_executed, actions_failed, actions_skipped, metadata
             FROM link_plans
             WHERE device_id = ?
             ORDER BY created_at DESC
@@ -61,7 +61,8 @@ def _find_recent_plan(
     return conn.execute(
         """
         SELECT lp.id, lp.name, lp.status, lp.created_at,
-               lp.actions_total, lp.actions_executed, lp.actions_failed, lp.actions_skipped
+               lp.actions_total, lp.actions_executed, lp.actions_failed, lp.actions_skipped,
+               lp.metadata
         FROM link_plans lp
         WHERE lp.device_id = ?
           AND EXISTS (
@@ -186,12 +187,29 @@ def main() -> int:
 
         plan_row = _find_recent_plan(conn, device_id, rel_root_str)
         if plan_row:
-            plan_id, name, status, created_at, actions_total, actions_executed, actions_failed, actions_skipped = plan_row
+            plan_id, name, status, created_at, actions_total, actions_executed, actions_failed, actions_skipped, metadata = plan_row
             _print_item(
                 "link plan",
                 True,
                 f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
                 "decide which duplicates should hardlink",
+            )
+            scope_done = False
+            if metadata:
+                import json
+                try:
+                    meta = json.loads(metadata)
+                    scope_done = (
+                        meta.get("scope_status") == "ok"
+                        and meta.get("scope_root") == str(canonical_root)
+                    )
+                except json.JSONDecodeError:
+                    scope_done = False
+            _print_item(
+                "link scope verify",
+                scope_done,
+                f"hashall link verify-scope {root_input} --plan-id {plan_id}",
+                "confirm plan paths are under root",
             )
             _print_item(
                 "link execute",
@@ -205,6 +223,12 @@ def main() -> int:
                 False,
                 f"hashall link plan \"dedupe {root_input}\" --device {device_alias}",
                 "decide which duplicates should hardlink",
+            )
+            _print_item(
+                "link scope verify",
+                False,
+                "no plan",
+                "confirm plan paths are under root",
             )
             _print_item("link execute", False, "no plan", "apply the plan (or dry-run first)")
 

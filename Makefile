@@ -82,7 +82,7 @@ help:  ## Show this help message
 	@grep -E '^(bootstrap|build|test|sandbox|clean):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Deduplication:"
-	@grep -E '^(link-path|link-paths):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(link-path|link-paths|link-verify-scope):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Rehome:"
 	@grep -E '^(rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply|rehome-apply-dry|rehome-checklist):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -366,6 +366,12 @@ link-paths:  ## Create hardlink plans for PATHS (space-separated)
 	@for p in $(PATHS); do \
 		$(MAKE) link-path PATH="$$p"; \
 	done
+
+.PHONY: link-verify-scope
+link-verify-scope:  ## Verify latest plan scope for PATH (optional PLAN_ID)
+	@plan_arg=""; \
+	if [ -n "$(PLAN_ID)" ]; then plan_arg="--plan-id $(PLAN_ID)"; fi; \
+	$(HASHALL_CLI) link verify-scope "$(PATH)" $$plan_arg --db "$(DB_FILE)"
 
 .PHONY: workflow
 workflow:  ## Show workflow done/todo for PATH

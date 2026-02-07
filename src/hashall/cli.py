@@ -1037,6 +1037,157 @@ def link_plan_cmd(name, db, device, min_size, include_empty, dry_run, upgrade_co
         return 1
 
 
+@link.command("verify-scope")
+@click.argument("path", type=click.Path(exists=True, file_okay=False))
+@click.option("--plan-id", type=int, default=None, help="Plan ID to verify (default: latest matching plan).")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--max-examples", type=int, default=10, help="Max out-of-scope examples to show.")
+@click.option("--update-plan/--no-update-plan", default=True, help="Store verification result in plan metadata.")
+def link_verify_scope_cmd(path, plan_id, db, max_examples, update_plan):
+    """
+    Verify that link plan actions are scoped under a root path.
+    """
+    import json
+    from datetime import datetime
+    from pathlib import Path
+    from hashall.model import connect_db
+    from hashall.pathing import canonicalize_path, is_under
+    from hashall.fs_utils import get_mount_source
+    from hashall.scan import _canonicalize_root
+
+    conn = connect_db(Path(db))
+    cursor = conn.cursor()
+
+    root_resolved = Path(path).resolve()
+    root_canonical = canonicalize_path(root_resolved)
+    device_id = os.stat(root_canonical).st_dev
+
+    device_row = cursor.execute("""
+        SELECT device_alias, mount_point, preferred_mount_point
+        FROM devices WHERE device_id = ?
+    """, (device_id,)).fetchone()
+    if not device_row:
+        click.echo(f"❌ Device not found for path: {root_canonical}", err=True)
+        conn.close()
+        return 1
+
+    device_alias, current_mount, preferred_mount = device_row[0], Path(device_row[1]), Path(device_row[2] or device_row[1])
+    mount_source = get_mount_source(str(root_canonical)) or ""
+    canonical_root = _canonicalize_root(
+        root_canonical, current_mount, preferred_mount, allow_remap=bool(mount_source)
+    )
+    effective_mount = preferred_mount if is_under(canonical_root, preferred_mount) else current_mount
+    try:
+        rel_root = canonical_root.relative_to(effective_mount)
+    except ValueError:
+        rel_root = Path(".")
+    rel_root_str = str(rel_root)
+
+    if plan_id is None:
+        if rel_root_str == ".":
+            plan_row = cursor.execute("""
+                SELECT id, name, status, metadata, created_at
+                FROM link_plans
+                WHERE device_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (device_id,)).fetchone()
+        else:
+            pattern = f"{rel_root_str}/%"
+            plan_row = cursor.execute("""
+                SELECT lp.id, lp.name, lp.status, lp.metadata, lp.created_at
+                FROM link_plans lp
+                WHERE lp.device_id = ?
+                  AND EXISTS (
+                        SELECT 1 FROM link_actions la
+                        WHERE la.plan_id = lp.id
+                          AND (
+                               la.canonical_path = ? OR la.canonical_path LIKE ?
+                            OR la.duplicate_path = ? OR la.duplicate_path LIKE ?
+                          )
+                  )
+                ORDER BY lp.created_at DESC
+                LIMIT 1
+            """, (device_id, rel_root_str, pattern, rel_root_str, pattern)).fetchone()
+        if not plan_row:
+            click.echo("❌ No matching plan found", err=True)
+            conn.close()
+            return 1
+        plan_id, plan_name, plan_status, plan_metadata, plan_created = plan_row
+    else:
+        plan_row = cursor.execute("""
+            SELECT id, name, status, metadata, created_at
+            FROM link_plans WHERE id = ?
+        """, (plan_id,)).fetchone()
+        if not plan_row:
+            click.echo(f"❌ Plan not found: {plan_id}", err=True)
+            conn.close()
+            return 1
+        plan_id, plan_name, plan_status, plan_metadata, plan_created = plan_row
+
+    total_actions = cursor.execute(
+        "SELECT COUNT(*) FROM link_actions WHERE plan_id = ?",
+        (plan_id,),
+    ).fetchone()[0]
+
+    out_of_scope = 0
+    examples = []
+    if rel_root_str != ".":
+        pattern = f"{rel_root_str}/%"
+        out_of_scope = cursor.execute("""
+            SELECT COUNT(*) FROM link_actions
+            WHERE plan_id = ?
+              AND (
+                    NOT (canonical_path = ? OR canonical_path LIKE ?)
+                 OR NOT (duplicate_path = ? OR duplicate_path LIKE ?)
+              )
+        """, (plan_id, rel_root_str, pattern, rel_root_str, pattern)).fetchone()[0]
+
+        if out_of_scope > 0 and max_examples > 0:
+            examples = cursor.execute("""
+                SELECT canonical_path, duplicate_path
+                FROM link_actions
+                WHERE plan_id = ?
+                  AND (
+                        NOT (canonical_path = ? OR canonical_path LIKE ?)
+                     OR NOT (duplicate_path = ? OR duplicate_path LIKE ?)
+                  )
+                LIMIT ?
+            """, (plan_id, rel_root_str, pattern, rel_root_str, pattern, max_examples)).fetchall()
+
+    click.echo(f"🔎 Plan #{plan_id}: {plan_name} ({plan_status})")
+    click.echo(f"   Path: {canonical_root}")
+    click.echo(f"   Relative root: {rel_root_str}")
+    click.echo(f"   Actions: {total_actions}")
+    click.echo(f"   Out of scope: {out_of_scope}")
+    if examples:
+        click.echo("   Examples:")
+        for canonical_path, duplicate_path in examples:
+            click.echo(f"     keep={canonical_path} replace={duplicate_path}")
+
+    if update_plan:
+        metadata = {}
+        if plan_metadata:
+            try:
+                metadata = json.loads(plan_metadata)
+            except json.JSONDecodeError:
+                metadata = {}
+        metadata.update({
+            "scope_verified_at": datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "scope_root": str(canonical_root),
+            "scope_rel_root": rel_root_str,
+            "scope_out_of_scope": out_of_scope,
+            "scope_status": "ok" if out_of_scope == 0 else "fail",
+        })
+        cursor.execute(
+            "UPDATE link_plans SET metadata = ? WHERE id = ?",
+            (json.dumps(metadata), plan_id),
+        )
+        conn.commit()
+
+    conn.close()
+    return 0 if out_of_scope == 0 else 2
+
 @link.command("plan-payload-empty")
 @click.argument("name")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
