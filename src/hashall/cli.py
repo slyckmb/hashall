@@ -4,6 +4,8 @@
 
 import click
 import time
+import os
+import sys
 from pathlib import Path
 from hashall.scan import scan_path
 from hashall.export import export_json
@@ -12,10 +14,83 @@ from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
 
+_LOG_SETUP = False
+_LOG_FILE = None
+
+
+class _TeeStream:
+    def __init__(self, primary, secondary):
+        self._primary = primary
+        self._secondary = secondary
+        self.encoding = getattr(primary, "encoding", "utf-8")
+
+    def write(self, data):
+        if isinstance(data, bytes):
+            text = data.decode(self.encoding, errors="replace")
+        else:
+            text = str(data)
+        result = self._primary.write(text)
+        try:
+            self._secondary.write(text)
+        except Exception:
+            pass
+        return result
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        self._primary.flush()
+        try:
+            self._secondary.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        return self._primary.isatty()
+
+    def fileno(self):
+        return self._primary.fileno()
+
+    def writable(self):
+        return True
+
+
+def _setup_master_log() -> None:
+    global _LOG_SETUP, _LOG_FILE
+    if _LOG_SETUP:
+        return
+    if os.environ.get("HASHALL_LOG_DISABLED") == "1":
+        _LOG_SETUP = True
+        return
+    try:
+        log_dir = os.environ.get("HASHALL_LOG_DIR")
+        log_file = os.environ.get("HASHALL_LOG_FILE")
+        if log_file:
+            log_path = Path(os.path.expanduser(log_file))
+        else:
+            base_dir = Path(log_dir) if log_dir else (Path.home() / ".logs" / "hashall")
+            log_path = base_dir / "hashall.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        _LOG_FILE = open(log_path, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        _LOG_SETUP = True
+        return
+    sys.stdout = _TeeStream(sys.stdout, _LOG_FILE)
+    sys.stderr = _TeeStream(sys.stderr, _LOG_FILE)
+    _LOG_SETUP = True
+
+
+# Initialize logging as early as possible for CLI usage.
+if os.environ.get("HASHALL_LOG_DISABLED") != "1":
+    _setup_master_log()
+
 @click.group()
 @click.version_option(__version__)
 def cli():
     """Hashall — file hashing, verification, and migration tools"""
+    _setup_master_log()
     pass
 
 @cli.command("scan")
