@@ -638,6 +638,7 @@ class _TwoLineProgress:
         self.n = 0
         self.path = ""
         if self.enabled:
+            self.file.write("\r\x1b[2K")
             print("", file=self.file, flush=True)
             print("", file=self.file, flush=True)
 
@@ -646,7 +647,7 @@ class _TwoLineProgress:
             width = shutil.get_terminal_size((120, 20)).columns
         except Exception:
             width = 120
-        return max(10, width - 1)
+        return max(10, width - 2)
 
     def _progress_line(self, width: int) -> str:
         elapsed = max(time.monotonic() - self.start, 1e-9)
@@ -685,7 +686,7 @@ class _TwoLineProgress:
 def _char_width(ch: str) -> int:
     if unicodedata.combining(ch):
         return 0
-    if unicodedata.east_asian_width(ch) in ("W", "F"):
+    if unicodedata.east_asian_width(ch) in ("W", "F", "A"):
         return 2
     return 1
 
