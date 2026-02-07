@@ -375,6 +375,110 @@ def find_duplicates(device_id: int, db_path: Path, auto_upgrade: bool = True) ->
     return duplicates
 
 
+def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = False) -> int:
+    """
+    Upgrade SHA256 for quick-hash collision groups (inode-aware).
+
+    Only hashes files in groups where quick_hash collides and distinct inodes exist.
+    Returns number of inode groups upgraded.
+    """
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    ensure_files_table(cursor, device_id)
+    table_name = f"files_{device_id}"
+
+    row = cursor.execute(
+        "SELECT preferred_mount_point, mount_point FROM devices WHERE device_id = ?",
+        (device_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return 0
+
+    preferred_mount = Path(row[0]) if row[0] else None
+    mount_point = Path(row[1]) if row[1] else None
+    base_mounts = [p for p in (preferred_mount, mount_point) if p is not None]
+
+    cursor.execute(f"""
+        SELECT quick_hash
+        FROM {table_name}
+        WHERE status = 'active'
+          AND quick_hash IS NOT NULL
+        GROUP BY quick_hash
+        HAVING COUNT(DISTINCT COALESCE(inode, path)) > 1
+    """)
+    quick_hashes = [row[0] for row in cursor.fetchall()]
+
+    if not quick_hashes:
+        conn.close()
+        return 0
+
+    if not quiet:
+        print(f"⚡ Upgrading {len(quick_hashes)} quick-hash collision groups...")
+
+    upgraded_groups = 0
+    for quick_hash in quick_hashes:
+        cursor.execute(f"""
+            SELECT path, inode, sha1, sha256
+            FROM {table_name}
+            WHERE quick_hash = ? AND status = 'active'
+        """, (quick_hash,))
+        rows = cursor.fetchall()
+
+        pending = []
+        seen = set()
+        for row in rows:
+            path, inode, sha1, sha256 = row[0], row[1], row[2], row[3]
+            if sha1 is not None and sha256 is not None:
+                continue
+            key = (inode, ) if inode is not None else ("path", path)
+            if key in seen:
+                continue
+            seen.add(key)
+            pending.append((path, inode))
+
+        if not pending:
+            continue
+
+        for path, inode in pending:
+            abs_path = None
+            if path.startswith("/"):
+                abs_path = Path(path)
+            else:
+                for base in base_mounts:
+                    candidate = base / path
+                    if candidate.exists():
+                        abs_path = candidate
+                        break
+                if abs_path is None and base_mounts:
+                    abs_path = base_mounts[0] / path
+
+            try:
+                sha1, sha256 = compute_full_hashes(str(abs_path))
+            except Exception as e:
+                if not quiet:
+                    print(f"⚠️  Could not upgrade {abs_path}: {e}")
+                continue
+
+            if inode is None:
+                cursor.execute(f"""
+                    UPDATE {table_name}
+                    SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                    WHERE path = ? AND status = 'active'
+                """, (sha1, sha256, path))
+            else:
+                cursor.execute(f"""
+                    UPDATE {table_name}
+                    SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                    WHERE inode = ? AND status = 'active'
+                """, (sha1, sha256, inode))
+            upgraded_groups += 1
+
+    conn.commit()
+    conn.close()
+    return upgraded_groups
+
+
 def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[str, dict], hash_mode: str = 'fast'):
     """
     Hash a file for incremental scanning.

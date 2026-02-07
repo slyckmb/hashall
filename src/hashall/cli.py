@@ -843,7 +843,9 @@ def link_analyze_cmd(db, device, cross_device, min_size, format):
 @click.option("--device", required=True, help="Device alias or device_id to plan for.")
 @click.option("--min-size", type=int, default=0, help="Minimum file size in bytes (default: 0).")
 @click.option("--dry-run", is_flag=True, help="Generate plan without saving to database.")
-def link_plan_cmd(name, db, device, min_size, dry_run):
+@click.option("--upgrade-collisions/--no-upgrade-collisions", default=True,
+              help="Upgrade quick-hash collisions to SHA256 before planning.")
+def link_plan_cmd(name, db, device, min_size, dry_run, upgrade_collisions):
     """
     Create a deduplication plan.
 
@@ -858,6 +860,7 @@ def link_plan_cmd(name, db, device, min_size, dry_run):
     from pathlib import Path
     from hashall.model import connect_db
     from hashall.link_planner import create_plan, save_plan, format_plan_summary
+    from hashall.scan import upgrade_quick_hash_collisions
 
     conn = connect_db(Path(db))
     cursor = conn.cursor()
@@ -888,6 +891,10 @@ def link_plan_cmd(name, db, device, min_size, dry_run):
         # Create plan
         click.echo(f"📋 Creating deduplication plan: \"{name}\"")
         click.echo(f"   Device: {device} ({device_id})")
+        if upgrade_collisions:
+            upgraded = upgrade_quick_hash_collisions(device_id, Path(db), quiet=False)
+            if upgraded > 0:
+                click.echo(f"   Upgraded collision groups: {upgraded}")
         click.echo(f"   Analyzing...")
         click.echo()
 
