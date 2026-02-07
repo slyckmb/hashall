@@ -10,13 +10,13 @@ import unicodedata
 import sys
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
-from typing import Dict, Set, Tuple
+from typing import Dict, Set, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
 from tqdm import tqdm
 from hashall.model import connect_db, init_db_schema
 from hashall.device import register_or_update_device, ensure_files_table
-from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source
+from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source, get_zfs_metadata
 from hashall.pathing import canonicalize_path, is_under
 
 BATCH_SIZE = 500
@@ -30,6 +30,7 @@ class ScanStats:
     files_updated: int = 0
     files_unchanged: int = 0
     files_deleted: int = 0
+    files_skipped_other_device: int = 0
     bytes_hashed: int = 0
 
 
@@ -497,7 +498,13 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
     return upgraded_groups
 
 
-def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[str, dict], hash_mode: str = 'fast'):
+def _hash_file_worker(
+    file_path: str,
+    mount_point: Path,
+    existing_files: Dict[str, dict],
+    hash_mode: str = 'fast',
+    expected_device_id: Optional[int] = None
+):
     """
     Hash a file for incremental scanning.
 
@@ -509,10 +516,13 @@ def _hash_file_worker(file_path: str, mount_point: Path, existing_files: Dict[st
 
     Returns:
         Tuple of (rel_path, size, mtime, quick_hash, sha1, sha256, inode, device_id, is_new, is_updated)
+        or ("__SKIP_DEVICE__", file_path, device_id) if file is on a different device
         or None on error
     """
     try:
         stat = os.stat(file_path)
+        if expected_device_id is not None and stat.st_dev != expected_device_id:
+            return ("__SKIP_DEVICE__", str(file_path), stat.st_dev)
         rel_path = str(Path(file_path).relative_to(mount_point))
 
         # Check if file exists in catalog
@@ -787,11 +797,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     # 3. Get filesystem UUID (persistent identifier)
     fs_uuid = get_filesystem_uuid(str(root_canonical))
+    zfs_meta = get_zfs_metadata(str(root_canonical))
 
     _emit(quiet, f"📍 Scanning: {root_canonical}")
     if root_canonical != root_resolved:
         _emit(quiet, f"   Bind mount source: {root_canonical}")
     _emit(quiet, f"   Device ID: {device_id} | Filesystem UUID: {fs_uuid}")
+    if zfs_meta:
+        _emit(quiet, f"   ZFS dataset: {zfs_meta.get('dataset_name')}")
 
     mount_point_str = get_mount_point(str(root_canonical)) or str(root_canonical)
     mount_source = get_mount_source(str(root_canonical)) or ""
@@ -853,6 +866,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     file_paths = []
     dir_count = 0
     file_count = 0
+    skipped_other_device_examples = []
+    skipped_example_limit = 5
     discovery = None
     if not quiet:
         discovery = tqdm(
@@ -904,8 +919,16 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         # Sequential scanning
         if progress.enabled:
             for file_path in file_paths:
-                result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
+                result = _hash_file_worker(
+                    file_path, mount_point, existing_files, hash_mode, expected_device_id=device_id
+                )
                 if result is None:
+                    progress.update(path=file_path, advance=1)
+                    continue
+                if result[0] == "__SKIP_DEVICE__":
+                    stats.files_skipped_other_device += 1
+                    if len(skipped_other_device_examples) < skipped_example_limit:
+                        skipped_other_device_examples.append(result[1])
                     progress.update(path=file_path, advance=1)
                     continue
                 seen_paths.add(result[0])
@@ -925,8 +948,15 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
             )
             for file_path in tqdm(file_paths, **pbar_kwargs):
-                result = _hash_file_worker(file_path, mount_point, existing_files, hash_mode)
+                result = _hash_file_worker(
+                    file_path, mount_point, existing_files, hash_mode, expected_device_id=device_id
+                )
                 if result is None:
+                    continue
+                if result[0] == "__SKIP_DEVICE__":
+                    stats.files_skipped_other_device += 1
+                    if len(skipped_other_device_examples) < skipped_example_limit:
+                        skipped_other_device_examples.append(result[1])
                     continue
                 seen_paths.add(result[0])
 
@@ -958,7 +988,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                         file_path = next(file_iter)
                     except StopIteration:
                         break
-                    future = executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode)
+                    future = executor.submit(
+                        _hash_file_worker, file_path, mount_point, existing_files, hash_mode, device_id
+                    )
                     pending.add(future)
                     future_to_path[future] = file_path
 
@@ -984,6 +1016,12 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             except CancelledError:
                                 progress.update(advance=1)
                                 continue
+                            if result is not None and result[0] == "__SKIP_DEVICE__":
+                                stats.files_skipped_other_device += 1
+                                if len(skipped_other_device_examples) < skipped_example_limit:
+                                    skipped_other_device_examples.append(result[1])
+                                progress.update(path=file_path, advance=1)
+                                continue
 
                             if result is not None:
                                 rel_path = result[0]
@@ -1006,7 +1044,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 file_path = next(file_iter)
                             except StopIteration:
                                 break
-                            future = executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode)
+                            future = executor.submit(
+                                _hash_file_worker, file_path, mount_point, existing_files, hash_mode, device_id
+                            )
                             pending.add(future)
                             future_to_path[future] = file_path
                 else:
@@ -1030,9 +1070,16 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             for fut in done:
                                 from concurrent.futures import CancelledError
                                 try:
+                                    future_to_path.pop(fut, None)
                                     result = fut.result()
                                 except CancelledError:
                                     # Ignore cancelled futures
+                                    pbar.update(1)
+                                    continue
+                                if result is not None and result[0] == "__SKIP_DEVICE__":
+                                    stats.files_skipped_other_device += 1
+                                    if len(skipped_other_device_examples) < skipped_example_limit:
+                                        skipped_other_device_examples.append(result[1])
                                     pbar.update(1)
                                     continue
 
@@ -1057,7 +1104,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                     file_path = next(file_iter)
                                 except StopIteration:
                                     break
-                                future = executor.submit(_hash_file_worker, file_path, mount_point, existing_files, hash_mode)
+                                future = executor.submit(
+                                    _hash_file_worker, file_path, mount_point, existing_files, hash_mode, device_id
+                                )
                                 pending.add(future)
                                 future_to_path[future] = file_path
 
@@ -1206,6 +1255,15 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
    Hashed: {stats.bytes_hashed / 1024 / 1024:.1f} MB
     """
         )
+        if stats.files_skipped_other_device:
+            print(f"⚠️  Skipped (other filesystem): {stats.files_skipped_other_device:,} files")
+            for example in skipped_other_device_examples:
+                meta = get_zfs_metadata(example)
+                dataset = meta.get("dataset_name") if meta else None
+                if dataset:
+                    print(f"   - {example} (dataset: {dataset})")
+                else:
+                    print(f"   - {example}")
 
     # Close connection to prevent resource leaks with hierarchical scanning
     conn.close()
