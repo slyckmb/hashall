@@ -1052,7 +1052,7 @@ def link_verify_scope_cmd(path, plan_id, db, max_examples, update_plan):
     from pathlib import Path
     from hashall.model import connect_db
     from hashall.pathing import canonicalize_path, is_under
-    from hashall.fs_utils import get_mount_source
+    from hashall.fs_utils import get_mount_source, get_zfs_metadata
     from hashall.scan import _canonicalize_root
 
     conn = connect_db(Path(db))
@@ -1157,6 +1157,16 @@ def link_verify_scope_cmd(path, plan_id, db, max_examples, update_plan):
 
     click.echo(f"🔎 Plan #{plan_id}: {plan_name} ({plan_status})")
     click.echo(f"   Path: {canonical_root}")
+    zfs_meta = get_zfs_metadata(str(canonical_root))
+    zfs_dataset = zfs_meta.get("dataset_name") if zfs_meta else None
+    if not zfs_dataset:
+        source = get_mount_source(str(canonical_root))
+        if source and not source.startswith("/"):
+            zfs_dataset = source
+    if zfs_dataset:
+        click.echo(f"   ZFS dataset: {zfs_dataset}")
+    else:
+        click.echo("   ZFS dataset: (not detected)")
     click.echo(f"   Relative root: {rel_root_str}")
     click.echo(f"   Actions: {total_actions}")
     click.echo(f"   Out of scope: {out_of_scope}")
@@ -1475,7 +1485,7 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
     from hashall.model import connect_db
     from hashall.link_query import get_plan
     from hashall.link_executor import execute_plan
-    from hashall.fs_utils import get_zfs_metadata
+    from hashall.fs_utils import get_zfs_metadata, get_mount_source
     import subprocess
     import datetime as dt
 
@@ -1513,6 +1523,10 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
         if snapshot and plan.mount_point:
             meta = get_zfs_metadata(plan.mount_point)
             snapshot_dataset = meta.get("dataset_name") if meta else None
+            if not snapshot_dataset:
+                source = get_mount_source(plan.mount_point)
+                if source and not source.startswith("/"):
+                    snapshot_dataset = source
             if snapshot_dataset:
                 try:
                     result = subprocess.run(
@@ -1535,6 +1549,11 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
 
         if dry_run:
             click.echo("🔍 DRY-RUN MODE (no changes will be made)")
+            if snapshot and snapshot_dataset:
+                snap_label = snapshot_existing or f"{snapshot_dataset}@{snapshot_prefix}-<timestamp>"
+                click.echo(f"🔎 ZFS snapshot (planned): {snap_label}")
+            elif snapshot:
+                click.echo("⚠️  ZFS snapshot not available")
             click.echo()
         else:
             # Safety confirmation

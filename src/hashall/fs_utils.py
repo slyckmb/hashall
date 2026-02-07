@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import shutil
 from typing import Optional
 from pathlib import Path
 
@@ -63,6 +64,16 @@ def get_filesystem_uuid(path: str) -> str:
         return "dev-unknown"
 
 
+def _resolve_cmd(cmd: str, fallbacks: list[str]) -> str:
+    found = shutil.which(cmd)
+    if found:
+        return found
+    for candidate in fallbacks:
+        if Path(candidate).exists():
+            return candidate
+    return cmd
+
+
 def _try_findmnt(path: str) -> Optional[str]:
     """
     Try to get filesystem UUID using findmnt.
@@ -77,8 +88,9 @@ def _try_findmnt(path: str) -> Optional[str]:
         UUID string if successful, None otherwise
     """
     try:
+        findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            ['findmnt', '-no', 'UUID', path],
+            [findmnt_cmd, '-no', 'UUID', path],
             capture_output=True,
             text=True,
             check=True,
@@ -105,8 +117,9 @@ def get_mount_point(path: str) -> Optional[str]:
     Returns None if findmnt is unavailable or fails.
     """
     try:
+        findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            ['findmnt', '-no', 'TARGET', path],
+            [findmnt_cmd, '-no', 'TARGET', path],
             capture_output=True,
             text=True,
             check=True,
@@ -138,8 +151,9 @@ def get_mount_source(path: str) -> Optional[str]:
     Useful for detecting bind mounts when SOURCE is an absolute path.
     """
     try:
+        findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            ['findmnt', '-no', 'SOURCE', path],
+            [findmnt_cmd, '-no', 'SOURCE', path],
             capture_output=True,
             text=True,
             check=True,
@@ -209,7 +223,11 @@ def get_zfs_metadata(path: str) -> dict:
         Returns empty dict {} if:
         - Path is not on a ZFS filesystem
         - ZFS commands are not available
-        - Any command fails or returns invalid data
+        - Dataset lookup fails or returns invalid data
+
+        Note:
+        If the dataset name is available but pool GUID cannot be read,
+        the function returns dataset_name/pool_name with pool_guid=None.
 
     Examples:
         >>> get_zfs_metadata("/tank/data/torrents")
@@ -224,8 +242,9 @@ def get_zfs_metadata(path: str) -> dict:
     """
     try:
         # Get dataset name using zfs list
+        zfs_cmd = _resolve_cmd("zfs", ["/sbin/zfs", "/usr/sbin/zfs"])
         result = subprocess.run(
-            ['zfs', 'list', '-H', '-o', 'name', path],
+            [zfs_cmd, 'list', '-H', '-o', 'name', path],
             capture_output=True,
             text=True,
             check=True,
@@ -240,19 +259,21 @@ def get_zfs_metadata(path: str) -> dict:
         # Extract pool name (first component before /)
         pool_name = dataset_name.split('/')[0]
 
-        # Get pool GUID using zpool get
-        result = subprocess.run(
-            ['zpool', 'get', '-H', '-o', 'value', 'guid', pool_name],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5
-        )
-        pool_guid = result.stdout.strip()
-
-        # Validate pool GUID
-        if not pool_guid or pool_guid == '-':
-            return {}
+        pool_guid = None
+        try:
+            zpool_cmd = _resolve_cmd("zpool", ["/sbin/zpool", "/usr/sbin/zpool"])
+            result = subprocess.run(
+                [zpool_cmd, 'get', '-H', '-o', 'value', 'guid', pool_name],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5
+            )
+            pool_guid = result.stdout.strip()
+            if not pool_guid or pool_guid == '-':
+                pool_guid = None
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            pool_guid = None
 
         return {
             'pool_name': pool_name,
