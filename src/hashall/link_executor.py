@@ -79,14 +79,28 @@ def _fetch_file_metadata(
     return cursor.fetchone()
 
 
-def _write_jdupes_list(paths: list[Path]) -> Path:
+def _write_jdupes_list(paths: list[Path]) -> tuple[Path, int]:
     tmp = tempfile.NamedTemporaryFile(prefix="hashall-jdupes-", suffix=".lst", delete=False)
     try:
+        seen_paths = set()
+        seen_inodes = set()
+        count = 0
         with tmp as handle:
             for path in paths:
-                handle.write(os.fsencode(str(path)))
+                resolved = path.resolve()
+                stat = resolved.stat()
+                inode_key = (stat.st_dev, stat.st_ino)
+                if inode_key in seen_inodes:
+                    continue
+                path_str = str(resolved)
+                if path_str in seen_paths:
+                    continue
+                seen_inodes.add(inode_key)
+                seen_paths.add(path_str)
+                handle.write(os.fsencode(path_str))
                 handle.write(b"\0")
-        return Path(tmp.name)
+                count += 1
+        return Path(tmp.name), count
     except Exception:
         Path(tmp.name).unlink(missing_ok=True)
         raise
@@ -825,7 +839,12 @@ def execute_plan(
                     record(action, 'completed', bytes_saved=action.bytes_to_save)
                 continue
 
-            list_path = _write_jdupes_list(paths)
+            list_path, list_count = _write_jdupes_list(paths)
+            if list_count < 2:
+                list_path.unlink(missing_ok=True)
+                for action, _, _ in kept:
+                    record(action, 'failed', error_message="Insufficient unique paths for jdupes linking")
+                continue
             try:
                 result = _run_jdupes(jdupes_cmd, list_path)
             finally:
