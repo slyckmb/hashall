@@ -144,6 +144,21 @@ def _payload_counts(conn: sqlite3.Connection, root: Path, device_id: int) -> tup
     return total, complete
 
 
+def _colorize(text: str, code: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _status_color(status: str, done: bool) -> str:
+    lowered = status.lower()
+    if "failed" in lowered or "error" in lowered:
+        return "31"
+    if "no plan" in lowered or "missing" in lowered:
+        return "31"
+    return "32" if done else "33"
+
+
 def _print_block(
     label: str,
     done: bool,
@@ -152,13 +167,20 @@ def _print_block(
     cli_cmd: str,
     explain: str,
 ) -> None:
+    color_enabled = sys.stdout.isatty() and not os.getenv("NO_COLOR")
+    sep = "-" * 70
     checkbox = "[x]" if done else "[ ]"
-    print("-" * 70)
-    print(f"{checkbox} | {label} | {status}")
-    print(make_cmd)
-    print(cli_cmd)
-    print(explain)
-    print("-" * 70)
+    checkbox = _colorize(checkbox, "32" if done else "33", color_enabled)
+    label_text = _colorize(label, "36", color_enabled)
+    status_text = _colorize(status, _status_color(status, done), color_enabled)
+    prefix = _colorize("make:", "2", color_enabled)
+    cprefix = _colorize("cli:", "2", color_enabled)
+    wprefix = _colorize("what:", "2", color_enabled)
+    print(sep)
+    print(f"{checkbox} | {label_text} | {status_text}")
+    print(f"{prefix} {make_cmd}")
+    print(f"{cprefix} {cli_cmd}")
+    print(f"{wprefix} {explain}")
 
 
 def main() -> int:
