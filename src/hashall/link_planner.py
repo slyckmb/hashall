@@ -11,6 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from hashall.link_analysis import analyze_device, DuplicateGroup
+from hashall.payload import get_payload_file_rows, PayloadFileRow
 
 
 @dataclass
@@ -208,6 +209,139 @@ def create_plan(
         total_bytes_saveable=analysis_result.potential_bytes_saveable,
         actions_total=len(all_actions),
         actions=all_actions
+    )
+
+    return plan
+
+
+def _has_cross_payload_hardlink(payload_files: dict[int, list[PayloadFileRow]]) -> bool:
+    inode_to_payloads: dict[int, set[int]] = {}
+    for payload_id, rows in payload_files.items():
+        for row in rows:
+            if row.size <= 0:
+                continue
+            inode_to_payloads.setdefault(row.inode, set()).add(payload_id)
+    return any(len(payload_ids) > 1 for payload_ids in inode_to_payloads.values())
+
+
+def create_payload_empty_plan(
+    conn: sqlite3.Connection,
+    name: str,
+    device_id: int,
+    require_existing_hardlinks: bool = True
+) -> LinkPlan:
+    """
+    Create a deduplication plan for zero-length files within payload groups.
+
+    Only considers payloads with the same payload_hash on the same device.
+    Optionally requires evidence of existing hardlinks across payload roots.
+    """
+    cursor = conn.cursor()
+
+    # Get device info
+    cursor.execute(
+        "SELECT device_id, device_alias, mount_point FROM devices WHERE device_id = ?",
+        (device_id,)
+    )
+    dev_row = cursor.fetchone()
+    if not dev_row:
+        raise ValueError(f"Device {device_id} not found in catalog")
+
+    device_alias, mount_point = dev_row[1], dev_row[2]
+
+    # Check if device table exists
+    table_name = f"files_{device_id}"
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,)
+    )
+    if not cursor.fetchone():
+        raise ValueError(f"Table {table_name} does not exist in catalog")
+
+    payload_groups = cursor.execute("""
+        SELECT payload_hash, COUNT(*) as payload_count
+        FROM payloads
+        WHERE status = 'complete' AND payload_hash IS NOT NULL AND device_id = ?
+        GROUP BY payload_hash
+        HAVING payload_count >= 2
+        ORDER BY payload_hash
+    """, (device_id,)).fetchall()
+
+    actions: List[LinkAction] = []
+    total_opportunities = 0
+
+    for payload_hash, _ in payload_groups:
+        payload_rows = cursor.execute("""
+            SELECT payload_id, root_path
+            FROM payloads
+            WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
+            ORDER BY payload_id
+        """, (payload_hash, device_id)).fetchall()
+
+        if len(payload_rows) < 2:
+            continue
+
+        payload_files: dict[int, list[PayloadFileRow]] = {}
+        for payload_id, root_path in payload_rows:
+            payload_files[payload_id] = get_payload_file_rows(
+                conn, root_path, device_id=device_id
+            )
+
+        if require_existing_hardlinks and not _has_cross_payload_hardlink(payload_files):
+            continue
+
+        zero_by_rel: dict[str, list[PayloadFileRow]] = {}
+        for rows in payload_files.values():
+            for row in rows:
+                if row.size != 0:
+                    continue
+                if not row.sha256:
+                    continue
+                zero_by_rel.setdefault(row.relative_path, []).append(row)
+
+        for rel_path, rows in zero_by_rel.items():
+            if len(rows) < 2:
+                continue
+            sha_set = {row.sha256 for row in rows}
+            if len(sha_set) != 1:
+                continue
+
+            files = [row.path for row in rows]
+            inodes = [row.inode for row in rows]
+            canonical_path, canonical_inode = pick_canonical_file(
+                files, inodes, conn, device_id
+            )
+
+            before = len(actions)
+            for row in rows:
+                if row.path == canonical_path and row.inode == canonical_inode:
+                    continue
+                if row.inode == canonical_inode:
+                    continue
+                actions.append(LinkAction(
+                    action_type='HARDLINK',
+                    canonical_path=canonical_path,
+                    duplicate_path=row.path,
+                    canonical_inode=canonical_inode,
+                    duplicate_inode=row.inode,
+                    device_id=device_id,
+                    file_size=0,
+                    sha256=row.sha256 or "",
+                    bytes_to_save=0
+                ))
+            if len(actions) > before:
+                total_opportunities += 1
+
+    plan = LinkPlan(
+        id=None,
+        name=name,
+        device_id=device_id,
+        device_alias=device_alias,
+        mount_point=mount_point,
+        total_opportunities=total_opportunities,
+        total_bytes_saveable=0,
+        actions_total=len(actions),
+        actions=actions
     )
 
     return plan

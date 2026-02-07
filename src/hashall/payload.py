@@ -62,6 +62,15 @@ class PayloadFile:
     size: int
     sha256: Optional[str]  # None if not yet scanned
 
+@dataclass
+class PayloadFileRow:
+    """Represents a file row within a payload (including table path/inode)."""
+    path: str
+    relative_path: str
+    size: int
+    sha256: Optional[str]
+    inode: int
+
 
 @dataclass
 class Payload:
@@ -207,6 +216,79 @@ def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str)
         ))
 
     return files
+
+
+def get_payload_file_rows(
+    conn: sqlite3.Connection,
+    root_path: str,
+    device_id: Optional[int] = None
+) -> List[PayloadFileRow]:
+    """
+    Return payload file rows with table paths and inodes.
+
+    Uses the same root resolution as get_files_for_path.
+    """
+    if device_id is None:
+        try:
+            device_id = os.stat(root_path).st_dev
+        except (OSError, IOError):
+            return []
+
+    table_name = f"files_{device_id}"
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if not cursor.fetchone():
+        return []
+
+    mount_point = preferred_mount = None
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone():
+        mount_point, preferred_mount = _get_mount_info(conn, device_id)
+
+    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return []
+    rel_root_str = str(rel_root)
+
+    if rel_root_str == ".":
+        rows = conn.execute(
+            f"SELECT path, size, sha256, inode FROM {table_name} WHERE status = 'active' ORDER BY path"
+        ).fetchall()
+    else:
+        query = f"""
+            SELECT path, size, sha256, inode
+            FROM {table_name}
+            WHERE status = 'active' AND (path = ? OR path LIKE ?)
+            ORDER BY path
+        """
+        pattern = f"{rel_root_str}/%"
+        rows = conn.execute(query, (rel_root_str, pattern)).fetchall()
+
+    results: List[PayloadFileRow] = []
+    for row in rows:
+        path = row[0]
+        if rel_root_str == ".":
+            relative_path = path
+        elif path.startswith(rel_root_str + '/'):
+            relative_path = path[len(rel_root_str) + 1:]
+        elif path == rel_root_str:
+            relative_path = Path(path).name
+        else:
+            relative_path = path
+
+        results.append(PayloadFileRow(
+            path=path,
+            relative_path=relative_path,
+            size=row[1],
+            sha256=row[2],
+            inode=row[3]
+        ))
+
+    return results
 
 
 def build_payload(conn: sqlite3.Connection, root_path: str,

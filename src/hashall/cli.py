@@ -949,11 +949,12 @@ def link_analyze_cmd(db, device, cross_device, min_size, format):
 @click.argument("name")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option("--device", required=True, help="Device alias or device_id to plan for.")
-@click.option("--min-size", type=int, default=0, help="Minimum file size in bytes (default: 0).")
+@click.option("--min-size", type=int, default=1, help="Minimum file size in bytes (default: 1).")
+@click.option("--include-empty", is_flag=True, help="Include zero-length files (sets --min-size=0).")
 @click.option("--dry-run", is_flag=True, help="Generate plan without saving to database.")
 @click.option("--upgrade-collisions/--no-upgrade-collisions", default=True,
               help="Upgrade quick-hash collisions to SHA256 before planning.")
-def link_plan_cmd(name, db, device, min_size, dry_run, upgrade_collisions):
+def link_plan_cmd(name, db, device, min_size, include_empty, dry_run, upgrade_collisions):
     """
     Create a deduplication plan.
 
@@ -963,6 +964,7 @@ def link_plan_cmd(name, db, device, min_size, dry_run, upgrade_collisions):
     Examples:
         hashall link plan "Monthly pool dedupe" --device pool
         hashall link plan "Stash cleanup" --device stash --min-size 1048576
+        hashall link plan "Include empties" --device pool --include-empty
         hashall link plan "Test plan" --device 49 --dry-run
     """
     from pathlib import Path
@@ -996,6 +998,8 @@ def link_plan_cmd(name, db, device, min_size, dry_run, upgrade_collisions):
     device_id = result_row[0]
 
     try:
+        if include_empty:
+            min_size = 0
         # Create plan
         click.echo(f"📋 Creating deduplication plan: \"{name}\"")
         click.echo(f"   Device: {device} ({device_id})")
@@ -1029,6 +1033,90 @@ def link_plan_cmd(name, db, device, min_size, dry_run, upgrade_collisions):
 
     except ValueError as e:
         click.echo(f"❌ Error: {e}", err=True)
+        conn.close()
+        return 1
+
+
+@link.command("plan-payload-empty")
+@click.argument("name")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--device", required=True, help="Device alias or device_id to plan for.")
+@click.option("--dry-run", is_flag=True, help="Generate plan without saving to database.")
+@click.option(
+    "--require-existing-hardlinks/--no-require-existing-hardlinks",
+    default=True,
+    help="Require existing hardlink evidence across payload roots (default: enabled)."
+)
+def link_plan_payload_empty_cmd(name, db, device, dry_run, require_existing_hardlinks):
+    """
+    Create a deduplication plan for zero-length files within payload groups.
+    """
+    from pathlib import Path
+    from hashall.model import connect_db
+    from hashall.link_planner import create_payload_empty_plan, save_plan, format_plan_summary
+
+    conn = connect_db(Path(db))
+    cursor = conn.cursor()
+
+    # Resolve device (try alias first, then device_id if numeric)
+    cursor.execute(
+        "SELECT device_id FROM devices WHERE device_alias = ?",
+        (device,)
+    )
+    result_row = cursor.fetchone()
+
+    if not result_row and device.isdigit():
+        cursor.execute(
+            "SELECT device_id FROM devices WHERE device_id = ?",
+            (int(device),)
+        )
+        result_row = cursor.fetchone()
+
+    if not result_row:
+        click.echo(f"❌ Device not found: {device}", err=True)
+        click.echo(f"💡 Tip: Use 'hashall devices list' to see available devices", err=True)
+        conn.close()
+        return 1
+
+    device_id = result_row[0]
+
+    try:
+        click.echo(f"📋 Creating empty-file payload plan: \"{name}\"")
+        click.echo(f"   Device: {device} ({device_id})")
+        click.echo(f"   Require existing hardlinks: {'yes' if require_existing_hardlinks else 'no'}")
+        click.echo()
+
+        plan = create_payload_empty_plan(
+            conn,
+            name,
+            device_id,
+            require_existing_hardlinks=require_existing_hardlinks
+        )
+
+        if dry_run:
+            click.echo("🔍 DRY-RUN MODE (plan not saved)")
+            click.echo()
+            click.echo(format_plan_summary(plan))
+            conn.close()
+            return 0
+
+        plan_id = save_plan(conn, plan)
+
+        click.echo("✅ Plan created successfully!")
+        click.echo()
+        click.echo(format_plan_summary(plan, plan_id=plan_id))
+
+        conn.close()
+        return 0
+
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        conn.close()
+        return 1
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
         conn.close()
         return 1
     except Exception as e:
