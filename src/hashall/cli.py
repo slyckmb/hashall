@@ -1069,8 +1069,10 @@ def link_show_plan_cmd(plan_id, db, limit, format):
 @click.option("--limit", type=int, default=0, help="Maximum number of actions to execute (0 for all).")
 @click.option("--jdupes/--no-jdupes", default=True,
               help="Use jdupes for byte-for-byte verification + hardlinking (recommended).")
+@click.option("--jdupes-log-dir", type=click.Path(), default=None,
+              help="Write per-group jdupes logs to this directory.")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
-def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, yes):
+def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdupes_log_dir, yes):
     """
     Execute a deduplication plan.
 
@@ -1187,7 +1189,8 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, yes
             create_backup=not no_backup,
             limit=limit,
             progress_callback=progress_callback if not dry_run else None,
-            use_jdupes=jdupes
+            use_jdupes=jdupes,
+            jdupes_log_dir=Path(jdupes_log_dir) if jdupes_log_dir else None
         )
 
         # Show results

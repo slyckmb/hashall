@@ -122,6 +122,14 @@ def _run_jdupes(jdupes_cmd: str, list_path: Path) -> subprocess.CompletedProcess
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def _write_jdupes_log(log_dir: Optional[Path], filename: str, content: str) -> None:
+    if log_dir is None:
+        return
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / filename
+    log_path.write_text(content)
+
+
 def compute_sha256(file_path: Path) -> Optional[str]:
     """
     Compute SHA256 hash of a file.
@@ -676,7 +684,8 @@ def execute_plan(
     limit: int = 0,
     progress_callback=None,
     use_jdupes: bool = True,
-    jdupes_path: Optional[str] = None
+    jdupes_path: Optional[str] = None,
+    jdupes_log_dir: Optional[Path] = None
 ) -> ExecutionResult:
     """
     Execute a deduplication plan.
@@ -694,6 +703,7 @@ def execute_plan(
         progress_callback: Optional callback(action_num, total_actions, action)
         use_jdupes: If True, use jdupes for byte-for-byte verification + linking
         jdupes_path: Optional explicit path to jdupes binary
+        jdupes_log_dir: Optional directory for per-group jdupes logs
 
     Returns:
         ExecutionResult with statistics
@@ -793,10 +803,16 @@ def execute_plan(
 
         for hash_val, group_actions in groups.items():
             valid = []
+            log_lines = []
+            log_lines.append(f"plan_id: {plan_id}")
+            log_lines.append(f"sha256: {hash_val}")
+            log_lines.append(f"actions: {len(group_actions)}")
+            log_lines.append(f"jdupes_cmd: {jdupes_cmd}")
             for action in group_actions:
                 status, error, canonical_path, duplicate_path = _precheck_jdupes_action(
                     conn, action, plan.mount_point, verify_mode
                 )
+                log_lines.append(f"precheck: action={action.id} status={status} canonical={canonical_path} duplicate={duplicate_path} error={error or ''}")
                 if status == "ok":
                     valid.append((action, canonical_path, duplicate_path))
                 elif status == "skipped":
@@ -809,6 +825,7 @@ def execute_plan(
 
             canonical_counts = Counter(str(entry[1]) for entry in valid)
             canonical_choice, _ = canonical_counts.most_common(1)[0]
+            log_lines.append(f"canonical_choice: {canonical_choice}")
 
             kept = []
             for action, canonical_path, duplicate_path in valid:
@@ -835,11 +852,13 @@ def execute_plan(
                 continue
 
             if dry_run:
+                log_lines.append("dry_run: true")
                 for action, _, _ in kept:
                     record(action, 'completed', bytes_saved=action.bytes_to_save)
                 continue
 
             list_path, list_count = _write_jdupes_list(paths)
+            log_lines.append(f"list_count: {list_count}")
             if list_count < 2:
                 list_path.unlink(missing_ok=True)
                 for action, _, _ in kept:
@@ -858,6 +877,13 @@ def execute_plan(
                 if err_text:
                     group_error = f"{group_error}: {err_text}"
                 errors.append(f"Group {hash_val[:12]}: {group_error}")
+            log_lines.append(f"jdupes_returncode: {result.returncode}")
+            if result.stdout:
+                log_lines.append("jdupes_stdout:")
+                log_lines.append(result.stdout.rstrip())
+            if result.stderr:
+                log_lines.append("jdupes_stderr:")
+                log_lines.append(result.stderr.rstrip())
 
             not_linked = 0
             for action, canonical_path, duplicate_path in kept:
@@ -866,19 +892,24 @@ def execute_plan(
                     duplicate_stat = os.stat(duplicate_path)
                 except OSError as e:
                     record(action, 'failed', error_message=f"Cannot stat after jdupes: {e}")
+                    log_lines.append(f"postcheck: action={action.id} status=failed error=Cannot stat after jdupes: {e}")
                     not_linked += 1
                     continue
 
                 if canonical_stat.st_dev == duplicate_stat.st_dev and canonical_stat.st_ino == duplicate_stat.st_ino:
                     record(action, 'completed', bytes_saved=action.bytes_to_save)
+                    log_lines.append(f"postcheck: action={action.id} status=linked inode={canonical_stat.st_ino}")
                 else:
                     record(action, 'failed', error_message="jdupes did not link files with matching SHA256")
+                    log_lines.append(f"postcheck: action={action.id} status=failed error=jdupes did not link files with matching SHA256")
                     not_linked += 1
 
             if not_linked:
                 errors.append(
                     f"ALERT: jdupes left {not_linked}/{len(kept)} files unlinked for hash {hash_val[:12]}"
                 )
+            log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
+            _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
 
     else:
         for action in actions:
