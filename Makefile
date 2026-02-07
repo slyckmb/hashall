@@ -307,7 +307,7 @@ install-dev:  ## Install with development dependencies
 
 .PHONY: link-path
 link-path:  ## Create a hardlink plan for PATH (auto-detect device)
-	@device="$$(python3 -c 'import os,sys; from pathlib import Path; from hashall.model import connect_db; from hashall.pathing import canonicalize_path; p=Path(sys.argv[1]); db=Path(sys.argv[2]); device_id=os.stat(canonicalize_path(p)).st_dev; conn=connect_db(db); cur=conn.cursor(); row=cur.execute(\"SELECT device_alias FROM devices WHERE device_id = ?\", (device_id,)).fetchone(); conn.close(); print(row[0] if row and row[0] else device_id)' "$(PATH)" "$(DB_FILE)" 2>/dev/null)"; \
+	@device="$$(PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c 'import os,sys; from pathlib import Path; from hashall.model import connect_db; from hashall.pathing import canonicalize_path; p=Path(sys.argv[1]); db=Path(sys.argv[2]); device_id=os.stat(canonicalize_path(p)).st_dev; conn=connect_db(db); cur=conn.cursor(); row=cur.execute(\"SELECT device_alias FROM devices WHERE device_id = ?\", (device_id,)).fetchone(); conn.close(); print(row[0] if row and row[0] else device_id)' "$(PATH)" "$(DB_FILE)")"; \
 	if [ -z "$$device" ]; then \
 		echo "❌ Could not resolve device for $(PATH)"; \
 		exit 1; \
