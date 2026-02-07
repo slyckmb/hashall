@@ -60,6 +60,7 @@ help:  ## Show this help message
 	@echo "  make link-path PATH=/pool/data            # Plan hardlinks for a path"
 	@echo "  make link-paths PATHS='/pool/data /stash/media'  # Plan both roots"
 	@echo "  make link-paths LINK_UPGRADE_COLLISIONS=0  # Skip collision upgrade"
+	@echo "  make workflow PATH=/pool/data             # Show workflow done/todo"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
 	@echo ""
@@ -327,6 +328,10 @@ link-paths:  ## Create hardlink plans for PATHS (space-separated)
 	@for p in $(PATHS); do \
 		$(MAKE) link-path PATH="$$p"; \
 	done
+
+.PHONY: workflow
+workflow:  ## Show workflow done/todo for PATH
+	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)"
 
 .PHONY: export
 export:  ## Export hashall metadata to JSON

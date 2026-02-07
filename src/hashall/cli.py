@@ -1051,6 +1051,7 @@ def link_plan_payload_empty_cmd(name, db, device, dry_run, require_existing_hard
     """
     Create a deduplication plan for zero-length files within payload groups.
     """
+    import json
     from pathlib import Path
     from hashall.model import connect_db
     from hashall.link_planner import create_payload_empty_plan, save_plan, format_plan_summary
@@ -1101,6 +1102,15 @@ def link_plan_payload_empty_cmd(name, db, device, dry_run, require_existing_hard
             return 0
 
         plan_id = save_plan(conn, plan)
+        metadata = json.dumps({
+            "type": "payload_empty",
+            "require_existing_hardlinks": require_existing_hardlinks
+        })
+        conn.execute(
+            "UPDATE link_plans SET notes = ?, metadata = ? WHERE id = ?",
+            ("payload_empty", metadata, plan_id),
+        )
+        conn.commit()
 
         click.echo("✅ Plan created successfully!")
         click.echo()
