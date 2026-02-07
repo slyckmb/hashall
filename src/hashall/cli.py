@@ -1248,9 +1248,23 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
                     return 0
 
         # Progress callback
-        def progress_callback(action_num, total_actions, action):
+        def progress_callback(action_num, total_actions, action, status=None, error=None):
             pct = (action_num / total_actions) * 100
-            click.echo(f"   [{action_num}/{total_actions}] ({pct:.0f}%) Processing: {Path(action.duplicate_path).name[:50]}")
+            size_mb = (action.file_size or 0) / (1024**2)
+            sha = (action.sha256 or "")[:12]
+            status_label = (status or "processing").upper()
+            if dry_run or status:
+                msg = (
+                    f"   [{action_num}/{total_actions}] ({pct:.0f}%) {status_label} "
+                    f"{size_mb:.2f} MB sha={sha} "
+                    f"keep={action.canonical_path} "
+                    f"replace={action.duplicate_path}"
+                )
+                if error:
+                    msg += f" err={error}"
+                click.echo(msg)
+            else:
+                click.echo(f"   [{action_num}/{total_actions}] ({pct:.0f}%) Processing: {Path(action.duplicate_path).name[:50]}")
 
         # Execute plan
         click.echo("⚡ Executing plan...")

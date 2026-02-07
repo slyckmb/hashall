@@ -772,7 +772,7 @@ def execute_plan(
         nonlocal executed, failed, skipped, total_bytes_saved, processed
         processed += 1
         if progress_callback:
-            progress_callback(processed, total_actions, action)
+            progress_callback(processed, total_actions, action, status=status, error=error_message)
 
         if status == 'completed':
             executed += 1
