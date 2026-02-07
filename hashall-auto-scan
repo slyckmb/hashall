@@ -18,6 +18,7 @@ Example:
 import os
 import sys
 import argparse
+from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 
@@ -25,6 +26,10 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from hashall.scan import scan_path
+try:
+    from hashall import __version__ as HASHALL_VERSION
+except Exception:
+    HASHALL_VERSION = "unknown"
 
 # Optimal configuration (benchmarked 2026-02-01)
 # Fast hash: workers=12 (good for single or dual concurrent scans)
@@ -34,6 +39,11 @@ from hashall.scan import scan_path
 # Full hash: workers=2 (reading entire files, I/O saturated)
 # batch_size=1000 for frequent commits and telemetry collection
 SCAN_CONFIG = {"parallel": True, "workers": 12, "batch_size": 1000}
+
+
+def _emit_run_header() -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"🧾 {Path(__file__).name} v{HASHALL_VERSION} @ {timestamp}")
 
 
 def count_files_in_directory(path: Path) -> int:
@@ -213,6 +223,7 @@ def hierarchical_scan(
 
 
 def main():
+    _emit_run_header()
     parser = argparse.ArgumentParser(
         description="Hierarchical folder-by-folder scan with fast hash (workers=8)",
         formatter_class=argparse.RawDescriptionHelpFormatter,

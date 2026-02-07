@@ -9,6 +9,7 @@ recommendations for optimal scan settings.
 import sys
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 from tabulate import tabulate
 
@@ -16,6 +17,15 @@ from tabulate import tabulate
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from hashall.telemetry import TelemetryCollector, generate_telemetry_report
+try:
+    from hashall import __version__ as HASHALL_VERSION
+except Exception:
+    HASHALL_VERSION = "unknown"
+
+
+def _emit_run_header() -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"🧾 {Path(__file__).name} v{HASHALL_VERSION} @ {timestamp}")
 
 
 def format_size(size_bytes: float) -> str:
@@ -167,6 +177,7 @@ def export_report(db_path: Path, output_path: Path):
 
 
 def main():
+    _emit_run_header()
     parser = argparse.ArgumentParser(
         description="Analyze scan telemetry and tune preset recommendations",
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -12,6 +12,7 @@ import os
 import sys
 import argparse
 import statistics
+from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
@@ -19,6 +20,10 @@ from typing import List, Tuple
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from hashall.scan import scan_path
+try:
+    from hashall import __version__ as HASHALL_VERSION
+except Exception:
+    HASHALL_VERSION = "unknown"
 
 # Presets based on media type
 # Updated 2026-02-01: Benchmarked on real data - 2 workers optimal for all sizes!
@@ -52,6 +57,11 @@ PRESETS = {
         "expected_avg_size": 20 * 1024 * 1024,  # 20MB
     },
 }
+
+
+def _emit_run_header() -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"🧾 {Path(__file__).name} v{HASHALL_VERSION} @ {timestamp}")
 
 
 def sample_directory(path: Path, max_samples: int = 100) -> List[int]:
@@ -146,6 +156,7 @@ def format_size(size_bytes: int) -> str:
 
 
 def main():
+    _emit_run_header()
     parser = argparse.ArgumentParser(
         description="Smart scan wrapper - auto-detects optimal settings",
         formatter_class=argparse.RawDescriptionHelpFormatter,

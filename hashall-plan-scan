@@ -24,6 +24,7 @@ import os
 import sys
 import argparse
 import statistics
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Tuple
 from collections import defaultdict
@@ -33,6 +34,10 @@ from dataclasses import dataclass
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from hashall.scan import scan_path
+try:
+    from hashall import __version__ as HASHALL_VERSION
+except Exception:
+    HASHALL_VERSION = "unknown"
 
 # Preset configurations (benchmarked 2026-02-01)
 # Updated with real performance data - 2 workers optimal!
@@ -42,6 +47,11 @@ PRESETS = {
     "books": {"parallel": True, "workers": 2, "batch_size": 100, "rate_estimate": 1683}, # Benchmarked
     "mixed": {"parallel": True, "workers": 2, "batch_size": 100, "rate_estimate": 100},
 }
+
+
+def _emit_run_header() -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"🧾 {Path(__file__).name} v{HASHALL_VERSION} @ {timestamp}")
 
 
 @dataclass
@@ -265,6 +275,7 @@ def execute_plan(plan: List[DirectoryInfo], db_path: Path):
 
 
 def main():
+    _emit_run_header()
     parser = argparse.ArgumentParser(
         description="Scan Strategy Planner - Analyze tree and propose optimal scan plan",
         formatter_class=argparse.RawDescriptionHelpFormatter,
