@@ -803,10 +803,12 @@ def execute_plan(
                 continue
             groups.setdefault(action.sha256, []).append(action)
 
-        for hash_val, group_actions in groups.items():
+        group_total = len(groups)
+        for group_index, (hash_val, group_actions) in enumerate(groups.items(), start=1):
             valid = []
             log_lines = []
             log_lines.append(f"plan_id: {plan_id}")
+            log_lines.append(f"group_index: {group_index}/{group_total}")
             log_lines.append(f"sha256: {hash_val}")
             log_lines.append(f"actions: {len(group_actions)}")
             log_lines.append(f"jdupes_cmd: {jdupes_cmd} -L -1 -O -P fullhash -q")
@@ -822,7 +824,15 @@ def execute_plan(
                 else:
                     record(action, 'failed', error_message=error)
 
+            log_lines.append(f"valid_actions: {len(valid)}")
             if not valid:
+                log_lines.append("group_status: no_valid_actions")
+                print(
+                    f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
+                    f"actions={len(group_actions)} valid=0"
+                )
+                log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
+                _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
                 continue
 
             canonical_counts = Counter(str(entry[1]) for entry in valid)
@@ -837,6 +847,13 @@ def execute_plan(
                     kept.append((action, canonical_path, duplicate_path))
 
             if not kept:
+                log_lines.append("group_status: no_kept_actions")
+                print(
+                    f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
+                    f"actions={len(group_actions)} kept=0 canonical={canonical_choice}"
+                )
+                log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
+                _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
                 continue
 
             paths = []
@@ -847,24 +864,57 @@ def execute_plan(
                     continue
                 seen.add(path_str)
                 paths.append(path)
+            unique_paths = len(paths)
+            log_lines.append(f"unique_paths: {unique_paths}")
 
             if len(paths) < 2:
                 for action, _, _ in kept:
                     record(action, 'failed', error_message="Insufficient paths for jdupes linking")
+                log_lines.append("group_status: insufficient_unique_paths")
+                log_lines.append(f"planned_list_count: {unique_paths}")
+                print(
+                    f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
+                    f"actions={len(group_actions)} kept={len(kept)} unique_paths={unique_paths} (skip)"
+                )
+                log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
+                _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
                 continue
 
             if dry_run:
                 log_lines.append("dry_run: true")
+                log_lines.append(f"planned_list_count: {unique_paths}")
+                log_lines.append("jdupes_invoked: false")
+                print(
+                    f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
+                    f"actions={len(group_actions)} kept={len(kept)} unique_paths={unique_paths} "
+                    f"canonical={canonical_choice}"
+                )
+                print(
+                    f"🧪 jdupes plan: {jdupes_cmd} -L -1 -O -P fullhash -q @ {unique_paths} paths (dry-run)"
+                )
                 for action, _, _ in kept:
                     record(action, 'completed', bytes_saved=action.bytes_to_save)
+                log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
+                _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
                 continue
 
             list_path, list_count = _write_jdupes_list(paths)
             log_lines.append(f"list_count: {list_count}")
+            print(
+                f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
+                f"actions={len(group_actions)} kept={len(kept)} unique_paths={unique_paths} "
+                f"canonical={canonical_choice}"
+            )
+            print(
+                f"🧪 jdupes plan: {jdupes_cmd} -L -1 -O -P fullhash -q @ {list_count} paths"
+            )
             if list_count < 2:
                 list_path.unlink(missing_ok=True)
                 for action, _, _ in kept:
                     record(action, 'failed', error_message="Insufficient unique paths for jdupes linking")
+                log_lines.append("group_status: insufficient_unique_paths")
+                log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
+                _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
                 continue
             try:
                 result = _run_jdupes(jdupes_cmd, list_path)
