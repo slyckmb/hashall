@@ -19,6 +19,9 @@ import hashlib
 import shutil
 import subprocess
 import tempfile
+import stat
+import pwd
+import grp
 from collections import Counter
 from pathlib import Path
 from typing import Optional, Tuple
@@ -130,6 +133,28 @@ def _write_jdupes_log(log_dir: Optional[Path], filename: str, content: str) -> N
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / filename
     log_path.write_text(content)
+
+def _format_prelist(paths: list[Path]) -> list[str]:
+    lines: list[str] = []
+    for path in paths:
+        try:
+            st = path.stat()
+            mode = stat.filemode(st.st_mode)
+            nlink = st.st_nlink
+            try:
+                user = pwd.getpwuid(st.st_uid).pw_name
+            except KeyError:
+                user = str(st.st_uid)
+            try:
+                group = grp.getgrgid(st.st_gid).gr_name
+            except KeyError:
+                group = str(st.st_gid)
+            size = st.st_size
+            mtime = datetime.fromtimestamp(st.st_mtime).strftime("%b %d %Y")
+            lines.append(f"{st.st_ino} {mode} {nlink} {user} {group} {size} {mtime} '{path}'")
+        except Exception as e:
+            lines.append(f"ERROR stat '{path}': {e}")
+    return lines
 
 
 def compute_sha256(file_path: Path) -> Optional[str]:
@@ -884,6 +909,9 @@ def execute_plan(
                 log_lines.append("dry_run: true")
                 log_lines.append(f"planned_list_count: {unique_paths}")
                 log_lines.append("jdupes_invoked: false")
+                prelist = _format_prelist(paths)
+                log_lines.append("prelist:")
+                log_lines.extend(prelist)
                 print(
                     f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
                     f"actions={len(group_actions)} kept={len(kept)} unique_paths={unique_paths} "
@@ -892,6 +920,9 @@ def execute_plan(
                 print(
                     f"🧪 jdupes plan: {jdupes_cmd} -L -1 -O -P fullhash -q @ {unique_paths} paths (dry-run)"
                 )
+                print("🧪 jdupes prelist:")
+                for line in prelist:
+                    print(f"   {line}")
                 for action, _, _ in kept:
                     record(action, 'completed', bytes_saved=action.bytes_to_save)
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
@@ -900,6 +931,9 @@ def execute_plan(
 
             list_path, list_count = _write_jdupes_list(paths)
             log_lines.append(f"list_count: {list_count}")
+            prelist = _format_prelist(paths)
+            log_lines.append("prelist:")
+            log_lines.extend(prelist)
             print(
                 f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
                 f"actions={len(group_actions)} kept={len(kept)} unique_paths={unique_paths} "
@@ -908,6 +942,9 @@ def execute_plan(
             print(
                 f"🧪 jdupes plan: {jdupes_cmd} -L -1 -O -P fullhash -q @ {list_count} paths"
             )
+            print("🧪 jdupes prelist:")
+            for line in prelist:
+                print(f"   {line}")
             if list_count < 2:
                 list_path.unlink(missing_ok=True)
                 for action, _, _ in kept:
