@@ -24,7 +24,7 @@ LINK_MIN_SIZE ?= 0
 LINK_DRY_RUN ?= 0
 LINK_LIMIT ?= 0
 LINK_REQUIRE_EXISTING_HARDLINKS ?= 1
-LINK_LOW_PRIORITY ?= 0
+LINK_LOW_PRIORITY ?= 1
 
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
