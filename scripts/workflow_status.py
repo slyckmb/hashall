@@ -243,7 +243,7 @@ def _link_execute_cli(db: str, plan_id: int | None) -> str:
         return "no plan"
     dry_run = _env_value("LINK_DRY_RUN", "0")
     limit = _env_value("LINK_LIMIT", "0")
-    low_priority = _env_value("LINK_LOW_PRIORITY", "0")
+    low_priority = _env_value("LINK_LOW_PRIORITY", "1")
     parts = [
         _hashall_cli(),
         "link",
