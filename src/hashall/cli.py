@@ -260,17 +260,19 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     qbit = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
 
     if not qbit.test_connection():
-        print("❌ Failed to connect to qBittorrent. Check URL and credentials.")
-        print(f"   URL: {qbit.base_url}")
         err = getattr(qbit, "last_error", None)
+        msg = f"Failed to connect to qBittorrent at {qbit.base_url}"
         if err:
-            print(f"   Error: {err}")
-        print("   Hint: uses QBITTORRENT_API_URL and /mnt/config/secrets/qbittorrent/api.env")
-        return
+            msg = f"{msg}: {err}"
+        msg = f"{msg}\nHint: uses QBITTORRENT_API_URL and /mnt/config/secrets/qbittorrent/api.env"
+        raise click.ClickException(msg)
 
     if not qbit.login():
-        print("❌ Failed to authenticate with qBittorrent.")
-        return
+        err = getattr(qbit, "last_error", None)
+        msg = "Failed to authenticate with qBittorrent"
+        if err:
+            msg = f"{msg}: {err}"
+        raise click.ClickException(msg)
 
     print("✅ Connected to qBittorrent")
 
