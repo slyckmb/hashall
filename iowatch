@@ -4,7 +4,7 @@ iowatch - Real-time I/O and system monitoring dashboard
 Monitors disk I/O, CPU usage, and hashall scan processes with colors!
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 import sys
 import time
@@ -135,6 +135,37 @@ def get_cpu_stats():
         return cpu_stats
     except Exception:
         return {}
+
+def _parse_pressure_line(line):
+    try:
+        parts = dict(item.split("=") for item in line.strip().split()[1:])
+        return {
+            "avg10": float(parts.get("avg10", 0.0)),
+            "avg60": float(parts.get("avg60", 0.0)),
+            "avg300": float(parts.get("avg300", 0.0)),
+            "total": int(parts.get("total", 0)),
+        }
+    except Exception:
+        return None
+
+def get_pressure_stats():
+    """Get PSI pressure stats for IO and CPU."""
+    stats = {}
+    for name in ("io", "cpu"):
+        try:
+            with open(f"/proc/pressure/{name}", "r") as f:
+                lines = f.read().strip().splitlines()
+            if not lines:
+                continue
+            stats[name] = {}
+            for line in lines:
+                if line.startswith("some"):
+                    stats[name]["some"] = _parse_pressure_line(line)
+                elif line.startswith("full"):
+                    stats[name]["full"] = _parse_pressure_line(line)
+        except Exception:
+            continue
+    return stats
 
 def get_process_io():
     """Get I/O statistics for all processes."""
@@ -316,6 +347,7 @@ def main():
             proc_io = get_process_io()
             arc_stats = get_zfs_arc_stats()
             zfs_stats = get_zfs_pool_stats()
+            pressure_stats = get_pressure_stats()
             
             # Update health occasionally
             if now - last_health_check > 10:
@@ -342,6 +374,25 @@ def main():
                     wait_color = get_color_for_percentage(wait_pct, low=10, mid=30)
                     print(f"  CPU Processing: {format_bar(busy_pct, 16, Colors.GREEN)}{busy_pct:5.1f}%")
                     print(f"  Disk I/O Wait:  {format_bar(wait_pct, 16, wait_color)}{wait_pct:5.1f}%")
+            if pressure_stats:
+                io_some = pressure_stats.get("io", {}).get("some")
+                io_full = pressure_stats.get("io", {}).get("full")
+                cpu_some = pressure_stats.get("cpu", {}).get("some")
+                if io_some:
+                    io_color = get_color_for_percentage(io_some["avg10"], low=10, mid=30)
+                    line = (
+                        f"  PSI IO avg10:   {format_bar(io_some['avg10'], 16, io_color)}"
+                        f"{io_some['avg10']:5.1f}%"
+                    )
+                    if io_full:
+                        line += f"  full:{io_full['avg10']:5.1f}%"
+                    print(line)
+                if cpu_some:
+                    cpu_color = get_color_for_percentage(cpu_some["avg10"], low=5, mid=15)
+                    print(
+                        f"  PSI CPU avg10:  {format_bar(cpu_some['avg10'], 16, cpu_color)}"
+                        f"{cpu_some['avg10']:5.1f}%"
+                    )
 
             if arc_stats:
                 print(f"  ZFS ARC Hits:   {format_bar(arc_stats['hit_rate'], 16, Colors.BRIGHT_CYAN)}{arc_stats['hit_rate']:5.1f}%  ({arc_stats['size_gb']:.1f}G)")
