@@ -392,7 +392,7 @@ link-path:  ## Create a hardlink plan for PATH (auto-detect device)
 	if [ "$(LINK_UPGRADE_COLLISIONS)" != "1" ]; then args="$$args --no-upgrade-collisions"; fi; \
 	if [ "$(LINK_MIN_SIZE)" != "0" ]; then args="$$args --min-size $(LINK_MIN_SIZE)"; fi; \
 	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
-	$(HASHALL_CLI) link plan "dedupe $(PATH)" $$args
+	$(HASHALL_CLI) link plan "dedupe $(PATH)" $$args --db "$(DB_FILE)"
 
 .PHONY: link-paths
 link-paths:  ## Create hardlink plans for PATHS (space-separated)
@@ -431,7 +431,7 @@ link-payload-empty:  ## Create empty-payload plan for PATH (auto-detect device)
 	args="--device $$device"; \
 	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
 	if [ "$(LINK_REQUIRE_EXISTING_HARDLINKS)" != "1" ]; then args="$$args --no-require-existing-hardlinks"; fi; \
-	$(HASHALL_CLI) link plan-payload-empty "empty payload $(PATH)" $$args
+	$(HASHALL_CLI) link plan-payload-empty "empty payload $(PATH)" $$args --db "$(DB_FILE)"
 
 .PHONY: workflow
 workflow:  ## Show workflow done/todo for PATH

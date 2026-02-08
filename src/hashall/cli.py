@@ -5,6 +5,7 @@
 import click
 import time
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -24,6 +25,8 @@ _LOG_FILE = None
 _LOG_PATH = None
 _RUN_HEADER_EMITTED = False
 _PIPE_BROKEN = False
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _apply_low_priority() -> None:
@@ -49,6 +52,24 @@ class _TeeStream:
         self._primary = primary
         self._secondary = secondary
         self.encoding = getattr(primary, "encoding", "utf-8")
+        self._log_raw = os.environ.get("HASHALL_LOG_RAW") == "1"
+        self._secondary_buf = ""
+
+    def _write_secondary_sanitized(self, text: str) -> None:
+        # Strip ANSI codes and collapse carriage-return updates into the final newline-delimited line.
+        cleaned = _ANSI_ESCAPE_RE.sub("", text)
+        for ch in cleaned:
+            if ch == "\r":
+                self._secondary_buf = ""
+                continue
+            if ch == "\n":
+                self._secondary.write(self._secondary_buf + "\n")
+                self._secondary_buf = ""
+                continue
+            code = ord(ch)
+            if code < 32 and ch not in ("\t",):
+                continue
+            self._secondary_buf += ch
 
     def write(self, data):
         global _PIPE_BROKEN
@@ -64,7 +85,10 @@ class _TeeStream:
             _PIPE_BROKEN = True
             return 0
         try:
-            self._secondary.write(text)
+            if self._log_raw:
+                self._secondary.write(text)
+            else:
+                self._write_secondary_sanitized(text)
         except BrokenPipeError:
             _PIPE_BROKEN = True
         except Exception:
@@ -2059,7 +2083,10 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
                     f"replace={action.duplicate_path}"
                 )
                 if error:
-                    msg += f" err={error}"
+                    if status_label == "SKIPPED":
+                        msg += f" reason={error}"
+                    else:
+                        msg += f" err={error}"
                 click.echo(msg)
             else:
                 click.echo(f"   [{action_num}/{total_actions}] ({pct:.0f}%) Processing: {Path(action.duplicate_path).name[:50]}")

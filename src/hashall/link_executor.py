@@ -82,6 +82,60 @@ def _fetch_file_metadata(
     )
     return cursor.fetchone()
 
+def _maybe_refresh_files_for_action(
+    conn: sqlite3.Connection,
+    action: ActionInfo,
+    mount_point: Optional[str],
+) -> None:
+    """
+    Best-effort: if canonical + duplicate now point to the same inode, update the catalog rows.
+
+    Why:
+    - After hardlinking, the duplicate path now shares inode/mtime/size with the canonical file.
+    - If we don't refresh the DB, future plans will re-detect "duplicates" that are already linked,
+      causing noisy SKIPPED actions and confusing re-plans.
+    """
+    canonical_fs = _resolve_path(action.canonical_path, mount_point)
+    duplicate_fs = _resolve_path(action.duplicate_path, mount_point)
+    try:
+        st_c = os.stat(canonical_fs)
+        st_d = os.stat(duplicate_fs)
+    except OSError:
+        return
+    if st_c.st_dev != st_d.st_dev:
+        return
+    if st_c.st_ino != st_d.st_ino:
+        return
+
+    inode = st_c.st_ino
+    size = st_c.st_size
+    mtime = st_c.st_mtime
+
+    table_name = f"files_{action.device_id}"
+    canonical_db = _db_path_for_action(action.canonical_path, mount_point)
+    duplicate_db = _db_path_for_action(action.duplicate_path, mount_point)
+
+    try:
+        conn.execute(
+            f"""
+            UPDATE {table_name}
+            SET inode = ?, size = ?, mtime = ?, last_modified_at = CURRENT_TIMESTAMP
+            WHERE path = ? AND status = 'active'
+            """,
+            (inode, size, mtime, canonical_db),
+        )
+        conn.execute(
+            f"""
+            UPDATE {table_name}
+            SET inode = ?, size = ?, mtime = ?, last_modified_at = CURRENT_TIMESTAMP
+            WHERE path = ? AND status = 'active'
+            """,
+            (inode, size, mtime, duplicate_db),
+        )
+    except sqlite3.OperationalError:
+        # Older DBs or missing per-device tables: linking still succeeded; skip refresh.
+        return
+
 
 def _write_jdupes_list(paths: list[Path]) -> tuple[Path, int]:
     tmp = tempfile.NamedTemporaryFile(prefix="hashall-jdupes-", suffix=".lst", delete=False)
@@ -852,6 +906,10 @@ def execute_plan(
             skipped += 1
 
         if not dry_run:
+            if status == "completed" or (
+                status == "skipped" and (error_message or "").lower().startswith("files are already hardlinked")
+            ):
+                _maybe_refresh_files_for_action(conn, action, plan.mount_point)
             if status == 'completed':
                 update_action_status(conn, action.id, 'completed', bytes_saved=bytes_saved)
             elif status == 'failed':
@@ -965,7 +1023,7 @@ def execute_plan(
 
             if len(paths) < 2:
                 for action, _, _ in kept:
-                    record(action, 'failed', error_message="Insufficient paths for jdupes linking")
+                    record(action, 'skipped', error_message="Insufficient unique paths for linking")
                 log_lines.append("group_status: insufficient_unique_paths")
                 log_lines.append(f"planned_list_count: {unique_paths}")
                 print(
@@ -1019,7 +1077,7 @@ def execute_plan(
             if list_count < 2:
                 list_path.unlink(missing_ok=True)
                 for action, _, _ in kept:
-                    record(action, 'failed', error_message="Insufficient unique paths for jdupes linking")
+                    record(action, 'skipped', error_message="Insufficient unique paths for linking")
                 log_lines.append("group_status: insufficient_unique_paths")
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
@@ -1029,14 +1087,14 @@ def execute_plan(
             finally:
                 list_path.unlink(missing_ok=True)
 
+            group_error = None
             if result.returncode != 0:
                 err_text = (result.stderr or result.stdout or "").strip()
                 if err_text:
                     err_text = err_text.splitlines()[-1]
-                group_error = f"jdupes returned {result.returncode}"
+                group_error = f"xargs/jdupes returned {result.returncode}"
                 if err_text:
                     group_error = f"{group_error}: {err_text}"
-                errors.append(f"Group {hash_val[:12]}: {group_error}")
             log_lines.append(f"jdupes_returncode: {result.returncode}")
             if result.stdout:
                 log_lines.append("jdupes_stdout:")
@@ -1063,6 +1121,12 @@ def execute_plan(
                     record(action, 'failed', error_message="jdupes did not link files with matching SHA256")
                     log_lines.append(f"postcheck: action={action.id} status=failed error=jdupes did not link files with matching SHA256")
                     not_linked += 1
+
+            if group_error:
+                if not_linked:
+                    errors.append(f"Group {hash_val[:12]}: {group_error}")
+                else:
+                    log_lines.append(f"warning: {group_error} (all actions linked)")
 
             if not_linked:
                 errors.append(

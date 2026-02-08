@@ -219,7 +219,7 @@ def _scan_cli(root_input: Path, db: str) -> str:
     return " ".join(parts)
 
 
-def _link_plan_cli(root_input: Path, device_alias: str) -> str:
+def _link_plan_cli(root_input: Path, device_alias: str, db: str) -> str:
     upgrade = _env_value("LINK_UPGRADE_COLLISIONS", "1")
     min_size = _env_value("LINK_MIN_SIZE", "0")
     dry_run = _env_value("LINK_DRY_RUN", "0")
@@ -230,6 +230,8 @@ def _link_plan_cli(root_input: Path, device_alias: str) -> str:
         _q(f"dedupe {root_input}"),
         "--device",
         _q(device_alias),
+        "--db",
+        _q(db),
     ]
     if upgrade != "1":
         parts.append("--no-upgrade-collisions")
@@ -352,7 +354,7 @@ def _payload_upgrade_collisions_cli(root_input: Path, db: str) -> str:
     return " ".join(parts)
 
 
-def _payload_empty_cli(root_input: Path, device_alias: str) -> str:
+def _payload_empty_cli(root_input: Path, device_alias: str, db: str) -> str:
     dry_run = _env_value("LINK_DRY_RUN", "0")
     require_hardlinks = _env_value("LINK_REQUIRE_EXISTING_HARDLINKS", "1")
     parts = [
@@ -362,6 +364,8 @@ def _payload_empty_cli(root_input: Path, device_alias: str) -> str:
         _q(f"empty payload {root_input}"),
         "--device",
         _q(device_alias),
+        "--db",
+        _q(db),
     ]
     if dry_run == "1":
         parts.append("--dry-run")
@@ -497,7 +501,7 @@ def main() -> int:
                 True,
                 f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
                 f"make link-path PATH={root_input}",
-                _link_plan_cli(root_input, device_alias),
+                _link_plan_cli(root_input, device_alias, args.db),
                 "decide which duplicates should hardlink",
             )
             scope_done = False
@@ -533,7 +537,7 @@ def main() -> int:
                 False,
                 "no plan",
                 f"make link-path PATH={root_input}",
-                _link_plan_cli(root_input, device_alias),
+                _link_plan_cli(root_input, device_alias, args.db),
                 "decide which duplicates should hardlink",
             )
             _print_block(
@@ -596,7 +600,7 @@ def main() -> int:
                 True,
                 f"plan #{plan_id} ({status}) actions={actions_total} created={created_at}",
                 f"make link-payload-empty PATH={root_input}",
-                _payload_empty_cli(root_input, device_alias),
+                _payload_empty_cli(root_input, device_alias, args.db),
                 "plan empty-file hardlinks inside payloads",
             )
             _print_block(
@@ -613,7 +617,7 @@ def main() -> int:
                 False,
                 "no plan",
                 f"make link-payload-empty PATH={root_input}",
-                _payload_empty_cli(root_input, device_alias),
+                _payload_empty_cli(root_input, device_alias, args.db),
                 "plan empty-file hardlinks inside payloads",
             )
             _print_block(
