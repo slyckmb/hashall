@@ -43,6 +43,27 @@ def _apply_with_sudo(cmd: list[str], use_sudo: bool) -> subprocess.CompletedProc
         return _run_cmd(cmd)
     return _run_cmd(["sudo"] + cmd)
 
+def resolve_plan_paths_for_permfix(
+    rows: Iterable[tuple[str, str]],
+    mount_point: Path | None,
+) -> set[Path]:
+    """
+    Expand (canonical_path, duplicate_path) DB rows into concrete filesystem paths to remediate.
+
+    Link plans store paths relative to the plan mount point. For permfix we need absolute paths
+    that exist on disk. We include both the file paths and their parent directories because
+    hardlinking requires directory write permission (rename/unlink in target dir).
+    """
+    out: set[Path] = set()
+    for canonical, duplicate in rows:
+        for raw in (canonical, duplicate):
+            p = Path(raw)
+            if not p.is_absolute() and mount_point is not None:
+                p = mount_point / p
+            out.add(p)
+            out.add(p.parent)
+    return out
+
 
 def fix_permissions(
     paths: Iterable[Path],

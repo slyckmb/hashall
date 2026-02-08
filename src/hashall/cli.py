@@ -1522,7 +1522,7 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
     from hashall.link_query import get_plan
     from hashall.link_executor import execute_plan
     from hashall.link_query import get_plan_actions
-    from hashall.permfix import fix_permissions
+    from hashall.permfix import fix_permissions, resolve_plan_paths_for_permfix
     from hashall.fs_utils import get_zfs_metadata, get_mount_source
     import subprocess
     import datetime as dt
@@ -1648,12 +1648,8 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
             cursor = conn.cursor()
             cursor.execute(query, params)
             rows = cursor.fetchall()
-            path_set = set()
-            for canonical, duplicate in rows:
-                path_set.add(Path(canonical))
-                path_set.add(Path(duplicate))
-                path_set.add(Path(canonical).parent)
-                path_set.add(Path(duplicate).parent)
+            mount_point = Path(plan.mount_point) if plan.mount_point else None
+            path_set = resolve_plan_paths_for_permfix(rows, mount_point)
 
             if plan.mount_point:
                 root_path = Path(plan.mount_point)

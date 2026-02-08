@@ -360,6 +360,22 @@ def verify_not_already_linked(canonical_path: Path, duplicate_path: Path) -> Tup
     except OSError as e:
         return False, f"Cannot stat files: {e}"
 
+def verify_parent_dir_writable(path: Path) -> Tuple[bool, Optional[str]]:
+    """
+    Verify the parent directory of a target path is writable.
+
+    jdupes performs a rename/unlink in the target directory as part of safe linking.
+    If the directory isn't writable, jdupes will fail with errors like:
+      "cannot move link target to a temporary name"
+    """
+    try:
+        parent = path.parent
+        if os.access(parent, os.W_OK | os.X_OK):
+            return True, None
+        return False, f"Directory not writable for linking: {parent}"
+    except OSError as e:
+        return False, f"Cannot check directory permissions: {e}"
+
 
 def _precheck_jdupes_action(
     conn: sqlite3.Connection,
@@ -381,6 +397,10 @@ def _precheck_jdupes_action(
     success, error = verify_not_already_linked(canonical_path, duplicate_path)
     if not success:
         return "skipped", error, canonical_path, duplicate_path
+
+    success, error = verify_parent_dir_writable(duplicate_path)
+    if not success:
+        return "failed", error, canonical_path, duplicate_path
 
     if verify_mode != "none":
         canonical_db_path = _db_path_for_action(action.canonical_path, mount_point)
