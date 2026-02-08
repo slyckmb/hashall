@@ -587,14 +587,21 @@ def payload_collisions_cmd(db, path_prefixes, limit, top):
     help="Only consider payload roots under this path (repeatable).",
 )
 @click.option(
+    "--order",
+    type=click.Choice(["cheapest", "largest"], case_sensitive=False),
+    default="cheapest",
+    show_default=True,
+    help="Processing order for collision groups (cheapest = fewest missing SHA256).",
+)
+@click.option(
     "--max-groups",
     type=int,
     default=0,
     show_default=True,
-    help="Process at most N collision groups (largest first). 0 means no limit.",
+    help="Process at most N collision groups (after ordering). 0 means no limit.",
 )
 @click.option("--dry-run", is_flag=True, help="Report what would be upgraded (no hashing/DB writes).")
-def payload_upgrade_collisions_cmd(db, path_prefixes, max_groups, dry_run):
+def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run):
     """
     Upgrade candidate duplicate payloads by backfilling missing SHA256, then computing payload_hash.
 
@@ -653,8 +660,19 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, max_groups, dry_run):
         total_bytes = sum(f.size for f in files)
         by_fast.setdefault(sig, []).append((payload_id, int(device_id), root_path, total_bytes))
 
-    collisions = [(sum(x[3] for x in roots), sig, roots) for sig, roots in by_fast.items() if len(roots) > 1]
-    collisions.sort(reverse=True, key=lambda t: t[0])
+    collisions = []
+    for sig, roots in by_fast.items():
+        if len(roots) <= 1:
+            continue
+        group_bytes = sum(x[3] for x in roots)
+        group_missing = sum(count_missing_sha256_for_path(conn, x[1], x[2]) for x in roots)
+        collisions.append((group_missing, group_bytes, sig, roots))
+
+    if order.lower() == "largest":
+        collisions.sort(reverse=True, key=lambda t: t[1])
+    else:
+        collisions.sort(key=lambda t: (t[0], t[1]))
+
     if max_groups:
         collisions = collisions[: int(max_groups)]
 
@@ -663,12 +681,13 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, max_groups, dry_run):
         print("   mode: DRY-RUN (no hashing/DB writes)")
     if prefix_paths:
         print(f"   path-prefixes: {', '.join(str(p) for p in prefix_paths)}")
+    print(f"   order: {order.lower()}")
     print(f"   collision groups: {len(collisions)}")
 
     if not collisions:
         return
 
-    total_roots = sum(len(roots) for _, _, roots in collisions)
+    total_roots = sum(len(roots) for _, _, _, roots in collisions)
     print(f"   colliding roots: {total_roots}")
 
     inode_groups_hashed = 0
@@ -676,8 +695,11 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, max_groups, dry_run):
     still_incomplete = 0
     confirmed = {}
 
-    for idx, (group_bytes, sig, roots) in enumerate(collisions, 1):
-        print(f"\n--- group {idx}/{len(collisions)} fast={sig[:16]}... roots={len(roots)} bytes={group_bytes:,} ---")
+    for idx, (group_missing, group_bytes, sig, roots) in enumerate(collisions, 1):
+        print(
+            f"\n--- group {idx}/{len(collisions)} fast={sig[:16]}... roots={len(roots)} "
+            f"bytes={group_bytes:,} missing_sha256={group_missing} ---"
+        )
 
         for payload_id, device_id, root_path, _ in roots:
             if dry_run:
