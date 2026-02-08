@@ -395,7 +395,7 @@ link-verify-scope:  ## Verify latest plan scope for PATH (optional PLAN_ID)
 	$(HASHALL_CLI) link verify-scope "$(PATH)" $$plan_arg --db "$(DB_FILE)"
 
 .PHONY: link-execute
-link-execute:  ## Execute a link plan (requires PLAN_ID). Vars: PLAN_ID, LINK_DRY_RUN, LINK_LIMIT
+link-execute:  ## Execute a link plan (requires PLAN_ID). Vars: PLAN_ID, LINK_DRY_RUN, LINK_LIMIT, LINK_LOW_PRIORITY
 	@if [ -z "$(PLAN_ID)" ]; then \
 		echo "❌ PLAN_ID is required"; \
 		exit 1; \
