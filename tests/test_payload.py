@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from hashall.payload import (
-    PayloadFile, compute_payload_hash, build_payload,
+    PayloadFile, PayloadFastFile, compute_payload_hash, compute_payload_fast_signature, build_payload,
     upsert_payload, get_torrent_siblings, Payload
 )
 from hashall.model import connect_db
@@ -94,6 +94,27 @@ def test_compute_payload_hash_incomplete():
 
     hash_result = compute_payload_hash(files)
     assert hash_result is None
+
+
+def test_compute_payload_fast_signature_deterministic():
+    files = [
+        PayloadFastFile("b.txt", 200, "qh2"),
+        PayloadFastFile("a.txt", 100, "qh1"),
+        PayloadFastFile("c.txt", 300, "qh3"),
+    ]
+    sig1 = compute_payload_fast_signature(files)
+    sig2 = compute_payload_fast_signature(files)
+    assert sig1 == sig2
+    assert sig1 is not None
+    assert len(sig1) == 64
+
+
+def test_compute_payload_fast_signature_incomplete():
+    files = [
+        PayloadFastFile("a.txt", 100, "qh1"),
+        PayloadFastFile("b.txt", 200, None),
+    ]
+    assert compute_payload_fast_signature(files) is None
 
 
 def test_build_payload_complete(test_db):

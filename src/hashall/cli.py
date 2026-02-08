@@ -447,6 +447,275 @@ def payload_siblings(torrent_hash, db):
             print(f"      Root: {torrent.root_name}")
             print()
 
+@payload.command("collisions")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--path-prefix",
+    "path_prefixes",
+    multiple=True,
+    help="Only consider payload roots under this path (repeatable).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Limit number of payload roots analyzed. 0 means no limit.",
+)
+@click.option(
+    "--top",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Show top N collision groups by size.",
+)
+def payload_collisions_cmd(db, path_prefixes, limit, top):
+    """
+    Detect candidate duplicate payloads using a fast signature (quick_hash-based).
+
+    This is a DB-only analysis pass. Use `payload upgrade-collisions` to backfill SHA256
+    for the colliding payload roots and compute confirmed payload hashes.
+    """
+    from hashall.model import connect_db
+    from hashall.payload import get_fast_files_for_path, compute_payload_fast_signature
+    from hashall.pathing import canonicalize_path, is_under
+
+    conn = connect_db(Path(db))
+
+    prefix_paths = []
+    for p in path_prefixes:
+        try:
+            prefix_paths.append(canonicalize_path(Path(p)))
+        except Exception:
+            prefix_paths.append(Path(p))
+
+    rows = conn.execute(
+        """
+        SELECT payload_id, device_id, root_path, status, payload_hash
+        FROM payloads
+        ORDER BY payload_id
+        """
+    ).fetchall()
+
+    analyzed = 0
+    skipped_prefix = 0
+    missing_in_catalog = 0
+    missing_quick = 0
+    by_fast = {}
+    group_meta = {}
+
+    for r in rows:
+        if limit and analyzed >= limit:
+            break
+
+        payload_id = r["payload_id"]
+        device_id = r["device_id"]
+        root_path = r["root_path"]
+
+        if prefix_paths:
+            try:
+                root_canon = canonicalize_path(Path(root_path))
+            except Exception:
+                root_canon = Path(root_path)
+            if not any(is_under(root_canon, pref) for pref in prefix_paths):
+                skipped_prefix += 1
+                continue
+
+        if device_id is None:
+            # Without device_id we can't reliably query per-device tables.
+            missing_in_catalog += 1
+            analyzed += 1
+            continue
+
+        files = get_fast_files_for_path(conn, int(device_id), root_path)
+        if not files:
+            missing_in_catalog += 1
+            analyzed += 1
+            continue
+
+        sig = compute_payload_fast_signature(files)
+        if sig is None:
+            missing_quick += 1
+            analyzed += 1
+            continue
+
+        total_bytes = sum(f.size for f in files)
+        by_fast.setdefault(sig, []).append((payload_id, int(device_id), root_path, total_bytes))
+        # Keep one representative metadata record for display
+        if sig not in group_meta:
+            group_meta[sig] = {"file_count": len(files), "total_bytes": total_bytes}
+        analyzed += 1
+
+    collisions = {sig: roots for sig, roots in by_fast.items() if len(roots) > 1}
+    colliding_roots = sum(len(v) for v in collisions.values())
+
+    print("🔍 Payload collisions (fast signature)")
+    print(f"   analyzed: {analyzed}")
+    if prefix_paths:
+        print(f"   skipped (path-prefix): {skipped_prefix}")
+    print(f"   missing in catalog: {missing_in_catalog}")
+    print(f"   missing quick_hash: {missing_quick}")
+    print(f"   collision groups: {len(collisions)}")
+    print(f"   colliding roots: {colliding_roots}")
+
+    if not collisions:
+        return
+
+    ranked = []
+    for sig, roots in collisions.items():
+        group_bytes = sum(x[3] for x in roots)
+        ranked.append((group_bytes, sig, roots))
+    ranked.sort(reverse=True, key=lambda t: t[0])
+
+    show = ranked[: max(0, int(top))]
+    print(f"\nTop {len(show)} groups (by total bytes):")
+    for i, (group_bytes, sig, roots) in enumerate(show, 1):
+        print(f" {i}. roots={len(roots)} bytes={group_bytes:,} fast={sig[:16]}...")
+        # Keep this short: show up to 3 roots.
+        for payload_id, device_id, root_path, _ in roots[:3]:
+            print(f"    - #{payload_id} dev={device_id} root={root_path}")
+        if len(roots) > 3:
+            print(f"    - ... and {len(roots) - 3} more")
+
+
+@payload.command("upgrade-collisions")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--path-prefix",
+    "path_prefixes",
+    multiple=True,
+    help="Only consider payload roots under this path (repeatable).",
+)
+@click.option(
+    "--max-groups",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Process at most N collision groups (largest first). 0 means no limit.",
+)
+@click.option("--dry-run", is_flag=True, help="Report what would be upgraded (no hashing/DB writes).")
+def payload_upgrade_collisions_cmd(db, path_prefixes, max_groups, dry_run):
+    """
+    Upgrade candidate duplicate payloads by backfilling missing SHA256, then computing payload_hash.
+
+    This is the payload-level analogue of "upgrade quick-hash collisions":
+    - Find colliding payload roots using fast signatures (quick_hash-based)
+    - For those roots only, hash missing SHA256 (inode-aware)
+    - Rebuild/upsert payload rows so confirmed payload_hash can be used for sibling grouping
+    """
+    from hashall.model import connect_db
+    from hashall.payload import (
+        get_fast_files_for_path,
+        compute_payload_fast_signature,
+        build_payload,
+        upsert_payload,
+        upgrade_payload_missing_sha256,
+        count_missing_sha256_for_path,
+    )
+    from hashall.pathing import canonicalize_path, is_under
+
+    conn = connect_db(Path(db))
+
+    prefix_paths = []
+    for p in path_prefixes:
+        try:
+            prefix_paths.append(canonicalize_path(Path(p)))
+        except Exception:
+            prefix_paths.append(Path(p))
+
+    payload_rows = conn.execute(
+        "SELECT payload_id, device_id, root_path FROM payloads ORDER BY payload_id"
+    ).fetchall()
+
+    by_fast = {}
+    for r in payload_rows:
+        device_id = r["device_id"]
+        root_path = r["root_path"]
+        payload_id = r["payload_id"]
+
+        if prefix_paths:
+            try:
+                root_canon = canonicalize_path(Path(root_path))
+            except Exception:
+                root_canon = Path(root_path)
+            if not any(is_under(root_canon, pref) for pref in prefix_paths):
+                continue
+
+        if device_id is None:
+            continue
+
+        files = get_fast_files_for_path(conn, int(device_id), root_path)
+        if not files:
+            continue
+        sig = compute_payload_fast_signature(files)
+        if sig is None:
+            continue
+        total_bytes = sum(f.size for f in files)
+        by_fast.setdefault(sig, []).append((payload_id, int(device_id), root_path, total_bytes))
+
+    collisions = [(sum(x[3] for x in roots), sig, roots) for sig, roots in by_fast.items() if len(roots) > 1]
+    collisions.sort(reverse=True, key=lambda t: t[0])
+    if max_groups:
+        collisions = collisions[: int(max_groups)]
+
+    print("⚡ Payload upgrade-collisions")
+    if dry_run:
+        print("   mode: DRY-RUN (no hashing/DB writes)")
+    if prefix_paths:
+        print(f"   path-prefixes: {', '.join(str(p) for p in prefix_paths)}")
+    print(f"   collision groups: {len(collisions)}")
+
+    if not collisions:
+        return
+
+    total_roots = sum(len(roots) for _, _, roots in collisions)
+    print(f"   colliding roots: {total_roots}")
+
+    inode_groups_hashed = 0
+    completed = 0
+    still_incomplete = 0
+    confirmed = {}
+
+    for idx, (group_bytes, sig, roots) in enumerate(collisions, 1):
+        print(f"\n--- group {idx}/{len(collisions)} fast={sig[:16]}... roots={len(roots)} bytes={group_bytes:,} ---")
+
+        for payload_id, device_id, root_path, _ in roots:
+            if dry_run:
+                missing = count_missing_sha256_for_path(conn, device_id, root_path)
+                print(f"   - #{payload_id} dev={device_id} missing_sha256={missing} root={root_path}")
+                continue
+
+            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=device_id)
+            inode_groups_hashed += upgraded
+
+            payload = build_payload(conn, root_path, device_id=device_id)
+            upsert_payload(conn, payload)
+
+            if payload.status == "complete" and payload.payload_hash:
+                confirmed.setdefault(payload.payload_hash, []).append((payload_id, root_path))
+                completed += 1
+            else:
+                still_incomplete += 1
+
+    if dry_run:
+        return
+
+    print("\n✅ Upgrade complete")
+    print(f"   inode-groups hashed: {inode_groups_hashed}")
+    print(f"   payloads complete: {completed}")
+    print(f"   payloads still incomplete: {still_incomplete}")
+
+    confirmed_dupes = {h: roots for h, roots in confirmed.items() if len(roots) > 1}
+    print(f"   confirmed duplicate payloads: {len(confirmed_dupes)}")
+    if confirmed_dupes:
+        print("\nTop confirmed dupes:")
+        for h, roots in list(confirmed_dupes.items())[:10]:
+            print(f" - hash={h[:16]}... roots={len(roots)}")
+            for payload_id, root_path in roots[:3]:
+                print(f"    - #{payload_id} {root_path}")
+            if len(roots) > 3:
+                print(f"    - ... and {len(roots) - 3} more")
+
 
 @cli.command("stats")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")

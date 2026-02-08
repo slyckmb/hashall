@@ -36,6 +36,7 @@ PAYLOAD_PATH_PREFIXES ?=
 PAYLOAD_LIMIT ?= 0
 PAYLOAD_DRY_RUN ?= 0
 PAYLOAD_UPGRADE_MISSING ?= 0
+PAYLOAD_MAX_GROUPS ?= 0
 
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
@@ -103,7 +104,7 @@ help:  ## Show this help message
 	@grep -E '^(link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -446,6 +447,19 @@ payload-sync:  ## Sync qBittorrent payloads into catalog
 	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
 	if [ "$(PAYLOAD_UPGRADE_MISSING)" = "1" ]; then args="$$args --upgrade-missing"; fi; \
 	$(HASHALL_CLI) payload sync --db "$(DB_FILE)" $$args
+
+.PHONY: payload-collisions
+payload-collisions:  ## Detect candidate duplicate payloads under PATH (fast signature)
+	@args="--path-prefix \"$(PATH)\""; \
+	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then args="$$args --limit $(PAYLOAD_LIMIT)"; fi; \
+	$(HASHALL_CLI) payload collisions --db "$(DB_FILE)" $$args
+
+.PHONY: payload-upgrade-collisions
+payload-upgrade-collisions:  ## Upgrade candidate duplicate payloads under PATH (hash missing SHA256 + compute payload_hash)
+	@args="--path-prefix \"$(PATH)\""; \
+	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	if [ "$(PAYLOAD_MAX_GROUPS)" != "" ] && [ "$(PAYLOAD_MAX_GROUPS)" != "0" ]; then args="$$args --max-groups $(PAYLOAD_MAX_GROUPS)"; fi; \
+	$(HASHALL_CLI) payload upgrade-collisions --db "$(DB_FILE)" $$args
 
 # ============================================================================
 # Rehome (Payload Moves)

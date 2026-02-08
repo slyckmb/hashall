@@ -63,6 +63,13 @@ class PayloadFile:
     sha256: Optional[str]  # None if not yet scanned
 
 @dataclass
+class PayloadFastFile:
+    """Represents a file within a payload for fast signature purposes."""
+    relative_path: str
+    size: int
+    quick_hash: Optional[str]  # None if not yet scanned (older DB rows)
+
+@dataclass
 class PayloadFileRow:
     """Represents a file row within a payload (including table path/inode)."""
     path: str
@@ -130,6 +137,29 @@ def compute_payload_hash(files: List[PayloadFile]) -> Optional[str]:
         # Encode as: path|size|sha256\n
         entry = f"{f.relative_path}|{f.size}|{f.sha256}\n"
         hasher.update(entry.encode('utf-8'))
+
+    return hasher.hexdigest()
+
+def compute_payload_fast_signature(files: List[PayloadFastFile]) -> Optional[str]:
+    """
+    Compute deterministic "fast signature" for a payload from quick_hashes.
+
+    This is used to find candidate duplicate payloads cheaply, without requiring SHA256.
+    If any file is missing quick_hash, returns None.
+    """
+    for f in files:
+        if f.quick_hash is None:
+            return None
+
+    sorted_files = sorted(
+        files,
+        key=lambda f: (f.relative_path, f.size, f.quick_hash),
+    )
+
+    hasher = hashlib.sha256()
+    for f in sorted_files:
+        entry = f"{f.relative_path}|{f.size}|{f.quick_hash}\n"
+        hasher.update(entry.encode("utf-8"))
 
     return hasher.hexdigest()
 
@@ -216,6 +246,112 @@ def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str)
         ))
 
     return files
+
+def get_fast_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> List[PayloadFastFile]:
+    """
+    Get all files under a given root path from the per-device table, using quick_hash.
+    """
+    root_path = root_path.rstrip("/")
+    table_name = f"files_{device_id}"
+
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name=?
+        """,
+        (table_name,),
+    )
+    if not cursor.fetchone():
+        return []
+
+    def _table_exists(name: str) -> bool:
+        return conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone() is not None
+
+    mount_point = preferred_mount = None
+    if _table_exists("devices"):
+        mount_point, preferred_mount = _get_mount_info(conn, device_id)
+
+    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return []
+    rel_root_str = str(rel_root)
+
+    if rel_root_str == ".":
+        rows = conn.execute(
+            f"SELECT path, size, quick_hash FROM {table_name} WHERE status = 'active' ORDER BY path"
+        ).fetchall()
+    else:
+        query = f"""
+            SELECT path, size, quick_hash
+            FROM {table_name}
+            WHERE status = 'active' AND (path = ? OR path LIKE ?)
+            ORDER BY path
+        """
+        pattern = f"{rel_root_str}/%"
+        rows = conn.execute(query, (rel_root_str, pattern)).fetchall()
+
+    files: List[PayloadFastFile] = []
+    for row in rows:
+        path = row[0]
+        if rel_root_str == ".":
+            relative_path = path
+        elif path.startswith(rel_root_str + "/"):
+            relative_path = path[len(rel_root_str) + 1 :]
+        elif path == rel_root_str:
+            relative_path = Path(path).name
+        else:
+            relative_path = path
+
+        files.append(
+            PayloadFastFile(
+                relative_path=relative_path,
+                size=row[1],
+                quick_hash=row[2],
+            )
+        )
+
+    return files
+
+def count_missing_sha256_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> int:
+    """
+    Count files under root_path that are missing SHA256 in the per-device table.
+
+    Uses the same root resolution as get_files_for_path/build_payload.
+    """
+    table_name = f"files_{device_id}"
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if not cursor.fetchone():
+        return 0
+
+    mount_point, preferred_mount = _get_mount_info(conn, device_id)
+    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return 0
+    rel_root_str = str(rel_root)
+
+    if rel_root_str == ".":
+        return conn.execute(
+            f"SELECT COUNT(*) FROM {table_name} WHERE status='active' AND sha256 IS NULL"
+        ).fetchone()[0]
+
+    pattern = f"{rel_root_str}/%"
+    return conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table_name}
+        WHERE status='active' AND sha256 IS NULL
+          AND (path = ? OR path LIKE ?)
+        """,
+        (rel_root_str, pattern),
+    ).fetchone()[0]
 
 
 def get_payload_file_rows(
