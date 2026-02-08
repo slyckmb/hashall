@@ -218,9 +218,23 @@ def payload():
 @click.option("--qbit-pass", default=None, help="qBittorrent password")
 @click.option("--category", default=None, help="Filter torrents by category")
 @click.option("--tag", default=None, help="Filter torrents by tag")
+@click.option(
+    "--path-prefix",
+    "path_prefixes",
+    multiple=True,
+    help="Only process torrents whose payload root is under this path (repeatable).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Limit number of torrents processed (after filtering). 0 means no limit.",
+)
+@click.option("--dry-run", is_flag=True, help="Compute payload mapping but do not write to DB.")
 @click.option("--upgrade-missing", is_flag=True,
               help="Hash missing SHA256s for payload files (inode-aware).")
-def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, upgrade_missing):
+def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, limit, dry_run, upgrade_missing):
     """
     Sync torrent instances from qBittorrent and map to payloads.
 
@@ -235,9 +249,11 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, upgrade_miss
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
         upgrade_payload_missing_sha256
     )
+    from hashall.pathing import canonicalize_path, is_under
 
     # Connect to database
-    conn = connect_db(Path(db))
+    # In dry-run mode, open read-only and skip migrations to guarantee "no writes".
+    conn = connect_db(Path(db), read_only=dry_run, apply_migrations=not dry_run)
 
     # Connect to qBittorrent
     print("🔌 Connecting to qBittorrent...")
@@ -255,6 +271,17 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, upgrade_miss
 
     print("✅ Connected to qBittorrent")
 
+    if dry_run and upgrade_missing:
+        print("⚠️  DRY-RUN: ignoring --upgrade-missing (would modify DB)")
+        upgrade_missing = False
+
+    prefix_paths = []
+    for p in path_prefixes:
+        try:
+            prefix_paths.append(canonicalize_path(Path(p)))
+        except Exception:
+            prefix_paths.append(Path(p))
+
     # Get torrents
     print("📥 Fetching torrents...")
     torrents = qbit.get_torrents(category=category, tag=tag)
@@ -263,37 +290,55 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, upgrade_miss
     # Process each torrent
     synced_count = 0
     incomplete_count = 0
+    missing_in_catalog = 0
+    skipped_prefix = 0
+    processed = 0
 
     for torrent in torrents:
-        print(f"\n🔄 Processing: {torrent.name[:50]}...")
-        print(f"   Hash: {torrent.hash}")
+        if limit and processed >= limit:
+            break
 
         # Get torrent root path
         root_path = qbit.get_torrent_root_path(torrent)
+        if prefix_paths:
+            try:
+                root_canon = canonicalize_path(Path(root_path))
+            except Exception:
+                root_canon = Path(root_path)
+            if not any(is_under(root_canon, pref) for pref in prefix_paths):
+                skipped_prefix += 1
+                continue
+
+        print(f"\n🔄 Processing: {torrent.name[:50]}...")
+        print(f"   Hash: {torrent.hash}")
         print(f"   Path: {root_path}")
 
         # Build payload from database
         payload = build_payload(conn, root_path, device_id=None)
-        if payload.status != 'complete' and upgrade_missing:
+        if payload.file_count == 0:
+            missing_in_catalog += 1
+
+        if (not dry_run) and payload.status != 'complete' and upgrade_missing:
             upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id)
             if upgraded > 0:
                 payload = build_payload(conn, root_path, device_id=payload.device_id)
 
-        # Insert/update payload
-        payload_id = upsert_payload(conn, payload)
+        if not dry_run:
+            # Insert/update payload
+            payload_id = upsert_payload(conn, payload)
 
-        # Insert/update torrent instance
-        torrent_instance = TorrentInstance(
-            torrent_hash=torrent.hash,
-            payload_id=payload_id,
-            device_id=None,  # Could be extracted from stat() if needed
-            save_path=torrent.save_path,
-            root_name=torrent.name,
-            category=torrent.category,
-            tags=torrent.tags,
-            last_seen_at=time.time()
-        )
-        upsert_torrent_instance(conn, torrent_instance)
+            # Insert/update torrent instance
+            torrent_instance = TorrentInstance(
+                torrent_hash=torrent.hash,
+                payload_id=payload_id,
+                device_id=None,  # Could be extracted from stat() if needed
+                save_path=torrent.save_path,
+                root_name=torrent.name,
+                category=torrent.category,
+                tags=torrent.tags,
+                last_seen_at=time.time()
+            )
+            upsert_torrent_instance(conn, torrent_instance)
 
         if payload.status == 'complete':
             print(f"   ✅ Payload complete (hash: {payload.payload_hash[:16]}...)")
@@ -302,10 +347,18 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, upgrade_miss
         else:
             print(f"   ⚠️  Payload incomplete (missing SHA256s)")
             incomplete_count += 1
+        processed += 1
 
-    print(f"\n✅ Sync complete!")
-    print(f"   {synced_count} complete payloads")
-    print(f"   {incomplete_count} incomplete payloads")
+    if dry_run:
+        print(f"\n✅ DRY-RUN complete (no DB changes)")
+    else:
+        print(f"\n✅ Sync complete!")
+    print(f"   processed: {processed}")
+    if prefix_paths:
+        print(f"   skipped (path-prefix): {skipped_prefix}")
+    print(f"   complete payloads: {synced_count}")
+    print(f"   incomplete payloads: {incomplete_count}")
+    print(f"   missing in catalog: {missing_in_catalog}")
 
 
 @payload.command("show")

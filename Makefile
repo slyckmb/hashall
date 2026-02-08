@@ -29,6 +29,14 @@ LINK_FIX_PERMS ?= 1
 LINK_FIX_ACL ?= 0
 LINK_FIX_PERMS_LOG ?=
 
+# Payload sync defaults (override via make VAR=value)
+PAYLOAD_CATEGORY ?=
+PAYLOAD_TAG ?=
+PAYLOAD_PATH_PREFIXES ?=
+PAYLOAD_LIMIT ?= 0
+PAYLOAD_DRY_RUN ?= 0
+PAYLOAD_UPGRADE_MISSING ?= 0
+
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
 WORKERS ?=
@@ -430,7 +438,14 @@ workflow:  ## Show workflow done/todo for PATH
 
 .PHONY: payload-sync
 payload-sync:  ## Sync qBittorrent payloads into catalog
-	@$(HASHALL_CLI) payload sync --db "$(DB_FILE)"
+	@args=""; \
+	if [ -n "$(PAYLOAD_CATEGORY)" ]; then args="$$args --category \"$(PAYLOAD_CATEGORY)\""; fi; \
+	if [ -n "$(PAYLOAD_TAG)" ]; then args="$$args --tag \"$(PAYLOAD_TAG)\""; fi; \
+	for p in $(PAYLOAD_PATH_PREFIXES); do args="$$args --path-prefix \"$$p\""; done; \
+	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then args="$$args --limit $(PAYLOAD_LIMIT)"; fi; \
+	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	if [ "$(PAYLOAD_UPGRADE_MISSING)" = "1" ]; then args="$$args --upgrade-missing"; fi; \
+	$(HASHALL_CLI) payload sync --db "$(DB_FILE)" $$args
 
 # ============================================================================
 # Rehome (Payload Moves)

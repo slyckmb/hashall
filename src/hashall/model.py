@@ -4,9 +4,25 @@ import json
 from dataclasses import dataclass
 from typing import List
 from pathlib import Path
+from urllib.parse import quote
 
-def connect_db(path: Path):
-    from hashall.migrate import apply_migrations  # Lazy import
+def connect_db(path: Path, read_only: bool = False, apply_migrations: bool = True):
+    """
+    Connect to the catalog DB.
+
+    By default this opens the DB read-write, enables WAL, and applies migrations.
+    For analysis-only / dry-run workflows, use read_only=True to avoid *any* DB writes.
+    """
+    from hashall.migrate import apply_migrations as _apply_migrations  # Lazy import
+
+    if read_only:
+        # Use SQLite URI mode=ro so SQLite doesn't attempt to create/modify files.
+        # Note: for paths with spaces/special chars we percent-encode.
+        uri = f"file:{quote(str(path), safe='/')}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=30.0)
 
@@ -18,7 +34,8 @@ def connect_db(path: Path):
     conn.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
 
     conn.row_factory = sqlite3.Row
-    apply_migrations(path, Path(__file__).parent / "migrations")
+    if apply_migrations:
+        _apply_migrations(path, Path(__file__).parent / "migrations")
     return conn
 
 def init_db_schema(conn):
