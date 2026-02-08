@@ -24,6 +24,7 @@ LINK_MIN_SIZE ?= 0
 LINK_DRY_RUN ?= 0
 LINK_LIMIT ?= 0
 LINK_REQUIRE_EXISTING_HARDLINKS ?= 1
+LINK_LOW_PRIORITY ?= 0
 
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
@@ -402,6 +403,7 @@ link-execute:  ## Execute a link plan (requires PLAN_ID). Vars: PLAN_ID, LINK_DR
 	args=""; \
 	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
 	if [ "$(LINK_LIMIT)" != "0" ] && [ -n "$(LINK_LIMIT)" ]; then args="$$args --limit $(LINK_LIMIT)"; fi; \
+	if [ "$(LINK_LOW_PRIORITY)" = "1" ]; then args="$$args --low-priority"; fi; \
 	$(HASHALL_CLI) link execute $(PLAN_ID) $$args --db "$(DB_FILE)"
 
 .PHONY: link-payload-empty

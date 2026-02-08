@@ -6,6 +6,8 @@ import click
 import time
 import os
 import sys
+import shutil
+import subprocess
 from pathlib import Path
 from hashall.scan import scan_path
 from hashall.export import export_json
@@ -20,6 +22,24 @@ _LOG_FILE = None
 _LOG_PATH = None
 _RUN_HEADER_EMITTED = False
 _PIPE_BROKEN = False
+
+
+def _apply_low_priority() -> None:
+    pid = os.getpid()
+    try:
+        os.nice(15)
+        click.echo("🐢 Low priority: nice +15")
+    except OSError as e:
+        click.echo(f"⚠️  Could not set nice: {e}")
+    try:
+        ionice = shutil.which("ionice")
+        if ionice:
+            subprocess.run([ionice, "-c3", "-p", str(pid)], check=False)
+            click.echo("🐢 Low priority: ionice idle")
+        else:
+            click.echo("⚠️  ionice not found; skipping IO priority")
+    except Exception as e:
+        click.echo(f"⚠️  Could not set ionice: {e}")
 
 
 class _TeeStream:
@@ -1445,9 +1465,11 @@ def link_show_plan_cmd(plan_id, db, limit, format):
               help="Use a ZFS snapshot for rollback when available (recommended).")
 @click.option("--snapshot-prefix", default="hashall-link",
               help="Prefix for ZFS snapshot names.")
+@click.option("--low-priority/--normal-priority", default=False,
+              help="Lower CPU/IO priority for this run (nice + ionice).")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
 def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdupes_log_dir,
-                     snapshot, snapshot_prefix, yes):
+                     snapshot, snapshot_prefix, low_priority, yes):
     """
     Execute a deduplication plan.
 
@@ -1477,6 +1499,9 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
 
         # Execute limited batch (test on 10 files first)
         hashall link execute 1 --limit 10
+
+        # Low priority (nice + ionice)
+        hashall link execute 1 --low-priority
 
         # Paranoid mode (full hash, slow but 100% certain)
         hashall link execute 1 --verify paranoid
@@ -1594,6 +1619,9 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
                     conn.close()
                     return 0
 
+        if low_priority:
+            _apply_low_priority()
+
         # Progress callback
         def progress_callback(action_num, total_actions, action, status=None, error=None):
             pct = (action_num / total_actions) * 100
@@ -1651,7 +1679,8 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
             limit=limit,
             progress_callback=progress_callback,
             use_jdupes=jdupes,
-            jdupes_log_dir=Path(jdupes_log_dir).expanduser() if jdupes_log_dir else None
+            jdupes_log_dir=Path(jdupes_log_dir).expanduser() if jdupes_log_dir else None,
+            low_priority=low_priority
         )
 
         # Show results

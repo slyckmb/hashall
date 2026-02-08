@@ -105,8 +105,13 @@ def _write_jdupes_list(paths: list[Path]) -> tuple[Path, int]:
         raise
 
 
-def _run_jdupes(jdupes_cmd: str, list_path: Path) -> subprocess.CompletedProcess:
-    cmd = [
+def _run_jdupes(jdupes_cmd: str, list_path: Path, low_priority: bool = False) -> subprocess.CompletedProcess:
+    cmd = []
+    if low_priority:
+        ionice = shutil.which("ionice")
+        if ionice:
+            cmd.extend([ionice, "-c3", "--"])
+    cmd.extend([
         "xargs",
         "-0",
         "-a",
@@ -120,7 +125,7 @@ def _run_jdupes(jdupes_cmd: str, list_path: Path) -> subprocess.CompletedProcess
         "fullhash",
         "-q",
         "--",
-    ]
+    ])
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
@@ -721,7 +726,8 @@ def execute_plan(
     progress_callback=None,
     use_jdupes: bool = True,
     jdupes_path: Optional[str] = None,
-    jdupes_log_dir: Optional[Path] = None
+    jdupes_log_dir: Optional[Path] = None,
+    low_priority: bool = False
 ) -> ExecutionResult:
     """
     Execute a deduplication plan.
@@ -740,6 +746,7 @@ def execute_plan(
         use_jdupes: If True, use jdupes for byte-for-byte verification + linking
         jdupes_path: Optional explicit path to jdupes binary
         jdupes_log_dir: Optional directory for per-group jdupes logs
+        low_priority: If True, run jdupes with low IO priority (ionice idle)
 
     Returns:
         ExecutionResult with statistics
@@ -998,7 +1005,7 @@ def execute_plan(
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
                 continue
             try:
-                result = _run_jdupes(jdupes_cmd, list_path)
+                result = _run_jdupes(jdupes_cmd, list_path, low_priority=low_priority)
             finally:
                 list_path.unlink(missing_ok=True)
 
