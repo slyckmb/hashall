@@ -20,6 +20,8 @@ def connect_db(path: Path, read_only: bool = False, apply_migrations: bool = Tru
         # Note: for paths with spaces/special chars we percent-encode.
         uri = f"file:{quote(str(path), safe='/')}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+        # Avoid temp-file usage in constrained environments (large GROUP BY / ORDER BY queries).
+        conn.execute("PRAGMA temp_store=MEMORY")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -32,6 +34,8 @@ def connect_db(path: Path, read_only: bool = False, apply_migrations: bool = Tru
     # - Better performance for concurrent scans
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
+    # Prefer in-memory temp storage to avoid temp-file open failures on some systems.
+    conn.execute("PRAGMA temp_store=MEMORY")
 
     conn.row_factory = sqlite3.Row
     if apply_migrations:
