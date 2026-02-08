@@ -1666,18 +1666,23 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
             else:
                 log_path = DEFAULT_PERMS_LOG_DIR / f"plan-{plan_id}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
 
-            click.echo(f"🧰 Perm fix: group={root_group} ({root_gid})")
+            apply_perms = not dry_run
+            click.echo(f"🧰 Perm fix ({'apply' if apply_perms else 'check-only'}): group={root_group} ({root_gid})")
             summary, written = fix_permissions(
                 sorted(path_set, key=lambda p: str(p)),
                 root_gid,
                 root_uid,
+                apply=apply_perms,
                 fix_owner_root=True,
                 fix_acl=fix_acl,
-                use_sudo=True,
+                use_sudo=apply_perms,
                 log_path=log_path,
                 root_label=str(root_path),
             )
-            click.echo(f"   Checked: {summary.checked:,} Changed: {summary.changed:,} Failed: {summary.failed:,}")
+            if apply_perms:
+                click.echo(f"   Checked: {summary.checked:,} Changed: {summary.changed:,} Failed: {summary.failed:,}")
+            else:
+                click.echo(f"   Checked: {summary.checked:,} Would change: {summary.changed:,} Failed: {summary.failed:,}")
             if written:
                 click.echo(f"   Log: {written}")
             if summary.failed:

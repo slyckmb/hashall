@@ -3,7 +3,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from hashall.permfix import resolve_plan_paths_for_permfix
+from hashall.permfix import resolve_plan_paths_for_permfix, fix_permissions
 from hashall.link_executor import verify_parent_dir_writable
 
 
@@ -51,3 +51,23 @@ def test_verify_parent_dir_writable():
         finally:
             os.chmod(td_path, stat.S_IRWXU)
 
+
+def test_fix_permissions_apply_false_does_not_modify():
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "subdir"
+        d.mkdir()
+        os.chmod(d, 0o555)
+        before = d.stat().st_mode & 0o7777
+        try:
+            summary, _ = fix_permissions(
+                [d],
+                target_gid=os.getgid(),
+                target_uid=os.getuid(),
+                apply=False,
+                use_sudo=False,
+            )
+            after = d.stat().st_mode & 0o7777
+            assert before == after
+            assert summary.changed == 1
+        finally:
+            os.chmod(d, 0o755)

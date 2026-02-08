@@ -70,6 +70,7 @@ def fix_permissions(
     target_gid: int,
     target_uid: int,
     *,
+    apply: bool = True,
     fix_owner_root: bool = True,
     fix_acl: bool = False,
     use_sudo: bool = True,
@@ -126,43 +127,44 @@ def fix_permissions(
                 summary.skipped += 1
                 continue
 
-            # Apply changes
-            if "chown" in actions or "chgrp" in actions:
-                owner = str(before["uid"])
-                group = str(before["gid"])
-                if "chown" in actions:
-                    owner = str(target_uid)
-                if "chgrp" in actions:
-                    group = str(target_gid)
-                try:
-                    os.chown(path, int(owner), int(group))
-                except PermissionError:
-                    used_sudo = True
-                    result = _apply_with_sudo(["chown", f"{owner}:{group}", str(path)], use_sudo)
+            if apply:
+                # Apply changes
+                if "chown" in actions or "chgrp" in actions:
+                    owner = str(before["uid"])
+                    group = str(before["gid"])
+                    if "chown" in actions:
+                        owner = str(target_uid)
+                    if "chgrp" in actions:
+                        group = str(target_gid)
+                    try:
+                        os.chown(path, int(owner), int(group))
+                    except PermissionError:
+                        used_sudo = True
+                        result = _apply_with_sudo(["chown", f"{owner}:{group}", str(path)], use_sudo)
+                        if result.returncode != 0:
+                            raise PermissionError(result.stderr.strip() or result.stdout.strip())
+
+                if "chmod" in actions:
+                    try:
+                        os.chmod(path, desired_mode)
+                    except PermissionError:
+                        used_sudo = True
+                        result = _apply_with_sudo(["chmod", oct(desired_mode)[2:], str(path)], use_sudo)
+                        if result.returncode != 0:
+                            raise PermissionError(result.stderr.strip() or result.stdout.strip())
+
+                if "setfacl" in actions:
+                    setfacl = shutil.which("setfacl")
+                    if not setfacl:
+                        raise PermissionError("setfacl not found")
+                    acl_spec = f"g:{gid_name}:rwx"
+                    result = _apply_with_sudo(
+                        [setfacl, "-m", acl_spec, "-d", acl_spec, str(path)], use_sudo
+                    )
                     if result.returncode != 0:
                         raise PermissionError(result.stderr.strip() or result.stdout.strip())
 
-            if "chmod" in actions:
-                try:
-                    os.chmod(path, desired_mode)
-                except PermissionError:
-                    used_sudo = True
-                    result = _apply_with_sudo(["chmod", oct(desired_mode)[2:], str(path)], use_sudo)
-                    if result.returncode != 0:
-                        raise PermissionError(result.stderr.strip() or result.stdout.strip())
-
-            if "setfacl" in actions:
-                setfacl = shutil.which("setfacl")
-                if not setfacl:
-                    raise PermissionError("setfacl not found")
-                acl_spec = f"g:{gid_name}:rwx"
-                result = _apply_with_sudo(
-                    [setfacl, "-m", acl_spec, "-d", acl_spec, str(path)], use_sudo
-                )
-                if result.returncode != 0:
-                    raise PermissionError(result.stderr.strip() or result.stdout.strip())
-
-            after = _stat_info(path)
+            after = _stat_info(path) if apply else before
             summary.changed += 1
             changes.append({
                 "path": str(path),
@@ -171,6 +173,7 @@ def fix_permissions(
                 "after": after,
                 "actions": actions,
                 "used_sudo": used_sudo,
+                "planned_only": not apply,
             })
 
         except Exception as exc:
@@ -187,6 +190,7 @@ def fix_permissions(
             "root": root_label,
             "target_group": {"gid": target_gid, "name": gid_name},
             "target_owner": {"uid": target_uid, "name": uid_name},
+            "apply": apply,
             "fix_acl": fix_acl,
             "summary": summary.__dict__,
             "changes": changes,
