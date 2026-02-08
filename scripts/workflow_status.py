@@ -143,6 +143,21 @@ def _payload_counts(conn: sqlite3.Connection, root: Path, device_id: int) -> tup
                 complete += 1
     return total, complete
 
+def _payload_root_counts(conn: sqlite3.Connection, root: Path) -> tuple[int, int]:
+    rows = conn.execute("SELECT root_path, status FROM payloads").fetchall()
+    total = 0
+    complete = 0
+    for root_path, status in rows:
+        try:
+            payload_root = Path(root_path)
+        except Exception:
+            continue
+        if payload_root == root or is_under(payload_root, root):
+            total += 1
+            if status == "complete":
+                complete += 1
+    return total, complete
+
 
 def _colorize(text: str, code: str, enabled: bool) -> str:
     if not enabled:
@@ -274,6 +289,68 @@ def _link_execute_cli(db: str, plan_id: int | None) -> str:
 def _payload_sync_cli(db: str) -> str:
     return " ".join([_hashall_cli(), "payload", "sync", "--db", _q(db)])
 
+def _payload_sync_cli_for_root(db: str, root_input: Path) -> str:
+    category = os.getenv("PAYLOAD_CATEGORY", "")
+    tag = os.getenv("PAYLOAD_TAG", "")
+    limit = os.getenv("PAYLOAD_LIMIT", "0")
+    dry_run = os.getenv("PAYLOAD_DRY_RUN", "0")
+    upgrade_missing = os.getenv("PAYLOAD_UPGRADE_MISSING", "0")
+    parts = [
+        _hashall_cli(),
+        "payload",
+        "sync",
+        "--db",
+        _q(db),
+        "--path-prefix",
+        _q(str(root_input)),
+    ]
+    if category:
+        parts.extend(["--category", _q(category)])
+    if tag:
+        parts.extend(["--tag", _q(tag)])
+    if limit not in ("", "0"):
+        parts.extend(["--limit", str(limit)])
+    if dry_run == "1":
+        parts.append("--dry-run")
+    if upgrade_missing == "1":
+        parts.append("--upgrade-missing")
+    return " ".join(parts)
+
+
+def _payload_collisions_cli(root_input: Path, db: str) -> str:
+    limit = os.getenv("PAYLOAD_LIMIT", "0")
+    parts = [
+        _hashall_cli(),
+        "payload",
+        "collisions",
+        "--db",
+        _q(db),
+        "--path-prefix",
+        _q(str(root_input)),
+    ]
+    if limit not in ("", "0"):
+        parts.extend(["--limit", str(limit)])
+    return " ".join(parts)
+
+
+def _payload_upgrade_collisions_cli(root_input: Path, db: str) -> str:
+    dry_run = os.getenv("PAYLOAD_DRY_RUN", "0")
+    max_groups = os.getenv("PAYLOAD_MAX_GROUPS", "0")
+    parts = [
+        _hashall_cli(),
+        "payload",
+        "upgrade-collisions",
+        "--db",
+        _q(db),
+        "--path-prefix",
+        _q(str(root_input)),
+    ]
+    if max_groups not in ("", "0"):
+        parts.extend(["--max-groups", str(max_groups)])
+    if dry_run == "1":
+        parts.append("--dry-run")
+    return " ".join(parts)
+
 
 def _payload_empty_cli(root_input: Path, device_alias: str) -> str:
     dry_run = _env_value("LINK_DRY_RUN", "0")
@@ -291,6 +368,32 @@ def _payload_empty_cli(root_input: Path, device_alias: str) -> str:
     if require_hardlinks != "1":
         parts.append("--no-require-existing-hardlinks")
     return " ".join(parts)
+
+def _payload_sync_stats(conn: sqlite3.Connection, root: Path) -> tuple[int, int, int]:
+    """
+    Return (instances, unique_payloads, complete_payloads) under root.
+    """
+    rows = conn.execute(
+        """
+        SELECT p.root_path, p.status
+        FROM torrent_instances ti
+        JOIN payloads p ON p.payload_id = ti.payload_id
+        """
+    ).fetchall()
+    instances = 0
+    payloads = set()
+    complete = set()
+    for root_path, status in rows:
+        try:
+            payload_root = Path(root_path)
+        except Exception:
+            continue
+        if payload_root == root or is_under(payload_root, root):
+            instances += 1
+            payloads.add(root_path)
+            if status == "complete":
+                complete.add(root_path)
+    return instances, len(payloads), len(complete)
 
 
 def _print_block(
@@ -450,9 +553,10 @@ def main() -> int:
                 "apply the plan (or dry-run first)",
             )
 
-        total_payloads, complete_payloads = _payload_counts(conn, canonical_root, device_id)
-        if complete_payloads > 0:
-            payload_status = f"complete={complete_payloads} total={total_payloads}"
+        total_payloads, complete_payloads = _payload_root_counts(conn, canonical_root)
+        instances, synced_payloads, synced_complete = _payload_sync_stats(conn, canonical_root)
+        if instances > 0:
+            payload_status = f"instances={instances} payloads={synced_payloads} complete={synced_complete}"
             payload_done = True
         else:
             payload_status = "not synced"
@@ -461,9 +565,27 @@ def main() -> int:
             "payload sync",
             payload_done,
             payload_status,
-            "make payload-sync",
-            _payload_sync_cli(args.db),
-            "map torrents to payloads",
+            f"make payload-sync PAYLOAD_PATH_PREFIXES={root_input}",
+            _payload_sync_cli_for_root(args.db, root_input),
+            "sync torrents under this root to payloads",
+        )
+
+        _print_block(
+            "payload coll",
+            False,
+            f"payloads={total_payloads} complete={complete_payloads}",
+            f"make payload-collisions PATH={root_input}",
+            _payload_collisions_cli(root_input, args.db),
+            "find candidate duplicate payloads (fast signature)",
+        )
+
+        _print_block(
+            "payload upg",
+            False,
+            "pending",
+            f"make payload-upgrade-collisions PATH={root_input}",
+            _payload_upgrade_collisions_cli(root_input, args.db),
+            "hash missing SHA256 for colliding payloads; compute confirmed payload_hash",
         )
 
         empty_plan_row = _find_recent_empty_plan(conn, device_id, rel_root_str)
