@@ -262,6 +262,9 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     if not qbit.test_connection():
         print("❌ Failed to connect to qBittorrent. Check URL and credentials.")
         print(f"   URL: {qbit.base_url}")
+        err = getattr(qbit, "last_error", None)
+        if err:
+            print(f"   Error: {err}")
         print("   Hint: uses QBITTORRENT_API_URL and /mnt/config/secrets/qbittorrent/api.env")
         return
 
@@ -707,6 +710,9 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run
                 print(f"   - #{payload_id} dev={device_id} missing_sha256={missing} root={root_path}")
                 continue
 
+            missing_before = count_missing_sha256_for_path(conn, device_id, root_path)
+            print(f"   - #{payload_id} dev={device_id} missing_sha256={missing_before} root={root_path}")
+
             upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=device_id)
             inode_groups_hashed += upgraded
 
@@ -716,8 +722,13 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run
             if payload.status == "complete" and payload.payload_hash:
                 confirmed.setdefault(payload.payload_hash, []).append((payload_id, root_path))
                 completed += 1
+                print(
+                    f"     -> complete hash={payload.payload_hash[:16]}... "
+                    f"files={payload.file_count} bytes={payload.total_bytes:,} upgraded_inodes={upgraded}"
+                )
             else:
                 still_incomplete += 1
+                print(f"     -> incomplete upgraded_inodes={upgraded}")
 
     if dry_run:
         return

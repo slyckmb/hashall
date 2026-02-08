@@ -58,6 +58,7 @@ class QBittorrentClient:
         self.password = password
         self.session = requests.Session()
         self._authenticated = False
+        self.last_error: Optional[str] = None
 
     def login(self) -> bool:
         """
@@ -73,9 +74,12 @@ class QBittorrentClient:
             )
             if response.text == "Ok.":
                 self._authenticated = True
+                self.last_error = None
                 return True
+            self.last_error = f"login failed: {response.text}"
             return False
         except requests.RequestException as e:
+            self.last_error = str(e)
             print(f"⚠️ qBittorrent login failed: {e}")
             return False
 
@@ -333,8 +337,10 @@ class QBittorrentClient:
                 timeout=5
             )
             response.raise_for_status()
+            self.last_error = None
             return True
-        except requests.RequestException:
+        except requests.RequestException as e:
+            self.last_error = str(e)
             return False
 
 
