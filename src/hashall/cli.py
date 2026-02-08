@@ -8,6 +8,7 @@ import os
 import sys
 import shutil
 import subprocess
+import grp
 from pathlib import Path
 from hashall.scan import scan_path
 from hashall.export import export_json
@@ -16,6 +17,7 @@ from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
 DEFAULT_JDUPES_LOG_DIR = Path.home() / ".logs" / "hashall" / "jdupes"
+DEFAULT_PERMS_LOG_DIR = Path.home() / ".logs" / "hashall" / "perms"
 
 _LOG_SETUP = False
 _LOG_FILE = None
@@ -1467,9 +1469,15 @@ def link_show_plan_cmd(plan_id, db, limit, format):
               help="Prefix for ZFS snapshot names.")
 @click.option("--low-priority/--normal-priority", default=False,
               help="Lower CPU/IO priority for this run (nice + ionice).")
+@click.option("--fix-perms/--no-fix-perms", default=True,
+              help="Fix ownership/group/perms on targets before linking (recommended).")
+@click.option("--fix-acl/--no-fix-acl", default=False,
+              help="Set default ACL on dirs when fixing perms (optional).")
+@click.option("--fix-perms-log", type=click.Path(), default=None,
+              help="Write JSON log of permission fixes (default: ~/.logs/hashall/perms/plan-<id>-<ts>.json).")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
 def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdupes_log_dir,
-                     snapshot, snapshot_prefix, low_priority, yes):
+                     snapshot, snapshot_prefix, low_priority, fix_perms, fix_acl, fix_perms_log, yes):
     """
     Execute a deduplication plan.
 
@@ -1513,6 +1521,8 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
     from hashall.model import connect_db
     from hashall.link_query import get_plan
     from hashall.link_executor import execute_plan
+    from hashall.link_query import get_plan_actions
+    from hashall.permfix import fix_permissions
     from hashall.fs_utils import get_zfs_metadata, get_mount_source
     import subprocess
     import datetime as dt
@@ -1621,6 +1631,61 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
 
         if low_priority:
             _apply_low_priority()
+
+        if fix_perms:
+            # Build list of pending action paths (respect limit)
+            order_clause = "bytes_to_save DESC"
+            query = f"""
+                SELECT canonical_path, duplicate_path
+                FROM link_actions
+                WHERE plan_id = ? AND status = 'pending'
+                ORDER BY {order_clause}
+            """
+            params: list[object] = [plan_id]
+            if limit > 0:
+                query += " LIMIT ?"
+                params.append(limit)
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            path_set = set()
+            for canonical, duplicate in rows:
+                path_set.add(Path(canonical))
+                path_set.add(Path(duplicate))
+                path_set.add(Path(canonical).parent)
+                path_set.add(Path(duplicate).parent)
+
+            if plan.mount_point:
+                root_path = Path(plan.mount_point)
+            elif path_set:
+                root_path = next(iter(path_set)).parent
+            else:
+                root_path = Path("/")
+            root_gid = os.stat(root_path).st_gid
+            root_group = grp.getgrgid(root_gid).gr_name if root_gid is not None else str(root_gid)
+            root_uid = os.getuid()
+
+            if fix_perms_log:
+                log_path = Path(fix_perms_log).expanduser()
+            else:
+                log_path = DEFAULT_PERMS_LOG_DIR / f"plan-{plan_id}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+
+            click.echo(f"🧰 Perm fix: group={root_group} ({root_gid})")
+            summary, written = fix_permissions(
+                sorted(path_set, key=lambda p: str(p)),
+                root_gid,
+                root_uid,
+                fix_owner_root=True,
+                fix_acl=fix_acl,
+                use_sudo=True,
+                log_path=log_path,
+                root_label=str(root_path),
+            )
+            click.echo(f"   Checked: {summary.checked:,} Changed: {summary.changed:,} Failed: {summary.failed:,}")
+            if written:
+                click.echo(f"   Log: {written}")
+            if summary.failed:
+                click.echo("⚠️  Some permission fixes failed; linking may still fail.")
 
         # Progress callback
         def progress_callback(action_num, total_actions, action, status=None, error=None):

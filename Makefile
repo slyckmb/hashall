@@ -25,6 +25,9 @@ LINK_DRY_RUN ?= 0
 LINK_LIMIT ?= 0
 LINK_REQUIRE_EXISTING_HARDLINKS ?= 1
 LINK_LOW_PRIORITY ?= 1
+LINK_FIX_PERMS ?= 1
+LINK_FIX_ACL ?= 0
+LINK_FIX_PERMS_LOG ?=
 
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
@@ -395,7 +398,7 @@ link-verify-scope:  ## Verify latest plan scope for PATH (optional PLAN_ID)
 	$(HASHALL_CLI) link verify-scope "$(PATH)" $$plan_arg --db "$(DB_FILE)"
 
 .PHONY: link-execute
-link-execute:  ## Execute a link plan (requires PLAN_ID). Vars: PLAN_ID, LINK_DRY_RUN, LINK_LIMIT, LINK_LOW_PRIORITY
+link-execute:  ## Execute a link plan (requires PLAN_ID). Vars: PLAN_ID, LINK_DRY_RUN, LINK_LIMIT, LINK_LOW_PRIORITY, LINK_FIX_PERMS, LINK_FIX_ACL, LINK_FIX_PERMS_LOG
 	@if [ -z "$(PLAN_ID)" ]; then \
 		echo "❌ PLAN_ID is required"; \
 		exit 1; \
@@ -404,6 +407,9 @@ link-execute:  ## Execute a link plan (requires PLAN_ID). Vars: PLAN_ID, LINK_DR
 	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
 	if [ "$(LINK_LIMIT)" != "0" ] && [ -n "$(LINK_LIMIT)" ]; then args="$$args --limit $(LINK_LIMIT)"; fi; \
 	if [ "$(LINK_LOW_PRIORITY)" = "1" ]; then args="$$args --low-priority"; fi; \
+	if [ "$(LINK_FIX_PERMS)" = "1" ]; then args="$$args --fix-perms"; else args="$$args --no-fix-perms"; fi; \
+	if [ "$(LINK_FIX_ACL)" = "1" ]; then args="$$args --fix-acl"; fi; \
+	if [ -n "$(LINK_FIX_PERMS_LOG)" ]; then args="$$args --fix-perms-log $(LINK_FIX_PERMS_LOG)"; fi; \
 	$(HASHALL_CLI) link execute $(PLAN_ID) $$args --db "$(DB_FILE)"
 
 .PHONY: link-payload-empty

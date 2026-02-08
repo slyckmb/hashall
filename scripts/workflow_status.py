@@ -244,6 +244,9 @@ def _link_execute_cli(db: str, plan_id: int | None) -> str:
     dry_run = _env_value("LINK_DRY_RUN", "0")
     limit = _env_value("LINK_LIMIT", "0")
     low_priority = _env_value("LINK_LOW_PRIORITY", "1")
+    fix_perms = _env_value("LINK_FIX_PERMS", "1")
+    fix_acl = _env_value("LINK_FIX_ACL", "0")
+    fix_log = os.getenv("LINK_FIX_PERMS_LOG", "")
     parts = [
         _hashall_cli(),
         "link",
@@ -256,6 +259,14 @@ def _link_execute_cli(db: str, plan_id: int | None) -> str:
         parts.extend(["--limit", str(limit)])
     if low_priority == "1":
         parts.append("--low-priority")
+    if fix_perms == "1":
+        parts.append("--fix-perms")
+    else:
+        parts.append("--no-fix-perms")
+    if fix_acl == "1":
+        parts.append("--fix-acl")
+    if fix_log:
+        parts.extend(["--fix-perms-log", _q(fix_log)])
     parts.extend(["--db", _q(db)])
     return " ".join(parts)
 
