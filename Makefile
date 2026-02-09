@@ -36,6 +36,9 @@ PAYLOAD_PATH_PREFIXES ?=
 PAYLOAD_LIMIT ?= 0
 PAYLOAD_DRY_RUN ?= 0
 PAYLOAD_UPGRADE_MISSING ?= 0
+PAYLOAD_PARALLEL ?= 0
+PAYLOAD_WORKERS ?=
+PAYLOAD_LOW_PRIORITY ?= 1
 PAYLOAD_MAX_GROUPS ?= 0
 
 # Root scan defaults (override via make VAR=value)
@@ -44,6 +47,7 @@ WORKERS ?=
 HASH_MODE ?= fast
 SHOW_PATH ?= 1
 SCAN_NESTED_DATASETS ?= 0
+SCAN_LOW_PRIORITY ?= 0
 
 # Root scan CLI
 HASHALL_CLI := $(PYTHON) -m hashall.cli
@@ -104,7 +108,7 @@ help:  ## Show this help message
 	@grep -E '^(link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-workflow|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -128,6 +132,8 @@ help:  ## Show this help message
 	@echo "  make workflow PATH=/pool/data             # Show workflow done/todo"
 	@echo "  make link-execute PLAN_ID=1 LINK_LIMIT=10 # Execute 10 actions"
 	@echo "  make payload-sync                         # Sync torrents -> payloads"
+	@echo "  make payload-workflow                     # Cross-device payload status"
+	@echo "  make payload-workflow PW_PATHS='/pool/data /stash/media'  # Explicit roots"
 	@echo "  make rehome-checklist                     # Rehome checklist"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
@@ -149,6 +155,9 @@ SCAN_ARGS += --show-path
 endif
 ifeq ($(SCAN_NESTED_DATASETS),1)
 SCAN_ARGS += --scan-nested-datasets
+endif
+ifeq ($(SCAN_LOW_PRIORITY),1)
+SCAN_ARGS += --low-priority
 endif
 
 .PHONY: scan
@@ -446,6 +455,9 @@ payload-sync:  ## Sync qBittorrent payloads into catalog
 	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then set -- "$$@" --limit $(PAYLOAD_LIMIT); fi; \
 	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
 	if [ "$(PAYLOAD_UPGRADE_MISSING)" = "1" ]; then set -- "$$@" --upgrade-missing; fi; \
+	if [ "$(PAYLOAD_PARALLEL)" = "1" ]; then set -- "$$@" --parallel; fi; \
+	if [ -n "$(PAYLOAD_WORKERS)" ]; then set -- "$$@" --workers $(PAYLOAD_WORKERS); fi; \
+	if [ "$(PAYLOAD_LOW_PRIORITY)" = "1" ]; then set -- "$$@" --low-priority; fi; \
 	$(HASHALL_CLI) payload sync --db "$(DB_FILE)" "$$@"
 
 .PHONY: payload-collisions
@@ -459,7 +471,17 @@ payload-upgrade-collisions:  ## Upgrade candidate duplicate payloads under PATH 
 	@set -- --path-prefix "$(PATH)"; \
 	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
 	if [ "$(PAYLOAD_MAX_GROUPS)" != "" ] && [ "$(PAYLOAD_MAX_GROUPS)" != "0" ]; then set -- "$$@" --max-groups $(PAYLOAD_MAX_GROUPS); fi; \
+	if [ "$(PAYLOAD_PARALLEL)" = "1" ]; then set -- "$$@" --parallel; fi; \
+	if [ -n "$(PAYLOAD_WORKERS)" ]; then set -- "$$@" --workers $(PAYLOAD_WORKERS); fi; \
+	if [ "$(PAYLOAD_LOW_PRIORITY)" = "1" ]; then set -- "$$@" --low-priority; fi; \
 	$(HASHALL_CLI) payload upgrade-collisions --db "$(DB_FILE)" "$$@"
+
+# PW_PATHS: explicit roots for payload-workflow (auto-discovers from DB if empty)
+PW_PATHS ?=
+
+.PHONY: payload-workflow
+payload-workflow:  ## Show payload workflow status across all roots
+	@$(PYTHON) scripts/payload_workflow_status.py --db "$(DB_FILE)" $(foreach p,$(PW_PATHS),"$(p)")
 
 # ============================================================================
 # Rehome (Payload Moves)

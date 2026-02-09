@@ -187,8 +187,11 @@ def cli():
 @click.option("--show-path", is_flag=True, help="Show current file path above progress bar.")
 @click.option("--scan-nested-datasets", is_flag=True,
               help="Detect nested mountpoints/datasets and scan them separately.")
-def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets):
+@click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
+def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, low_priority):
     """Scan a directory and store file metadata in SQLite."""
+    if low_priority:
+        _apply_low_priority()
     # Use flag if provided, otherwise use hash_mode
     mode = hash_mode_flag if hash_mode_flag else hash_mode
     scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
@@ -258,7 +261,11 @@ def payload():
 @click.option("--dry-run", is_flag=True, help="Compute payload mapping but do not write to DB.")
 @click.option("--upgrade-missing", is_flag=True,
               help="Hash missing SHA256s for payload files (inode-aware).")
-def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, limit, dry_run, upgrade_missing):
+@click.option("--parallel", is_flag=True, help="Parallel SHA256 hashing for --upgrade-missing.")
+@click.option("--workers", type=int, default=None,
+              help="Worker threads for --parallel (default: CPU count).")
+@click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
+def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, limit, dry_run, upgrade_missing, parallel, workers, low_priority):
     """
     Sync torrent instances from qBittorrent and map to payloads.
 
@@ -274,6 +281,9 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
         upgrade_payload_missing_sha256
     )
     from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
+
+    if low_priority:
+        _apply_low_priority()
 
     # Connect to database
     # In dry-run mode, open read-only and skip migrations to guarantee "no writes".
@@ -387,7 +397,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             missing_in_catalog += 1
 
         if (not dry_run) and payload.status != 'complete' and upgrade_missing:
-            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id)
+            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id, parallel=parallel, workers=workers)
             if upgraded > 0:
                 payload = build_payload(conn, root_path, device_id=payload.device_id)
 
@@ -669,7 +679,10 @@ def payload_collisions_cmd(db, path_prefixes, limit, top):
     help="Process at most N collision groups (after ordering). 0 means no limit.",
 )
 @click.option("--dry-run", is_flag=True, help="Report what would be upgraded (no hashing/DB writes).")
-def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run):
+@click.option("--parallel", is_flag=True, help="Parallel SHA256 hashing for missing hashes.")
+@click.option("--workers", type=int, default=None, help="Worker threads for --parallel (default: CPU count).")
+@click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
+def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run, parallel, workers, low_priority):
     """
     Upgrade candidate duplicate payloads by backfilling missing SHA256, then computing payload_hash.
 
@@ -678,6 +691,9 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run
     - For those roots only, hash missing SHA256 (inode-aware)
     - Rebuild/upsert payload rows so confirmed payload_hash can be used for sibling grouping
     """
+    if low_priority:
+        _apply_low_priority()
+
     from hashall.model import connect_db
     from hashall.payload import (
         get_fast_files_for_path,
@@ -778,7 +794,7 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run
             missing_before = count_missing_sha256_for_path(conn, device_id, root_path)
             print(f"   - #{payload_id} dev={device_id} missing_sha256={missing_before} root={root_path}")
 
-            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=device_id)
+            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=device_id, parallel=parallel, workers=workers)
             inode_groups_hashed += upgraded
 
             payload = build_payload(conn, root_path, device_id=device_id)
