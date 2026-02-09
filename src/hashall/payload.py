@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
-from hashall.pathing import canonicalize_path, to_relpath
+from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.scan import compute_full_hashes
 
 
@@ -44,7 +44,26 @@ def _resolve_rel_root(root_path: str, mount_point: Optional[Path], preferred_mou
 
     if mount_point:
         if root.is_absolute():
-            rel_root = to_relpath(root, preferred_mount) or to_relpath(root, mount_point)
+            rel_root = None
+            if preferred_mount:
+                rel_root = to_relpath(root, preferred_mount)
+            if rel_root is None:
+                rel_root = to_relpath(root, mount_point)
+
+            # Handle alternate mount targets for the same filesystem, e.g.
+            # /data/media/... (qBittorrent) vs /stash/media/... (preferred mount).
+            if rel_root is None:
+                for base in (preferred_mount, mount_point):
+                    if base is None:
+                        continue
+                    remapped = remap_to_mount_alias(root, base)
+                    if remapped is None:
+                        continue
+                    rel_root = to_relpath(remapped, base)
+                    if rel_root is not None:
+                        root = remapped
+                        break
+
             if rel_root is None:
                 return None, root
         else:
@@ -461,6 +480,23 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
                 status='incomplete',
                 last_built_at=None
             )
+
+    # Normalize to preferred mount point when the same filesystem is mounted at
+    # multiple targets (ZFS alternate mount points, etc).
+    try:
+        if conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+        ).fetchone():
+            mount_point, preferred_mount = _get_mount_info(conn, device_id)
+            for base in (preferred_mount, mount_point):
+                if base is None:
+                    continue
+                remapped = remap_to_mount_alias(root, base)
+                if remapped is not None:
+                    root = remapped
+                    break
+    except Exception:
+        pass
 
     # Get files from device-specific table
     files = get_files_for_path(conn, device_id, str(root))

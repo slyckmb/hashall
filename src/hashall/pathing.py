@@ -37,6 +37,44 @@ def canonicalize_path(path: Path) -> Path:
     return resolve_bind_source(resolved)
 
 
+def remap_to_mount_alias(path: Path, preferred_mount: Path) -> Optional[Path]:
+    """
+    Remap PATH onto PREFERRED_MOUNT when both are mounts of the same SOURCE.
+
+    This handles "alternate mount points" where the same filesystem is mounted
+    at multiple targets (common with ZFS datasets). Example:
+
+        /data/media/...  ->  /stash/media/...
+
+    when both mount targets have the same `findmnt -no SOURCE` value.
+
+    Returns:
+        Remapped absolute path, or None if no remap was possible.
+    """
+    try:
+        p = Path(path)
+        pref = Path(preferred_mount)
+        if not p.is_absolute() or not pref.is_absolute():
+            return None
+
+        from_mount = get_mount_point(str(p))
+        if not from_mount:
+            return None
+        from_mount_p = Path(from_mount)
+        if not p.is_relative_to(from_mount_p):
+            return None
+
+        p_source = get_mount_source(str(p))
+        pref_source = get_mount_source(str(pref))
+        if not p_source or not pref_source or p_source != pref_source:
+            return None
+
+        rel = p.relative_to(from_mount_p)
+        return pref / rel
+    except Exception:
+        return None
+
+
 def is_under(path: Path, root: Path) -> bool:
     """Return True if path is under root."""
     try:

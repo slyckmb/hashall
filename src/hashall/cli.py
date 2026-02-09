@@ -273,7 +273,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
         upgrade_payload_missing_sha256
     )
-    from hashall.pathing import canonicalize_path, is_under
+    from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
 
     # Connect to database
     # In dry-run mode, open read-only and skip migrations to guarantee "no writes".
@@ -311,6 +311,45 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
         except Exception:
             prefix_paths.append(Path(p))
 
+    def _canonicalize_payload_root_path(root_path: str) -> Path:
+        """
+        Normalize torrent roots onto the device preferred mount point when possible.
+
+        qBittorrent may report paths under an alternate mount target (e.g. /data/media)
+        while scans were performed under the preferred mount (e.g. /stash/media).
+        """
+        p = Path(root_path)
+        if p.is_absolute():
+            try:
+                p = canonicalize_path(p)
+            except Exception:
+                p = Path(root_path)
+
+        try:
+            dev_id = os.stat(p).st_dev
+        except (OSError, IOError):
+            return p
+
+        try:
+            row = conn.execute(
+                "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
+                (dev_id,),
+            ).fetchone()
+        except Exception:
+            row = None
+
+        if row:
+            mount_point = Path(row[0]) if row[0] else None
+            preferred_mount = Path(row[1] or row[0]) if row[0] else None
+            for base in (preferred_mount, mount_point):
+                if base is None:
+                    continue
+                remapped = remap_to_mount_alias(p, base)
+                if remapped is not None:
+                    return remapped
+
+        return p
+
     # Get torrents
     print("📥 Fetching torrents...")
     torrents = qbit.get_torrents(category=category, tag=tag)
@@ -329,11 +368,9 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
 
         # Get torrent root path
         root_path = qbit.get_torrent_root_path(torrent)
+        root_canon = _canonicalize_payload_root_path(root_path)
+
         if prefix_paths:
-            try:
-                root_canon = canonicalize_path(Path(root_path))
-            except Exception:
-                root_canon = Path(root_path)
             if not any(is_under(root_canon, pref) for pref in prefix_paths):
                 skipped_prefix += 1
                 continue
@@ -341,9 +378,11 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
         print(f"\n🔄 Processing: {torrent.name[:50]}...")
         print(f"   Hash: {torrent.hash}")
         print(f"   Path: {root_path}")
+        if str(root_canon) != root_path:
+            print(f"   Canonical: {root_canon}")
 
         # Build payload from database
-        payload = build_payload(conn, root_path, device_id=None)
+        payload = build_payload(conn, str(root_canon), device_id=None)
         if payload.file_count == 0:
             missing_in_catalog += 1
 

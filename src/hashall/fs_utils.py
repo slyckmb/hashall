@@ -90,7 +90,7 @@ def _try_findmnt(path: str) -> Optional[str]:
     try:
         findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            [findmnt_cmd, '-no', 'UUID', path],
+            [findmnt_cmd, '-no', 'UUID', '-T', path],
             capture_output=True,
             text=True,
             check=True,
@@ -119,7 +119,7 @@ def get_mount_point(path: str) -> Optional[str]:
     try:
         findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            [findmnt_cmd, '-no', 'TARGET', path],
+            [findmnt_cmd, '-no', 'TARGET', '-T', path],
             capture_output=True,
             text=True,
             check=True,
@@ -153,7 +153,7 @@ def get_mount_source(path: str) -> Optional[str]:
     try:
         findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            [findmnt_cmd, '-no', 'SOURCE', path],
+            [findmnt_cmd, '-no', 'SOURCE', '-T', path],
             capture_output=True,
             text=True,
             check=True,

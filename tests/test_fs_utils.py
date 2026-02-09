@@ -8,7 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hashall.fs_utils import get_filesystem_uuid, get_zfs_metadata, _try_findmnt, _try_zfs_guid
+from hashall.fs_utils import (
+    get_filesystem_uuid,
+    get_mount_point,
+    get_mount_source,
+    get_zfs_metadata,
+    _try_findmnt,
+    _try_zfs_guid,
+)
 
 
 class TestGetFilesystemUuid:
@@ -31,7 +38,7 @@ class TestGetFilesystemUuid:
             # Verify findmnt was called with correct arguments
             mock_run.assert_called_once()
             args = mock_run.call_args[0][0]
-            assert args[0] == 'findmnt'
+            assert Path(args[0]).name == 'findmnt'
             assert '-no' in args
             assert 'UUID' in args
             assert '/some/path' in args
@@ -225,6 +232,30 @@ class TestTryFindmnt:
             kwargs = mock_run.call_args[1]
             assert 'timeout' in kwargs
             assert kwargs['timeout'] == 5
+
+
+def test_get_mount_point_uses_findmnt_target():
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout="/mnt/data\n", returncode=0)
+        result = get_mount_point("/some/file/under/mount")
+        assert result == "/mnt/data"
+
+        args = mock_run.call_args[0][0]
+        assert Path(args[0]).name == "findmnt"
+        assert "-T" in args
+        assert "/some/file/under/mount" in args
+
+
+def test_get_mount_source_uses_findmnt_target():
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout="stash/media\n", returncode=0)
+        result = get_mount_source("/some/file/under/mount")
+        assert result == "stash/media"
+
+        args = mock_run.call_args[0][0]
+        assert Path(args[0]).name == "findmnt"
+        assert "-T" in args
+        assert "/some/file/under/mount" in args
 
 
 class TestTryZfsGuid:
@@ -456,7 +487,11 @@ class TestGetZfsMetadata:
             ]
 
             result = get_zfs_metadata("/tank/data")
-            assert result == {}
+            assert result == {
+                'pool_name': 'tank',
+                'dataset_name': 'tank/data',
+                'pool_guid': None,
+            }
 
     def test_dash_pool_guid(self):
         """Test handling of '-' as pool GUID."""
@@ -467,7 +502,11 @@ class TestGetZfsMetadata:
             ]
 
             result = get_zfs_metadata("/tank/data")
-            assert result == {}
+            assert result == {
+                'pool_name': 'tank',
+                'dataset_name': 'tank/data',
+                'pool_guid': None,
+            }
 
     def test_zfs_commands_not_available(self):
         """Test handling when ZFS commands are not installed."""
@@ -494,7 +533,11 @@ class TestGetZfsMetadata:
             ]
 
             result = get_zfs_metadata("/tank/data")
-            assert result == {}
+            assert result == {
+                'pool_name': 'tank',
+                'dataset_name': 'tank/data',
+                'pool_guid': None,
+            }
 
     def test_correct_command_arguments(self):
         """Test that ZFS commands are called with correct arguments."""
@@ -508,11 +551,13 @@ class TestGetZfsMetadata:
 
             # Verify first call: zfs list
             first_call_args = mock_run.call_args_list[0][0][0]
-            assert first_call_args == ['zfs', 'list', '-H', '-o', 'name', '/tank/data']
+            assert Path(first_call_args[0]).name == 'zfs'
+            assert first_call_args[1:] == ['list', '-H', '-o', 'name', '/tank/data']
 
             # Verify second call: zpool get
             second_call_args = mock_run.call_args_list[1][0][0]
-            assert second_call_args == ['zpool', 'get', '-H', '-o', 'value', 'guid', 'tank']
+            assert Path(second_call_args[0]).name == 'zpool'
+            assert second_call_args[1:] == ['get', '-H', '-o', 'value', 'guid', 'tank']
 
     def test_whitespace_handling(self):
         """Test that whitespace is properly stripped from output."""

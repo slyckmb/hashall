@@ -32,6 +32,40 @@ def test_canonicalize_path_bind_mount(monkeypatch, tmp_path):
     assert canonical == (stash_root / "file.txt").resolve()
 
 
+def test_remap_to_mount_alias_zfs_alternate_mount(monkeypatch, tmp_path):
+    """
+    When the same SOURCE is mounted at two different targets, remap to the
+    preferred mount target.
+    """
+    data_root = tmp_path / "data" / "media"
+    stash_root = tmp_path / "stash" / "media"
+    (data_root / "payload").mkdir(parents=True)
+    stash_root.mkdir(parents=True)
+
+    target = data_root / "payload" / "file.txt"
+    target.write_text("x")
+
+    def fake_get_mount_point(p: str):
+        p = str(Path(p))
+        if p.startswith(str(data_root)):
+            return str(data_root)
+        if p.startswith(str(stash_root)):
+            return str(stash_root)
+        return None
+
+    def fake_get_mount_source(p: str):
+        p = str(Path(p))
+        if p.startswith(str(data_root)) or p.startswith(str(stash_root)):
+            return "stash/media"
+        return None
+
+    monkeypatch.setattr(pathing, "get_mount_point", fake_get_mount_point)
+    monkeypatch.setattr(pathing, "get_mount_source", fake_get_mount_source)
+
+    remapped = pathing.remap_to_mount_alias(target, stash_root)
+    assert remapped == (stash_root / "payload" / "file.txt")
+
+
 def test_to_relpath_and_is_under(tmp_path):
     root = tmp_path / "pool"
     root.mkdir()
