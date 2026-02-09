@@ -439,27 +439,27 @@ workflow:  ## Show workflow done/todo for PATH
 
 .PHONY: payload-sync
 payload-sync:  ## Sync qBittorrent payloads into catalog
-	@args=""; \
-	if [ -n "$(PAYLOAD_CATEGORY)" ]; then args="$$args --category \"$(PAYLOAD_CATEGORY)\""; fi; \
-	if [ -n "$(PAYLOAD_TAG)" ]; then args="$$args --tag \"$(PAYLOAD_TAG)\""; fi; \
-	for p in $(PAYLOAD_PATH_PREFIXES); do args="$$args --path-prefix \"$$p\""; done; \
-	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then args="$$args --limit $(PAYLOAD_LIMIT)"; fi; \
-	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
-	if [ "$(PAYLOAD_UPGRADE_MISSING)" = "1" ]; then args="$$args --upgrade-missing"; fi; \
-	$(HASHALL_CLI) payload sync --db "$(DB_FILE)" $$args
+	@set --; \
+	if [ -n "$(PAYLOAD_CATEGORY)" ]; then set -- "$$@" --category "$(PAYLOAD_CATEGORY)"; fi; \
+	if [ -n "$(PAYLOAD_TAG)" ]; then set -- "$$@" --tag "$(PAYLOAD_TAG)"; fi; \
+	for p in $(PAYLOAD_PATH_PREFIXES); do set -- "$$@" --path-prefix "$$p"; done; \
+	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then set -- "$$@" --limit $(PAYLOAD_LIMIT); fi; \
+	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
+	if [ "$(PAYLOAD_UPGRADE_MISSING)" = "1" ]; then set -- "$$@" --upgrade-missing; fi; \
+	$(HASHALL_CLI) payload sync --db "$(DB_FILE)" "$$@"
 
 .PHONY: payload-collisions
 payload-collisions:  ## Detect candidate duplicate payloads under PATH (fast signature)
-	@args="--path-prefix \"$(PATH)\""; \
-	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then args="$$args --limit $(PAYLOAD_LIMIT)"; fi; \
-	$(HASHALL_CLI) payload collisions --db "$(DB_FILE)" $$args
+	@set -- --path-prefix "$(PATH)"; \
+	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then set -- "$$@" --limit $(PAYLOAD_LIMIT); fi; \
+	$(HASHALL_CLI) payload collisions --db "$(DB_FILE)" "$$@"
 
 .PHONY: payload-upgrade-collisions
 payload-upgrade-collisions:  ## Upgrade candidate duplicate payloads under PATH (hash missing SHA256 + compute payload_hash)
-	@args="--path-prefix \"$(PATH)\""; \
-	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
-	if [ "$(PAYLOAD_MAX_GROUPS)" != "" ] && [ "$(PAYLOAD_MAX_GROUPS)" != "0" ]; then args="$$args --max-groups $(PAYLOAD_MAX_GROUPS)"; fi; \
-	$(HASHALL_CLI) payload upgrade-collisions --db "$(DB_FILE)" $$args
+	@set -- --path-prefix "$(PATH)"; \
+	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
+	if [ "$(PAYLOAD_MAX_GROUPS)" != "" ] && [ "$(PAYLOAD_MAX_GROUPS)" != "0" ]; then set -- "$$@" --max-groups $(PAYLOAD_MAX_GROUPS); fi; \
+	$(HASHALL_CLI) payload upgrade-collisions --db "$(DB_FILE)" "$$@"
 
 # ============================================================================
 # Rehome (Payload Moves)

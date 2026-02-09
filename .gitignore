@@ -43,6 +43,8 @@ pytest_cache/
 
 # 🧹 Stray artifacts
 <sqlite3.Connection object at *>
+${PLAN}
+rehome-plan-*.json
 
 # 🧠 GPTrail & Dev Symlinks
 tools/inject_staged.sh

@@ -236,5 +236,165 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertIn("complete payloads: 1", result.output)
         self.assertIn("missing in catalog: 0", result.output)
 
+    def test_payload_sync_limit_stops_after_n(self):
+        """--limit N stops processing after N torrents (post-filter)."""
+        torrents = [
+            QBitTorrent(
+                hash=f"t{i}",
+                name=f"torrent-{i}",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            )
+            for i in range(5)
+        ]
+        fake = _FakeQbit(torrents)
+
+        runner = CliRunner()
+        with patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--dry-run",
+                    "--limit",
+                    "2",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("processed: 2", result.output)
+
+    def test_payload_sync_path_prefix_skips_out_of_scope(self):
+        """Torrents whose root is not under --path-prefix are skipped."""
+        torrents = [
+            QBitTorrent(
+                hash="in-scope",
+                name="torrent-in",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+            QBitTorrent(
+                hash="out-of-scope",
+                name="torrent-out",
+                save_path="/",
+                content_path="/totally/different/path",
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+
+        runner = CliRunner()
+        with patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--dry-run",
+                    "--path-prefix",
+                    str(self.tmp_path),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (path-prefix): 1", result.output)
+
+
+class TestPayloadSyncQbitFailFast(unittest.TestCase):
+    """Test that qBittorrent connect/auth failures raise ClickException (exit 1)."""
+
+    def setUp(self):
+        fd, db_path = tempfile.mkstemp(suffix=".sqlite3")
+        os.close(fd)
+        self.db_path = Path(db_path)
+        # Initialize minimal schema
+        conn = connect_db(self.db_path)
+        conn.close()
+
+    def tearDown(self):
+        try:
+            self.db_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def test_qbit_connection_failure_exits_nonzero(self):
+        """When qBittorrent connection fails, CLI exits non-zero with error message."""
+
+        class _FailConnect:
+            base_url = "http://fake:9999"
+            last_error = "Connection refused"
+
+            def test_connection(self):
+                return False
+
+            def login(self):
+                return False
+
+            def get_torrents(self, **kw):
+                return []
+
+        runner = CliRunner()
+        with patch(
+            "hashall.qbittorrent.get_qbittorrent_client",
+            return_value=_FailConnect(),
+        ):
+            result = runner.invoke(
+                cli,
+                ["payload", "sync", "--db", str(self.db_path)],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Failed to connect", result.output)
+
+    def test_qbit_auth_failure_exits_nonzero(self):
+        """When qBittorrent auth fails, CLI exits non-zero with error message."""
+
+        class _FailAuth:
+            base_url = "http://fake:9999"
+            last_error = "Forbidden"
+
+            def test_connection(self):
+                return True
+
+            def login(self):
+                return False
+
+            def get_torrents(self, **kw):
+                return []
+
+        runner = CliRunner()
+        with patch(
+            "hashall.qbittorrent.get_qbittorrent_client",
+            return_value=_FailAuth(),
+        ):
+            result = runner.invoke(
+                cli,
+                ["payload", "sync", "--db", str(self.db_path)],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Failed to authenticate", result.output)
+
+
 if __name__ == "__main__":
     unittest.main()
