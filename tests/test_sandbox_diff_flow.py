@@ -62,8 +62,16 @@ def test_sandbox_diff_hardlink_equivalence(tmp_path: Path) -> None:
     conn = connect_db(db_path)
     device_id = os.stat(sandbox_root).st_dev
 
-    src_files = _load_file_map(conn, device_id, "src")
-    dst_files = _load_file_map(conn, device_id, "dst")
+    # Paths in DB are relative to mount point; compute the correct prefix.
+    from hashall.pathing import canonicalize_path
+    from hashall.fs_utils import get_mount_point
+    canon = canonicalize_path(sandbox_root)
+    mount = get_mount_point(str(canon)) or "/"
+    sandbox_rel = str(canon).lstrip("/") if mount == "/" else str(canon.relative_to(mount))
+    src_prefix = f"{sandbox_rel}/src"
+    dst_prefix = f"{sandbox_rel}/dst"
+    src_files = _load_file_map(conn, device_id, src_prefix)
+    dst_files = _load_file_map(conn, device_id, dst_prefix)
 
     diff = diff_sessions(src_files, dst_files)
 

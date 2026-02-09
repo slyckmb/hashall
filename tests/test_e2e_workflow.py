@@ -98,15 +98,22 @@ def test_scan_export_verify_roundtrip():
             (dst_session["id"],)
         ).fetchone()[0]
 
+        # src and dst may share the same device (same tmpdir), so count
+        # by path prefix rather than assuming separate files_N tables.
+        # Paths are stored relative to mount point, so strip leading '/'.
+        src_rel = str(src).lstrip("/")
+        dst_rel = str(dst).lstrip("/")
         src_count = cursor.execute(
-            f"SELECT COUNT(*) FROM files_{src_device_id} WHERE status = 'active'"
+            f"SELECT COUNT(*) FROM files_{src_device_id} WHERE status = 'active' AND path LIKE ?",
+            (f"{src_rel}/%",)
         ).fetchone()[0]
         dst_count = cursor.execute(
-            f"SELECT COUNT(*) FROM files_{dst_device_id} WHERE status = 'active'"
+            f"SELECT COUNT(*) FROM files_{dst_device_id} WHERE status = 'active' AND path LIKE ?",
+            (f"{dst_rel}/%",)
         ).fetchone()[0]
 
-        assert src_count == 3, "Source should have 3 files"
-        assert dst_count == 3, "Destination should have 3 files"
+        assert src_count == 3, f"Source should have 3 files, got {src_count}"
+        assert dst_count == 3, f"Destination should have 3 files, got {dst_count}"
 
         conn.close()
         print("✅ E2E test passed: scan → export → verify workflow works correctly")

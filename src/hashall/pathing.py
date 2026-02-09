@@ -18,11 +18,16 @@ def resolve_bind_source(path: Path) -> Path:
     mount_source = get_mount_source(str(resolved))
 
     if mount_point and mount_source and mount_source.startswith("/"):
+        source_p = Path(mount_source)
+        # Only remap for actual bind mounts (source is a directory), not
+        # block devices like /dev/nvme0n1p7 which are regular FS backing.
+        if not source_p.is_dir():
+            return resolved
         try:
             rel = resolved.relative_to(Path(mount_point))
         except ValueError:
             return resolved
-        return (Path(mount_source) / rel).resolve()
+        return (source_p / rel).resolve()
 
     return resolved
 

@@ -128,7 +128,7 @@ class TestDevicesCLI(unittest.TestCase):
         self.assertIn("Alias", result.output)
         self.assertIn("UUID (first 8)", result.output)
         self.assertIn("Device ID", result.output)
-        self.assertIn("Mount Point", result.output)
+        self.assertIn("Preferred Mount", result.output)
         self.assertIn("Type", result.output)
         self.assertIn("Files", result.output)
         self.assertIn("Size", result.output)
@@ -339,7 +339,7 @@ class TestDevicesCLI(unittest.TestCase):
         self.assertIn("Device: pool", result.output)
         self.assertIn("a1b2c3d4-e5f6-7890-abcd-ef1234567890", result.output)
         self.assertIn("Current Device ID: 49", result.output)
-        self.assertIn("Mount Point: /pool", result.output)
+        self.assertIn("Preferred Mount: /pool", result.output)
         self.assertIn("Filesystem Type: zfs", result.output)
         self.assertIn("ZFS Metadata:", result.output)
         self.assertIn("Pool Name: pool", result.output)
@@ -381,7 +381,7 @@ class TestDevicesCLI(unittest.TestCase):
         self.assertIn("Device: stash", result.output)
         self.assertIn("b2c3d4e5-f6a7-8901-bcde-f12345678901", result.output)
         self.assertIn("Current Device ID: 51", result.output)
-        self.assertIn("Mount Point: /stash", result.output)
+        self.assertIn("Preferred Mount: /stash", result.output)
         self.assertIn("Filesystem Type: ext4", result.output)
         self.assertIn("5,000 active", result.output)
         self.assertIn("500.0 MB", result.output)
@@ -693,7 +693,7 @@ class TestDevicesCLI(unittest.TestCase):
         self.assertIn("Scan History:", result.output)
         self.assertIn("Last Scan: 2026-01-31 14:22:15", result.output)
         self.assertIn("(pool)", result.output)
-        self.assertIn("Total Scans: 1", result.output)
+        self.assertIn("Scan Sessions (completed): 1", result.output)
 
     def test_stats_command_nonexistent_database(self):
         """Test 'stats' command with nonexistent database."""
