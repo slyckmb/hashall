@@ -1,17 +1,21 @@
 # AGENTS — Repo Entry Point
 
-**Authoritative global guide:** `/home/michael/.codex/AGENTS.md`
+**Global defaults**: `~/.agent/AGENTS_GLOBAL.md`
 
 This repo doc is intentionally thin and points to the global guide, which defines:
 - Environment detection (glider vs surfer)
 - Path conventions
 - Command routing (heavy ops on glider)
 - `mkvenv` usage
-- Prompt coordination rules
+- Safety rules and baseline protocol
 
-If you are a **remote Codex app agent on surfer**, read the global guide **and** the surfer mirror guidance at:
-- `/Users/michaelbraband/.codex/AGENTS.md`
+## Baseline Protocol
 
-Repo-specific context (if present) lives in:
+- If `.agent/baseline.md` exists, read it first — objective facts about repo state.
+- Do not ask the user whether things were dirty before; use the baseline.
+- Do not commit, delete files, or modify `.gitignore` without explicit approval.
+
+## Repo-Specific Context
+
 - `docs/NEXT-REMOTE-AGENT-PROMPT.md`
 - `docs/REMOTE-PREAMBLE.md`
