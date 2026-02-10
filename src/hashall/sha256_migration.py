@@ -115,7 +115,7 @@ def backfill_sha256(
 
                 params = []
                 query = (
-                    f"SELECT path, sha1 FROM {table_name} "
+                    f"SELECT path, sha1, inode, size FROM {table_name} "
                     "WHERE status = 'active' AND sha256 IS NULL"
                 )
                 if last_path is not None:
@@ -129,13 +129,64 @@ def backfill_sha256(
                 if not rows:
                     break
 
+                # Group files by (inode, size) for hardlink deduplication
+                inode_groups = {}  # {(inode, size): [(path, sha1), ...]}
+                files_without_inode = []
+
                 for file_row in rows:
                     rel_path = file_row["path"]
                     existing_sha1 = file_row["sha1"]
+                    inode = file_row["inode"]
+                    size = file_row["size"]
                     last_path = rel_path
+
+                    if inode is not None and inode != 0:
+                        key = (inode, size)
+                        inode_groups.setdefault(key, []).append((rel_path, existing_sha1))
+                    else:
+                        files_without_inode.append((rel_path, existing_sha1))
+
+                # Hash once per inode group
+                for (inode, size), group_files in inode_groups.items():
+                    # Pick first file as representative
+                    repr_path, repr_sha1 = group_files[0]
+                    abs_path = mount_point / repr_path
+                    processed += len(group_files)
+
+                    if not abs_path.exists():
+                        errors += len(group_files)
+                        print(f"⚠️  Missing: {abs_path} (affects {len(group_files)} hardlinks)")
+                        continue
+
+                    try:
+                        full_sha1, full_sha256 = compute_full_hashes(abs_path)
+                    except Exception as exc:
+                        errors += len(group_files)
+                        print(f"⚠️  Error hashing {abs_path}: {exc} (affects {len(group_files)} hardlinks)")
+                        continue
+
+                    if repr_sha1 and repr_sha1 != full_sha1:
+                        mismatches += 1
+                        print(f"❌ SHA1 mismatch: {repr_path}")
+
+                    if dry_run:
+                        updated += len(group_files)
+                        continue
+
+                    # Update ALL files with this inode
+                    cursor.execute(
+                        f"UPDATE {table_name} "
+                        "SET sha256 = ?, sha1 = COALESCE(sha1, ?), last_modified_at = datetime('now') "
+                        "WHERE inode = ? AND size = ? AND status = 'active'",
+                        (full_sha256, full_sha1, inode, size),
+                    )
+                    updated += len(group_files)
+
+                # Handle files without inodes individually
+                for rel_path, existing_sha1 in files_without_inode:
+                    abs_path = mount_point / rel_path
                     processed += 1
 
-                    abs_path = mount_point / rel_path
                     if not abs_path.exists():
                         errors += 1
                         print(f"⚠️  Missing: {abs_path}")

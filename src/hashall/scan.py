@@ -238,15 +238,16 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
 
     Side effects:
         Updates database records with computed full SHA256 values
+        Uses inode-aware optimization to avoid re-hashing hardlinks
     """
     conn = connect_db(db_path)
     cursor = conn.cursor()
     ensure_files_table(cursor, device_id)
     table_name = f"files_{device_id}"
 
-    # Get all files with this quick_hash
+    # Get all files with this quick_hash (include inode for deduplication)
     cursor.execute(f"""
-        SELECT path, size, mtime, quick_hash, sha1, sha256
+        SELECT path, size, mtime, quick_hash, sha1, sha256, inode
         FROM {table_name}
         WHERE quick_hash = ? AND status = 'active'
     """, (quick_hash,))
@@ -259,31 +260,70 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
             'mtime': row[2],
             'quick_hash': row[3],
             'sha1': row[4],
-            'sha256': row[5]
+            'sha256': row[5],
+            'inode': row[6]
         }
         files.append(file_record)
 
-    # Compute full hash for any file missing it
-    updated_files = []
+    # Group files by (inode, size) to avoid re-hashing hardlinks
+    inode_groups = {}  # {(inode, size): [file_record, ...]}
+    files_without_inode = []
+
     for file_record in files:
+        inode = file_record['inode']
+        size = file_record['size']
+
+        # Only group files that need hashing
         if file_record['sha1'] is None or file_record['sha256'] is None:
-            # Resolve absolute path
-            abs_path = mount_point / file_record['path']
-            try:
-                full_sha1, full_sha256 = compute_full_hashes(abs_path)
+            if inode is not None and inode != 0:
+                key = (inode, size)
+                inode_groups.setdefault(key, []).append(file_record)
+            else:
+                files_without_inode.append(file_record)
 
-                # Update database
-                cursor.execute(f"""
-                    UPDATE {table_name}
-                    SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
-                    WHERE path = ?
-                """, (full_sha1, full_sha256, file_record['path']))
+    # Hash once per inode group
+    updated_files = []
+    for (inode, size), group_files in inode_groups.items():
+        # Pick first file as representative
+        repr_file = group_files[0]
+        abs_path = mount_point / repr_file['path']
 
+        try:
+            full_sha1, full_sha256 = compute_full_hashes(abs_path)
+
+            # Update ALL files in this inode group
+            cursor.execute(f"""
+                UPDATE {table_name}
+                SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                WHERE inode = ? AND size = ? AND status = 'active'
+            """, (full_sha1, full_sha256, inode, size))
+
+            # Update all file records in memory
+            for file_record in group_files:
                 file_record['sha1'] = full_sha1
                 file_record['sha256'] = full_sha256
                 updated_files.append(file_record)
-            except Exception as e:
-                print(f"⚠️  Could not upgrade {abs_path}: {e}")
+        except Exception as e:
+            print(f"⚠️  Could not upgrade {abs_path}: {e}")
+
+    # Handle files without inodes individually
+    for file_record in files_without_inode:
+        abs_path = mount_point / file_record['path']
+        try:
+            full_sha1, full_sha256 = compute_full_hashes(abs_path)
+
+            # Update by path
+            cursor.execute(f"""
+                UPDATE {table_name}
+                SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                WHERE path = ?
+            """, (full_sha1, full_sha256, file_record['path']))
+
+            file_record['sha1'] = full_sha1
+            file_record['sha256'] = full_sha256
+            updated_files.append(file_record)
+        except Exception as e:
+            print(f"⚠️  Could not upgrade {abs_path}: {e}")
 
     conn.commit()
     conn.close()
