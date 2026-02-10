@@ -57,6 +57,7 @@ def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
             quick_hash TEXT,
             sha1 TEXT,
             sha256 TEXT,
+            hash_source TEXT,
             inode INTEGER NOT NULL,
             first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -76,6 +77,13 @@ def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
     # Migrate existing tables: add sha256 column if missing
     try:
         cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN sha256 TEXT")
+    except Exception:
+        # Column already exists, ignore
+        pass
+
+    # Migrate existing tables: add hash_source column if missing
+    try:
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN hash_source TEXT")
     except Exception:
         # Column already exists, ignore
         pass

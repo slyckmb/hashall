@@ -33,6 +33,8 @@ class ScanStats:
     files_deleted: int = 0
     files_skipped_other_device: int = 0
     bytes_hashed: int = 0
+    inode_groups_hashed: int = 0  # Unique inodes hashed
+    hardlinks_propagated: int = 0  # Hardlinks that got copied hashes
 
 
 def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
@@ -500,62 +502,103 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
 
 
 def _hash_file_worker(
-    file_path: str,
+    work_item: dict,
     mount_point: Path,
     existing_files: Dict[str, dict],
     hash_mode: str = 'fast',
     expected_device_id: Optional[int] = None
 ):
     """
-    Hash a file for incremental scanning.
+    Hash a file or inode group for incremental scanning.
 
     Args:
-        file_path: Absolute path to the file
+        work_item: Dict containing:
+            - representative_path: Path to hash (first path in inode group)
+            - all_paths: List of all paths in this inode group
+            - inode: Inode number (or None)
+            - size: File size
+            - stat: Pre-computed stat result
+            - is_hardlink_group: Boolean
         mount_point: Mount point for the filesystem (to compute relative path)
         existing_files: Dict of {rel_path: {size, mtime, quick_hash, sha1, sha256}} from database
         hash_mode: 'fast' (quick_hash only), 'full' (both), or 'upgrade' (add full hashes to existing quick_hash)
+        expected_device_id: Expected device ID (for validation)
 
     Returns:
-        Tuple of (rel_path, size, mtime, quick_hash, sha1, sha256, inode, device_id, is_new, is_updated)
-        or ("__SKIP_DEVICE__", file_path, device_id) if file is on a different device
+        List of tuples: [(rel_path, size, mtime, quick_hash, sha1, sha256, inode, device_id, is_new, is_updated, hash_source), ...]
+        or [("__SKIP_DEVICE__", file_path, device_id)] if file is on a different device
         or None on error
     """
     try:
-        stat = os.stat(file_path)
+        representative_path = work_item['representative_path']
+        all_paths = work_item['all_paths']
+        inode = work_item['inode']
+        stat = work_item['stat']
+        is_hardlink_group = work_item['is_hardlink_group']
+
+        # Validate device
         if expected_device_id is not None and stat.st_dev != expected_device_id:
-            return ("__SKIP_DEVICE__", str(file_path), stat.st_dev)
-        rel_path = str(Path(file_path).relative_to(mount_point))
+            return [("__SKIP_DEVICE__", str(representative_path), stat.st_dev)]
 
-        # Check if file exists in catalog
-        existing = existing_files.get(rel_path)
+        # Get representative file's catalog entry
+        rel_path_repr = str(Path(representative_path).relative_to(mount_point))
+        existing_repr = existing_files.get(rel_path_repr)
 
-        # Determine if we need to hash
-        if existing and existing['size'] == stat.st_size and abs(existing['mtime'] - stat.st_mtime) < 0.001:
-            # File unchanged - reuse existing hashes
-            quick_hash = existing.get('quick_hash')
-            sha1 = existing.get('sha1')
-            sha256 = existing.get('sha256')
-
-            # If upgrading and no full hash yet, compute it
-            if hash_mode == 'upgrade' and (sha1 is None or sha256 is None):
-                sha1, sha256 = compute_full_hashes(file_path)
-                return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, sha256, stat.st_ino, stat.st_dev, False, True)
-
-            return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, sha256, stat.st_ino, stat.st_dev, False, False)
-
-        # File is new or modified - compute hashes based on mode
-        quick_hash = compute_quick_hash(file_path)
+        # Determine if we need to hash the representative file
+        need_hash = True
+        quick_hash = None
         sha1 = None
         sha256 = None
-        if hash_mode == 'full':
-            sha1, sha256 = compute_full_hashes(file_path)
 
-        is_new = existing is None
-        is_updated = not is_new
+        if existing_repr and existing_repr['size'] == stat.st_size and abs(existing_repr['mtime'] - stat.st_mtime) < 0.001:
+            # Representative file unchanged - reuse existing hashes
+            quick_hash = existing_repr.get('quick_hash')
+            sha1 = existing_repr.get('sha1')
+            sha256 = existing_repr.get('sha256')
 
-        return (rel_path, stat.st_size, stat.st_mtime, quick_hash, sha1, sha256, stat.st_ino, stat.st_dev, is_new, is_updated)
+            # Check if we need to hash based on mode
+            if hash_mode == 'fast' and quick_hash is not None:
+                need_hash = False
+            elif hash_mode == 'full' and sha1 is not None and sha256 is not None:
+                need_hash = False
+            elif hash_mode == 'upgrade' and (sha1 is None or sha256 is None):
+                need_hash = True  # Need to compute full hashes
+            else:
+                need_hash = False
+
+        # Hash the representative file if needed
+        if need_hash:
+            quick_hash = compute_quick_hash(representative_path)
+            if hash_mode == 'full' or hash_mode == 'upgrade':
+                sha1, sha256 = compute_full_hashes(representative_path)
+
+        # Build results for ALL paths in this inode group
+        results = []
+        for path in all_paths:
+            rel_path = str(Path(path).relative_to(mount_point))
+            existing_file = existing_files.get(rel_path)
+            is_new = existing_file is None
+            is_updated = not is_new and need_hash
+
+            # Determine hash_source
+            hash_source = None
+            if sha256 is not None:  # Only track for full hashes
+                if path == representative_path:
+                    hash_source = 'calculated'
+                elif is_hardlink_group:
+                    hash_source = f'inode:{inode}'
+
+            results.append((
+                rel_path, stat.st_size, stat.st_mtime,
+                quick_hash, sha1, sha256,
+                stat.st_ino, stat.st_dev,
+                is_new, is_updated,
+                hash_source
+            ))
+
+        return results
     except Exception as e:
-        print(f"⚠️ Could not process: {file_path} ({e})")
+        print(f"⚠️ Could not process work item: {e}")
         return None
 
 def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple], stats: ScanStats):
@@ -575,39 +618,50 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
     root_str = str(root_canonical)
 
     for row in rows:
-        rel_path, size, mtime, quick_hash, sha1, sha256, inode, device_id, is_new, is_updated = row
+        rel_path, size, mtime, quick_hash, sha1, sha256, inode, device_id, is_new, is_updated, hash_source = row
 
         if is_new:
             # Insert new file or re-activate deleted file
             cursor.execute(f"""
                 INSERT INTO {table_name}
-                (path, size, mtime, quick_hash, sha1, sha256, inode, first_seen_at, last_seen_at, last_modified_at, status, discovered_under)
-                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), 'active', ?)
+                (path, size, mtime, quick_hash, sha1, sha256, hash_source, inode, first_seen_at, last_seen_at, last_modified_at, status, discovered_under)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), 'active', ?)
                 ON CONFLICT(path) DO UPDATE SET
                     size = excluded.size,
                     mtime = excluded.mtime,
                     quick_hash = excluded.quick_hash,
                     sha1 = excluded.sha1,
                     sha256 = excluded.sha256,
+                    hash_source = excluded.hash_source,
                     inode = excluded.inode,
                     last_seen_at = datetime('now'),
                     last_modified_at = datetime('now'),
                     status = 'active',
                     discovered_under = excluded.discovered_under
-            """, (rel_path, size, mtime, quick_hash, sha1, sha256, inode, root_str))
+            """, (rel_path, size, mtime, quick_hash, sha1, sha256, hash_source, inode, root_str))
             stats.files_added += 1
-            stats.bytes_hashed += size
+            # Only count bytes_hashed once per inode group (when hash was calculated)
+            if hash_source == 'calculated' or hash_source is None:
+                stats.bytes_hashed += size
+                stats.inode_groups_hashed += 1
+            else:
+                stats.hardlinks_propagated += 1
 
         elif is_updated:
             # Update existing file (metadata or hash changed)
             cursor.execute(f"""
                 UPDATE {table_name}
-                SET size = ?, mtime = ?, quick_hash = ?, sha1 = ?, sha256 = ?, inode = ?,
+                SET size = ?, mtime = ?, quick_hash = ?, sha1 = ?, sha256 = ?, hash_source = ?, inode = ?,
                     last_seen_at = datetime('now'), last_modified_at = datetime('now'), status = 'active'
                 WHERE path = ?
-            """, (size, mtime, quick_hash, sha1, sha256, inode, rel_path))
+            """, (size, mtime, quick_hash, sha1, sha256, hash_source, inode, rel_path))
             stats.files_updated += 1
-            stats.bytes_hashed += size
+            # Only count bytes_hashed once per inode group (when hash was calculated)
+            if hash_source == 'calculated' or hash_source is None:
+                stats.bytes_hashed += size
+                stats.inode_groups_hashed += 1
+            else:
+                stats.hardlinks_propagated += 1
 
         else:
             # Unchanged file - just update last_seen_at
@@ -759,10 +813,11 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     existing_files = load_existing_files(cursor, device_id, canonical_root)
     _emit(quiet, f"📊 Existing files in catalog: {len(existing_files)}")
 
-    # 9. Walk filesystem and collect file paths
-    file_paths = []
+    # 9. Walk filesystem and collect file metadata (path + stat)
+    file_metadata = []  # List of (abs_path, stat_result)
     dir_count = 0
     file_count = 0
+    skipped_other_device_count = 0
     skipped_other_device_examples = []
     skipped_example_limit = 5
     nested_roots: list[Path] = []
@@ -806,14 +861,69 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             file_path = Path(dirpath) / filename
             if file_path.is_symlink():
                 continue
-            file_paths.append(str(file_path))
-            file_count += 1
+            try:
+                stat_result = file_path.stat()
+                if stat_result.st_dev != device_id:
+                    # File on different device
+                    skipped_other_device_count += 1
+                    if len(skipped_other_device_examples) < skipped_example_limit:
+                        skipped_other_device_examples.append(str(file_path))
+                    continue
+                file_metadata.append((str(file_path), stat_result))
+                file_count += 1
+            except OSError:
+                # Can't stat file, skip it
+                continue
 
     if discovery is not None:
         discovery.set_postfix(files=file_count)
         discovery.close()
 
+    # Group files by (inode, size) to deduplicate hardlinks
+    inode_groups = {}  # {(inode, size): [(path, stat), ...]}
+    files_without_inode = []  # Files where inode is None or 0
+
+    for abs_path, stat_result in file_metadata:
+        inode = stat_result.st_ino
+        size = stat_result.st_size
+        if inode is None or inode == 0:
+            files_without_inode.append((abs_path, stat_result))
+        else:
+            key = (inode, size)
+            inode_groups.setdefault(key, []).append((abs_path, stat_result))
+
+    # Build work items (one per inode group)
+    work_items = []
+    for (inode, size), path_stats in inode_groups.items():
+        paths = [ps[0] for ps in path_stats]
+        stat_result = path_stats[0][1]  # All hardlinks have same stat
+        work_items.append({
+            'representative_path': paths[0],
+            'all_paths': paths,
+            'inode': inode,
+            'size': size,
+            'stat': stat_result,
+            'is_hardlink_group': len(paths) > 1
+        })
+
+    # Add files without inodes as individual work items
+    for abs_path, stat_result in files_without_inode:
+        work_items.append({
+            'representative_path': abs_path,
+            'all_paths': [abs_path],
+            'inode': None,
+            'size': stat_result.st_size,
+            'stat': stat_result,
+            'is_hardlink_group': False
+        })
+
+    # Calculate hardlink statistics
+    total_hardlink_groups = sum(1 for item in work_items if item['is_hardlink_group'])
+    total_hardlinks = sum(len(item['all_paths']) - 1 for item in work_items if item['is_hardlink_group'])
+
     _emit(quiet, f"📁 Files on filesystem: {file_count:,} in {dir_count:,} dirs")
+    if total_hardlink_groups > 0:
+        _emit(quiet, f"🔗 Hardlink groups: {total_hardlink_groups:,} (saving {total_hardlinks:,} hash operations)")
     if nested_roots:
         _emit(quiet, f"🧭 Detected nested datasets/mounts: {len(nested_roots)}")
         for nested in nested_roots[:5]:
@@ -837,32 +947,35 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     mount_point = effective_mount
 
     use_two_line = show_current_path and not quiet and tqdm_position is None
-    progress = TwoLineProgress(total=len(file_paths), prefix="📦 Scanning", unit="files", enabled=use_two_line)
+    progress = TwoLineProgress(total=file_count, prefix="📦 Scanning", unit="files", enabled=use_two_line)
     progress_position = tqdm_position
     progress_file = None
 
     if not parallel:
         # Sequential scanning
         if progress.enabled:
-            for file_path in file_paths:
-                result = _hash_file_worker(
-                    file_path, mount_point, existing_files, hash_mode, expected_device_id=device_id
+            for work_item in work_items:
+                results = _hash_file_worker(
+                    work_item, mount_point, existing_files, hash_mode, expected_device_id=device_id
                 )
-                if result is None:
-                    progress.update(desc=file_path, advance=1)
+                if results is None:
+                    progress.update(desc=work_item['representative_path'], advance=len(work_item['all_paths']))
                     continue
-                if result[0] == "__SKIP_DEVICE__":
-                    stats.files_skipped_other_device += 1
+                if results and results[0][0] == "__SKIP_DEVICE__":
+                    stats.files_skipped_other_device += len(results)
                     if len(skipped_other_device_examples) < skipped_example_limit:
-                        skipped_other_device_examples.append(result[1])
-                    progress.update(desc=file_path, advance=1)
+                        skipped_other_device_examples.append(results[0][1])
+                    progress.update(desc=work_item['representative_path'], advance=len(results))
                     continue
-                seen_paths.add(result[0])
 
-                # Write immediately in sequential mode
-                _write_batch(cursor, table_name, canonical_root, [result], stats)
-                stats.files_scanned += 1
-                progress.update(desc=file_path, advance=1)
+                # Process all results from this work item
+                for result in results:
+                    seen_paths.add(result[0])
+
+                # Write batch of results
+                _write_batch(cursor, table_name, canonical_root, results, stats)
+                stats.files_scanned += len(results)
+                progress.update(desc=work_item['representative_path'], advance=len(results))
 
                 # Commit periodically
                 if stats.files_scanned % 500 == 0:
@@ -871,24 +984,27 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             conn.commit()
         else:
             pbar_kwargs = _progress_kwargs(
-                total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
+                total=file_count, tqdm_position=progress_position, quiet=quiet, file=progress_file
             )
-            for file_path in tqdm(file_paths, **pbar_kwargs):
-                result = _hash_file_worker(
-                    file_path, mount_point, existing_files, hash_mode, expected_device_id=device_id
+            for work_item in tqdm(work_items, **pbar_kwargs):
+                results = _hash_file_worker(
+                    work_item, mount_point, existing_files, hash_mode, expected_device_id=device_id
                 )
-                if result is None:
+                if results is None:
                     continue
-                if result[0] == "__SKIP_DEVICE__":
-                    stats.files_skipped_other_device += 1
+                if results and results[0][0] == "__SKIP_DEVICE__":
+                    stats.files_skipped_other_device += len(results)
                     if len(skipped_other_device_examples) < skipped_example_limit:
-                        skipped_other_device_examples.append(result[1])
+                        skipped_other_device_examples.append(results[0][1])
                     continue
-                seen_paths.add(result[0])
 
-                # Write immediately in sequential mode
-                _write_batch(cursor, table_name, canonical_root, [result], stats)
-                stats.files_scanned += 1
+                # Process all results from this work item
+                for result in results:
+                    seen_paths.add(result[0])
+
+                # Write batch of results
+                _write_batch(cursor, table_name, canonical_root, results, stats)
+                stats.files_scanned += len(results)
 
                 # Commit periodically
                 if stats.files_scanned % 500 == 0:
@@ -903,22 +1019,22 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         batch_size = batch_size or BATCH_SIZE
         pending = set()
         batch_rows = []
-        file_iter = iter(file_paths)
-        future_to_path = {}
+        work_iter = iter(work_items)
+        future_to_item = {}
 
         try:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 # Prime the queue
                 while len(pending) < max_inflight:
                     try:
-                        file_path = next(file_iter)
+                        work_item = next(work_iter)
                     except StopIteration:
                         break
                     future = executor.submit(
-                        _hash_file_worker, file_path, mount_point, existing_files, hash_mode, device_id
+                        _hash_file_worker, work_item, mount_point, existing_files, hash_mode, device_id
                     )
                     pending.add(future)
-                    future_to_path[future] = file_path
+                    future_to_item[future] = work_item
 
                 if progress.enabled:
                     while pending:
@@ -937,29 +1053,31 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                         for fut in done:
                             from concurrent.futures import CancelledError
                             try:
-                                file_path = future_to_path.pop(fut, None)
-                                result = fut.result()
+                                work_item = future_to_item.pop(fut, None)
+                                results = fut.result()
                             except CancelledError:
-                                progress.update(advance=1)
+                                if work_item:
+                                    progress.update(advance=len(work_item['all_paths']))
                                 continue
-                            if result is not None and result[0] == "__SKIP_DEVICE__":
-                                stats.files_skipped_other_device += 1
+                            if results is not None and results and results[0][0] == "__SKIP_DEVICE__":
+                                stats.files_skipped_other_device += len(results)
                                 if len(skipped_other_device_examples) < skipped_example_limit:
-                                    skipped_other_device_examples.append(result[1])
-                                progress.update(desc=file_path, advance=1)
+                                    skipped_other_device_examples.append(results[0][1])
+                                progress.update(desc=work_item['representative_path'] if work_item else "", advance=len(results))
                                 continue
 
-                            if result is not None:
-                                rel_path = result[0]
-                                seen_paths.add(rel_path)
-                                batch_rows.append(result)
-                                stats.files_scanned += 1
+                            if results is not None:
+                                for result in results:
+                                    seen_paths.add(result[0])
+                                batch_rows.extend(results)
+                                stats.files_scanned += len(results)
 
                                 if len(batch_rows) >= batch_size:
                                     _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
                                     batch_rows.clear()
                                     conn.commit()
-                            progress.update(desc=file_path, advance=1)
+                            if work_item:
+                                progress.update(desc=work_item['representative_path'], advance=len(results) if results else 0)
 
                         # Exit immediately if interrupted
                         if interrupted:
@@ -967,17 +1085,17 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
                         while len(pending) < max_inflight:
                             try:
-                                file_path = next(file_iter)
+                                work_item = next(work_iter)
                             except StopIteration:
                                 break
                             future = executor.submit(
-                                _hash_file_worker, file_path, mount_point, existing_files, hash_mode, device_id
+                                _hash_file_worker, work_item, mount_point, existing_files, hash_mode, device_id
                             )
                             pending.add(future)
-                            future_to_path[future] = file_path
+                            future_to_item[future] = work_item
                 else:
                     pbar_kwargs = _progress_kwargs(
-                        total=len(file_paths), tqdm_position=progress_position, quiet=quiet, file=progress_file
+                        total=file_count, tqdm_position=progress_position, quiet=quiet, file=progress_file
                     )
                     with tqdm(**pbar_kwargs) as pbar:
                         while pending:
@@ -996,30 +1114,31 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             for fut in done:
                                 from concurrent.futures import CancelledError
                                 try:
-                                    future_to_path.pop(fut, None)
-                                    result = fut.result()
+                                    work_item = future_to_item.pop(fut, None)
+                                    results = fut.result()
                                 except CancelledError:
                                     # Ignore cancelled futures
-                                    pbar.update(1)
+                                    if work_item:
+                                        pbar.update(len(work_item['all_paths']))
                                     continue
-                                if result is not None and result[0] == "__SKIP_DEVICE__":
-                                    stats.files_skipped_other_device += 1
+                                if results is not None and results and results[0][0] == "__SKIP_DEVICE__":
+                                    stats.files_skipped_other_device += len(results)
                                     if len(skipped_other_device_examples) < skipped_example_limit:
-                                        skipped_other_device_examples.append(result[1])
-                                    pbar.update(1)
+                                        skipped_other_device_examples.append(results[0][1])
+                                    pbar.update(len(results))
                                     continue
 
-                                if result is not None:
-                                    rel_path = result[0]
-                                    seen_paths.add(rel_path)
-                                    batch_rows.append(result)
-                                    stats.files_scanned += 1
+                                if results is not None:
+                                    for result in results:
+                                        seen_paths.add(result[0])
+                                    batch_rows.extend(results)
+                                    stats.files_scanned += len(results)
 
                                     if len(batch_rows) >= batch_size:
                                         _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
                                         batch_rows.clear()
                                         conn.commit()
-                                pbar.update(1)
+                                    pbar.update(len(results))
 
                             # Exit immediately if interrupted
                             if interrupted:
@@ -1027,14 +1146,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
                             while len(pending) < max_inflight:
                                 try:
-                                    file_path = next(file_iter)
+                                    work_item = next(work_iter)
                                 except StopIteration:
                                     break
                                 future = executor.submit(
-                                    _hash_file_worker, file_path, mount_point, existing_files, hash_mode, device_id
+                                    _hash_file_worker, work_item, mount_point, existing_files, hash_mode, device_id
                                 )
                                 pending.add(future)
-                                future_to_path[future] = file_path
+                                future_to_item[future] = work_item
 
         except KeyboardInterrupt:
             interrupted = True
@@ -1125,10 +1244,10 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
         # Calculate file size metrics for scanned files
         file_sizes = []
-        for file_path in file_paths[:min(100, len(file_paths))]:  # Sample up to 100 files
+        for work_item in work_items[:min(100, len(work_items))]:  # Sample up to 100 work items
             try:
-                file_sizes.append(os.path.getsize(file_path))
-            except (OSError, PermissionError):
+                file_sizes.append(work_item['size'])
+            except (OSError, KeyError):
                 continue
 
         if file_sizes and stats.files_scanned > 0:
@@ -1169,6 +1288,13 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         pass
 
     if not quiet:
+        # Calculate efficiency metrics
+        efficiency_msg = ""
+        if stats.hardlinks_propagated > 0:
+            total_potential_hashes = stats.inode_groups_hashed + stats.hardlinks_propagated
+            efficiency_pct = (stats.hardlinks_propagated / total_potential_hashes * 100) if total_potential_hashes > 0 else 0
+            efficiency_msg = f"   Hardlink optimization: {stats.hardlinks_propagated:,} files copied hash from {stats.inode_groups_hashed:,} inodes ({efficiency_pct:.0f}% I/O reduction)\n"
+
         print(
             f"""
 📦 Scan complete!
@@ -1179,7 +1305,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
    Unchanged: {stats.files_unchanged:,}
    Deleted: {stats.files_deleted:,}
    Hashed: {stats.bytes_hashed / 1024 / 1024:.1f} MB
-    """
+{efficiency_msg}    """
         )
         if stats.files_skipped_other_device:
             print(f"⚠️  Skipped (other filesystem): {stats.files_skipped_other_device:,} files")
@@ -1210,3 +1336,5 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     # Close connection to prevent resource leaks with hierarchical scanning
     conn.close()
+
+    return stats
