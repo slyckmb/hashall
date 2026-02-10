@@ -18,6 +18,7 @@ from hashall.model import connect_db, init_db_schema
 from hashall.device import register_or_update_device, ensure_files_table
 from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source, get_zfs_metadata
 from hashall.pathing import canonicalize_path, is_under
+from hashall.progress import TwoLineProgress
 
 BATCH_SIZE = 500
 
@@ -639,112 +640,6 @@ def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: boo
     return kwargs
 
 
-class _TwoLineProgress:
-    def __init__(self, total: int, enabled: bool):
-        self.enabled = enabled and sys.stdout.isatty()
-        self.file = sys.stdout if self.enabled else None
-        self.total = total
-        self.start = time.monotonic()
-        self.n = 0
-        self.path = ""
-        if self.enabled:
-            self.file.write("\r\x1b[2K")
-            print("", file=self.file, flush=True)
-            print("", file=self.file, flush=True)
-
-    def _width(self) -> int:
-        try:
-            width = shutil.get_terminal_size((120, 20)).columns
-        except Exception:
-            width = 120
-        return max(10, width - 2)
-
-    def _progress_line(self, width: int) -> str:
-        elapsed = max(time.monotonic() - self.start, 1e-9)
-        line = tqdm.format_meter(
-            self.n,
-            self.total,
-            elapsed,
-            ncols=width,
-            prefix="📦 Scanning",
-            unit="files",
-        )
-        return _pad_to_width(_truncate_middle(line, width), width)
-
-    def update(self, *, path: str | None = None, advance: int = 0) -> None:
-        if not self.enabled:
-            return
-        if path is not None:
-            self.path = path.replace("\n", " ")
-        if advance:
-            self.n += advance
-        width = self._width()
-        status_line = _pad_to_width(_truncate_middle(self.path, width), width)
-        bar_line = self._progress_line(width)
-        self.file.write("\x1b[2A\r\x1b[2K" + status_line)
-        self.file.write("\x1b[1B\r\x1b[2K" + bar_line)
-        self.file.write("\x1b[1B\r")
-        self.file.flush()
-
-    def close(self) -> None:
-        if not self.enabled:
-            return
-        self.file.write("\x1b[2A\r\x1b[2K\x1b[1B\r")
-        self.file.flush()
-
-
-def _char_width(ch: str) -> int:
-    if unicodedata.combining(ch):
-        return 0
-    if unicodedata.east_asian_width(ch) in ("W", "F", "A"):
-        return 2
-    return 1
-
-
-def _display_width(text: str) -> int:
-    return sum(_char_width(ch) for ch in text)
-
-
-def _slice_by_width(text: str, max_width: int, *, from_end: bool = False) -> str:
-    if max_width <= 0:
-        return ""
-    if not from_end:
-        width = 0
-        out = []
-        for ch in text:
-            ch_w = _char_width(ch)
-            if width + ch_w > max_width:
-                break
-            out.append(ch)
-            width += ch_w
-        return "".join(out)
-    width = 0
-    out = []
-    for ch in reversed(text):
-        ch_w = _char_width(ch)
-        if width + ch_w > max_width:
-            break
-        out.append(ch)
-        width += ch_w
-    return "".join(reversed(out))
-
-
-def _truncate_middle(text: str, max_width: int) -> str:
-    if max_width <= 0 or _display_width(text) <= max_width:
-        return text
-    if max_width <= 3:
-        return _slice_by_width(text, max_width)
-    head = max_width // 2 - 1
-    tail = max_width - head - 3
-    return f"{_slice_by_width(text, head)}...{_slice_by_width(text, tail, from_end=True)}"
-
-
-def _pad_to_width(text: str, max_width: int) -> str:
-    pad = max_width - _display_width(text)
-    if pad > 0:
-        return text + (" " * pad)
-    return text
-
 
 def _canonicalize_root(
     root_path: Path,
@@ -942,7 +837,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     mount_point = effective_mount
 
     use_two_line = show_current_path and not quiet and tqdm_position is None
-    progress = _TwoLineProgress(total=len(file_paths), enabled=use_two_line)
+    progress = TwoLineProgress(total=len(file_paths), prefix="📦 Scanning", unit="files", enabled=use_two_line)
     progress_position = tqdm_position
     progress_file = None
 
@@ -954,20 +849,20 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     file_path, mount_point, existing_files, hash_mode, expected_device_id=device_id
                 )
                 if result is None:
-                    progress.update(path=file_path, advance=1)
+                    progress.update(desc=file_path, advance=1)
                     continue
                 if result[0] == "__SKIP_DEVICE__":
                     stats.files_skipped_other_device += 1
                     if len(skipped_other_device_examples) < skipped_example_limit:
                         skipped_other_device_examples.append(result[1])
-                    progress.update(path=file_path, advance=1)
+                    progress.update(desc=file_path, advance=1)
                     continue
                 seen_paths.add(result[0])
 
                 # Write immediately in sequential mode
                 _write_batch(cursor, table_name, canonical_root, [result], stats)
                 stats.files_scanned += 1
-                progress.update(path=file_path, advance=1)
+                progress.update(desc=file_path, advance=1)
 
                 # Commit periodically
                 if stats.files_scanned % 500 == 0:
@@ -1051,7 +946,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 stats.files_skipped_other_device += 1
                                 if len(skipped_other_device_examples) < skipped_example_limit:
                                     skipped_other_device_examples.append(result[1])
-                                progress.update(path=file_path, advance=1)
+                                progress.update(desc=file_path, advance=1)
                                 continue
 
                             if result is not None:
@@ -1064,7 +959,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                     _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
                                     batch_rows.clear()
                                     conn.commit()
-                            progress.update(path=file_path, advance=1)
+                            progress.update(desc=file_path, advance=1)
 
                         # Exit immediately if interrupted
                         if interrupted:

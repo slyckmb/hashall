@@ -14,6 +14,7 @@ from pathlib import Path
 from hashall.scan import scan_path
 from hashall.export import export_json
 from hashall.verify_trees import verify_trees
+from hashall.progress import TwoLineProgress
 from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
@@ -372,60 +373,69 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     skipped_prefix = 0
     processed = 0
 
-    for torrent in torrents:
-        if limit and processed >= limit:
-            break
+    with TwoLineProgress(
+        total=len(torrents),
+        prefix="📦 Syncing payloads",
+        unit="torrents",
+        enabled=not dry_run
+    ) as progress:
+        for torrent in torrents:
+            if limit and processed >= limit:
+                break
 
-        # Get torrent root path
-        root_path = qbit.get_torrent_root_path(torrent)
-        root_canon = _canonicalize_payload_root_path(root_path)
+            # Get torrent root path
+            root_path = qbit.get_torrent_root_path(torrent)
+            root_canon = _canonicalize_payload_root_path(root_path)
 
-        if prefix_paths:
-            if not any(is_under(root_canon, pref) for pref in prefix_paths):
-                skipped_prefix += 1
-                continue
+            if prefix_paths:
+                if not any(is_under(root_canon, pref) for pref in prefix_paths):
+                    skipped_prefix += 1
+                    continue
 
-        print(f"\n🔄 Processing: {torrent.name[:50]}...")
-        print(f"   Hash: {torrent.hash}")
-        print(f"   Path: {root_path}")
-        if str(root_canon) != root_path:
-            print(f"   Canonical: {root_canon}")
+            progress.update(desc=f"{torrent.name[:60]}", advance=0)
 
-        # Build payload from database
-        payload = build_payload(conn, str(root_canon), device_id=None)
-        if payload.file_count == 0:
-            missing_in_catalog += 1
+            print(f"\n🔄 Processing: {torrent.name[:50]}...")
+            print(f"   Hash: {torrent.hash}")
+            print(f"   Path: {root_path}")
+            if str(root_canon) != root_path:
+                print(f"   Canonical: {root_canon}")
 
-        if (not dry_run) and payload.status != 'complete' and upgrade_missing:
-            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id, parallel=parallel, workers=workers)
-            if upgraded > 0:
-                payload = build_payload(conn, root_path, device_id=payload.device_id)
+            # Build payload from database
+            payload = build_payload(conn, str(root_canon), device_id=None)
+            if payload.file_count == 0:
+                missing_in_catalog += 1
 
-        if not dry_run:
-            # Insert/update payload
-            payload_id = upsert_payload(conn, payload)
+            if (not dry_run) and payload.status != 'complete' and upgrade_missing:
+                upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id, parallel=parallel, workers=workers)
+                if upgraded > 0:
+                    payload = build_payload(conn, root_path, device_id=payload.device_id)
 
-            # Insert/update torrent instance
-            torrent_instance = TorrentInstance(
-                torrent_hash=torrent.hash,
-                payload_id=payload_id,
-                device_id=None,  # Could be extracted from stat() if needed
-                save_path=torrent.save_path,
-                root_name=torrent.name,
-                category=torrent.category,
-                tags=torrent.tags,
-                last_seen_at=time.time()
-            )
-            upsert_torrent_instance(conn, torrent_instance)
+            if not dry_run:
+                # Insert/update payload
+                payload_id = upsert_payload(conn, payload)
 
-        if payload.status == 'complete':
-            print(f"   ✅ Payload complete (hash: {payload.payload_hash[:16]}...)")
-            print(f"      {payload.file_count} files, {payload.total_bytes:,} bytes")
-            synced_count += 1
-        else:
-            print(f"   ⚠️  Payload incomplete (missing SHA256s)")
-            incomplete_count += 1
-        processed += 1
+                # Insert/update torrent instance
+                torrent_instance = TorrentInstance(
+                    torrent_hash=torrent.hash,
+                    payload_id=payload_id,
+                    device_id=None,  # Could be extracted from stat() if needed
+                    save_path=torrent.save_path,
+                    root_name=torrent.name,
+                    category=torrent.category,
+                    tags=torrent.tags,
+                    last_seen_at=time.time()
+                )
+                upsert_torrent_instance(conn, torrent_instance)
+
+            if payload.status == 'complete':
+                print(f"   ✅ Payload complete (hash: {payload.payload_hash[:16]}...)")
+                print(f"      {payload.file_count} files, {payload.total_bytes:,} bytes")
+                synced_count += 1
+            else:
+                print(f"   ⚠️  Payload incomplete (missing SHA256s)")
+                incomplete_count += 1
+            processed += 1
+            progress.update(advance=1)
 
     if dry_run:
         print(f"\n✅ DRY-RUN complete (no DB changes)")
