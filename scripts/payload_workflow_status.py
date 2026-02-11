@@ -120,6 +120,57 @@ def _payload_upgrade_collisions_cli(root: str, db: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _catalog_scan_status(conn: sqlite3.Connection, roots: list[str]) -> None:
+    """Block 0: catalog scan — payloads not yet in catalog (file_count=0)."""
+    all_rows = conn.execute(
+        "SELECT root_path, file_count FROM payloads WHERE file_count = 0"
+    ).fetchall()
+
+    per_root: dict[str, int] = {}
+    for root in roots:
+        count = 0
+        for root_path, _ in all_rows:
+            if root_path == root or root_path.startswith(root.rstrip("/") + "/"):
+                count += 1
+        per_root[root] = count
+
+    total_dirty = sum(per_root.values())
+    done = total_dirty == 0
+
+    dirty_parts = [f"dirty={total_dirty}"]
+    for root, count in per_root.items():
+        if count > 0:
+            dirty_parts.append(f"{root}: {count}")
+    status_str = " | ".join(dirty_parts)
+
+    # Find scan path - use root with most dirty payloads + /torrents/seeding
+    max_dirty = 0
+    target_root = None
+    for root, count in per_root.items():
+        if count > max_dirty:
+            max_dirty = count
+            target_root = root
+
+    if target_root and "/torrents/seeding/" in all_rows[0][0]:
+        scan_path = target_root + "/torrents/seeding"
+    elif target_root:
+        scan_path = target_root
+    else:
+        scan_path = str(Path(all_rows[0][0]).parent) if all_rows else "/stash/media/torrents/seeding"
+
+    make_cmd = f"make scan PATH={scan_path} HASH_MODE=full PARALLEL=1"
+    cli_cmd = f"{_hashall_cli()} scan {_q(scan_path)} --hash-mode full --parallel"
+
+    _print_block(
+        "catalog scan",
+        done,
+        status_str,
+        make_cmd,
+        cli_cmd,
+        "scan directories to add files to catalog (required before upgrade-missing)",
+    )
+
+
 def _payload_sync_status(conn: sqlite3.Connection, roots: list[str]) -> None:
     """Block 1: payload sync status per root."""
     # Per-device breakdown
@@ -131,15 +182,26 @@ def _payload_sync_status(conn: sqlite3.Connection, roots: list[str]) -> None:
         "SELECT COUNT(DISTINCT torrent_hash) FROM torrent_instances"
     ).fetchone()[0]
 
+    # Check for dirty payloads (only under specified roots)
+    dirty_rows = conn.execute(
+        "SELECT root_path FROM payloads WHERE file_count = 0"
+    ).fetchall()
+
+    dirty_count = 0
+    for root in roots:
+        for (rp,) in dirty_rows:
+            if rp == root or rp.startswith(root.rstrip("/") + "/"):
+                dirty_count += 1
+
     # Aggregate per root
     per_root: dict[str, dict[str, int]] = {}
     all_rows = conn.execute(
-        "SELECT root_path, status FROM payloads"
+        "SELECT root_path, status, file_count FROM payloads"
     ).fetchall()
 
     for root in roots:
         counts: dict[str, int] = {"total": 0, "complete": 0, "incomplete": 0}
-        for root_path, status in all_rows:
+        for root_path, status, _ in all_rows:
             if root_path == root or root_path.startswith(root.rstrip("/") + "/"):
                 counts["total"] += 1
                 if status == "complete":
@@ -151,12 +213,16 @@ def _payload_sync_status(conn: sqlite3.Connection, roots: list[str]) -> None:
     total_payloads = sum(c["total"] for c in per_root.values())
     total_complete = sum(c["complete"] for c in per_root.values())
     total_incomplete = total_payloads - total_complete
-    synced = total_payloads > 0
+    # Mark as not done if there are dirty payloads (need scan first, then re-sync)
+    synced = total_payloads > 0 and dirty_count == 0
 
     parts = [f"payloads={total_payloads}", f"complete={total_complete}",
              f"torrents={torrent_count}"]
     for root, counts in per_root.items():
         parts.append(f"{root}: {counts['complete']}/{counts['total']}")
+
+    if dirty_count > 0:
+        parts.append(f"⚠ {dirty_count} need scan first")
 
     status_str = " | ".join(parts)
 
@@ -178,29 +244,53 @@ def _payload_sync_status(conn: sqlite3.Connection, roots: list[str]) -> None:
     )
 
     # Block 1b: incomplete payload resolution guidance
+    # Split into dirty (file_count=0) vs missing SHA256 (file_count>0)
     if total_incomplete > 0:
-        incomplete_parts = [f"incomplete={total_incomplete}"]
-        for root, counts in per_root.items():
-            if counts["incomplete"] > 0:
-                incomplete_parts.append(f"{root}: {counts['incomplete']}")
-        inc_status = " | ".join(incomplete_parts)
+        # Count dirty vs needs-upgrade
+        dirty_rows = conn.execute(
+            "SELECT root_path FROM payloads WHERE status = 'incomplete' AND file_count = 0"
+        ).fetchall()
 
-        if total_payloads == 0:
-            upgrade_make = "make payload-sync PAYLOAD_UPGRADE_MISSING=1 PAYLOAD_PARALLEL=1"
-            upgrade_cli = _payload_sync_cli(args_db) + " --upgrade-missing --parallel"
-        else:
-            prefixes = " ".join(roots)
-            upgrade_make = f"make payload-sync PAYLOAD_UPGRADE_MISSING=1 PAYLOAD_PARALLEL=1 PAYLOAD_PATH_PREFIXES='{prefixes}'"
-            upgrade_cli = _payload_sync_cli_for_root(args_db, roots[0]) + " --upgrade-missing --parallel"
+        needs_upgrade_rows = conn.execute(
+            "SELECT root_path FROM payloads WHERE status = 'incomplete' AND file_count > 0"
+        ).fetchall()
 
-        _print_block(
-            "payload complete",
-            False,
-            inc_status,
-            upgrade_make,
-            upgrade_cli,
-            "hash only the files missing SHA256 in incomplete payloads (inode-aware, targeted)",
-        )
+        dirty_per_root: dict[str, int] = {}
+        upgrade_per_root: dict[str, int] = {}
+
+        for root in roots:
+            dirty_per_root[root] = sum(1 for (rp,) in dirty_rows
+                                      if rp == root or rp.startswith(root.rstrip("/") + "/"))
+            upgrade_per_root[root] = sum(1 for (rp,) in needs_upgrade_rows
+                                        if rp == root or rp.startswith(root.rstrip("/") + "/"))
+
+        total_dirty = sum(dirty_per_root.values())
+        total_needs_upgrade = sum(upgrade_per_root.values())
+
+        # Only show upgrade block if there are payloads needing upgrade (not dirty)
+        if total_needs_upgrade > 0:
+            upgrade_parts = [f"incomplete={total_needs_upgrade}"]
+            for root, count in upgrade_per_root.items():
+                if count > 0:
+                    upgrade_parts.append(f"{root}: {count}")
+            inc_status = " | ".join(upgrade_parts)
+
+            if total_payloads == 0:
+                upgrade_make = "make payload-sync PAYLOAD_UPGRADE_MISSING=1 PAYLOAD_PARALLEL=1"
+                upgrade_cli = _payload_sync_cli(args_db) + " --upgrade-missing --parallel"
+            else:
+                prefixes = " ".join(roots)
+                upgrade_make = f"make payload-sync PAYLOAD_UPGRADE_MISSING=1 PAYLOAD_PARALLEL=1 PAYLOAD_PATH_PREFIXES='{prefixes}'"
+                upgrade_cli = _payload_sync_cli_for_root(args_db, roots[0]) + " --upgrade-missing --parallel"
+
+            _print_block(
+                "payload complete",
+                False,
+                inc_status,
+                upgrade_make,
+                upgrade_cli,
+                "hash only the files missing SHA256 in incomplete payloads (inode-aware, targeted)",
+            )
 
 
 def _payload_collision_status(conn: sqlite3.Connection, roots: list[str]) -> None:
@@ -345,6 +435,7 @@ def main() -> int:
         print(f"  DB: {args.db}")
         print()
 
+        _catalog_scan_status(conn, roots)
         _payload_sync_status(conn, roots)
         _payload_collision_status(conn, roots)
         _payload_upgrade_status(conn, roots)

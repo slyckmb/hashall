@@ -483,6 +483,10 @@ PW_PATHS ?=
 payload-workflow:  ## Show payload workflow status across all roots
 	@$(PYTHON) scripts/payload_workflow_status.py --db "$(DB_FILE)" $(foreach p,$(PW_PATHS),"$(p)")
 
+.PHONY: payload-auto
+payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' or auto-discover)
+	@$(PYTHON) scripts/payload_auto_workflow.py --db "$(DB_FILE)" $(if $(ROOTS),--roots "$(ROOTS)",) $(if $(DRY_RUN),--dry-run,)
+
 # ============================================================================
 # Rehome (Payload Moves)
 # ============================================================================
