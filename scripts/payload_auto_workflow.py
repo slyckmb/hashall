@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
 # Ensure this script and its subprocesses resolve hashall from this repo checkout.
@@ -15,6 +18,8 @@ if REPO_SRC.exists():
     sys.path.insert(0, str(REPO_SRC))
 
 from hashall.model import connect_db
+
+STALL_THRESHOLD = 2
 
 
 def main() -> int:
@@ -29,7 +34,7 @@ def main() -> int:
 
     # Discover or parse roots
     if args.roots:
-        roots = [r.strip() for r in args.roots.split(",")]
+        roots = [r.strip() for r in args.roots.split(",") if r.strip()]
     else:
         roots = _discover_roots(conn)
 
@@ -37,110 +42,306 @@ def main() -> int:
         print("No roots found. Run 'make payload-sync' first.")
         return 1
 
+    run_id = uuid.uuid4().hex[:10]
+    log_path = _workflow_log_path(run_id)
+    _log_event(
+        log_path,
+        "run_start",
+        run_id=run_id,
+        db=args.db,
+        roots=roots,
+        max_iterations=args.max_iterations,
+        dry_run=args.dry_run,
+    )
+
     print(f"Automated payload workflow")
     print(f"  Roots: {', '.join(roots)}")
     print(f"  DB: {args.db}")
+    print(f"  Run ID: {run_id}")
+    print(f"  Log: {log_path}")
     print(f"  Max iterations: {args.max_iterations}")
     print()
 
-    # Main loop
-    for iteration in range(1, args.max_iterations + 1):
-        print(f"--- Iteration {iteration} ---")
+    previous_signature = None
+    stagnation_streak = 0
 
-        action_taken = False
+    try:
+        # Main loop
+        for iteration in range(1, args.max_iterations + 1):
+            print(f"--- Iteration {iteration} ---")
+            state = collect_workflow_state(conn, roots)
+            signature = state_signature(state)
+            stagnation_streak = next_stagnation_streak(previous_signature, signature, stagnation_streak)
+            previous_signature = signature
 
-        # Step 1: Check for dirty payloads (need scan)
-        dirty_count, scan_path = check_dirty(conn, roots)
-        if dirty_count > 0:
-            print(f"  Found {dirty_count} dirty payloads (need scan)")
-            if not run_scan(scan_path, args.db, args.dry_run):
-                print("  ❌ Scan failed")
-                return 1
-            action_taken = True
-            # Re-run payload-sync after scan to update file_count
-            print(f"  Re-syncing payloads after scan...")
-            if not run_payload_sync(roots, args.db, upgrade=False, dry_run=args.dry_run):
-                print("  ❌ Payload-sync failed")
-                return 1
-            continue  # Re-check from top
+            _log_event(
+                log_path,
+                "iteration_state",
+                run_id=run_id,
+                iteration=iteration,
+                signature=list(signature),
+                stagnation_streak=stagnation_streak,
+                state=state,
+            )
 
-        # Step 2: Check for incomplete payloads (need upgrade)
-        incomplete_count = check_incomplete(conn, roots)
-        if incomplete_count > 0:
-            print(f"  Found {incomplete_count} incomplete payloads (need upgrade)")
-            if not run_payload_sync(roots, args.db, upgrade=True, dry_run=args.dry_run):
-                print("  ❌ Payload upgrade failed")
-                return 1
-            action_taken = True
-            continue  # Re-check from top
+            dirty_count = state["dirty_in_scope"]
+            incomplete_count = state["incomplete_in_scope"]
+            collision_count = state["collision_groups_in_scope"]
+            if state["dirty_out_of_scope"] > 0:
+                print(
+                    f"  ⚠ Out-of-scope dirty payloads: {state['dirty_out_of_scope']} "
+                    f"(samples: {', '.join(state['dirty_samples_out_of_scope'])})"
+                )
+                if state["mount_alias_hint"]:
+                    print(f"  ⚠ Hint: {state['mount_alias_hint']}")
 
-        # Step 3: Check for collision groups
-        collision_count = check_collisions(conn)
-        if collision_count > 0:
-            print(f"  Found {collision_count} collision groups (need upgrade)")
-            if not run_collision_upgrade(roots, args.db, args.dry_run):
-                print("  ❌ Collision upgrade failed")
-                return 1
-            action_taken = True
-            continue  # Re-check from top
+            if stagnation_streak >= STALL_THRESHOLD:
+                reason = "stalled_no_progress"
+                print(f"⚠️  Stopping early: {reason} after {stagnation_streak} unchanged iterations")
+                print(f"   state: dirty={dirty_count}, incomplete={incomplete_count}, collisions={collision_count}")
+                _log_event(
+                    log_path,
+                    "run_stalled",
+                    run_id=run_id,
+                    iteration=iteration,
+                    reason=reason,
+                    signature=list(signature),
+                    stagnation_streak=stagnation_streak,
+                    state=state,
+                )
+                return 0 if args.dry_run else 1
 
-        if not action_taken:
-            print("✅ Workflow complete - no actions needed")
-            break
-    else:
-        print(f"⚠️  Max iterations ({args.max_iterations}) reached")
-        return 1
+            action_taken = False
+
+            # Step 1: Check for dirty payloads (need scan)
+            if dirty_count > 0:
+                scan_path = state["scan_path"]
+                print(f"  Found {dirty_count} dirty payloads (need scan)")
+                scan_result = run_scan(scan_path, args.db, args.dry_run)
+                _log_event(
+                    log_path,
+                    "command",
+                    run_id=run_id,
+                    iteration=iteration,
+                    command=scan_result["cmd"],
+                    action="scan",
+                    result=scan_result,
+                )
+                if not scan_result["ok"]:
+                    print("  ❌ Scan failed")
+                    _log_event(
+                        log_path,
+                        "run_failed",
+                        run_id=run_id,
+                        iteration=iteration,
+                        reason="scan_failed",
+                        result=scan_result,
+                    )
+                    return 1
+                action_taken = True
+                # Re-run payload-sync after scan to update file_count
+                print("  Re-syncing payloads after scan...")
+                sync_result = run_payload_sync(roots, args.db, upgrade=False, dry_run=args.dry_run)
+                _log_event(
+                    log_path,
+                    "command",
+                    run_id=run_id,
+                    iteration=iteration,
+                    command=sync_result["cmd"],
+                    action="payload_sync",
+                    result=sync_result,
+                )
+                if not sync_result["ok"]:
+                    print("  ❌ Payload-sync failed")
+                    _log_event(
+                        log_path,
+                        "run_failed",
+                        run_id=run_id,
+                        iteration=iteration,
+                        reason="payload_sync_failed_after_scan",
+                        result=sync_result,
+                    )
+                    return 1
+                continue  # Re-check from top
+
+            # Step 2: Check for incomplete payloads (need upgrade)
+            if incomplete_count > 0:
+                print(f"  Found {incomplete_count} incomplete payloads (need upgrade)")
+                upgrade_result = run_payload_sync(roots, args.db, upgrade=True, dry_run=args.dry_run)
+                _log_event(
+                    log_path,
+                    "command",
+                    run_id=run_id,
+                    iteration=iteration,
+                    command=upgrade_result["cmd"],
+                    action="payload_sync_upgrade",
+                    result=upgrade_result,
+                )
+                if not upgrade_result["ok"]:
+                    print("  ❌ Payload upgrade failed")
+                    _log_event(
+                        log_path,
+                        "run_failed",
+                        run_id=run_id,
+                        iteration=iteration,
+                        reason="payload_upgrade_failed",
+                        result=upgrade_result,
+                    )
+                    return 1
+                action_taken = True
+                continue  # Re-check from top
+
+            # Step 3: Check collision groups (scoped to roots)
+            if collision_count > 0:
+                print(f"  Found {collision_count} collision groups (need upgrade)")
+                collision_runs = run_collision_upgrade(roots, args.db, args.dry_run)
+                for run in collision_runs:
+                    _log_event(
+                        log_path,
+                        "command",
+                        run_id=run_id,
+                        iteration=iteration,
+                        command=run["cmd"],
+                        action="payload_upgrade_collisions",
+                        result=run,
+                    )
+                if any(not run["ok"] for run in collision_runs):
+                    print("  ❌ Collision upgrade failed")
+                    _log_event(
+                        log_path,
+                        "run_failed",
+                        run_id=run_id,
+                        iteration=iteration,
+                        reason="collision_upgrade_failed",
+                    )
+                    return 1
+                action_taken = True
+                continue  # Re-check from top
+
+            if not action_taken:
+                print("✅ Workflow complete - no actions needed")
+                _log_event(
+                    log_path,
+                    "run_complete",
+                    run_id=run_id,
+                    iteration=iteration,
+                    state=state,
+                )
+                break
+        else:
+            print(f"⚠️  Max iterations ({args.max_iterations}) reached")
+            _log_event(
+                log_path,
+                "run_max_iterations",
+                run_id=run_id,
+                max_iterations=args.max_iterations,
+            )
+            return 1
+    finally:
+        conn.close()
 
     return 0
 
 
-def check_dirty(conn, roots: list[str]) -> tuple[int, str | None]:
-    """Check for dirty payloads (file_count=0). Returns (count, scan_path)."""
-    rows = conn.execute(
-        "SELECT root_path FROM payloads WHERE file_count = 0"
+def collect_workflow_state(conn, roots: list[str]) -> dict:
+    """Collect scoped/global state used for workflow decisions and diagnostics."""
+    all_rows = conn.execute(
+        "SELECT root_path, status, file_count, total_bytes FROM payloads"
     ).fetchall()
+    if not all_rows:
+        return {
+            "dirty_in_scope": 0,
+            "dirty_out_of_scope": 0,
+            "incomplete_in_scope": 0,
+            "collision_groups_in_scope": 0,
+            "collision_groups_global": 0,
+            "scan_path": None,
+            "dirty_samples_out_of_scope": [],
+            "mount_alias_hint": None,
+        }
 
-    per_root = {}
+    def _in_scope(root_path: str) -> bool:
+        return any(root_path == root or root_path.startswith(root.rstrip("/") + "/") for root in roots)
+
+    dirty_in_scope_paths = [rp for rp, _, fc, _ in all_rows if fc == 0 and _in_scope(rp)]
+    dirty_out_scope_paths = [rp for rp, _, fc, _ in all_rows if fc == 0 and not _in_scope(rp)]
+    incomplete_in_scope = sum(
+        1 for rp, status, fc, _ in all_rows
+        if status == "incomplete" and fc > 0 and _in_scope(rp)
+    )
+
+    per_root_dirty = {}
     for root in roots:
-        count = sum(1 for (rp,) in rows if rp == root or rp.startswith(root.rstrip("/") + "/"))
-        per_root[root] = count
+        per_root_dirty[root] = sum(
+            1 for rp in dirty_in_scope_paths
+            if rp == root or rp.startswith(root.rstrip("/") + "/")
+        )
 
-    total_dirty = sum(per_root.values())
-    if total_dirty == 0:
-        return 0, None
+    scan_path = None
+    if dirty_in_scope_paths:
+        max_dirty = max(per_root_dirty.values())
+        target_root = next(root for root, count in per_root_dirty.items() if count == max_dirty)
+        target_dirty_paths = [
+            rp for rp in dirty_in_scope_paths
+            if rp == target_root or rp.startswith(target_root.rstrip("/") + "/")
+        ]
+        first_target_dirty = target_dirty_paths[0] if target_dirty_paths else ""
+        if "/torrents/seeding/" in first_target_dirty:
+            scan_path = target_root.rstrip("/") + "/torrents/seeding"
+        else:
+            scan_path = target_root
 
-    # Find scan path - use root with most dirty + /torrents/seeding
-    max_dirty = max(per_root.values())
-    target_root = next(r for r, c in per_root.items() if c == max_dirty)
-
-    first_dirty = rows[0][0] if rows else ""
-    if "/torrents/seeding/" in first_dirty:
-        scan_path = target_root + "/torrents/seeding"
-    else:
-        scan_path = target_root
-
-    return total_dirty, scan_path
-
-
-def check_incomplete(conn, roots: list[str]) -> int:
-    """Check incomplete payloads needing upgrade (file_count>0, status=incomplete)."""
-    rows = conn.execute(
-        "SELECT root_path FROM payloads WHERE status = 'incomplete' AND file_count > 0"
-    ).fetchall()
-
-    count = 0
-    for root in roots:
-        for (rp,) in rows:
-            if rp == root or rp.startswith(root.rstrip("/") + "/"):
-                count += 1
-
-    return count
+    return {
+        "dirty_in_scope": len(dirty_in_scope_paths),
+        "dirty_out_of_scope": len(dirty_out_scope_paths),
+        "incomplete_in_scope": incomplete_in_scope,
+        "collision_groups_in_scope": _count_collision_groups(conn, roots=roots),
+        "collision_groups_global": _count_collision_groups(conn, roots=None),
+        "scan_path": scan_path,
+        "dirty_samples_out_of_scope": dirty_out_scope_paths[:5],
+        "mount_alias_hint": _mount_alias_hint(conn, roots, dirty_out_scope_paths),
+    }
 
 
-def check_collisions(conn) -> int:
-    """Check collision groups needing SHA256 upgrade."""
-    count = conn.execute(
+def state_signature(state: dict) -> tuple:
+    """Signature for stagnation detection."""
+    return (
+        state["dirty_in_scope"],
+        state["incomplete_in_scope"],
+        state["collision_groups_in_scope"],
+    )
+
+
+def next_stagnation_streak(previous_signature: tuple | None, current_signature: tuple, streak: int) -> int:
+    """Increment streak when no progress, otherwise reset."""
+    if previous_signature is None:
+        return 0
+    if previous_signature == current_signature:
+        return streak + 1
+    return 0
+
+
+def _count_collision_groups(conn, roots: list[str] | None) -> int:
+    if roots:
+        where_clauses = []
+        params: list[str] = []
+        for root in roots:
+            where_clauses.append("(root_path = ? OR root_path LIKE ?)")
+            params.extend([root, f"{root.rstrip('/')}/%"])
+        where_expr = " OR ".join(where_clauses)
+        query = f"""
+            SELECT COUNT(*) FROM (
+                SELECT file_count, total_bytes
+                FROM payloads
+                WHERE {where_expr}
+                GROUP BY file_count, total_bytes
+                HAVING COUNT(*) > 1
+                   AND SUM(CASE WHEN status = 'incomplete' THEN 1 ELSE 0 END) > 0
+            )
         """
+        return conn.execute(query, params).fetchone()[0]
+
+    query = """
         SELECT COUNT(*) FROM (
             SELECT file_count, total_bytes
             FROM payloads
@@ -148,55 +349,113 @@ def check_collisions(conn) -> int:
             HAVING COUNT(*) > 1
                AND SUM(CASE WHEN status = 'incomplete' THEN 1 ELSE 0 END) > 0
         )
+    """
+    return conn.execute(query).fetchone()[0]
+
+
+def _mount_alias_hint(conn, roots: list[str], dirty_out_scope_paths: list[str]) -> str | None:
+    """Return mount alias guidance when out-of-scope dirty paths match non-preferred mount points."""
+    if not dirty_out_scope_paths:
+        return None
+    rows = conn.execute(
         """
-    ).fetchone()[0]
-    return count
+        SELECT mount_point, preferred_mount_point
+        FROM devices
+        WHERE preferred_mount_point IS NOT NULL AND preferred_mount_point != mount_point
+        """
+    ).fetchall()
+    for mount_point, preferred_mount_point in rows:
+        if not mount_point or not preferred_mount_point:
+            continue
+        has_out_scope = any(rp == mount_point or rp.startswith(mount_point.rstrip("/") + "/") for rp in dirty_out_scope_paths)
+        root_uses_preferred = any(root == preferred_mount_point or root.startswith(preferred_mount_point.rstrip("/") + "/") for root in roots)
+        if has_out_scope and root_uses_preferred:
+            return f"dirty rows under {mount_point} but workflow roots use preferred mount {preferred_mount_point}"
+    return None
 
 
-def run_scan(scan_path: str, db_path: str, dry_run: bool) -> bool:
-    """Execute scan command. Returns True on success."""
+def run_scan(scan_path: str, db_path: str, dry_run: bool) -> dict:
+    """Execute scan command."""
     cmd = [sys.executable, "-m", "hashall.cli", "scan", scan_path, "--db", db_path, "--hash-mode", "full", "--parallel"]
-    print(f"  → Running: {' '.join(cmd)}")
-    if dry_run:
-        print("    (dry-run, skipped)")
-        return True
-
-    result = subprocess.run(cmd, env=_subprocess_env())
-    return result.returncode == 0
+    return _run_cmd(cmd, dry_run=dry_run)
 
 
-def run_payload_sync(roots: list[str], db_path: str, upgrade: bool, dry_run: bool) -> bool:
-    """Execute payload-sync. Returns True on success."""
+def run_payload_sync(roots: list[str], db_path: str, upgrade: bool, dry_run: bool) -> dict:
+    """Execute payload-sync."""
     cmd = [sys.executable, "-m", "hashall.cli", "payload", "sync", "--db", db_path]
     for root in roots:
         cmd.extend(["--path-prefix", root])
     if upgrade:
         cmd.extend(["--upgrade-missing", "--parallel"])
-
-    print(f"  → Running: {' '.join(cmd)}")
-    if dry_run:
-        print("    (dry-run, skipped)")
-        return True
-
-    result = subprocess.run(cmd, env=_subprocess_env())
-    return result.returncode == 0
+    return _run_cmd(cmd, dry_run=dry_run)
 
 
-def run_collision_upgrade(roots: list[str], db_path: str, dry_run: bool) -> bool:
-    """Execute payload-upgrade-collisions for all roots. Returns True on success."""
+def run_collision_upgrade(roots: list[str], db_path: str, dry_run: bool) -> list[dict]:
+    """Execute payload-upgrade-collisions for all roots."""
+    runs: list[dict] = []
     for root in roots:
         cmd = [sys.executable, "-m", "hashall.cli", "payload", "upgrade-collisions", "--db",
                db_path, "--path-prefix", root]
-        print(f"  → Running: {' '.join(cmd)}")
-        if dry_run:
-            print("    (dry-run, skipped)")
+        result = _run_cmd(cmd, dry_run=dry_run)
+        runs.append(result)
+        if not result["ok"]:
+            break
+    return runs
+
+
+def _run_cmd(cmd: list[str], dry_run: bool) -> dict:
+    """Run a command and return structured result."""
+    print(f"  → Running: {' '.join(cmd)}")
+    if dry_run:
+        print("    (dry-run, skipped)")
+        return {
+            "cmd": cmd,
+            "rc": 0,
+            "ok": True,
+            "duration_s": 0.0,
+            "dry_run": True,
+        }
+
+    start = time.monotonic()
+    result = subprocess.run(cmd, env=_subprocess_env())
+    duration_s = round(time.monotonic() - start, 3)
+    return {
+        "cmd": cmd,
+        "rc": result.returncode,
+        "ok": result.returncode == 0,
+        "duration_s": duration_s,
+        "dry_run": False,
+    }
+
+
+def _workflow_log_path(run_id: str) -> Path:
+    preferred = Path(os.environ.get("HASHALL_PAYLOAD_AUTO_LOG_DIR", str(Path.home() / ".logs" / "hashall" / "payload-auto")))
+    fallbacks = [
+        preferred,
+        Path("/tmp/hashall/payload-auto"),
+        Path.cwd() / ".agent" / "logs" / "payload-auto",
+    ]
+    filename = f"{time.strftime('%Y%m%d-%H%M%S')}-{run_id}.jsonl"
+    for base in fallbacks:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            return base / filename
+        except OSError:
             continue
+    return Path("/tmp") / filename
 
-        result = subprocess.run(cmd, env=_subprocess_env())
-        if result.returncode != 0:
-            return False
 
-    return True
+def _log_event(log_path: Path, event: str, **fields) -> None:
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "event": event,
+        **fields,
+    }
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        pass
 
 
 def _subprocess_env() -> dict[str, str]:
