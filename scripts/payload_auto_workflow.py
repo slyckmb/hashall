@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -28,9 +29,21 @@ def main() -> int:
     parser.add_argument("--roots", help="Comma-separated roots (auto-discover if omitted)")
     parser.add_argument("--max-iterations", type=int, default=10, help="Max loop iterations")
     parser.add_argument("--dry-run", action="store_true", help="Show actions without executing")
+    parser.add_argument("--backup", action="store_true", help="Create a timestamped DB backup before running")
+    parser.add_argument("--backup-dir", help="Optional directory for --backup output (default: DB parent)")
     args = parser.parse_args()
 
-    conn = connect_db(Path(args.db))
+    db_path = Path(args.db)
+    backup_path = None
+    if args.backup:
+        try:
+            backup_dir = Path(args.backup_dir) if args.backup_dir else None
+            backup_path = _backup_db(db_path, backup_dir=backup_dir)
+        except OSError as e:
+            print(f"❌ Failed to create DB backup: {e}")
+            return 1
+
+    conn = connect_db(db_path)
 
     # Discover or parse roots
     if args.roots:
@@ -49,6 +62,7 @@ def main() -> int:
         "run_start",
         run_id=run_id,
         db=args.db,
+        db_backup=str(backup_path) if backup_path else None,
         roots=roots,
         max_iterations=args.max_iterations,
         dry_run=args.dry_run,
@@ -57,6 +71,8 @@ def main() -> int:
     print(f"Automated payload workflow")
     print(f"  Roots: {', '.join(roots)}")
     print(f"  DB: {args.db}")
+    if backup_path:
+        print(f"  DB backup: {backup_path}")
     print(f"  Run ID: {run_id}")
     print(f"  Log: {log_path}")
     print(f"  Max iterations: {args.max_iterations}")
@@ -538,6 +554,17 @@ def _workflow_log_path(run_id: str) -> Path:
         except OSError:
             continue
     return Path("/tmp") / filename
+
+
+def _backup_db(db_path: Path, backup_dir: Path | None = None) -> Path:
+    """Create a timestamped copy of the SQLite catalog for quick rollback testing."""
+    db_path = Path(db_path)
+    out_dir = backup_dir or db_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_path = out_dir / f"{db_path.name}.backup-{stamp}"
+    shutil.copy2(db_path, backup_path)
+    return backup_path
 
 
 def _log_event(log_path: Path, event: str, **fields) -> None:

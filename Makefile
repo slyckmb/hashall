@@ -40,6 +40,8 @@ PAYLOAD_PARALLEL ?= 0
 PAYLOAD_WORKERS ?=
 PAYLOAD_LOW_PRIORITY ?= 1
 PAYLOAD_MAX_GROUPS ?= 0
+PAYLOAD_AUTO_BACKUP ?= 0
+PAYLOAD_AUTO_BACKUP_DIR ?=
 
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
@@ -486,8 +488,13 @@ payload-workflow:  ## Show payload workflow status across all roots
 	@$(PYTHON) scripts/payload_workflow_status.py --db "$(DB_FILE)" $(foreach p,$(PW_PATHS),"$(p)")
 
 .PHONY: payload-auto
-payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' or auto-discover)
-	@PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/payload_auto_workflow.py --db "$(DB_FILE)" $(if $(ROOTS),--roots "$(ROOTS)",) $(if $(DRY_RUN),--dry-run,)
+payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' PAYLOAD_AUTO_BACKUP=1 optional)
+	@set -- --db "$(DB_FILE)"; \
+	if [ -n "$(ROOTS)" ]; then set -- "$$@" --roots "$(ROOTS)"; fi; \
+	if [ "$(DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
+	if [ "$(PAYLOAD_AUTO_BACKUP)" = "1" ]; then set -- "$$@" --backup; fi; \
+	if [ -n "$(PAYLOAD_AUTO_BACKUP_DIR)" ]; then set -- "$$@" --backup-dir "$(PAYLOAD_AUTO_BACKUP_DIR)"; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/payload_auto_workflow.py "$$@"
 
 # ============================================================================
 # Rehome (Payload Moves)

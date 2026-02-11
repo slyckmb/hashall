@@ -175,3 +175,17 @@ def test_log_event_writes_jsonl(tmp_path):
     assert row["event"] == "iteration_state"
     assert row["iteration"] == 1
     assert row["state"]["dirty_in_scope"] == 3
+
+
+def test_backup_db_creates_timestamped_copy(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    db_path.write_bytes(b"db-bytes")
+    backup_dir = tmp_path / "backups"
+
+    backup_path = workflow._backup_db(db_path, backup_dir=backup_dir)
+
+    assert backup_path.exists()
+    assert backup_path.parent == backup_dir
+    assert backup_path.name.startswith("catalog.db.backup-")
+    assert backup_path.read_bytes() == b"db-bytes"
