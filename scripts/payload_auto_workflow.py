@@ -47,13 +47,13 @@ def main() -> int:
         dirty_count, scan_path = check_dirty(conn, roots)
         if dirty_count > 0:
             print(f"  Found {dirty_count} dirty payloads (need scan)")
-            if not run_scan(scan_path, args.dry_run):
+            if not run_scan(scan_path, args.db, args.dry_run):
                 print("  ❌ Scan failed")
                 return 1
             action_taken = True
             # Re-run payload-sync after scan to update file_count
             print(f"  Re-syncing payloads after scan...")
-            if not run_payload_sync(roots, upgrade=False, dry_run=args.dry_run):
+            if not run_payload_sync(roots, args.db, upgrade=False, dry_run=args.dry_run):
                 print("  ❌ Payload-sync failed")
                 return 1
             continue  # Re-check from top
@@ -62,7 +62,7 @@ def main() -> int:
         incomplete_count = check_incomplete(conn, roots)
         if incomplete_count > 0:
             print(f"  Found {incomplete_count} incomplete payloads (need upgrade)")
-            if not run_payload_sync(roots, upgrade=True, dry_run=args.dry_run):
+            if not run_payload_sync(roots, args.db, upgrade=True, dry_run=args.dry_run):
                 print("  ❌ Payload upgrade failed")
                 return 1
             action_taken = True
@@ -72,7 +72,7 @@ def main() -> int:
         collision_count = check_collisions(conn)
         if collision_count > 0:
             print(f"  Found {collision_count} collision groups (need upgrade)")
-            if not run_collision_upgrade(roots, args.dry_run):
+            if not run_collision_upgrade(roots, args.db, args.dry_run):
                 print("  ❌ Collision upgrade failed")
                 return 1
             action_taken = True
@@ -147,9 +147,9 @@ def check_collisions(conn) -> int:
     return count
 
 
-def run_scan(scan_path: str, dry_run: bool) -> bool:
+def run_scan(scan_path: str, db_path: str, dry_run: bool) -> bool:
     """Execute scan command. Returns True on success."""
-    cmd = ["hashall", "scan", scan_path, "--hash-mode", "full", "--parallel"]
+    cmd = [sys.executable, "-m", "hashall.cli", "scan", scan_path, "--db", db_path, "--hash-mode", "full", "--parallel"]
     print(f"  → Running: {' '.join(cmd)}")
     if dry_run:
         print("    (dry-run, skipped)")
@@ -159,15 +159,15 @@ def run_scan(scan_path: str, dry_run: bool) -> bool:
     return result.returncode == 0
 
 
-def run_payload_sync(roots: list[str], upgrade: bool, dry_run: bool) -> bool:
+def run_payload_sync(roots: list[str], db_path: str, upgrade: bool, dry_run: bool) -> bool:
     """Execute payload-sync. Returns True on success."""
-    cmd = ["hashall", "payload", "sync", "--db", str(Path.home() / ".hashall" / "catalog.db")]
+    cmd = [sys.executable, "-m", "hashall.cli", "payload", "sync", "--db", db_path]
     for root in roots:
         cmd.extend(["--path-prefix", root])
     if upgrade:
         cmd.extend(["--upgrade-missing", "--parallel"])
 
-    print(f"  → Running: {' '.join(cmd[:6])}... {'--upgrade-missing --parallel' if upgrade else ''}")
+    print(f"  → Running: {' '.join(cmd)}")
     if dry_run:
         print("    (dry-run, skipped)")
         return True
@@ -176,12 +176,12 @@ def run_payload_sync(roots: list[str], upgrade: bool, dry_run: bool) -> bool:
     return result.returncode == 0
 
 
-def run_collision_upgrade(roots: list[str], dry_run: bool) -> bool:
+def run_collision_upgrade(roots: list[str], db_path: str, dry_run: bool) -> bool:
     """Execute payload-upgrade-collisions for all roots. Returns True on success."""
     for root in roots:
-        cmd = ["hashall", "payload", "upgrade-collisions", "--db",
-               str(Path.home() / ".hashall" / "catalog.db"), "--path-prefix", root]
-        print(f"  → Running: {' '.join(cmd[:4])} ... --path-prefix {root}")
+        cmd = [sys.executable, "-m", "hashall.cli", "payload", "upgrade-collisions", "--db",
+               db_path, "--path-prefix", root]
+        print(f"  → Running: {' '.join(cmd)}")
         if dry_run:
             print("    (dry-run, skipped)")
             continue

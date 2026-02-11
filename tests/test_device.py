@@ -699,3 +699,59 @@ def test_update_device_updates_mount_point(mock_get_fs_type, mock_get_zfs_metada
     """, ('zfs-mount-test',)).fetchone()
     assert mount_point == '/new/mount'
     assert preferred_mount_point == '/old/mount'
+
+
+@patch('hashall.fs_utils.get_zfs_metadata')
+@patch('hashall.device._get_fs_type')
+def test_update_fs_uuid_for_existing_device_id(mock_get_fs_type, mock_get_zfs_metadata, test_db):
+    """Updating fs_uuid for an existing device_id should not raise UNIQUE(device_id)."""
+    cursor = test_db
+    mock_get_fs_type.return_value = 'zfs'
+    mock_get_zfs_metadata.return_value = {}
+
+    cursor.execute("""
+        INSERT INTO devices (
+            fs_uuid, device_id, device_alias, mount_point, preferred_mount_point,
+            fs_type, first_scanned_at, last_scanned_at, scan_count
+        ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 3)
+    """, ('dev-49', 49, 'stash', '/stash/media', '/stash/media', 'zfs'))
+
+    cursor.execute("""
+        INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count)
+        VALUES (?, ?, datetime('now'), 1)
+    """, ('dev-49', '/stash/media'))
+    cursor.execute("""
+        INSERT INTO scan_sessions (scan_id, fs_uuid, device_id, root_path, status)
+        VALUES (?, ?, ?, ?, ?)
+    """, ('scan-old-uuid', 'dev-49', 49, '/stash/media', 'completed'))
+    cursor.connection.commit()
+
+    device = register_or_update_device(
+        cursor,
+        fs_uuid='zfs-4624186565346049802',
+        device_id=49,
+        mount_point='/stash/media'
+    )
+
+    assert device['device_id'] == 49
+    assert device['fs_uuid'] == 'zfs-4624186565346049802'
+
+    rows = cursor.execute("""
+        SELECT fs_uuid, device_id, device_alias, scan_count
+        FROM devices
+    """).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == 'zfs-4624186565346049802'
+    assert rows[0][1] == 49
+    assert rows[0][2] == 'stash'
+    assert rows[0][3] == 4
+
+    scan_roots_row = cursor.execute("""
+        SELECT fs_uuid FROM scan_roots WHERE root_path = '/stash/media'
+    """).fetchone()
+    assert scan_roots_row[0] == 'zfs-4624186565346049802'
+
+    scan_session_row = cursor.execute("""
+        SELECT fs_uuid FROM scan_sessions WHERE scan_id = 'scan-old-uuid'
+    """).fetchone()
+    assert scan_session_row[0] == 'zfs-4624186565346049802'
