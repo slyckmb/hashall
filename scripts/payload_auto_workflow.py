@@ -64,6 +64,7 @@ def main() -> int:
 
     previous_signature = None
     stagnation_streak = 0
+    iteration = 0
 
     try:
         # Main loop
@@ -259,6 +260,16 @@ def main() -> int:
                 max_iterations=args.max_iterations,
             )
             return 1
+    except KeyboardInterrupt:
+        print("⚠️ Interrupted by user")
+        _log_event(
+            log_path,
+            "run_interrupted",
+            run_id=run_id,
+            iteration=iteration,
+            reason="keyboard_interrupt",
+        )
+        return 130
     finally:
         conn.close()
 
@@ -330,6 +341,7 @@ def collect_workflow_state(conn, roots: list[str]) -> dict:
             scan_path = target_root.rstrip("/") + "/torrents/seeding"
         else:
             scan_path = target_root
+        scan_path = _remap_scan_path_to_preferred_mount(conn, scan_path)
 
     return {
         "dirty_in_scope": len(dirty_actionable_in_scope_paths),
@@ -344,6 +356,32 @@ def collect_workflow_state(conn, roots: list[str]) -> dict:
         "dirty_orphan_samples_in_scope": dirty_orphan_in_scope_paths[:5],
         "mount_alias_hint": _mount_alias_hint(conn, roots, dirty_out_scope_paths),
     }
+
+
+def _remap_scan_path_to_preferred_mount(conn, scan_path: str | None) -> str | None:
+    """Use preferred mount aliases for scan path when device rows provide one."""
+    if not scan_path:
+        return scan_path
+    p = Path(scan_path)
+    rows = conn.execute(
+        """
+        SELECT mount_point, preferred_mount_point
+        FROM devices
+        WHERE preferred_mount_point IS NOT NULL AND preferred_mount_point != mount_point
+        """
+    ).fetchall()
+    for mount_point, preferred_mount in rows:
+        if not mount_point or not preferred_mount:
+            continue
+        mount_p = Path(mount_point)
+        pref_p = Path(preferred_mount)
+        if p == mount_p or str(p).startswith(str(mount_p).rstrip("/") + "/"):
+            try:
+                rel = p.relative_to(mount_p)
+            except ValueError:
+                continue
+            return str(pref_p / rel)
+    return scan_path
 
 
 def state_signature(state: dict) -> tuple:

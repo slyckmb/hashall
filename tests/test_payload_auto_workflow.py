@@ -78,6 +78,35 @@ def test_collect_workflow_state_uses_target_root_dirty_path(tmp_path):
     assert state["scan_path"] == "/stash/media/torrents/seeding"
 
 
+def test_collect_workflow_state_remaps_scan_path_to_preferred_mount(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    conn.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("zfs-49", 49, "/data/media", "/stash/media"),
+    )
+    payload_id = _insert_payload(conn, "/data/media/torrents/seeding/one", file_count=0, total_bytes=0)
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("h-data", payload_id, 49, "/data/media", "one", "", "", 1.0),
+    )
+    conn.commit()
+
+    state = workflow.collect_workflow_state(conn, ["/pool/data", "/stash/media", "/data/media"])
+    conn.close()
+
+    assert state["dirty_in_scope"] == 1
+    assert state["scan_path"] == "/stash/media/torrents/seeding"
+
+
 def test_collect_workflow_state_marks_orphan_dirty_in_scope(tmp_path):
     workflow = _load_workflow_module()
     db_path = tmp_path / "catalog.db"

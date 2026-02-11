@@ -195,9 +195,14 @@ def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag,
         _apply_low_priority()
     # Use flag if provided, otherwise use hash_mode
     mode = hash_mode_flag if hash_mode_flag else hash_mode
-    scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
-              workers=workers, batch_size=batch_size, hash_mode=mode,
-              show_current_path=show_path, scan_nested_datasets=scan_nested_datasets)
+    stats = scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
+                      workers=workers, batch_size=batch_size, hash_mode=mode,
+                      show_current_path=show_path, scan_nested_datasets=scan_nested_datasets)
+    if getattr(stats, "safety_guard_triggered", False):
+        raise click.ClickException(
+            "Scan safety guard blocked deletion due path-resolution errors; "
+            "catalog was preserved."
+        )
 
 @cli.command("export")
 @click.argument("db_path", type=click.Path(exists=True, dir_okay=False))
