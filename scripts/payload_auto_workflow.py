@@ -21,6 +21,8 @@ if REPO_SRC.exists():
 from hashall.model import connect_db
 
 STALL_THRESHOLD = 2
+ORPHAN_GC_MIN_SEEN_RUNS = 2
+ORPHAN_GC_MIN_AGE_SECONDS = 24 * 60 * 60
 
 
 def main() -> int:
@@ -117,6 +119,11 @@ def main() -> int:
                 print(
                     f"  ⚠ In-scope orphan dirty payloads: {dirty_orphan_in_scope} "
                     f"(samples: {', '.join(state['dirty_orphan_samples_in_scope'])})"
+                )
+                print(
+                    "  ⚠ Orphan GC staging: "
+                    f"tracked={state['orphan_gc_tracked_in_scope']}, "
+                    f"aged={state['orphan_gc_aged_in_scope']}"
                 )
 
             if stagnation_streak >= STALL_THRESHOLD:
@@ -324,6 +331,8 @@ def collect_workflow_state(conn, roots: list[str]) -> dict:
             "dirty_samples_out_of_scope": [],
             "dirty_orphan_samples_in_scope": [],
             "mount_alias_hint": None,
+            "orphan_gc_tracked_in_scope": 0,
+            "orphan_gc_aged_in_scope": 0,
         }
 
     def _in_scope(root_path: str) -> bool:
@@ -358,6 +367,7 @@ def collect_workflow_state(conn, roots: list[str]) -> dict:
         else:
             scan_path = target_root
         scan_path = _remap_scan_path_to_preferred_mount(conn, scan_path)
+    orphan_gc_tracked_in_scope, orphan_gc_aged_in_scope = _orphan_gc_metrics(conn, roots)
 
     return {
         "dirty_in_scope": len(dirty_actionable_in_scope_paths),
@@ -371,6 +381,8 @@ def collect_workflow_state(conn, roots: list[str]) -> dict:
         "dirty_samples_out_of_scope": dirty_out_scope_paths[:5],
         "dirty_orphan_samples_in_scope": dirty_orphan_in_scope_paths[:5],
         "mount_alias_hint": _mount_alias_hint(conn, roots, dirty_out_scope_paths),
+        "orphan_gc_tracked_in_scope": orphan_gc_tracked_in_scope,
+        "orphan_gc_aged_in_scope": orphan_gc_aged_in_scope,
     }
 
 
@@ -483,6 +495,54 @@ def _mount_alias_hint(conn, roots: list[str], dirty_out_scope_paths: list[str]) 
         if has_out_scope and root_uses_preferred:
             return f"dirty rows under {mount_point} but workflow roots use preferred mount {preferred_mount_point}"
     return None
+
+
+def _orphan_gc_metrics(conn, roots: list[str]) -> tuple[int, int]:
+    """Return (tracked, aged) orphan-GC candidate counts scoped to roots."""
+    has_gc_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='payload_orphan_gc'"
+    ).fetchone()
+    if not has_gc_table:
+        return 0, 0
+
+    predicates: list[str] = []
+    params: list[object] = [ORPHAN_GC_MIN_SEEN_RUNS, time.time(), ORPHAN_GC_MIN_AGE_SECONDS]
+    for root in roots:
+        root_s = str(root)
+        predicates.append("(p.root_path = ? OR p.root_path LIKE ?)")
+        params.extend([root_s, f"{root_s.rstrip('/')}/%"])
+
+    if not predicates:
+        return 0, 0
+
+    scope_sql = " OR ".join(predicates)
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS tracked,
+            SUM(
+                CASE
+                    WHEN og.seen_count >= ?
+                     AND (? - og.first_seen_at) >= ?
+                    THEN 1 ELSE 0
+                END
+            ) AS aged
+        FROM payload_orphan_gc og
+        JOIN payloads p ON p.payload_id = og.payload_id
+        LEFT JOIN (
+            SELECT payload_id, COUNT(*) AS ref_count
+            FROM torrent_instances
+            GROUP BY payload_id
+        ) ti ON ti.payload_id = p.payload_id
+        WHERE COALESCE(ti.ref_count, 0) = 0
+          AND p.file_count = 0
+          AND ({scope_sql})
+        """,
+        params,
+    ).fetchone()
+    tracked = int(row[0] or 0)
+    aged = int(row[1] or 0)
+    return tracked, aged
 
 
 def run_scan(scan_path: str, db_path: str, dry_run: bool) -> dict:

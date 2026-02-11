@@ -458,7 +458,16 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     print(f"   incomplete payloads: {incomplete_count}")
     print(f"   missing in catalog: {missing_in_catalog}")
     if prune_stats is not None:
+        print(
+            "   orphan gc candidates: "
+            f"{prune_stats['tracked_candidates']} "
+            f"(new={prune_stats['new_candidates']}, aged={prune_stats['aged_candidates']})"
+        )
         print(f"   orphan payloads pruned: {prune_stats['pruned']}")
+        if prune_stats["kept_alias_ambiguous"] > 0:
+            print(f"   orphan prune skipped (alias-ambiguous): {prune_stats['kept_alias_ambiguous']}")
+        if prune_stats["block_reason"]:
+            print(f"   orphan prune blocked: {prune_stats['block_reason']}")
         if prune_stats["samples"]:
             print(f"   pruned samples: {', '.join(prune_stats['samples'])}")
     elif (not dry_run) and limit > 0:

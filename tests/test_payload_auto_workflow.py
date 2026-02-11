@@ -121,6 +121,31 @@ def test_collect_workflow_state_marks_orphan_dirty_in_scope(tmp_path):
     assert state["dirty_in_scope"] == 0
     assert state["dirty_orphan_in_scope"] == 1
     assert state["dirty_total_in_scope"] == 1
+    assert state["orphan_gc_tracked_in_scope"] == 0
+    assert state["orphan_gc_aged_in_scope"] == 0
+
+
+def test_collect_workflow_state_reports_orphan_gc_metrics(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    payload_id = _insert_payload(conn, "/stash/media/torrents/seeding/orphan", file_count=0, total_bytes=0)
+    old_seen = 1_700_000_000.0
+    conn.execute(
+        """
+        INSERT INTO payload_orphan_gc (payload_id, first_seen_at, last_seen_at, seen_count, last_root_path, last_device_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (payload_id, old_seen, old_seen, 2, "/stash/media/torrents/seeding/orphan", 49),
+    )
+    conn.commit()
+
+    state = workflow.collect_workflow_state(conn, ["/stash/media"])
+    conn.close()
+
+    assert state["orphan_gc_tracked_in_scope"] == 1
+    assert state["orphan_gc_aged_in_scope"] == 1
 
 
 def test_mount_alias_hint_for_out_of_scope_dirty_rows(tmp_path):
