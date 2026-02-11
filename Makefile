@@ -1,5 +1,5 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
-# hashall - 0.4.41 - 2026-02-11T15:57:40-0500
+# hashall - 0.4.43 - 2026-02-11T17:58:00-0500
 # Makefile for hashall - Development and smart scan operations
 
 REPO_DIR := $(shell pwd)
@@ -29,6 +29,13 @@ LINK_LOW_PRIORITY ?= 1
 LINK_FIX_PERMS ?= 1
 LINK_FIX_ACL ?= 0
 LINK_FIX_PERMS_LOG ?=
+HARDLINK_ROOTS ?=
+HARDLINK_AUTO_EXECUTE ?= 0
+HARDLINK_AUTO_MAX_ITER ?= 5
+HARDLINK_AUTO_SCAN_EACH_ITER ?= 0
+HARDLINK_AUTO_DRY_RUN ?= 0
+HARDLINK_AUTO_HASH_MODE ?= $(HASH_MODE)
+HARDLINK_AUTO_MIN_SIZE ?= $(LINK_MIN_SIZE)
 
 # Payload sync defaults (override via make VAR=value)
 PAYLOAD_CATEGORY ?=
@@ -110,7 +117,7 @@ help:  ## Show this help message
 	@grep -E '^(scan-hierarchical|scan-hier-per-device|scan-plan|scan-plan-execute|scan-hier-dry):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Dedup & Link:"
-	@grep -E '^(link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
 	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-workflow|payload-auto|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -134,7 +141,9 @@ help:  ## Show this help message
 	@echo "  make link-path PATH=/pool/data            # Plan hardlinks for a path"
 	@echo "  make link-paths PATHS='/pool/data /stash/media'  # Plan both roots"
 	@echo "  make link-paths LINK_UPGRADE_COLLISIONS=0  # Skip collision upgrade"
-	@echo "  make workflow PATH=/pool/data             # Show workflow done/todo"
+	@echo "  make hardlink-workflow PATH=/pool/data    # Show hardlink workflow done/todo"
+	@echo "  make hardlink-auto ROOTS='/pool/data,/stash/media' HARDLINK_AUTO_DRY_RUN=1  # Preview full hardlink workflow"
+	@echo "  make hardlink-auto ROOTS='/pool/data,/stash/media' HARDLINK_AUTO_EXECUTE=1   # Run full hardlink workflow"
 	@echo "  make link-execute PLAN_ID=1 LINK_LIMIT=10 # Execute 10 actions"
 	@echo "  make payload-sync                         # Sync torrents -> payloads"
 	@echo "  make payload-workflow                     # Cross-device payload status"
@@ -451,9 +460,31 @@ link-payload-empty:  ## Create empty-payload plan for PATH (auto-detect device)
 	if [ "$(LINK_REQUIRE_EXISTING_HARDLINKS)" != "1" ]; then args="$$args --no-require-existing-hardlinks"; fi; \
 	$(HASHALL_CLI) link plan-payload-empty "empty payload $(PATH)" $$args --db "$(DB_FILE)"
 
-.PHONY: workflow
-workflow:  ## Show workflow done/todo for PATH
+.PHONY: hardlink-workflow
+hardlink-workflow:  ## Show hardlink workflow done/todo for PATH
 	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)" --auto-verify-scope
+
+.PHONY: workflow
+workflow:  ## Alias for hardlink-workflow (deprecated)
+	@echo "⚠️  'workflow' target is deprecated; use 'hardlink-workflow'"
+	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)" --auto-verify-scope
+
+.PHONY: hardlink-auto
+hardlink-auto:  ## Auto-run hardlink workflow (ROOTS='path1,path2' HARDLINK_AUTO_EXECUTE=1 optional)
+	@set -- --db "$(DB_FILE)"; \
+		roots="$(HARDLINK_ROOTS)"; \
+		if [ -z "$$roots" ] && [ -n "$(ROOTS)" ]; then roots="$(ROOTS)"; fi; \
+		if [ -n "$$roots" ]; then set -- "$$@" --roots "$$roots"; fi; \
+		set -- "$$@" --max-iterations "$(HARDLINK_AUTO_MAX_ITER)" --hash-mode "$(HARDLINK_AUTO_HASH_MODE)"; \
+		if [ "$(HARDLINK_AUTO_SCAN_EACH_ITER)" = "1" ]; then set -- "$$@" --scan-each-iteration; fi; \
+		if [ "$(HARDLINK_AUTO_EXECUTE)" = "1" ]; then set -- "$$@" --execute; fi; \
+		if [ "$(HARDLINK_AUTO_DRY_RUN)" = "1" ] || [ "$(DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
+		if [ "$(HARDLINK_AUTO_MIN_SIZE)" != "0" ] && [ -n "$(HARDLINK_AUTO_MIN_SIZE)" ]; then set -- "$$@" --min-size "$(HARDLINK_AUTO_MIN_SIZE)"; fi; \
+		if [ "$(LINK_LIMIT)" != "0" ] && [ -n "$(LINK_LIMIT)" ]; then set -- "$$@" --link-limit "$(LINK_LIMIT)"; fi; \
+		if [ "$(LINK_LOW_PRIORITY)" = "1" ]; then set -- "$$@" --low-priority; else set -- "$$@" --normal-priority; fi; \
+		if [ "$(LINK_FIX_PERMS)" = "1" ]; then set -- "$$@" --fix-perms; else set -- "$$@" --no-fix-perms; fi; \
+		if [ "$(LINK_FIX_ACL)" = "1" ]; then set -- "$$@" --fix-acl; fi; \
+		PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/hardlink_auto_workflow.py "$$@"
 
 .PHONY: payload-sync
 payload-sync:  ## Sync qBittorrent payloads into catalog
@@ -665,4 +696,4 @@ backup-db:  ## Backup catalog database with timestamp
 	echo "✅ Database backed up to: $$BACKUP_FILE" || \
 	echo "⚠️  No database found to backup"
 
-# hashall - 0.4.41 - 2026-02-11T15:57:40-0500
+# hashall - 0.4.43 - 2026-02-11T17:58:00-0500
