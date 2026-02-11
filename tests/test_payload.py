@@ -5,12 +5,14 @@ Tests for payload identity functionality.
 import pytest
 import sqlite3
 import tempfile
+import os
 from pathlib import Path
 from hashall.payload import (
     PayloadFile, PayloadFastFile, compute_payload_hash, compute_payload_fast_signature, build_payload,
-    upsert_payload, get_torrent_siblings, Payload
+    upsert_payload, get_torrent_siblings, Payload, upgrade_payload_missing_sha256
 )
 from hashall.model import connect_db
+from hashall.scan import scan_path
 
 
 @pytest.fixture
@@ -399,3 +401,46 @@ def test_idempotent_sync(test_db):
         ("test_hash",)
     ).fetchone()
     assert row[0] == "tag1,tag2"
+
+
+def test_upgrade_missing_sha256_with_hardlinks(tmp_path):
+    """Payload SHA256 upgrade hashes a hardlink group once and propagates results."""
+    root = tmp_path / "payload_root"
+    root.mkdir()
+
+    original = root / "base.bin"
+    original.write_bytes(b"x" * 8192)
+    link1 = root / "link1.bin"
+    link2 = root / "link2.bin"
+    os.link(original, link1)
+    os.link(original, link2)
+
+    db_path = tmp_path / "catalog.db"
+    scan_path(db_path=db_path, root_path=root, hash_mode='fast', quiet=True)
+
+    conn = connect_db(db_path)
+    device_id = os.stat(root).st_dev
+    table_name = f"files_{device_id}"
+
+    missing_before = conn.execute(
+        f"SELECT COUNT(*) FROM {table_name} WHERE status = 'active' AND sha256 IS NULL"
+    ).fetchone()[0]
+    assert missing_before == 3
+
+    upgraded = upgrade_payload_missing_sha256(conn, str(root), device_id=device_id, parallel=False)
+    assert upgraded == 1
+
+    rows = conn.execute(f"""
+        SELECT sha256
+        FROM {table_name}
+        WHERE status = 'active'
+        ORDER BY path
+    """).fetchall()
+    assert len(rows) == 3
+    assert all(row[0] is not None for row in rows)
+    assert len({row[0] for row in rows}) == 1
+
+    payload = build_payload(conn, str(root), device_id=device_id)
+    assert payload.status == 'complete'
+    assert payload.file_count == 3
+    conn.close()
