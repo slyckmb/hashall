@@ -18,14 +18,15 @@ def _load_workflow_module():
     return module
 
 
-def _insert_payload(conn, root_path: str, *, device_id: int = 49, status: str = "incomplete", file_count: int = 0, total_bytes: int = 0):
-    conn.execute(
+def _insert_payload(conn, root_path: str, *, device_id: int = 49, status: str = "incomplete", file_count: int = 0, total_bytes: int = 0) -> int:
+    cur = conn.execute(
         """
         INSERT INTO payloads (payload_hash, device_id, root_path, file_count, total_bytes, status)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (None, device_id, root_path, file_count, total_bytes, status),
     )
+    return int(cur.lastrowid)
 
 
 def test_collect_workflow_state_scopes_collisions(tmp_path):
@@ -54,9 +55,20 @@ def test_collect_workflow_state_uses_target_root_dirty_path(tmp_path):
     conn = connect_db(db_path)
 
     _insert_payload(conn, "/data/media/out-of-scope", file_count=0, total_bytes=0)
-    _insert_payload(conn, "/pool/data/not-seeding", file_count=0, total_bytes=0)
-    _insert_payload(conn, "/stash/media/torrents/seeding/one", file_count=0, total_bytes=0)
-    _insert_payload(conn, "/stash/media/other/two", file_count=0, total_bytes=0)
+    p1 = _insert_payload(conn, "/pool/data/not-seeding", file_count=0, total_bytes=0)
+    p2 = _insert_payload(conn, "/stash/media/torrents/seeding/one", file_count=0, total_bytes=0)
+    p3 = _insert_payload(conn, "/stash/media/other/two", file_count=0, total_bytes=0)
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("h1", p1, 49, "/pool/data", "not-seeding", "", "", 1.0),
+            ("h2", p2, 49, "/stash/media", "one", "", "", 1.0),
+            ("h3", p3, 49, "/stash/media", "two", "", "", 1.0),
+        ],
+    )
     conn.commit()
 
     state = workflow.collect_workflow_state(conn, ["/pool/data", "/stash/media"])
@@ -64,6 +76,22 @@ def test_collect_workflow_state_uses_target_root_dirty_path(tmp_path):
 
     assert state["dirty_in_scope"] == 3
     assert state["scan_path"] == "/stash/media/torrents/seeding"
+
+
+def test_collect_workflow_state_marks_orphan_dirty_in_scope(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    _insert_payload(conn, "/stash/media/torrents/seeding/orphan", file_count=0, total_bytes=0)
+    conn.commit()
+
+    state = workflow.collect_workflow_state(conn, ["/stash/media"])
+    conn.close()
+
+    assert state["dirty_in_scope"] == 0
+    assert state["dirty_orphan_in_scope"] == 1
+    assert state["dirty_total_in_scope"] == 1
 
 
 def test_mount_alias_hint_for_out_of_scope_dirty_rows(tmp_path):

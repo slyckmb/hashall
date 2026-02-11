@@ -85,6 +85,7 @@ def main() -> int:
             )
 
             dirty_count = state["dirty_in_scope"]
+            dirty_orphan_in_scope = state["dirty_orphan_in_scope"]
             incomplete_count = state["incomplete_in_scope"]
             collision_count = state["collision_groups_in_scope"]
             if state["dirty_out_of_scope"] > 0:
@@ -95,10 +96,20 @@ def main() -> int:
                 if state["mount_alias_hint"]:
                     print(f"  ⚠ Hint: {state['mount_alias_hint']}")
 
+            if dirty_orphan_in_scope > 0:
+                print(
+                    f"  ⚠ In-scope orphan dirty payloads: {dirty_orphan_in_scope} "
+                    f"(samples: {', '.join(state['dirty_orphan_samples_in_scope'])})"
+                )
+
             if stagnation_streak >= STALL_THRESHOLD:
                 reason = "stalled_no_progress"
                 print(f"⚠️  Stopping early: {reason} after {stagnation_streak} unchanged iterations")
-                print(f"   state: dirty={dirty_count}, incomplete={incomplete_count}, collisions={collision_count}")
+                print(
+                    f"   state: actionable_dirty={dirty_count}, "
+                    f"orphan_dirty={dirty_orphan_in_scope}, "
+                    f"incomplete={incomplete_count}, collisions={collision_count}"
+                )
                 _log_event(
                     log_path,
                     "run_stalled",
@@ -219,14 +230,25 @@ def main() -> int:
                 continue  # Re-check from top
 
             if not action_taken:
-                print("✅ Workflow complete - no actions needed")
-                _log_event(
-                    log_path,
-                    "run_complete",
-                    run_id=run_id,
-                    iteration=iteration,
-                    state=state,
-                )
+                if dirty_orphan_in_scope > 0:
+                    print("✅ Workflow complete with warnings - only orphan payload rows remain")
+                    _log_event(
+                        log_path,
+                        "run_complete_with_warnings",
+                        run_id=run_id,
+                        iteration=iteration,
+                        warning="orphan_payload_rows",
+                        state=state,
+                    )
+                else:
+                    print("✅ Workflow complete - no actions needed")
+                    _log_event(
+                        log_path,
+                        "run_complete",
+                        run_id=run_id,
+                        iteration=iteration,
+                        state=state,
+                    )
                 break
         else:
             print(f"⚠️  Max iterations ({args.max_iterations}) reached")
@@ -246,43 +268,61 @@ def main() -> int:
 def collect_workflow_state(conn, roots: list[str]) -> dict:
     """Collect scoped/global state used for workflow decisions and diagnostics."""
     all_rows = conn.execute(
-        "SELECT root_path, status, file_count, total_bytes FROM payloads"
+        """
+        SELECT
+            p.payload_id,
+            p.root_path,
+            p.status,
+            p.file_count,
+            p.total_bytes,
+            COALESCE(ti.ref_count, 0) AS ref_count
+        FROM payloads p
+        LEFT JOIN (
+            SELECT payload_id, COUNT(*) AS ref_count
+            FROM torrent_instances
+            GROUP BY payload_id
+        ) ti ON ti.payload_id = p.payload_id
+        """
     ).fetchall()
     if not all_rows:
         return {
             "dirty_in_scope": 0,
+            "dirty_orphan_in_scope": 0,
+            "dirty_total_in_scope": 0,
             "dirty_out_of_scope": 0,
             "incomplete_in_scope": 0,
             "collision_groups_in_scope": 0,
             "collision_groups_global": 0,
             "scan_path": None,
             "dirty_samples_out_of_scope": [],
+            "dirty_orphan_samples_in_scope": [],
             "mount_alias_hint": None,
         }
 
     def _in_scope(root_path: str) -> bool:
         return any(root_path == root or root_path.startswith(root.rstrip("/") + "/") for root in roots)
 
-    dirty_in_scope_paths = [rp for rp, _, fc, _ in all_rows if fc == 0 and _in_scope(rp)]
-    dirty_out_scope_paths = [rp for rp, _, fc, _ in all_rows if fc == 0 and not _in_scope(rp)]
+    dirty_actionable_in_scope_paths = [rp for _, rp, _, fc, _, ref_count in all_rows if fc == 0 and ref_count > 0 and _in_scope(rp)]
+    dirty_orphan_in_scope_paths = [rp for _, rp, _, fc, _, ref_count in all_rows if fc == 0 and ref_count == 0 and _in_scope(rp)]
+    dirty_out_scope_paths = [rp for _, rp, _, fc, _, _ in all_rows if fc == 0 and not _in_scope(rp)]
     incomplete_in_scope = sum(
-        1 for rp, status, fc, _ in all_rows
+        1 for _, rp, status, fc, _, _ in all_rows
         if status == "incomplete" and fc > 0 and _in_scope(rp)
     )
 
     per_root_dirty = {}
     for root in roots:
         per_root_dirty[root] = sum(
-            1 for rp in dirty_in_scope_paths
+            1 for rp in dirty_actionable_in_scope_paths
             if rp == root or rp.startswith(root.rstrip("/") + "/")
         )
 
     scan_path = None
-    if dirty_in_scope_paths:
+    if dirty_actionable_in_scope_paths:
         max_dirty = max(per_root_dirty.values())
         target_root = next(root for root, count in per_root_dirty.items() if count == max_dirty)
         target_dirty_paths = [
-            rp for rp in dirty_in_scope_paths
+            rp for rp in dirty_actionable_in_scope_paths
             if rp == target_root or rp.startswith(target_root.rstrip("/") + "/")
         ]
         first_target_dirty = target_dirty_paths[0] if target_dirty_paths else ""
@@ -292,13 +332,16 @@ def collect_workflow_state(conn, roots: list[str]) -> dict:
             scan_path = target_root
 
     return {
-        "dirty_in_scope": len(dirty_in_scope_paths),
+        "dirty_in_scope": len(dirty_actionable_in_scope_paths),
+        "dirty_orphan_in_scope": len(dirty_orphan_in_scope_paths),
+        "dirty_total_in_scope": len(dirty_actionable_in_scope_paths) + len(dirty_orphan_in_scope_paths),
         "dirty_out_of_scope": len(dirty_out_scope_paths),
         "incomplete_in_scope": incomplete_in_scope,
-        "collision_groups_in_scope": _count_collision_groups(conn, roots=roots),
+        "collision_groups_in_scope": _count_collision_groups(conn, roots=roots, require_refs=True),
         "collision_groups_global": _count_collision_groups(conn, roots=None),
         "scan_path": scan_path,
         "dirty_samples_out_of_scope": dirty_out_scope_paths[:5],
+        "dirty_orphan_samples_in_scope": dirty_orphan_in_scope_paths[:5],
         "mount_alias_hint": _mount_alias_hint(conn, roots, dirty_out_scope_paths),
     }
 
@@ -321,33 +364,47 @@ def next_stagnation_streak(previous_signature: tuple | None, current_signature: 
     return 0
 
 
-def _count_collision_groups(conn, roots: list[str] | None) -> int:
+def _count_collision_groups(conn, roots: list[str] | None, require_refs: bool = False) -> int:
+    ref_join = ""
+    ref_where = ""
+    if require_refs:
+        ref_join = """
+            LEFT JOIN (
+                SELECT payload_id, COUNT(*) AS ref_count
+                FROM torrent_instances
+                GROUP BY payload_id
+            ) ti ON ti.payload_id = p.payload_id
+        """
+        ref_where = " AND COALESCE(ti.ref_count, 0) > 0"
+
     if roots:
         where_clauses = []
         params: list[str] = []
         for root in roots:
-            where_clauses.append("(root_path = ? OR root_path LIKE ?)")
+            where_clauses.append("(p.root_path = ? OR p.root_path LIKE ?)")
             params.extend([root, f"{root.rstrip('/')}/%"])
         where_expr = " OR ".join(where_clauses)
         query = f"""
             SELECT COUNT(*) FROM (
-                SELECT file_count, total_bytes
-                FROM payloads
+                SELECT p.file_count, p.total_bytes
+                FROM payloads p
+                {ref_join}
                 WHERE {where_expr}
-                GROUP BY file_count, total_bytes
+                {ref_where}
+                GROUP BY p.file_count, p.total_bytes
                 HAVING COUNT(*) > 1
-                   AND SUM(CASE WHEN status = 'incomplete' THEN 1 ELSE 0 END) > 0
+                   AND SUM(CASE WHEN p.status = 'incomplete' THEN 1 ELSE 0 END) > 0
             )
         """
         return conn.execute(query, params).fetchone()[0]
 
     query = """
         SELECT COUNT(*) FROM (
-            SELECT file_count, total_bytes
-            FROM payloads
-            GROUP BY file_count, total_bytes
+            SELECT p.file_count, p.total_bytes
+            FROM payloads p
+            GROUP BY p.file_count, p.total_bytes
             HAVING COUNT(*) > 1
-               AND SUM(CASE WHEN status = 'incomplete' THEN 1 ELSE 0 END) > 0
+               AND SUM(CASE WHEN p.status = 'incomplete' THEN 1 ELSE 0 END) > 0
         )
     """
     return conn.execute(query).fetchone()[0]

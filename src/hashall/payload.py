@@ -374,6 +374,116 @@ def count_missing_sha256_for_path(conn: sqlite3.Connection, device_id: int, root
     ).fetchone()[0]
 
 
+def count_active_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> int:
+    """
+    Count active files under root_path in the per-device files table.
+
+    Uses the same path resolution logic as build_payload/get_files_for_path.
+    """
+    if device_id is None:
+        return 0
+
+    table_name = f"files_{device_id}"
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if not cursor.fetchone():
+        return 0
+
+    mount_point, preferred_mount = _get_mount_info(conn, device_id)
+    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return 0
+    rel_root_str = str(rel_root)
+
+    if rel_root_str == ".":
+        return conn.execute(
+            f"SELECT COUNT(*) FROM {table_name} WHERE status='active'"
+        ).fetchone()[0]
+
+    pattern = f"{rel_root_str}/%"
+    return conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table_name}
+        WHERE status='active'
+          AND (path = ? OR path LIKE ?)
+        """,
+        (rel_root_str, pattern),
+    ).fetchone()[0]
+
+
+def prune_orphan_payloads(
+    conn: sqlite3.Connection,
+    roots: Optional[List[str]] = None,
+    sample_limit: int = 5,
+) -> Dict[str, object]:
+    """
+    Delete orphan payload rows that cannot be recovered by scan/sync.
+
+    A payload is considered orphaned when:
+    - It has no torrent_instances reference, AND
+    - It has no active files in the files_{device_id} catalog.
+    """
+    params: List[object] = []
+    scope_sql = ""
+    if roots:
+        predicates = []
+        for root in roots:
+            root_s = str(root)
+            predicates.append("(p.root_path = ? OR p.root_path LIKE ?)")
+            params.extend([root_s, f"{root_s.rstrip('/')}/%"])
+        scope_sql = f" AND ({' OR '.join(predicates)})"
+
+    candidates = conn.execute(
+        f"""
+        SELECT p.payload_id, p.device_id, p.root_path
+        FROM payloads p
+        LEFT JOIN (
+            SELECT payload_id, COUNT(*) AS ref_count
+            FROM torrent_instances
+            GROUP BY payload_id
+        ) ti ON ti.payload_id = p.payload_id
+        WHERE COALESCE(ti.ref_count, 0) = 0
+        {scope_sql}
+        ORDER BY p.payload_id
+        """,
+        params,
+    ).fetchall()
+
+    prunable_ids: List[int] = []
+    samples: List[str] = []
+    kept_with_files = 0
+
+    for row in candidates:
+        payload_id = int(row[0])
+        device_id = row[1]
+        root_path = row[2]
+        active_count = count_active_files_for_path(conn, device_id, root_path)
+        if active_count == 0:
+            prunable_ids.append(payload_id)
+            if len(samples) < sample_limit:
+                samples.append(root_path)
+        else:
+            kept_with_files += 1
+
+    if prunable_ids:
+        conn.executemany(
+            "DELETE FROM payloads WHERE payload_id = ?",
+            [(pid,) for pid in prunable_ids],
+        )
+        conn.commit()
+
+    return {
+        "candidates": len(candidates),
+        "pruned": len(prunable_ids),
+        "kept_with_files": kept_with_files,
+        "samples": samples,
+    }
+
+
 def get_payload_file_rows(
     conn: sqlite3.Connection,
     root_path: str,

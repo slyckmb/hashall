@@ -279,7 +279,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     from hashall.qbittorrent import get_qbittorrent_client
     from hashall.payload import (
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
-        upgrade_payload_missing_sha256
+        upgrade_payload_missing_sha256, prune_orphan_payloads
     )
     from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
 
@@ -372,6 +372,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     missing_in_catalog = 0
     skipped_prefix = 0
     processed = 0
+    prune_stats = None
 
     with TwoLineProgress(
         total=len(torrents),
@@ -437,6 +438,10 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             processed += 1
             progress.update(advance=1)
 
+    if (not dry_run) and limit == 0:
+        prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
+        prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
+
     if dry_run:
         print(f"\n✅ DRY-RUN complete (no DB changes)")
     else:
@@ -447,6 +452,12 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     print(f"   complete payloads: {synced_count}")
     print(f"   incomplete payloads: {incomplete_count}")
     print(f"   missing in catalog: {missing_in_catalog}")
+    if prune_stats is not None:
+        print(f"   orphan payloads pruned: {prune_stats['pruned']}")
+        if prune_stats["samples"]:
+            print(f"   pruned samples: {', '.join(prune_stats['samples'])}")
+    elif (not dry_run) and limit > 0:
+        print("   orphan payload prune: skipped (limit applied)")
 
 
 @payload.command("show")
