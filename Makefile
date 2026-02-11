@@ -1,4 +1,5 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
+# hashall - 0.4.41 - 2026-02-11T15:57:40-0500
 # Makefile for hashall - Development and smart scan operations
 
 REPO_DIR := $(shell pwd)
@@ -94,6 +95,8 @@ REHOME_OUTPUT_ARG := $(if $(REHOME_OUTPUT),--output "$(REHOME_OUTPUT)",)
 help:  ## Show this help message
 	@echo "🧰 Hashall Make Targets"
 	@echo ""
+	@grep -E '^# hashall - ' $(MAKEFILE_LIST) | head -n 1 | sed 's/^# //'
+	@echo ""
 	@echo "Meta & Docs:"
 	@grep -E '^(help|targets-table|targets-full|prompts-remote):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
@@ -141,6 +144,8 @@ help:  ## Show this help message
 	@echo "  make rehome-checklist                     # Rehome checklist"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
+	@echo ""
+	@grep -E '^# hashall - ' $(MAKEFILE_LIST) | head -n 1 | sed 's/^# //'
 	@echo ""
 
 # ============================================================================
@@ -659,3 +664,5 @@ backup-db:  ## Backup catalog database with timestamp
 	cp "$(DB_FILE)" "$$BACKUP_FILE" 2>/dev/null && \
 	echo "✅ Database backed up to: $$BACKUP_FILE" || \
 	echo "⚠️  No database found to backup"
+
+# hashall - 0.4.41 - 2026-02-11T15:57:40-0500
