@@ -49,8 +49,8 @@ SHOW_PATH ?= 1
 SCAN_NESTED_DATASETS ?= 0
 SCAN_LOW_PRIORITY ?= 0
 
-# Root scan CLI
-HASHALL_CLI := $(PYTHON) -m hashall.cli
+# Root scan CLI (force repo-local src to avoid editable-install path drift)
+HASHALL_CLI := PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -m hashall.cli
 # Rehome CLI
 REHOME_CLI := $(PYTHON) -m rehome.cli
 
@@ -487,7 +487,7 @@ payload-workflow:  ## Show payload workflow status across all roots
 
 .PHONY: payload-auto
 payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' or auto-discover)
-	@$(PYTHON) scripts/payload_auto_workflow.py --db "$(DB_FILE)" $(if $(ROOTS),--roots "$(ROOTS)",) $(if $(DRY_RUN),--dry-run,)
+	@PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/payload_auto_workflow.py --db "$(DB_FILE)" $(if $(ROOTS),--roots "$(ROOTS)",) $(if $(DRY_RUN),--dry-run,)
 
 # ============================================================================
 # Rehome (Payload Moves)

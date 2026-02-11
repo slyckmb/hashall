@@ -4,9 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+# Ensure this script and its subprocesses resolve hashall from this repo checkout.
+REPO_SRC = Path(__file__).resolve().parents[1] / "src"
+if REPO_SRC.exists():
+    sys.path.insert(0, str(REPO_SRC))
 
 from hashall.model import connect_db
 
@@ -155,7 +161,7 @@ def run_scan(scan_path: str, db_path: str, dry_run: bool) -> bool:
         print("    (dry-run, skipped)")
         return True
 
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=_subprocess_env())
     return result.returncode == 0
 
 
@@ -172,7 +178,7 @@ def run_payload_sync(roots: list[str], db_path: str, upgrade: bool, dry_run: boo
         print("    (dry-run, skipped)")
         return True
 
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=_subprocess_env())
     return result.returncode == 0
 
 
@@ -186,11 +192,19 @@ def run_collision_upgrade(roots: list[str], db_path: str, dry_run: bool) -> bool
             print("    (dry-run, skipped)")
             continue
 
-        result = subprocess.run(cmd)
+        result = subprocess.run(cmd, env=_subprocess_env())
         if result.returncode != 0:
             return False
 
     return True
+
+
+def _subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    repo_src = str(REPO_SRC)
+    env["PYTHONPATH"] = repo_src if not existing else f"{repo_src}:{existing}"
+    return env
 
 
 def _discover_roots(conn) -> list[str]:
