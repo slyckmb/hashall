@@ -8,12 +8,14 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=%h/dev/work/hashall
 Environment=PYTHONUNBUFFERED=1
+Environment=HASHALL_REPO_DIR=%h/dev/work/hashall
+Environment=HASHALL_PYTHON=%h/.venvs/hashall/bin/python
 Environment=PAYLOAD_ORPHAN_AUDIT_NOTIFY_EMAIL=1
 Environment=PAYLOAD_ORPHAN_AUDIT_NOTIFY_TO=michael
 Environment=PAYLOAD_ORPHAN_AUDIT_NOTIFY_REVIEW_HOURS=24
 Environment=PAYLOAD_ORPHAN_AUDIT_TIMER_UNIT=hashall-payload-orphan-snapshot.timer
 EnvironmentFile=-%h/.config/hashall/payload-orphan-snapshot.env
-ExecStart=/usr/bin/make payload-orphan-snapshot
+ExecStart=/usr/bin/bash -lc 'py="${HASHALL_PYTHON:-$HOME/.venvs/hashall/bin/python}"; if [ ! -x "$py" ]; then py=python3; fi; make -C "${HASHALL_REPO_DIR}" PYTHON="$py" payload-orphan-snapshot'
 StandardOutput=append:%h/.logs/hashall/orphan-audit-timer.log
 StandardError=append:%h/.logs/hashall/orphan-audit-timer.log
 

@@ -94,6 +94,9 @@ make payload-orphan-timer-disable
 
 ### Timer-run system email reminder
 
+The timer resolves the repo path via `HASHALL_REPO_DIR` (defaults to `/home/michael/dev/work/hashall`, installer writes current checkout path into `~/.config/hashall/payload-orphan-snapshot.env`).
+
+
 Timer runs send a local system email to `michael` by default with:
 
 - run result and snapshot directory,
@@ -103,6 +106,8 @@ Timer runs send a local system email to `michael` by default with:
 
 The service sets these defaults:
 
+- `HASHALL_REPO_DIR=/home/michael/dev/work/hashall`
+- `HASHALL_PYTHON=/home/michael/.venvs/hashall/bin/python`
 - `PAYLOAD_ORPHAN_AUDIT_NOTIFY_EMAIL=1`
 - `PAYLOAD_ORPHAN_AUDIT_NOTIFY_TO=michael`
 - `PAYLOAD_ORPHAN_AUDIT_NOTIFY_REVIEW_HOURS=24`
