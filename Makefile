@@ -93,6 +93,7 @@ REHOME_CLEANUP_EMPTY_DIRS ?= 0
 REHOME_CLEANUP_DUPLICATE_PAYLOAD ?= 0
 
 REHOME_SEEDING_ARGS := $(foreach r,$(REHOME_SEEDING_ROOTS),--seeding-root "$(r)")
+HELP_BANNER := hashall - $(shell PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c "from hashall import __version__; print(__version__)" 2>/dev/null || echo unknown) - $(shell TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)
 REHOME_LIBRARY_ARGS := $(foreach r,$(REHOME_LIBRARY_ROOTS),--library-root "$(r)")
 REHOME_CROSS_SEED_ARG := $(if $(REHOME_CROSS_SEED_CONFIG),--cross-seed-config "$(REHOME_CROSS_SEED_CONFIG)",)
 REHOME_TRACKER_ARG := $(if $(REHOME_TRACKER_REGISTRY),--tracker-registry "$(REHOME_TRACKER_REGISTRY)",)
@@ -107,7 +108,7 @@ REHOME_OUTPUT_ARG := $(if $(REHOME_OUTPUT),--output "$(REHOME_OUTPUT)",)
 help:  ## Show this help message
 	@echo "🧰 Hashall Make Targets"
 	@echo ""
-	@grep -E '^# hashall - ' $(MAKEFILE_LIST) | head -n 1 | sed 's/^# //'
+	@echo "$(HELP_BANNER)"
 	@echo ""
 	@echo "Meta & Docs:"
 	@grep -E '^(help|targets-table|targets-full|prompts-remote):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -160,7 +161,7 @@ help:  ## Show this help message
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
 	@echo ""
-	@grep -E '^# hashall - ' $(MAKEFILE_LIST) | head -n 1 | sed 's/^# //'
+	@echo "$(HELP_BANNER)"
 	@echo ""
 
 # ============================================================================
