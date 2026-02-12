@@ -125,6 +125,71 @@ def test_collect_workflow_state_marks_orphan_dirty_in_scope(tmp_path):
     assert state["orphan_gc_aged_in_scope"] == 0
 
 
+def test_collect_workflow_state_ignores_noncomplete_refs_when_filter_active(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    actionable = _insert_payload(conn, "/stash/media/torrents/seeding/ready", file_count=0, total_bytes=0)
+    pending = _insert_payload(conn, "/stash/media/torrents/seeding/pending", file_count=0, total_bytes=0)
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("complete-hash", actionable, 49, "/stash/media", "ready", "", "", 1.0),
+            ("pending-hash", pending, 49, "/stash/media", "pending", "", "", 1.0),
+        ],
+    )
+    conn.commit()
+
+    state = workflow.collect_workflow_state(
+        conn,
+        ["/stash/media"],
+        completed_hashes={"complete-hash"},
+        completion_filter_active=True,
+    )
+    conn.close()
+
+    assert state["dirty_in_scope"] == 1
+    assert state["dirty_noncomplete_in_scope"] == 1
+    assert state["dirty_total_in_scope"] == 2
+    assert state["scan_path"] == "/stash/media/torrents/seeding"
+
+
+def test_collect_workflow_state_collision_counts_ignore_noncomplete_refs(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    a = _insert_payload(conn, "/stash/media/a", file_count=0, total_bytes=0)
+    b = _insert_payload(conn, "/stash/media/b", file_count=0, total_bytes=0)
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("noncomplete-a", a, 49, "/stash/media", "a", "", "", 1.0),
+            ("noncomplete-b", b, 49, "/stash/media", "b", "", "", 1.0),
+        ],
+    )
+    conn.commit()
+
+    state_without_filter = workflow.collect_workflow_state(conn, ["/stash/media"])
+    state_with_filter = workflow.collect_workflow_state(
+        conn,
+        ["/stash/media"],
+        completed_hashes=set(),
+        completion_filter_active=True,
+    )
+    conn.close()
+
+    assert state_without_filter["collision_groups_in_scope"] == 1
+    assert state_with_filter["collision_groups_in_scope"] == 0
+
+
 def test_collect_workflow_state_reports_orphan_gc_metrics(tmp_path):
     workflow = _load_workflow_module()
     db_path = tmp_path / "catalog.db"

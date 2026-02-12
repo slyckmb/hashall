@@ -23,6 +23,7 @@ from hashall.model import connect_db
 STALL_THRESHOLD = 2
 ORPHAN_GC_MIN_SEEN_RUNS = 2
 ORPHAN_GC_MIN_AGE_SECONDS = 24 * 60 * 60
+QBIT_COMPLETE_PROGRESS = 0.999999
 
 
 def main() -> int:
@@ -57,6 +58,8 @@ def main() -> int:
         print("No roots found. Run 'make payload-sync' first.")
         return 1
 
+    completed_hashes, completion_filter_active, completion_filter_error = _load_completed_torrent_hashes()
+
     run_id = uuid.uuid4().hex[:10]
     log_path = _workflow_log_path(run_id)
     _log_event(
@@ -68,6 +71,8 @@ def main() -> int:
         roots=roots,
         max_iterations=args.max_iterations,
         dry_run=args.dry_run,
+        completion_filter_active=completion_filter_active,
+        completion_filter_error=completion_filter_error,
     )
 
     print(f"Automated payload workflow")
@@ -78,6 +83,10 @@ def main() -> int:
     print(f"  Run ID: {run_id}")
     print(f"  Log: {log_path}")
     print(f"  Max iterations: {args.max_iterations}")
+    if completion_filter_active:
+        print(f"  qB completion filter: active (ignoring refs below 100% progress)")
+    elif completion_filter_error:
+        print(f"  qB completion filter: disabled ({completion_filter_error})")
     print()
 
     previous_signature = None
@@ -88,7 +97,12 @@ def main() -> int:
         # Main loop
         for iteration in range(1, args.max_iterations + 1):
             print(f"--- Iteration {iteration} ---")
-            state = collect_workflow_state(conn, roots)
+            state = collect_workflow_state(
+                conn,
+                roots,
+                completed_hashes=completed_hashes,
+                completion_filter_active=completion_filter_active,
+            )
             signature = state_signature(state)
             stagnation_streak = next_stagnation_streak(previous_signature, signature, stagnation_streak)
             previous_signature = signature
@@ -105,6 +119,7 @@ def main() -> int:
 
             dirty_count = state["dirty_in_scope"]
             dirty_orphan_in_scope = state["dirty_orphan_in_scope"]
+            dirty_pending_in_scope = state["dirty_noncomplete_in_scope"]
             incomplete_count = state["incomplete_in_scope"]
             collision_count = state["collision_groups_in_scope"]
             if state["dirty_out_of_scope"] > 0:
@@ -126,11 +141,18 @@ def main() -> int:
                     f"aged={state['orphan_gc_aged_in_scope']}"
                 )
 
+            if dirty_pending_in_scope > 0:
+                print(
+                    f"  ⚠ In-scope dirty refs below 100% progress: {dirty_pending_in_scope} "
+                    f"(samples: {', '.join(state['dirty_noncomplete_samples_in_scope'])})"
+                )
+
             if stagnation_streak >= STALL_THRESHOLD:
                 reason = "stalled_no_progress"
                 print(f"⚠️  Stopping early: {reason} after {stagnation_streak} unchanged iterations")
                 print(
                     f"   state: actionable_dirty={dirty_count}, "
+                    f"pending_noncomplete={dirty_pending_in_scope}, "
                     f"orphan_dirty={dirty_orphan_in_scope}, "
                     f"incomplete={incomplete_count}, collisions={collision_count}"
                 )
@@ -254,14 +276,20 @@ def main() -> int:
                 continue  # Re-check from top
 
             if not action_taken:
+                warnings: list[str] = []
                 if dirty_orphan_in_scope > 0:
-                    print("✅ Workflow complete with warnings - only orphan payload rows remain")
+                    warnings.append("orphan payload rows remain")
+                if dirty_pending_in_scope > 0:
+                    warnings.append("non-100% torrent refs were ignored")
+
+                if warnings:
+                    print(f"✅ Workflow complete with warnings - {'; '.join(warnings)}")
                     _log_event(
                         log_path,
                         "run_complete_with_warnings",
                         run_id=run_id,
                         iteration=iteration,
-                        warning="orphan_payload_rows",
+                        warning="; ".join(warnings),
                         state=state,
                     )
                 else:
@@ -299,28 +327,21 @@ def main() -> int:
     return 0
 
 
-def collect_workflow_state(conn, roots: list[str]) -> dict:
+def collect_workflow_state(
+    conn,
+    roots: list[str],
+    *,
+    completed_hashes: set[str] | None = None,
+    completion_filter_active: bool = False,
+) -> dict:
     """Collect scoped/global state used for workflow decisions and diagnostics."""
-    all_rows = conn.execute(
-        """
-        SELECT
-            p.payload_id,
-            p.root_path,
-            p.status,
-            p.file_count,
-            p.total_bytes,
-            COALESCE(ti.ref_count, 0) AS ref_count
-        FROM payloads p
-        LEFT JOIN (
-            SELECT payload_id, COUNT(*) AS ref_count
-            FROM torrent_instances
-            GROUP BY payload_id
-        ) ti ON ti.payload_id = p.payload_id
-        """
+    payload_rows = conn.execute(
+        "SELECT payload_id, root_path, status, file_count, total_bytes FROM payloads"
     ).fetchall()
-    if not all_rows:
+    if not payload_rows:
         return {
             "dirty_in_scope": 0,
+            "dirty_noncomplete_in_scope": 0,
             "dirty_orphan_in_scope": 0,
             "dirty_total_in_scope": 0,
             "dirty_out_of_scope": 0,
@@ -329,21 +350,84 @@ def collect_workflow_state(conn, roots: list[str]) -> dict:
             "collision_groups_global": 0,
             "scan_path": None,
             "dirty_samples_out_of_scope": [],
+            "dirty_noncomplete_samples_in_scope": [],
             "dirty_orphan_samples_in_scope": [],
             "mount_alias_hint": None,
             "orphan_gc_tracked_in_scope": 0,
             "orphan_gc_aged_in_scope": 0,
+            "completion_filter_active": completion_filter_active,
         }
+
+    completed_hashes = {h.lower() for h in (completed_hashes or set())}
+    ref_rows = conn.execute("SELECT payload_id, torrent_hash FROM torrent_instances").fetchall()
+    ref_count_by_payload: dict[int, int] = {}
+    complete_ref_by_payload: dict[int, bool] = {}
+    for payload_id, torrent_hash in ref_rows:
+        pid = int(payload_id)
+        ref_count_by_payload[pid] = ref_count_by_payload.get(pid, 0) + 1
+        if completion_filter_active and torrent_hash and str(torrent_hash).lower() in completed_hashes:
+            complete_ref_by_payload[pid] = True
 
     def _in_scope(root_path: str) -> bool:
         return any(root_path == root or root_path.startswith(root.rstrip("/") + "/") for root in roots)
 
-    dirty_actionable_in_scope_paths = [rp for _, rp, _, fc, _, ref_count in all_rows if fc == 0 and ref_count > 0 and _in_scope(rp)]
-    dirty_orphan_in_scope_paths = [rp for _, rp, _, fc, _, ref_count in all_rows if fc == 0 and ref_count == 0 and _in_scope(rp)]
-    dirty_out_scope_paths = [rp for _, rp, _, fc, _, _ in all_rows if fc == 0 and not _in_scope(rp)]
-    incomplete_in_scope = sum(
-        1 for _, rp, status, fc, _, _ in all_rows
-        if status == "incomplete" and fc > 0 and _in_scope(rp)
+    dirty_actionable_in_scope_paths: list[str] = []
+    dirty_noncomplete_in_scope_paths: list[str] = []
+    dirty_orphan_in_scope_paths: list[str] = []
+    dirty_out_scope_paths: list[str] = []
+    incomplete_in_scope = 0
+    scoped_rows: list[dict[str, object]] = []
+
+    for payload_id, root_path, status, file_count, total_bytes in payload_rows:
+        payload_id = int(payload_id)
+        file_count = int(file_count)
+        ref_count = int(ref_count_by_payload.get(payload_id, 0))
+        has_complete_ref = bool(complete_ref_by_payload.get(payload_id, False))
+        in_scope = _in_scope(root_path)
+
+        scoped_rows.append(
+            {
+                "payload_id": payload_id,
+                "root_path": root_path,
+                "status": status,
+                "file_count": file_count,
+                "total_bytes": int(total_bytes),
+                "ref_count": ref_count,
+                "has_complete_ref": has_complete_ref,
+                "in_scope": in_scope,
+            }
+        )
+
+        if status == "incomplete" and file_count > 0 and in_scope:
+            incomplete_in_scope += 1
+
+        if file_count != 0:
+            continue
+
+        if not in_scope:
+            dirty_out_scope_paths.append(root_path)
+            continue
+
+        if ref_count == 0:
+            dirty_orphan_in_scope_paths.append(root_path)
+            continue
+
+        if completion_filter_active and not has_complete_ref:
+            dirty_noncomplete_in_scope_paths.append(root_path)
+        else:
+            dirty_actionable_in_scope_paths.append(root_path)
+
+    collision_groups_in_scope = _count_collision_groups_from_rows(
+        scoped_rows,
+        in_scope_only=True,
+        require_refs=True,
+        completion_filter_active=completion_filter_active,
+    )
+    collision_groups_global = _count_collision_groups_from_rows(
+        scoped_rows,
+        in_scope_only=False,
+        require_refs=False,
+        completion_filter_active=False,
     )
 
     per_root_dirty = {}
@@ -371,18 +455,25 @@ def collect_workflow_state(conn, roots: list[str]) -> dict:
 
     return {
         "dirty_in_scope": len(dirty_actionable_in_scope_paths),
+        "dirty_noncomplete_in_scope": len(dirty_noncomplete_in_scope_paths),
         "dirty_orphan_in_scope": len(dirty_orphan_in_scope_paths),
-        "dirty_total_in_scope": len(dirty_actionable_in_scope_paths) + len(dirty_orphan_in_scope_paths),
+        "dirty_total_in_scope": (
+            len(dirty_actionable_in_scope_paths)
+            + len(dirty_noncomplete_in_scope_paths)
+            + len(dirty_orphan_in_scope_paths)
+        ),
         "dirty_out_of_scope": len(dirty_out_scope_paths),
         "incomplete_in_scope": incomplete_in_scope,
-        "collision_groups_in_scope": _count_collision_groups(conn, roots=roots, require_refs=True),
-        "collision_groups_global": _count_collision_groups(conn, roots=None),
+        "collision_groups_in_scope": collision_groups_in_scope,
+        "collision_groups_global": collision_groups_global,
         "scan_path": scan_path,
         "dirty_samples_out_of_scope": dirty_out_scope_paths[:5],
+        "dirty_noncomplete_samples_in_scope": dirty_noncomplete_in_scope_paths[:5],
         "dirty_orphan_samples_in_scope": dirty_orphan_in_scope_paths[:5],
         "mount_alias_hint": _mount_alias_hint(conn, roots, dirty_out_scope_paths),
         "orphan_gc_tracked_in_scope": orphan_gc_tracked_in_scope,
         "orphan_gc_aged_in_scope": orphan_gc_aged_in_scope,
+        "completion_filter_active": completion_filter_active,
     }
 
 
@@ -430,50 +521,52 @@ def next_stagnation_streak(previous_signature: tuple | None, current_signature: 
     return 0
 
 
-def _count_collision_groups(conn, roots: list[str] | None, require_refs: bool = False) -> int:
-    ref_join = ""
-    ref_where = ""
-    if require_refs:
-        ref_join = """
-            LEFT JOIN (
-                SELECT payload_id, COUNT(*) AS ref_count
-                FROM torrent_instances
-                GROUP BY payload_id
-            ) ti ON ti.payload_id = p.payload_id
-        """
-        ref_where = " AND COALESCE(ti.ref_count, 0) > 0"
+def _count_collision_groups_from_rows(
+    rows: list[dict[str, object]],
+    *,
+    in_scope_only: bool,
+    require_refs: bool,
+    completion_filter_active: bool,
+) -> int:
+    groups: dict[tuple[int, int], dict[str, int]] = {}
+    for row in rows:
+        if in_scope_only and not bool(row["in_scope"]):
+            continue
+        if require_refs:
+            if int(row["ref_count"]) <= 0:
+                continue
+            if completion_filter_active and not bool(row["has_complete_ref"]):
+                continue
 
-    if roots:
-        where_clauses = []
-        params: list[str] = []
-        for root in roots:
-            where_clauses.append("(p.root_path = ? OR p.root_path LIKE ?)")
-            params.extend([root, f"{root.rstrip('/')}/%"])
-        where_expr = " OR ".join(where_clauses)
-        query = f"""
-            SELECT COUNT(*) FROM (
-                SELECT p.file_count, p.total_bytes
-                FROM payloads p
-                {ref_join}
-                WHERE {where_expr}
-                {ref_where}
-                GROUP BY p.file_count, p.total_bytes
-                HAVING COUNT(*) > 1
-                   AND SUM(CASE WHEN p.status = 'incomplete' THEN 1 ELSE 0 END) > 0
-            )
-        """
-        return conn.execute(query, params).fetchone()[0]
+        key = (int(row["file_count"]), int(row["total_bytes"]))
+        g = groups.setdefault(key, {"count": 0, "incomplete_count": 0})
+        g["count"] += 1
+        if row["status"] == "incomplete":
+            g["incomplete_count"] += 1
 
-    query = """
-        SELECT COUNT(*) FROM (
-            SELECT p.file_count, p.total_bytes
-            FROM payloads p
-            GROUP BY p.file_count, p.total_bytes
-            HAVING COUNT(*) > 1
-               AND SUM(CASE WHEN p.status = 'incomplete' THEN 1 ELSE 0 END) > 0
-        )
-    """
-    return conn.execute(query).fetchone()[0]
+    return sum(1 for g in groups.values() if g["count"] > 1 and g["incomplete_count"] > 0)
+
+
+def _load_completed_torrent_hashes() -> tuple[set[str], bool, str | None]:
+    """Return completed torrent hashes from qB; disable filtering if unavailable."""
+    try:
+        from hashall.qbittorrent import get_qbittorrent_client
+    except Exception as exc:
+        return set(), False, f"qB client import failed: {exc}"
+
+    qbit = get_qbittorrent_client()
+    if not qbit.test_connection():
+        return set(), False, f"qB unreachable: {qbit.last_error or 'connection failed'}"
+    if not qbit.login():
+        return set(), False, f"qB login failed: {qbit.last_error or 'authentication failed'}"
+
+    torrents = qbit.get_torrents()
+    completed = {
+        str(t.hash).lower()
+        for t in torrents
+        if t.hash and float(t.progress or 0.0) >= QBIT_COMPLETE_PROGRESS
+    }
+    return completed, True, None
 
 
 def _mount_alias_hint(conn, roots: list[str], dirty_out_scope_paths: list[str]) -> str | None:
