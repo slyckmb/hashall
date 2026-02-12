@@ -275,6 +275,7 @@ class QBittorrentClient:
             print(f"⚠️ Failed to resume torrent {torrent_hash}: {e}")
             return False
 
+
     def set_location(self, torrent_hash: str, new_location: str) -> bool:
         """
         Relocate a torrent to a new save path.
@@ -302,6 +303,44 @@ class QBittorrentClient:
             return True
         except requests.RequestException as e:
             print(f"⚠️ Failed to set location for torrent {torrent_hash}: {e}")
+            return False
+
+    def add_tags(self, torrent_hash: str, tags: List[str]) -> bool:
+        """Add tags to a torrent."""
+        self._ensure_authenticated()
+
+        clean_tags = sorted({t.strip() for t in tags if t and t.strip()})
+        if not clean_tags:
+            return True
+
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/v2/torrents/addTags",
+                data={"hashes": torrent_hash, "tags": ",".join(clean_tags)},
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            print(f"⚠️ Failed to add tags for torrent {torrent_hash}: {e}")
+            return False
+
+    def remove_tags(self, torrent_hash: str, tags: List[str]) -> bool:
+        """Remove tags from a torrent."""
+        self._ensure_authenticated()
+
+        clean_tags = sorted({t.strip() for t in tags if t and t.strip()})
+        if not clean_tags:
+            return True
+
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/v2/torrents/removeTags",
+                data={"hashes": torrent_hash, "tags": ",".join(clean_tags)},
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            print(f"⚠️ Failed to remove tags for torrent {torrent_hash}: {e}")
             return False
 
     def get_torrent_info(self, torrent_hash: str) -> Optional[QBitTorrent]:
@@ -362,8 +401,6 @@ class QBittorrentClient:
         except requests.RequestException as e:
             self.last_error = str(e)
             return False
-
-
 def get_qbittorrent_client(base_url: Optional[str] = None,
                           username: Optional[str] = None,
                           password: Optional[str] = None) -> QBittorrentClient:

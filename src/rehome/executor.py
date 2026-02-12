@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import json
+from datetime import datetime
 
 # Import hashall and qBittorrent modules
 import sys
@@ -471,6 +472,73 @@ class DemotionExecutor:
 
         self._log("✅ Dry-run complete (no changes made)", "success")
 
+
+
+
+    @staticmethod
+    def _split_tags(raw_tags: Optional[str]) -> List[str]:
+        """Split qB tag CSV into normalized tag names."""
+        if not raw_tags:
+            return []
+        return [tag.strip() for tag in str(raw_tags).split(',') if tag and tag.strip()]
+
+    def _build_rehome_provenance_tags(self, plan: Dict) -> List[str]:
+        """Compute rehome provenance tags for a completed apply run."""
+        direction = plan.get("direction", "demote")
+        if direction == "promote":
+            source_tag = "rehome_from_pool"
+            target_tag = "rehome_to_stash"
+        else:
+            source_tag = "rehome_from_stash"
+            target_tag = "rehome_to_pool"
+
+        date_tag = f"rehome_at_{datetime.now().strftime('%Y%m%d')}"
+        return ["rehome", source_tag, target_tag, date_tag]
+
+    def _apply_rehome_provenance_tags(self, plan: Dict) -> None:
+        """Apply idempotent provenance tags to all affected torrents."""
+        torrent_hashes = plan.get("affected_torrents") or []
+        if not torrent_hashes:
+            return
+
+        desired_tags = self._build_rehome_provenance_tags(plan)
+        for torrent_hash in torrent_hashes:
+            try:
+                torrent_info = self.qbit_client.get_torrent_info(torrent_hash)
+                existing_tags = self._split_tags(getattr(torrent_info, "tags", "") if torrent_info else "")
+                stale_tags = [
+                    tag for tag in existing_tags
+                    if tag.startswith("rehome_from_")
+                    or tag.startswith("rehome_to_")
+                    or tag.startswith("rehome_at_")
+                ]
+
+                if stale_tags and hasattr(self.qbit_client, "remove_tags"):
+                    if not self.qbit_client.remove_tags(torrent_hash, stale_tags):
+                        self._log(
+                            f"rehome_tag_remove_failed hash={torrent_hash[:16]} tags={','.join(stale_tags)}",
+                            "warning",
+                        )
+
+                if hasattr(self.qbit_client, "add_tags"):
+                    if not self.qbit_client.add_tags(torrent_hash, desired_tags):
+                        self._log(
+                            f"rehome_tag_add_failed hash={torrent_hash[:16]} tags={','.join(desired_tags)}",
+                            "warning",
+                        )
+                    else:
+                        self._log(
+                            f"rehome_tag_update hash={torrent_hash[:16]} tags={','.join(desired_tags)}"
+                        )
+                else:
+                    self._log(
+                        f"rehome_tag_update_skipped hash={torrent_hash[:16]} reason=no_add_tags_api",
+                        "warning",
+                    )
+            except Exception as e:
+                self._log(f"rehome_tag_update_failed hash={torrent_hash[:16]} error={e}", "warning")
+
+
     def execute(self, plan: Dict, cleanup_source_views: bool = False,
                 cleanup_empty_dirs: bool = False, cleanup_duplicate_payload: bool = False,
                 rescan: bool = False, spot_check: int = 0) -> None:
@@ -512,6 +580,7 @@ class DemotionExecutor:
 
             self._apply_cleanup(plan, cleanup_source_views, cleanup_empty_dirs, cleanup_duplicate_payload)
             self._sync_catalog_after_rehome(plan)
+            self._apply_rehome_provenance_tags(plan)
             if rescan:
                 self._rescan_after_rehome(plan)
 

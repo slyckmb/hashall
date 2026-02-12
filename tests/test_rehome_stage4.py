@@ -449,5 +449,141 @@ class TestSingleFileVerification:
         assert executor._verify_total_bytes(file_path, len(payload_bytes) + 1) is False
 
 
+class TestQBittorrentTagOps:
+    """Test qBittorrent tag helper API calls."""
+
+    def test_add_tags_calls_api(self):
+        mock_session = Mock()
+        ok = Mock()
+        ok.raise_for_status = Mock()
+        mock_session.post.return_value = ok
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.add_tags("abc123", ["rehome", "rehome_to_pool", "rehome"]) is True
+        assert mock_session.post.call_count == 1
+        args, kwargs = mock_session.post.call_args
+        assert args[0].endswith("/api/v2/torrents/addTags")
+        assert kwargs["data"]["hashes"] == "abc123"
+        assert kwargs["data"]["tags"] == "rehome,rehome_to_pool"
+
+    def test_remove_tags_calls_api(self):
+        mock_session = Mock()
+        ok = Mock()
+        ok.raise_for_status = Mock()
+        mock_session.post.return_value = ok
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.remove_tags("abc123", ["rehome_at_20260211", "rehome_from_stash"]) is True
+        assert mock_session.post.call_count == 1
+        args, kwargs = mock_session.post.call_args
+        assert args[0].endswith("/api/v2/torrents/removeTags")
+        assert kwargs["data"]["hashes"] == "abc123"
+        assert kwargs["data"]["tags"] == "rehome_at_20260211,rehome_from_stash"
+
+
+class TestRehomeTagging:
+    """Test automatic provenance tag updates after rehome."""
+
+    def test_apply_rehome_provenance_tags_demote(self, tmp_path, monkeypatch):
+        import rehome.executor as executor_module
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls):
+                from datetime import datetime as _dt
+                return _dt(2026, 2, 12, 10, 0, 0)
+
+        monkeypatch.setattr(executor_module, "datetime", FakeDateTime)
+
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        old_tags = "keep,rehome_from_pool,rehome_to_stash,rehome_at_20260210"
+        mock_info = QBitTorrent(
+            hash="torrent_tagged",
+            name="Tagged Torrent",
+            save_path="/stash/torrents/seeding",
+            content_path="/stash/torrents/seeding/Tagged Torrent",
+            category="",
+            tags=old_tags,
+            state="stalledUP",
+            size=100,
+            progress=1.0,
+        )
+
+        mock_client = Mock()
+        mock_client.get_torrent_info.return_value = mock_info
+        mock_client.remove_tags.return_value = True
+        mock_client.add_tags.return_value = True
+        executor.qbit_client = mock_client
+
+        plan = {
+            "direction": "demote",
+            "affected_torrents": ["torrent_tagged"],
+        }
+
+        executor._apply_rehome_provenance_tags(plan)
+
+        mock_client.remove_tags.assert_called_once_with(
+            "torrent_tagged",
+            ["rehome_from_pool", "rehome_to_stash", "rehome_at_20260210"],
+        )
+        mock_client.add_tags.assert_called_once_with(
+            "torrent_tagged",
+            ["rehome", "rehome_from_stash", "rehome_to_pool", "rehome_at_20260212"],
+        )
+
+    def test_apply_rehome_provenance_tags_promote(self, tmp_path, monkeypatch):
+        import rehome.executor as executor_module
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls):
+                from datetime import datetime as _dt
+                return _dt(2026, 2, 12, 10, 0, 0)
+
+        monkeypatch.setattr(executor_module, "datetime", FakeDateTime)
+
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        mock_info = QBitTorrent(
+            hash="torrent_promote",
+            name="Promote Torrent",
+            save_path="/pool/data/cross-seed",
+            content_path="/pool/data/cross-seed/Promote Torrent",
+            category="",
+            tags="seed",
+            state="stalledUP",
+            size=100,
+            progress=1.0,
+        )
+
+        mock_client = Mock()
+        mock_client.get_torrent_info.return_value = mock_info
+        mock_client.remove_tags.return_value = True
+        mock_client.add_tags.return_value = True
+        executor.qbit_client = mock_client
+
+        plan = {
+            "direction": "promote",
+            "affected_torrents": ["torrent_promote"],
+        }
+
+        executor._apply_rehome_provenance_tags(plan)
+
+        mock_client.remove_tags.assert_not_called()
+        mock_client.add_tags.assert_called_once_with(
+            "torrent_promote",
+            ["rehome", "rehome_from_pool", "rehome_to_stash", "rehome_at_20260212"],
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
