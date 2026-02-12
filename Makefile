@@ -156,6 +156,7 @@ help:  ## Show this help message
 	@echo "  make payload-workflow PW_PATHS='/pool/data /stash/media'  # Explicit roots"
 	@echo "  make payload-unmanaged PAYLOAD_UNMANAGED_PATH_PREFIXES='/pool/data /stash/media'  # Orphan inventory"
 	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media'  # Non-destructive orphan staging audit"
+	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media' PAYLOAD_ORPHAN_AUDIT_JSON=1  # JSON snapshot for trend checks"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media' DRY_RUN=1  # Preview actions"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media'            # Run to completion"
 	@echo "  make rehome-checklist                     # Rehome checklist"
@@ -539,6 +540,7 @@ payload-orphan-audit:  ## Audit true-orphan staging (non-destructive)
 	@set --; \
 	for p in $(PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES); do set -- "$$@" --path-prefix "$$p"; done; \
 	if [ -n "$(PAYLOAD_ORPHAN_AUDIT_SAMPLES)" ]; then set -- "$$@" --samples $(PAYLOAD_ORPHAN_AUDIT_SAMPLES); fi; \
+	if [ "$(PAYLOAD_ORPHAN_AUDIT_JSON)" = "1" ]; then set -- "$$@" --json; fi; \
 	$(HASHALL_CLI) payload orphan-audit --db "$(DB_FILE)" "$$@"
 
 .PHONY: payload-workflow

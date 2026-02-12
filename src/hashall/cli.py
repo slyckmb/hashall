@@ -10,6 +10,7 @@ import sys
 import shutil
 import subprocess
 import grp
+import json
 from pathlib import Path
 from hashall.scan import scan_path
 from hashall.export import export_json
@@ -754,7 +755,8 @@ def payload_unmanaged_cmd(db, path_prefixes, samples):
     show_default=True,
     help="Number of sample roots to print per bucket.",
 )
-def payload_orphan_audit_cmd(db, path_prefixes, samples):
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON summary.")
+def payload_orphan_audit_cmd(db, path_prefixes, samples, json_output):
     """Audit orphan payload state without deleting anything."""
     from hashall.model import connect_db
     from hashall.pathing import canonicalize_path
@@ -904,6 +906,25 @@ def payload_orphan_audit_cmd(db, path_prefixes, samples):
 
     true_samples = [root for _, root in true_orphans[: max(1, samples)]]
     alias_samples = [root for _, root in alias_artifacts[: max(1, samples)]]
+
+    if json_output:
+        payload = {
+            "scoped_unmanaged_payloads": len(filtered_rows),
+            "skipped_path_prefix": skipped_prefix,
+            "true_orphans": len(true_orphans),
+            "alias_artifacts": len(alias_artifacts),
+            "gc_table_exists": bool(gc_table_exists),
+            "gc_tracked_true_orphans": tracked_count,
+            "gc_aged_true_orphans": aged_count,
+            "gc_min_seen_runs": ORPHAN_GC_MIN_SEEN_RUNS,
+            "gc_min_age_seconds": ORPHAN_GC_MIN_AGE_SECONDS,
+            "true_orphan_samples": true_samples,
+            "alias_artifact_samples": alias_samples,
+            "path_prefixes": prefix_strings,
+        }
+        print(json.dumps(payload, sort_keys=True))
+        conn.close()
+        return
 
     print("🔎 Payload orphan audit (non-destructive)")
     print(f"   scoped unmanaged payloads: {len(filtered_rows)}")

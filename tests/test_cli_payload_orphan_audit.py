@@ -1,6 +1,7 @@
 """Tests for `hashall payload orphan-audit` CLI command."""
 
 import time
+import json
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -134,3 +135,40 @@ def test_payload_orphan_audit_handles_missing_gc_table(tmp_path):
     assert result.exit_code == 0, result.output
     assert "true orphans (eligible class): 1" in result.output
     assert "gc staging table: missing" in result.output
+
+
+
+def test_payload_orphan_audit_json_output(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (None, None, "/stash/media/torrents/seeding/ghost-item", 0, 0, "incomplete"),
+    )
+    conn.execute("DROP TABLE IF EXISTS payload_orphan_gc")
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "payload",
+            "orphan-audit",
+            "--db",
+            str(db_path),
+            "--path-prefix",
+            "/stash/media",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    assert payload["scoped_unmanaged_payloads"] == 1
+    assert payload["true_orphans"] == 1
+    assert payload["alias_artifacts"] == 0
+    assert payload["gc_table_exists"] is False
