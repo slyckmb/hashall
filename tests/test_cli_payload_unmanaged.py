@@ -131,3 +131,57 @@ def test_payload_unmanaged_respects_path_prefix_filter(tmp_path):
     assert "unmanaged payloads: 1" in result.output
     assert "skipped (path-prefix): 1" in result.output
     assert "true orphans (no refs + no active files): 1" in result.output
+
+
+def test_payload_unmanaged_counts_mount_root_payload_as_alias_artifact(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    conn.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("zfs-49", 49, "/data/media", "/stash/media"),
+    )
+    conn.execute(
+        """
+        CREATE TABLE files_49 (
+            path TEXT PRIMARY KEY,
+            size INTEGER,
+            sha256 TEXT,
+            status TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO files_49 (path, size, sha256, status) VALUES (?, ?, ?, ?)",
+        ("torrents/seeding/root-file.mkv", 123, "abc", "active"),
+    )
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (None, 49, "/data/media", 0, 0, "incomplete"),
+    )
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "payload",
+            "unmanaged",
+            "--db",
+            str(db_path),
+            "--path-prefix",
+            "/data/media",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "unmanaged payloads: 1" in result.output
+    assert "true orphans (no refs + no active files): 0" in result.output
+    assert "alias artifacts (no refs + active files): 1" in result.output

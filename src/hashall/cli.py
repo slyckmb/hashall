@@ -452,7 +452,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     else:
         print(f"\n✅ Sync complete!")
     print(f"   processed: {processed}")
-    if prefix_paths:
+    if prefix_strings:
         print(f"   skipped (path-prefix): {skipped_prefix}")
     print(f"   complete payloads: {synced_count}")
     print(f"   incomplete payloads: {incomplete_count}")
@@ -472,6 +472,113 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             print(f"   pruned samples: {', '.join(prune_stats['samples'])}")
     elif (not dry_run) and limit > 0:
         print("   orphan payload prune: skipped (limit applied)")
+
+
+def _payload_table_has_column(conn, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(row[1] == column_name for row in rows)
+
+
+def _payload_root_relpath_for_device(root_path: str, mount_point: str | None, preferred_mount: str | None) -> str | None:
+    if not Path(root_path).is_absolute():
+        return root_path
+
+    for base in (preferred_mount, mount_point):
+        if not base:
+            continue
+        if root_path == base:
+            return "."
+        prefix = base.rstrip("/") + "/"
+        if root_path.startswith(prefix):
+            return root_path[len(prefix):]
+
+    return None
+
+
+def _batch_count_active_payload_roots(conn, keys: list[tuple[int, str]]) -> dict[tuple[int, str], int]:
+    """Batch count active files under payload roots for unmanaged inventory."""
+    if not keys:
+        return {}
+
+    out: dict[tuple[int, str], int] = {(device_id, root_path): 0 for device_id, root_path in keys}
+
+    has_devices = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    device_mounts: dict[int, tuple[str | None, str | None]] = {}
+    if has_devices:
+        for row in conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall():
+            did = int(row[0])
+            mount_point = row[1]
+            preferred_mount = row[2] or row[1]
+            device_mounts[did] = (mount_point, preferred_mount)
+
+    by_device: dict[int, list[str]] = {}
+    for device_id, root_path in keys:
+        by_device.setdefault(int(device_id), []).append(root_path)
+
+    for device_id, root_paths in by_device.items():
+        table_name = f"files_{device_id}"
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone():
+            continue
+
+        status_clause = "f.status='active' AND " if _payload_table_has_column(conn, table_name, "status") else ""
+        mount_point, preferred_mount = device_mounts.get(device_id, (None, None))
+
+        rel_to_roots: dict[str, list[str]] = {}
+        all_roots: list[str] = []
+        for root_path in root_paths:
+            rel_root = _payload_root_relpath_for_device(root_path, mount_point, preferred_mount)
+            if rel_root is None:
+                continue
+            if rel_root == ".":
+                all_roots.append(root_path)
+            else:
+                rel_to_roots.setdefault(rel_root, []).append(root_path)
+
+        if all_roots:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {table_name} f WHERE {status_clause}1=1"
+            ).fetchone()
+            count_all = int(row[0] or 0)
+            for root_path in all_roots:
+                out[(device_id, root_path)] = count_all
+
+        if rel_to_roots:
+            rel_root_counts: dict[str, int] = {rel_root: 0 for rel_root in rel_to_roots.keys()}
+            rel_root_lookup = set(rel_root_counts.keys())
+            path_rows = conn.execute(
+                f"SELECT path FROM {table_name} f WHERE {status_clause}1=1"
+            ).fetchall()
+
+            for row in path_rows:
+                file_path = row[0]
+                if not file_path:
+                    continue
+
+                if file_path in rel_root_lookup:
+                    rel_root_counts[file_path] += 1
+
+                idx = 0
+                while True:
+                    idx = file_path.find("/", idx)
+                    if idx <= 0:
+                        break
+                    prefix = file_path[:idx]
+                    if prefix in rel_root_lookup:
+                        rel_root_counts[prefix] += 1
+                    idx += 1
+
+            for rel_root, count in rel_root_counts.items():
+                for root_path in rel_to_roots.get(rel_root, []):
+                    out[(device_id, root_path)] = int(count or 0)
+
+    return out
 
 
 @payload.command("unmanaged")
@@ -498,17 +605,48 @@ def payload_unmanaged_cmd(db, path_prefixes, samples):
     - alias artifact: no torrent refs but active catalog files still exist under root
     """
     from hashall.model import connect_db
-    from hashall.pathing import canonicalize_path, is_under
-    from hashall.payload import count_active_files_for_path
+    from hashall.pathing import canonicalize_path
 
     conn = connect_db(Path(db), read_only=True, apply_migrations=False)
 
-    prefix_paths = []
+    def _is_under_fast(path_str: str, prefix_str: str) -> bool:
+        return path_str == prefix_str or path_str.startswith(prefix_str.rstrip("/") + "/")
+
+    def _remap_mount(path_str: str, source_mount: str | None, target_mount: str | None) -> str | None:
+        if not source_mount or not target_mount:
+            return None
+        if path_str == source_mount:
+            return target_mount
+        source_prefix = source_mount.rstrip("/") + "/"
+        if path_str.startswith(source_prefix):
+            suffix = path_str[len(source_prefix):]
+            return target_mount.rstrip("/") + "/" + suffix
+        return None
+
+    prefix_strings = []
+    prefix_paths_canon = []
     for p in path_prefixes:
         try:
-            prefix_paths.append(canonicalize_path(Path(p)))
+            canon = canonicalize_path(Path(p))
+            prefix_paths_canon.append(canon)
+            prefix_strings.append(str(canon))
         except Exception:
-            prefix_paths.append(Path(p))
+            raw = Path(p)
+            prefix_paths_canon.append(raw)
+            prefix_strings.append(str(raw))
+
+    device_mounts: dict[int, tuple[str | None, str | None]] = {}
+    has_devices = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    if has_devices:
+        for dev_row in conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall():
+            did = int(dev_row[0])
+            mount_point = dev_row[1]
+            preferred_mount = dev_row[2] or dev_row[1]
+            device_mounts[did] = (mount_point, preferred_mount)
 
     rows = conn.execute(
         """
@@ -524,35 +662,58 @@ def payload_unmanaged_cmd(db, path_prefixes, samples):
         """
     ).fetchall()
 
-    total = 0
+    skipped_prefix = 0
+    filtered_rows = []
+    for row in rows:
+        root_path = row["root_path"]
+
+        if prefix_strings:
+            in_scope = any(_is_under_fast(root_path, pref) for pref in prefix_strings)
+
+            if not in_scope and row["device_id"] is not None:
+                mount_point, preferred_mount = device_mounts.get(int(row["device_id"]), (None, None))
+                remapped = _remap_mount(root_path, mount_point, preferred_mount)
+                if remapped is None:
+                    remapped = _remap_mount(root_path, preferred_mount, mount_point)
+                if remapped:
+                    in_scope = any(_is_under_fast(remapped, pref) for pref in prefix_strings)
+
+            if not in_scope:
+                # Last-resort canonicalization for odd path cases.
+                try:
+                    root_canon = canonicalize_path(Path(root_path))
+                    in_scope = any(
+                        _is_under_fast(str(root_canon), str(pref_path))
+                        for pref_path in prefix_paths_canon
+                    )
+                except Exception:
+                    in_scope = False
+
+            if not in_scope:
+                skipped_prefix += 1
+                continue
+
+        filtered_rows.append(row)
+
+    active_count_keys = [
+        (int(row["device_id"]), row["root_path"])
+        for row in filtered_rows
+        if row["device_id"] is not None and int(row["file_count"] or 0) == 0
+    ]
+    live_counts = _batch_count_active_payload_roots(conn, active_count_keys)
+
+    total = len(filtered_rows)
     true_orphan = 0
     alias_artifact = 0
     true_samples = []
     alias_samples = []
-    skipped_prefix = 0
 
-    for row in rows:
+    for row in filtered_rows:
         root_path = row["root_path"]
-
-        if prefix_paths:
-            try:
-                root_canon = canonicalize_path(Path(root_path))
-            except Exception:
-                root_canon = Path(root_path)
-            if not any(is_under(root_canon, pref) for pref in prefix_paths):
-                skipped_prefix += 1
-                continue
-
-        total += 1
-
+        device_id = row["device_id"]
         live_count = int(row["file_count"] or 0)
-        if live_count == 0 and row["device_id"] is not None:
-            try:
-                live_count = int(
-                    count_active_files_for_path(conn, int(row["device_id"]), root_path)
-                )
-            except Exception:
-                live_count = 0
+        if live_count == 0 and device_id is not None:
+            live_count = live_counts.get((int(device_id), root_path), 0)
 
         if live_count > 0:
             alias_artifact += 1
@@ -565,7 +726,7 @@ def payload_unmanaged_cmd(db, path_prefixes, samples):
 
     print("🔎 Unmanaged payload inventory")
     print(f"   unmanaged payloads: {total}")
-    if prefix_paths:
+    if prefix_strings:
         print(f"   skipped (path-prefix): {skipped_prefix}")
     print(f"   true orphans (no refs + no active files): {true_orphan}")
     print(f"   alias artifacts (no refs + active files): {alias_artifact}")
@@ -575,7 +736,7 @@ def payload_unmanaged_cmd(db, path_prefixes, samples):
     if alias_samples:
         print(f"   alias artifact samples: {', '.join(alias_samples)}")
 
-
+    conn.close()
 
 
 @payload.command("show")
@@ -768,7 +929,7 @@ def payload_collisions_cmd(db, path_prefixes, limit, top):
 
     print("🔍 Payload collisions (fast signature)")
     print(f"   analyzed: {analyzed}")
-    if prefix_paths:
+    if prefix_strings:
         print(f"   skipped (path-prefix): {skipped_prefix}")
     print(f"   missing in catalog: {missing_in_catalog}")
     print(f"   missing quick_hash: {missing_quick}")
