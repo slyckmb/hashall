@@ -474,6 +474,110 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
         print("   orphan payload prune: skipped (limit applied)")
 
 
+@payload.command("unmanaged")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--path-prefix",
+    "path_prefixes",
+    multiple=True,
+    help="Only include payload roots under this path (repeatable).",
+)
+@click.option(
+    "--samples",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Number of sample roots to print per bucket.",
+)
+def payload_unmanaged_cmd(db, path_prefixes, samples):
+    """
+    List payload rows that have no active torrent reference.
+
+    Buckets:
+    - true orphan: no torrent refs and no active catalog files under root
+    - alias artifact: no torrent refs but active catalog files still exist under root
+    """
+    from hashall.model import connect_db
+    from hashall.pathing import canonicalize_path, is_under
+    from hashall.payload import count_active_files_for_path
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+
+    prefix_paths = []
+    for p in path_prefixes:
+        try:
+            prefix_paths.append(canonicalize_path(Path(p)))
+        except Exception:
+            prefix_paths.append(Path(p))
+
+    rows = conn.execute(
+        """
+        SELECT p.payload_id, p.device_id, p.root_path, p.status, p.file_count, p.total_bytes
+        FROM payloads p
+        LEFT JOIN (
+            SELECT payload_id, COUNT(*) AS ref_count
+            FROM torrent_instances
+            GROUP BY payload_id
+        ) ti ON ti.payload_id = p.payload_id
+        WHERE COALESCE(ti.ref_count, 0) = 0
+        ORDER BY p.root_path
+        """
+    ).fetchall()
+
+    total = 0
+    true_orphan = 0
+    alias_artifact = 0
+    true_samples = []
+    alias_samples = []
+    skipped_prefix = 0
+
+    for row in rows:
+        root_path = row["root_path"]
+
+        if prefix_paths:
+            try:
+                root_canon = canonicalize_path(Path(root_path))
+            except Exception:
+                root_canon = Path(root_path)
+            if not any(is_under(root_canon, pref) for pref in prefix_paths):
+                skipped_prefix += 1
+                continue
+
+        total += 1
+
+        live_count = int(row["file_count"] or 0)
+        if live_count == 0 and row["device_id"] is not None:
+            try:
+                live_count = int(
+                    count_active_files_for_path(conn, int(row["device_id"]), root_path)
+                )
+            except Exception:
+                live_count = 0
+
+        if live_count > 0:
+            alias_artifact += 1
+            if len(alias_samples) < samples:
+                alias_samples.append(root_path)
+        else:
+            true_orphan += 1
+            if len(true_samples) < samples:
+                true_samples.append(root_path)
+
+    print("🔎 Unmanaged payload inventory")
+    print(f"   unmanaged payloads: {total}")
+    if prefix_paths:
+        print(f"   skipped (path-prefix): {skipped_prefix}")
+    print(f"   true orphans (no refs + no active files): {true_orphan}")
+    print(f"   alias artifacts (no refs + active files): {alias_artifact}")
+
+    if true_samples:
+        print(f"   true orphan samples: {', '.join(true_samples)}")
+    if alias_samples:
+        print(f"   alias artifact samples: {', '.join(alias_samples)}")
+
+
+
+
 @payload.command("show")
 @click.argument("torrent_hash")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")

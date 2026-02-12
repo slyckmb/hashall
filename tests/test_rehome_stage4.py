@@ -341,6 +341,60 @@ class TestBatchDemotionByTag:
             assert plan['batch_filter'] == '~noHL'
 
 
+    def test_batch_by_tag_still_blocks_external_consumers(self, tmp_path):
+        """~noHL is advisory; external hardlinks must still force BLOCK."""
+        db_path = TestDatabase.create_test_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+
+        conn.executescript("""
+            CREATE TABLE devices (
+                device_id INTEGER PRIMARY KEY,
+                fs_uuid TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT
+            );
+
+            INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
+            VALUES (50, 'fs-test-50', '/stash', '/stash');
+
+            CREATE TABLE files_50 (
+                path TEXT PRIMARY KEY,
+                inode INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                sha1 TEXT,
+                status TEXT DEFAULT 'active'
+            );
+
+            INSERT INTO files_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('torrents/seeding/MovieHL/video.mkv', 7001, 1000000, 1234567890, 'sha-video', 'active'),
+                ('media/library/MovieHL/video.mkv', 7001, 1000000, 1234567890, 'sha-video', 'active');
+
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (1, 'payload_hash_hl', 50, '/stash/torrents/seeding/MovieHL', 1, 1000000, 'complete');
+
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, tags)
+            VALUES ('torrent_hl_tagged', 1, 50, '/stash/torrents/seeding', 'MovieHL', '~noHL');
+        """)
+        conn.commit()
+        conn.close()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/torrents/seeding"],
+            library_roots=[],
+            stash_device=50,
+            pool_device=49,
+        )
+
+        plans = planner.plan_batch_demotion_by_tag('~noHL')
+
+        assert len(plans) == 1
+        assert plans[0]['batch_filter'] == '~noHL'
+        assert plans[0]['decision'] == 'BLOCK'
+        assert any('outside' in r.lower() or 'external' in r.lower() for r in plans[0]['reasons'])
+
+
 class TestRelocationVerification:
     """Test that relocation is verified after execution."""
 
