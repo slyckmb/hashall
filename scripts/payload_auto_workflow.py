@@ -119,6 +119,7 @@ def main() -> int:
 
             dirty_count = state["dirty_in_scope"]
             dirty_orphan_in_scope = state["dirty_orphan_in_scope"]
+            dirty_orphan_alias_in_scope = state["dirty_orphan_alias_in_scope"]
             dirty_pending_in_scope = state["dirty_noncomplete_in_scope"]
             incomplete_count = state["incomplete_in_scope"]
             collision_count = state["collision_groups_in_scope"]
@@ -141,6 +142,12 @@ def main() -> int:
                     f"aged={state['orphan_gc_aged_in_scope']}"
                 )
 
+            if dirty_orphan_alias_in_scope > 0:
+                print(
+                    f"  ℹ In-scope orphan alias rows with active files: {dirty_orphan_alias_in_scope} "
+                    f"(samples: {', '.join(state['dirty_orphan_alias_samples_in_scope'])})"
+                )
+
             if dirty_pending_in_scope > 0:
                 print(
                     f"  ⚠ In-scope dirty refs below 100% progress: {dirty_pending_in_scope} "
@@ -154,6 +161,7 @@ def main() -> int:
                     f"   state: actionable_dirty={dirty_count}, "
                     f"pending_noncomplete={dirty_pending_in_scope}, "
                     f"orphan_dirty={dirty_orphan_in_scope}, "
+                    f"orphan_alias={dirty_orphan_alias_in_scope}, "
                     f"incomplete={incomplete_count}, collisions={collision_count}"
                 )
                 _log_event(
@@ -336,13 +344,14 @@ def collect_workflow_state(
 ) -> dict:
     """Collect scoped/global state used for workflow decisions and diagnostics."""
     payload_rows = conn.execute(
-        "SELECT payload_id, root_path, status, file_count, total_bytes FROM payloads"
+        "SELECT payload_id, device_id, root_path, status, file_count, total_bytes FROM payloads"
     ).fetchall()
     if not payload_rows:
         return {
             "dirty_in_scope": 0,
             "dirty_noncomplete_in_scope": 0,
             "dirty_orphan_in_scope": 0,
+            "dirty_orphan_alias_in_scope": 0,
             "dirty_total_in_scope": 0,
             "dirty_out_of_scope": 0,
             "incomplete_in_scope": 0,
@@ -352,6 +361,7 @@ def collect_workflow_state(
             "dirty_samples_out_of_scope": [],
             "dirty_noncomplete_samples_in_scope": [],
             "dirty_orphan_samples_in_scope": [],
+            "dirty_orphan_alias_samples_in_scope": [],
             "mount_alias_hint": None,
             "orphan_gc_tracked_in_scope": 0,
             "orphan_gc_aged_in_scope": 0,
@@ -374,23 +384,34 @@ def collect_workflow_state(
     dirty_actionable_in_scope_paths: list[str] = []
     dirty_noncomplete_in_scope_paths: list[str] = []
     dirty_orphan_in_scope_paths: list[str] = []
+    dirty_orphan_alias_in_scope_paths: list[str] = []
     dirty_out_scope_paths: list[str] = []
     incomplete_in_scope = 0
     scoped_rows: list[dict[str, object]] = []
+    live_active_cache: dict[tuple[int, str], int] = {}
 
-    for payload_id, root_path, status, file_count, total_bytes in payload_rows:
+    for payload_id, device_id, root_path, status, file_count, total_bytes in payload_rows:
         payload_id = int(payload_id)
         file_count = int(file_count)
         ref_count = int(ref_count_by_payload.get(payload_id, 0))
         has_complete_ref = bool(complete_ref_by_payload.get(payload_id, False))
         in_scope = _in_scope(root_path)
+        live_file_count = file_count
+
+        if in_scope and file_count == 0 and device_id is not None:
+            live_file_count = _live_active_file_count(
+                conn,
+                live_active_cache,
+                int(device_id),
+                root_path,
+            )
 
         scoped_rows.append(
             {
                 "payload_id": payload_id,
                 "root_path": root_path,
                 "status": status,
-                "file_count": file_count,
+                "file_count": live_file_count,
                 "total_bytes": int(total_bytes),
                 "ref_count": ref_count,
                 "has_complete_ref": has_complete_ref,
@@ -398,7 +419,7 @@ def collect_workflow_state(
             }
         )
 
-        if status == "incomplete" and file_count > 0 and in_scope:
+        if status == "incomplete" and live_file_count > 0 and in_scope:
             incomplete_in_scope += 1
 
         if file_count != 0:
@@ -406,6 +427,11 @@ def collect_workflow_state(
 
         if not in_scope:
             dirty_out_scope_paths.append(root_path)
+            continue
+
+        if live_file_count > 0:
+            if ref_count == 0:
+                dirty_orphan_alias_in_scope_paths.append(root_path)
             continue
 
         if ref_count == 0:
@@ -457,6 +483,7 @@ def collect_workflow_state(
         "dirty_in_scope": len(dirty_actionable_in_scope_paths),
         "dirty_noncomplete_in_scope": len(dirty_noncomplete_in_scope_paths),
         "dirty_orphan_in_scope": len(dirty_orphan_in_scope_paths),
+        "dirty_orphan_alias_in_scope": len(dirty_orphan_alias_in_scope_paths),
         "dirty_total_in_scope": (
             len(dirty_actionable_in_scope_paths)
             + len(dirty_noncomplete_in_scope_paths)
@@ -470,6 +497,7 @@ def collect_workflow_state(
         "dirty_samples_out_of_scope": dirty_out_scope_paths[:5],
         "dirty_noncomplete_samples_in_scope": dirty_noncomplete_in_scope_paths[:5],
         "dirty_orphan_samples_in_scope": dirty_orphan_in_scope_paths[:5],
+        "dirty_orphan_alias_samples_in_scope": dirty_orphan_alias_in_scope_paths[:5],
         "mount_alias_hint": _mount_alias_hint(conn, roots, dirty_out_scope_paths),
         "orphan_gc_tracked_in_scope": orphan_gc_tracked_in_scope,
         "orphan_gc_aged_in_scope": orphan_gc_aged_in_scope,
@@ -567,6 +595,72 @@ def _load_completed_torrent_hashes() -> tuple[set[str], bool, str | None]:
         if t.hash and float(t.progress or 0.0) >= QBIT_COMPLETE_PROGRESS
     }
     return completed, True, None
+
+
+def _live_active_file_count(
+    conn,
+    cache: dict[tuple[int, str], int],
+    device_id: int,
+    root_path: str,
+) -> int:
+    """Return live active file count for a payload root with memoization."""
+    key = (device_id, root_path)
+    if key in cache:
+        return cache[key]
+
+    table_name = f"files_{device_id}"
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    if not table_exists:
+        cache[key] = 0
+        return 0
+
+    rel_root = root_path
+    if Path(root_path).is_absolute():
+        dev_row = conn.execute(
+            """
+            SELECT mount_point, preferred_mount_point
+            FROM devices
+            WHERE device_id = ?
+            """,
+            (device_id,),
+        ).fetchone()
+        if not dev_row:
+            cache[key] = 0
+            return 0
+        mount_point = dev_row[0]
+        preferred_mount = dev_row[1] or dev_row[0]
+
+        for base in (preferred_mount, mount_point):
+            if not base:
+                continue
+            if root_path == base or root_path.startswith(base.rstrip("/") + "/"):
+                rel_root = root_path[len(base.rstrip("/")) + 1:] if root_path != base else "."
+                break
+        else:
+            cache[key] = 0
+            return 0
+
+    if rel_root == ".":
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {table_name} WHERE status='active'"
+        ).fetchone()
+        count = int(row[0] or 0)
+    else:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM {table_name}
+            WHERE status='active' AND (path = ? OR path LIKE ?)
+            """,
+            (rel_root, f"{rel_root}/%"),
+        ).fetchone()
+        count = int(row[0] or 0)
+
+    cache[key] = count
+    return count
 
 
 def _mount_alias_hint(conn, roots: list[str], dirty_out_scope_paths: list[str]) -> str | None:

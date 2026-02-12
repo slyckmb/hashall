@@ -125,6 +125,53 @@ def test_collect_workflow_state_marks_orphan_dirty_in_scope(tmp_path):
     assert state["orphan_gc_aged_in_scope"] == 0
 
 
+def test_collect_workflow_state_splits_alias_orphan_rows_with_live_files(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    conn.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("zfs-49", 49, "/data/media", "/stash/media"),
+    )
+    conn.execute(
+        """
+        CREATE TABLE files_49 (
+            path TEXT PRIMARY KEY,
+            size INTEGER,
+            sha256 TEXT,
+            status TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO files_49 (path, size, sha256, status) VALUES (?, ?, ?, ?)",
+        ("torrents/seeding/cross-seed/alias-item/file.mkv", 123, "abc", "active"),
+    )
+
+    _insert_payload(
+        conn,
+        "/data/media/torrents/seeding/cross-seed/alias-item",
+        device_id=49,
+        file_count=0,
+        total_bytes=0,
+        status="incomplete",
+    )
+    conn.commit()
+
+    state = workflow.collect_workflow_state(conn, ["/data/media", "/stash/media"])
+    conn.close()
+
+    assert state["dirty_orphan_in_scope"] == 0
+    assert state["dirty_orphan_alias_in_scope"] == 1
+    assert state["dirty_orphan_alias_samples_in_scope"] == [
+        "/data/media/torrents/seeding/cross-seed/alias-item"
+    ]
+
+
 def test_collect_workflow_state_ignores_noncomplete_refs_when_filter_active(tmp_path):
     workflow = _load_workflow_module()
     db_path = tmp_path / "catalog.db"
@@ -196,6 +243,18 @@ def test_collect_workflow_state_reports_orphan_gc_metrics(tmp_path):
     conn = connect_db(db_path)
 
     payload_id = _insert_payload(conn, "/stash/media/torrents/seeding/orphan", file_count=0, total_bytes=0)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payload_orphan_gc (
+            payload_id INTEGER PRIMARY KEY,
+            first_seen_at REAL NOT NULL,
+            last_seen_at REAL NOT NULL,
+            seen_count INTEGER NOT NULL DEFAULT 1,
+            last_root_path TEXT,
+            last_device_id INTEGER
+        )
+        """
+    )
     old_seen = 1_700_000_000.0
     conn.execute(
         """
