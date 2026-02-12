@@ -222,7 +222,17 @@ class QBittorrentClient:
                 f"{self.base_url}/api/v2/torrents/pause",
                 data={"hashes": torrent_hash}
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.HTTPError:
+                if response.status_code != 404:
+                    raise
+                # Some qB builds expose stop/start instead of pause/resume.
+                fallback = self.session.post(
+                    f"{self.base_url}/api/v2/torrents/stop",
+                    data={"hashes": torrent_hash}
+                )
+                fallback.raise_for_status()
             return True
         except requests.RequestException as e:
             print(f"⚠️ Failed to pause torrent {torrent_hash}: {e}")
@@ -249,7 +259,17 @@ class QBittorrentClient:
                 f"{self.base_url}/api/v2/torrents/resume",
                 data={"hashes": torrent_hash}
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.HTTPError:
+                if response.status_code != 404:
+                    raise
+                # Some qB builds expose stop/start instead of pause/resume.
+                fallback = self.session.post(
+                    f"{self.base_url}/api/v2/torrents/start",
+                    data={"hashes": torrent_hash}
+                )
+                fallback.raise_for_status()
             return True
         except requests.RequestException as e:
             print(f"⚠️ Failed to resume torrent {torrent_hash}: {e}")

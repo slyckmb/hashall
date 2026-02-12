@@ -73,6 +73,9 @@ class DemotionExecutor:
         if not path.exists():
             return False
 
+        if path.is_file():
+            return expected_count == 1
+
         actual_count = sum(1 for _ in path.rglob('*') if _.is_file())
         return actual_count == expected_count
 
@@ -89,6 +92,9 @@ class DemotionExecutor:
         """
         if not path.exists():
             return False
+
+        if path.is_file():
+            return path.stat().st_size == expected_bytes
 
         actual_bytes = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
         return actual_bytes == expected_bytes

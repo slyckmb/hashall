@@ -9,6 +9,7 @@ Covers:
 """
 
 import pytest
+import requests
 import sqlite3
 import json
 import tempfile
@@ -125,6 +126,48 @@ class TestQBittorrentRelocation:
         mock_session.post.return_value = mock_resume_response
         assert client.resume_torrent("abc123") is True
         assert mock_session.post.call_count == 1
+
+    def test_pause_falls_back_to_stop_on_404(self):
+        """qB variants without pause endpoint should use stop endpoint."""
+        mock_session = Mock()
+
+        not_found = Mock()
+        not_found.status_code = 404
+        not_found.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
+
+        ok = Mock()
+        ok.raise_for_status = Mock()
+
+        mock_session.post.side_effect = [not_found, ok]
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.pause_torrent("abc123") is True
+        assert mock_session.post.call_args_list[0].args[0].endswith("/api/v2/torrents/pause")
+        assert mock_session.post.call_args_list[1].args[0].endswith("/api/v2/torrents/stop")
+
+    def test_resume_falls_back_to_start_on_404(self):
+        """qB variants without resume endpoint should use start endpoint."""
+        mock_session = Mock()
+
+        not_found = Mock()
+        not_found.status_code = 404
+        not_found.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
+
+        ok = Mock()
+        ok.raise_for_status = Mock()
+
+        mock_session.post.side_effect = [not_found, ok]
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.resume_torrent("abc123") is True
+        assert mock_session.post.call_args_list[0].args[0].endswith("/api/v2/torrents/resume")
+        assert mock_session.post.call_args_list[1].args[0].endswith("/api/v2/torrents/start")
 
     def test_relocation_failure_handling(self, tmp_path):
         """Test that executor handles relocation failures gracefully."""
@@ -333,6 +376,23 @@ class TestRelocationVerification:
         # Try to relocate - should fail verification
         with pytest.raises(RuntimeError, match="location verification failed"):
             executor._relocate_torrent('verify_test', '/pool/torrents/content')
+
+
+class TestSingleFileVerification:
+    """Ensure MOVE preflight works for single-file payload roots."""
+
+    def test_verify_helpers_handle_single_file_paths(self, tmp_path):
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        file_path = tmp_path / "single-file.epub"
+        payload_bytes = b"hello-world"
+        file_path.write_bytes(payload_bytes)
+
+        assert executor._verify_file_count(file_path, 1) is True
+        assert executor._verify_total_bytes(file_path, len(payload_bytes)) is True
+        assert executor._verify_file_count(file_path, 2) is False
+        assert executor._verify_total_bytes(file_path, len(payload_bytes) + 1) is False
 
 
 if __name__ == "__main__":
