@@ -50,6 +50,11 @@ PAYLOAD_LOW_PRIORITY ?= 1
 PAYLOAD_MAX_GROUPS ?= 0
 PAYLOAD_AUTO_BACKUP ?= 0
 PAYLOAD_AUTO_BACKUP_DIR ?=
+PAYLOAD_UNMANAGED_PATH_PREFIXES ?=
+PAYLOAD_UNMANAGED_SAMPLES ?= 5
+PAYLOAD_AUTO_QBM_FAIL_CLOSED ?= 0
+PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES ?= 120
+PAYLOAD_AUTO_QBM_ACTIVITY_LOG ?=
 
 # Root scan defaults (override via make VAR=value)
 PARALLEL ?= 1
@@ -120,7 +125,7 @@ help:  ## Show this help message
 	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-workflow|payload-auto|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-workflow|payload-auto|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -148,6 +153,7 @@ help:  ## Show this help message
 	@echo "  make payload-sync                         # Sync torrents -> payloads"
 	@echo "  make payload-workflow                     # Cross-device payload status"
 	@echo "  make payload-workflow PW_PATHS='/pool/data /stash/media'  # Explicit roots"
+	@echo "  make payload-unmanaged PAYLOAD_UNMANAGED_PATH_PREFIXES='/pool/data /stash/media'  # Orphan inventory"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media' DRY_RUN=1  # Preview actions"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media'            # Run to completion"
 	@echo "  make rehome-checklist                     # Rehome checklist"
@@ -519,6 +525,13 @@ payload-upgrade-collisions:  ## Upgrade candidate duplicate payloads under PATH 
 # PW_PATHS: explicit roots for payload-workflow (auto-discovers from DB if empty)
 PW_PATHS ?=
 
+.PHONY: payload-unmanaged
+payload-unmanaged:  ## Inventory payload rows with no qB refs (true orphan vs alias artifact)
+	@set --; \
+	for p in $(PAYLOAD_UNMANAGED_PATH_PREFIXES); do set -- "$$@" --path-prefix "$$p"; done; \
+	if [ -n "$(PAYLOAD_UNMANAGED_SAMPLES)" ]; then set -- "$$@" --samples $(PAYLOAD_UNMANAGED_SAMPLES); fi; \
+	$(HASHALL_CLI) payload unmanaged --db "$(DB_FILE)" "$$@"
+
 .PHONY: payload-workflow
 payload-workflow:  ## Show payload workflow status across all roots
 	@$(PYTHON) scripts/payload_workflow_status.py --db "$(DB_FILE)" $(foreach p,$(PW_PATHS),"$(p)")
@@ -530,7 +543,11 @@ payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' P
 	if [ "$(DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
 	if [ "$(PAYLOAD_AUTO_BACKUP)" = "1" ]; then set -- "$$@" --backup; fi; \
 	if [ -n "$(PAYLOAD_AUTO_BACKUP_DIR)" ]; then set -- "$$@" --backup-dir "$(PAYLOAD_AUTO_BACKUP_DIR)"; fi; \
-	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/payload_auto_workflow.py "$$@"
+	qbm_env=""; \
+	if [ "$(PAYLOAD_AUTO_QBM_FAIL_CLOSED)" = "1" ]; then qbm_env="$$qbm_env HASHALL_QBM_FRESH_FAIL_CLOSED=1"; fi; \
+	if [ -n "$(PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES)" ]; then qbm_env="$$qbm_env HASHALL_QBM_FRESH_MAX_MINUTES=$(PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES)"; fi; \
+	if [ -n "$(PAYLOAD_AUTO_QBM_ACTIVITY_LOG)" ]; then qbm_env="$$qbm_env HASHALL_QBM_ACTIVITY_LOG=$(PAYLOAD_AUTO_QBM_ACTIVITY_LOG) HASHALL_QBM_ACTIVITY_LOG_ONLY=1"; fi; \
+	eval $$qbm_env PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/payload_auto_workflow.py "$$@"
 
 # ============================================================================
 # Rehome (Payload Moves)

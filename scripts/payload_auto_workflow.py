@@ -104,6 +104,25 @@ def main() -> int:
         )
     else:
         print(f"  qbit_manage freshness: unknown ({qbm_freshness.get('reason')})")
+
+    fail_closed = os.environ.get("HASHALL_QBM_FRESH_FAIL_CLOSED") == "1"
+    if fail_closed:
+        print("  qbit_manage freshness policy: fail-closed")
+
+    if fail_closed and qbm_freshness["status"] != "fresh":
+        reason = "qbit_manage_freshness_not_fresh"
+        print(f"❌ Stopping: {reason}")
+        _log_event(
+            log_path,
+            "run_failed",
+            run_id=run_id,
+            iteration=0,
+            reason=reason,
+            qbm_freshness=qbm_freshness,
+        )
+        conn.close()
+        return 1
+
     print()
 
     previous_signature = None
@@ -398,6 +417,13 @@ def collect_workflow_state(
     def _in_scope(root_path: str) -> bool:
         return any(root_path == root or root_path.startswith(root.rstrip("/") + "/") for root in roots)
 
+    zero_count_in_scope = [
+        (int(device_id), root_path)
+        for _, device_id, root_path, _, file_count, _ in payload_rows
+        if device_id is not None and int(file_count) == 0 and _in_scope(root_path)
+    ]
+    live_counts = _batch_live_active_file_counts(conn, zero_count_in_scope)
+
     dirty_actionable_in_scope_paths: list[str] = []
     dirty_noncomplete_in_scope_paths: list[str] = []
     dirty_orphan_in_scope_paths: list[str] = []
@@ -405,7 +431,6 @@ def collect_workflow_state(
     dirty_out_scope_paths: list[str] = []
     incomplete_in_scope = 0
     scoped_rows: list[dict[str, object]] = []
-    live_active_cache: dict[tuple[int, str], int] = {}
 
     for payload_id, device_id, root_path, status, file_count, total_bytes in payload_rows:
         payload_id = int(payload_id)
@@ -416,12 +441,7 @@ def collect_workflow_state(
         live_file_count = file_count
 
         if in_scope and file_count == 0 and device_id is not None:
-            live_file_count = _live_active_file_count(
-                conn,
-                live_active_cache,
-                int(device_id),
-                root_path,
-            )
+            live_file_count = live_counts.get((int(device_id), root_path), 0)
 
         scoped_rows.append(
             {
@@ -522,6 +542,119 @@ def collect_workflow_state(
     }
 
 
+def _batch_live_active_file_counts(
+    conn,
+    keys: list[tuple[int, str]],
+) -> dict[tuple[int, str], int]:
+    """Batch active-file counts for (device_id, root_path) pairs."""
+    if not keys:
+        return {}
+
+    device_mounts: dict[int, tuple[str | None, str | None]] = {}
+    has_devices = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    if has_devices:
+        for row in conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall():
+            did = int(row[0])
+            mount_point = row[1]
+            preferred_mount = row[2] or row[1]
+            device_mounts[did] = (mount_point, preferred_mount)
+
+    out: dict[tuple[int, str], int] = {(device_id, root_path): 0 for device_id, root_path in keys}
+
+    by_device: dict[int, list[str]] = {}
+    for device_id, root_path in keys:
+        by_device.setdefault(device_id, []).append(root_path)
+
+    for device_id, root_paths in by_device.items():
+        table_name = f"files_{int(device_id)}"
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone():
+            continue
+
+        status_clause = "status='active' AND " if _table_has_column(conn, table_name, "status") else ""
+
+        rel_to_roots: dict[str, list[str]] = {}
+        root_all: list[str] = []
+        mount_point, preferred_mount = device_mounts.get(device_id, (None, None))
+        for root_path in root_paths:
+            rel_root = _to_rel_root_for_device(root_path, mount_point, preferred_mount)
+            if rel_root is None:
+                continue
+            if rel_root == ".":
+                root_all.append(root_path)
+                continue
+            rel_to_roots.setdefault(rel_root, []).append(root_path)
+
+        if root_all:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {table_name} WHERE {status_clause}1=1"
+            ).fetchone()
+            count_all = int(row[0] or 0)
+            for root_path in root_all:
+                out[(device_id, root_path)] = count_all
+
+        if not rel_to_roots:
+            continue
+
+        temp_table = f"payload_auto_roots_{device_id}"
+        conn.execute(f"DROP TABLE IF EXISTS temp.{temp_table}")
+        conn.execute(f"CREATE TEMP TABLE {temp_table} (rel_root TEXT PRIMARY KEY)")
+        conn.executemany(
+            f"INSERT OR IGNORE INTO {temp_table} (rel_root) VALUES (?)",
+            [(rel_root,) for rel_root in rel_to_roots.keys()],
+        )
+
+        rows = conn.execute(
+            f"""
+            SELECT r.rel_root, COUNT(f.path)
+            FROM {temp_table} r
+            LEFT JOIN {table_name} f
+              ON {status_clause}(f.path = r.rel_root OR f.path LIKE r.rel_root || '/%')
+            GROUP BY r.rel_root
+            """
+        ).fetchall()
+
+        for rel_root, count in rows:
+            for root_path in rel_to_roots.get(rel_root, []):
+                out[(device_id, root_path)] = int(count or 0)
+
+        conn.execute(f"DROP TABLE IF EXISTS temp.{temp_table}")
+
+    return out
+
+
+def _to_rel_root_for_device(
+    root_path: str,
+    mount_point: str | None,
+    preferred_mount: str | None,
+) -> str | None:
+    """Map absolute root path to per-device relative table path."""
+    if not Path(root_path).is_absolute():
+        return root_path
+
+    for base in (preferred_mount, mount_point):
+        if not base:
+            continue
+        if root_path == base:
+            return "."
+        prefix = base.rstrip("/") + "/"
+        if root_path.startswith(prefix):
+            return root_path[len(prefix):]
+
+    return None
+
+
+def _table_has_column(conn, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(row[1] == column_name for row in rows)
+
+
 def _remap_scan_path_to_preferred_mount(conn, scan_path: str | None) -> str | None:
     """Use preferred mount aliases for scan path when device rows provide one."""
     if not scan_path:
@@ -612,72 +745,6 @@ def _load_completed_torrent_hashes() -> tuple[set[str], bool, str | None]:
         if t.hash and float(t.progress or 0.0) >= QBIT_COMPLETE_PROGRESS
     }
     return completed, True, None
-
-
-def _live_active_file_count(
-    conn,
-    cache: dict[tuple[int, str], int],
-    device_id: int,
-    root_path: str,
-) -> int:
-    """Return live active file count for a payload root with memoization."""
-    key = (device_id, root_path)
-    if key in cache:
-        return cache[key]
-
-    table_name = f"files_{device_id}"
-    table_exists = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table_name,),
-    ).fetchone()
-    if not table_exists:
-        cache[key] = 0
-        return 0
-
-    rel_root = root_path
-    if Path(root_path).is_absolute():
-        dev_row = conn.execute(
-            """
-            SELECT mount_point, preferred_mount_point
-            FROM devices
-            WHERE device_id = ?
-            """,
-            (device_id,),
-        ).fetchone()
-        if not dev_row:
-            cache[key] = 0
-            return 0
-        mount_point = dev_row[0]
-        preferred_mount = dev_row[1] or dev_row[0]
-
-        for base in (preferred_mount, mount_point):
-            if not base:
-                continue
-            if root_path == base or root_path.startswith(base.rstrip("/") + "/"):
-                rel_root = root_path[len(base.rstrip("/")) + 1:] if root_path != base else "."
-                break
-        else:
-            cache[key] = 0
-            return 0
-
-    if rel_root == ".":
-        row = conn.execute(
-            f"SELECT COUNT(*) FROM {table_name} WHERE status='active'"
-        ).fetchone()
-        count = int(row[0] or 0)
-    else:
-        row = conn.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM {table_name}
-            WHERE status='active' AND (path = ? OR path LIKE ?)
-            """,
-            (rel_root, f"{rel_root}/%"),
-        ).fetchone()
-        count = int(row[0] or 0)
-
-    cache[key] = count
-    return count
 
 
 def _qbit_manage_freshness() -> dict[str, object]:

@@ -388,3 +388,91 @@ def test_qbit_manage_freshness_unknown_when_log_missing(tmp_path, monkeypatch):
     assert result["status"] == "unknown"
     assert result["reason"] == "activity_log_not_found"
     assert result["path"] == str(missing_log)
+
+
+
+def test_batch_live_active_file_counts_counts_multiple_roots(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    conn.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("zfs-49", 49, "/data/media", "/stash/media"),
+    )
+    conn.execute(
+        """
+        CREATE TABLE files_49 (
+            path TEXT PRIMARY KEY,
+            size INTEGER,
+            sha256 TEXT,
+            status TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO files_49 (path, size, sha256, status) VALUES (?, ?, ?, ?)",
+        [
+            ("torrents/seeding/A/file1.mkv", 1, "a", "active"),
+            ("torrents/seeding/A/file2.mkv", 1, "b", "active"),
+            ("torrents/seeding/B/file1.mkv", 1, "c", "active"),
+        ],
+    )
+    conn.commit()
+
+    counts = workflow._batch_live_active_file_counts(
+        conn,
+        [
+            (49, "/data/media/torrents/seeding/A"),
+            (49, "/data/media/torrents/seeding/B"),
+            (49, "/data/media/torrents/seeding/C"),
+        ],
+    )
+    conn.close()
+
+    assert counts[(49, "/data/media/torrents/seeding/A")] == 2
+    assert counts[(49, "/data/media/torrents/seeding/B")] == 1
+    assert counts[(49, "/data/media/torrents/seeding/C")] == 0
+
+
+def test_main_fail_closed_stops_on_stale_qbit_manage(monkeypatch, tmp_path):
+    workflow = _load_workflow_module()
+
+    class DummyConn:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    conn = DummyConn()
+    log_path = tmp_path / "payload-auto.jsonl"
+
+    monkeypatch.setattr(workflow, "connect_db", lambda db_path: conn)
+    monkeypatch.setattr(workflow, "_discover_roots", lambda _conn: ["/stash/media"])
+    monkeypatch.setattr(workflow, "_load_completed_torrent_hashes", lambda: (set(), True, None))
+    monkeypatch.setattr(
+        workflow,
+        "_qbit_manage_freshness",
+        lambda: {
+            "status": "stale",
+            "path": "/tmp/activity.log",
+            "age_seconds": 600,
+            "max_age_seconds": 300,
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(workflow, "_workflow_log_path", lambda run_id: log_path)
+    monkeypatch.setenv("HASHALL_QBM_FRESH_FAIL_CLOSED", "1")
+    monkeypatch.setattr(workflow.sys, "argv", ["payload_auto_workflow.py", "--db", str(tmp_path / "catalog.db")])
+
+    rc = workflow.main()
+
+    assert rc == 1
+    assert conn.closed is True
+    lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+    assert any('"event": "run_failed"' in line for line in lines)
+    assert any('"reason": "qbit_manage_freshness_not_fresh"' in line for line in lines)
