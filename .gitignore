@@ -53,3 +53,4 @@ tools/pre-commit-gptrail.sh
 
 out/
 **/._*
+.state/
