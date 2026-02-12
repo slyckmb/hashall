@@ -126,7 +126,7 @@ help:  ## Show this help message
 	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-workflow|payload-auto|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-workflow|payload-auto|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -155,6 +155,7 @@ help:  ## Show this help message
 	@echo "  make payload-workflow                     # Cross-device payload status"
 	@echo "  make payload-workflow PW_PATHS='/pool/data /stash/media'  # Explicit roots"
 	@echo "  make payload-unmanaged PAYLOAD_UNMANAGED_PATH_PREFIXES='/pool/data /stash/media'  # Orphan inventory"
+	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media'  # Non-destructive orphan staging audit"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media' DRY_RUN=1  # Preview actions"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media'            # Run to completion"
 	@echo "  make rehome-checklist                     # Rehome checklist"
@@ -532,6 +533,13 @@ payload-unmanaged:  ## Inventory payload rows with no qB refs (true orphan vs al
 	for p in $(PAYLOAD_UNMANAGED_PATH_PREFIXES); do set -- "$$@" --path-prefix "$$p"; done; \
 	if [ -n "$(PAYLOAD_UNMANAGED_SAMPLES)" ]; then set -- "$$@" --samples $(PAYLOAD_UNMANAGED_SAMPLES); fi; \
 	$(HASHALL_CLI) payload unmanaged --db "$(DB_FILE)" "$$@"
+
+.PHONY: payload-orphan-audit
+payload-orphan-audit:  ## Audit true-orphan staging (non-destructive)
+	@set --; \
+	for p in $(PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES); do set -- "$$@" --path-prefix "$$p"; done; \
+	if [ -n "$(PAYLOAD_ORPHAN_AUDIT_SAMPLES)" ]; then set -- "$$@" --samples $(PAYLOAD_ORPHAN_AUDIT_SAMPLES); fi; \
+	$(HASHALL_CLI) payload orphan-audit --db "$(DB_FILE)" "$$@"
 
 .PHONY: payload-workflow
 payload-workflow:  ## Show payload workflow status across all roots

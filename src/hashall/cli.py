@@ -739,6 +739,197 @@ def payload_unmanaged_cmd(db, path_prefixes, samples):
     conn.close()
 
 
+@payload.command("orphan-audit")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--path-prefix",
+    "path_prefixes",
+    multiple=True,
+    help="Only include payload roots under this path (repeatable).",
+)
+@click.option(
+    "--samples",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Number of sample roots to print per bucket.",
+)
+def payload_orphan_audit_cmd(db, path_prefixes, samples):
+    """Audit orphan payload state without deleting anything."""
+    from hashall.model import connect_db
+    from hashall.pathing import canonicalize_path
+    from hashall.payload import ORPHAN_GC_MIN_SEEN_RUNS, ORPHAN_GC_MIN_AGE_SECONDS
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+
+    def _is_under_fast(path_str, prefix_str):
+        return path_str == prefix_str or path_str.startswith(prefix_str.rstrip("/") + "/")
+
+    def _remap_mount(path_str, source_mount, target_mount):
+        if not source_mount or not target_mount:
+            return None
+        if path_str == source_mount:
+            return target_mount
+        source_prefix = source_mount.rstrip("/") + "/"
+        if path_str.startswith(source_prefix):
+            suffix = path_str[len(source_prefix):]
+            return target_mount.rstrip("/") + "/" + suffix
+        return None
+
+    prefix_strings = []
+    prefix_paths_canon = []
+    for p in path_prefixes:
+        try:
+            canon = canonicalize_path(Path(p))
+            prefix_paths_canon.append(canon)
+            prefix_strings.append(str(canon))
+        except Exception:
+            raw = Path(p)
+            prefix_paths_canon.append(raw)
+            prefix_strings.append(str(raw))
+
+    device_mounts = {}
+    has_devices = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    if has_devices:
+        for dev_row in conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall():
+            did = int(dev_row[0])
+            mount_point = dev_row[1]
+            preferred_mount = dev_row[2] or dev_row[1]
+            device_mounts[did] = (mount_point, preferred_mount)
+
+    rows = conn.execute(
+        """
+        SELECT p.payload_id, p.device_id, p.root_path, p.status, p.file_count, p.total_bytes
+        FROM payloads p
+        LEFT JOIN (
+            SELECT payload_id, COUNT(*) AS ref_count
+            FROM torrent_instances
+            GROUP BY payload_id
+        ) ti ON ti.payload_id = p.payload_id
+        WHERE COALESCE(ti.ref_count, 0) = 0
+        ORDER BY p.root_path
+        """
+    ).fetchall()
+
+    skipped_prefix = 0
+    filtered_rows = []
+    for row in rows:
+        root_path = row["root_path"]
+
+        if prefix_strings:
+            in_scope = any(_is_under_fast(root_path, pref) for pref in prefix_strings)
+
+            if not in_scope and row["device_id"] is not None:
+                mount_point, preferred_mount = device_mounts.get(int(row["device_id"]), (None, None))
+                remapped = _remap_mount(root_path, mount_point, preferred_mount)
+                if remapped is None:
+                    remapped = _remap_mount(root_path, preferred_mount, mount_point)
+                if remapped:
+                    in_scope = any(_is_under_fast(remapped, pref) for pref in prefix_strings)
+
+            if not in_scope:
+                try:
+                    root_canon = canonicalize_path(Path(root_path))
+                    in_scope = any(
+                        _is_under_fast(str(root_canon), str(pref_path))
+                        for pref_path in prefix_paths_canon
+                    )
+                except Exception:
+                    in_scope = False
+
+            if not in_scope:
+                skipped_prefix += 1
+                continue
+
+        filtered_rows.append(row)
+
+    active_count_keys = [
+        (int(row["device_id"]), row["root_path"])
+        for row in filtered_rows
+        if row["device_id"] is not None and int(row["file_count"] or 0) == 0
+    ]
+    live_counts = _batch_count_active_payload_roots(conn, active_count_keys)
+
+    true_orphans = []
+    alias_artifacts = []
+    for row in filtered_rows:
+        root_path = row["root_path"]
+        payload_id = int(row["payload_id"])
+        device_id = row["device_id"]
+        live_count = int(row["file_count"] or 0)
+        if live_count == 0 and device_id is not None:
+            live_count = live_counts.get((int(device_id), root_path), 0)
+
+        if live_count > 0:
+            alias_artifacts.append((payload_id, root_path))
+        else:
+            true_orphans.append((payload_id, root_path))
+
+    gc_rows = {}
+    gc_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='payload_orphan_gc'"
+    ).fetchone()
+    if gc_table_exists and true_orphans:
+        orphan_ids = [pid for pid, _ in true_orphans]
+        placeholders = ",".join("?" for _ in orphan_ids)
+        for row in conn.execute(
+            f"""
+            SELECT payload_id, first_seen_at, last_seen_at, seen_count
+            FROM payload_orphan_gc
+            WHERE payload_id IN ({placeholders})
+            """,
+            orphan_ids,
+        ).fetchall():
+            gc_rows[int(row[0])] = {
+                "first_seen_at": float(row[1]),
+                "last_seen_at": float(row[2]),
+                "seen_count": int(row[3]),
+            }
+
+    now = time.time()
+    tracked_count = 0
+    aged_count = 0
+    for payload_id, _ in true_orphans:
+        entry = gc_rows.get(payload_id)
+        if not entry:
+            continue
+        tracked_count += 1
+        age_seconds = max(0.0, now - float(entry["first_seen_at"]))
+        if int(entry["seen_count"]) >= ORPHAN_GC_MIN_SEEN_RUNS and age_seconds >= ORPHAN_GC_MIN_AGE_SECONDS:
+            aged_count += 1
+
+    true_samples = [root for _, root in true_orphans[: max(1, samples)]]
+    alias_samples = [root for _, root in alias_artifacts[: max(1, samples)]]
+
+    print("🔎 Payload orphan audit (non-destructive)")
+    print(f"   scoped unmanaged payloads: {len(filtered_rows)}")
+    if prefix_strings:
+        print(f"   skipped (path-prefix): {skipped_prefix}")
+    print(f"   true orphans (eligible class): {len(true_orphans)}")
+    print(f"   alias artifacts (not eligible): {len(alias_artifacts)}")
+
+    if gc_table_exists:
+        print(f"   gc tracked true orphans: {tracked_count}")
+        print(f"   gc aged true orphans: {aged_count}")
+        print(
+            "   gc thresholds: "
+            f"seen>={ORPHAN_GC_MIN_SEEN_RUNS}, age>={int(ORPHAN_GC_MIN_AGE_SECONDS/3600)}h"
+        )
+    else:
+        print("   gc staging table: missing (will initialize on payload sync)")
+
+    if true_samples:
+        print(f"   true orphan samples: {', '.join(true_samples)}")
+    if alias_samples:
+        print(f"   alias artifact samples: {', '.join(alias_samples)}")
+
+    conn.close()
+
+
 @payload.command("show")
 @click.argument("torrent_hash")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
