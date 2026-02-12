@@ -8,6 +8,10 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=%h/dev/work/hashall
 Environment=PYTHONUNBUFFERED=1
+Environment=PAYLOAD_ORPHAN_AUDIT_NOTIFY_EMAIL=1
+Environment=PAYLOAD_ORPHAN_AUDIT_NOTIFY_TO=michael
+Environment=PAYLOAD_ORPHAN_AUDIT_NOTIFY_REVIEW_HOURS=24
+Environment=PAYLOAD_ORPHAN_AUDIT_TIMER_UNIT=hashall-payload-orphan-snapshot.timer
 EnvironmentFile=-%h/.config/hashall/payload-orphan-snapshot.env
 ExecStart=/usr/bin/make payload-orphan-snapshot
 StandardOutput=append:%h/.logs/hashall/orphan-audit-timer.log

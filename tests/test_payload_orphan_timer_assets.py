@@ -17,6 +17,8 @@ def test_systemd_user_units_exist_and_reference_repo_targets():
     assert "ExecStart=/usr/bin/make payload-orphan-snapshot" in service_text
     assert "WorkingDirectory=%h/dev/work/hashall" in service_text
     assert "EnvironmentFile=-%h/.config/hashall/payload-orphan-snapshot.env" in service_text
+    assert "Environment=PAYLOAD_ORPHAN_AUDIT_NOTIFY_EMAIL=1" in service_text
+    assert "Environment=PAYLOAD_ORPHAN_AUDIT_NOTIFY_TO=michael" in service_text
     assert "OnCalendar=*-*-* 00,06,12,18:15:00" in timer_text
     assert "Unit=hashall-payload-orphan-snapshot.service" in timer_text
 

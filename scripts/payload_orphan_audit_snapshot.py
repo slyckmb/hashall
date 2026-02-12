@@ -7,9 +7,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -37,6 +38,99 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _notification_subject(run_id: str, success: bool) -> str:
+    status = "ok" if success else "failed"
+    return f"[hashall] payload orphan snapshot {status} ({run_id})"
+
+
+def _notification_body(
+    *,
+    run_id: str,
+    captured_at: str,
+    db_path: str,
+    roots: list[str],
+    run_dir: Path,
+    orphan_json: dict | None,
+    orphan_rc: int,
+    payload_rc: int | None,
+    review_hours: int,
+    timer_unit: str,
+) -> str:
+    review_by = (datetime.now().astimezone() + timedelta(hours=review_hours)).strftime("%Y-%m-%dT%H:%M:%S%z")
+    lines = [
+        "hashall payload-orphan snapshot run summary.",
+        "",
+        f"run_id: {run_id}",
+        f"captured_at: {captured_at}",
+        f"db: {db_path}",
+        f"roots: {', '.join(roots)}",
+        f"snapshot_dir: {run_dir}",
+        f"orphan_audit_rc: {orphan_rc}",
+        f"payload_auto_dry_run_rc: {payload_rc if payload_rc is not None else 'skipped'}",
+    ]
+
+    if orphan_json:
+        lines.extend(
+            [
+                "",
+                "orphan_audit_summary:",
+                f"- true_orphans={orphan_json.get('true_orphans')}",
+                f"- alias_artifacts={orphan_json.get('alias_artifacts')}",
+                f"- gc_tracked_true_orphans={orphan_json.get('gc_tracked_true_orphans')}",
+                f"- gc_aged_true_orphans={orphan_json.get('gc_aged_true_orphans')}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            f"review_by: {review_by} (within {review_hours}h)",
+            "review_how:",
+            f"- make payload-orphan-timer-status # includes {timer_unit}",
+            f"- ls -1dt {run_dir.parent}/* | head -n 3",
+            f"- cat {run_dir / 'summary.json'}",
+            "",
+            "disable_when:",
+            "- disable if you intentionally pause orphan trend monitoring.",
+            "- disable after replacing this timer with another approved monitor.",
+            "disable_how:",
+            "- make payload-orphan-timer-disable",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _send_system_email(*, recipient: str, subject: str, body: str) -> tuple[bool, str]:
+    if not recipient.strip():
+        return False, "recipient is empty"
+
+    sendmail = shutil.which("sendmail")
+    if sendmail:
+        message = f"To: {recipient}\nSubject: {subject}\n\n{body}"
+        result = subprocess.run([sendmail, "-t"], input=message, text=True, capture_output=True)
+        if result.returncode == 0:
+            return True, f"sendmail:{sendmail}"
+        err = (result.stderr or result.stdout or "").strip() or f"exit={result.returncode}"
+        return False, f"sendmail failed: {err}"
+
+    mail_bin = shutil.which("mail")
+    if mail_bin:
+        result = subprocess.run([mail_bin, "-s", subject, recipient], input=body, text=True, capture_output=True)
+        if result.returncode == 0:
+            return True, f"mail:{mail_bin}"
+        err = (result.stderr or result.stdout or "").strip() or f"exit={result.returncode}"
+        return False, f"mail failed: {err}"
+
+    return False, "no system mailer found (sendmail/mail)"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture orphan-audit + payload-auto dry-run snapshot")
     parser.add_argument("--db", default=str(Path.home() / ".hashall" / "catalog.db"))
@@ -48,7 +142,7 @@ def main() -> int:
 
     roots = [r.strip() for r in args.roots.split(",") if r.strip()]
     if not roots:
-        print("❌ No roots provided")
+        print("No roots provided")
         return 2
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -128,7 +222,35 @@ def main() -> int:
     }
     _write_text(run_dir / "summary.json", json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
-    print(f"✅ Snapshot captured: {run_dir}")
+    if _env_flag("PAYLOAD_ORPHAN_AUDIT_NOTIFY_EMAIL", default=False):
+        recipient = os.environ.get("PAYLOAD_ORPHAN_AUDIT_NOTIFY_TO", "michael")
+        timer_unit = os.environ.get("PAYLOAD_ORPHAN_AUDIT_TIMER_UNIT", "hashall-payload-orphan-snapshot.timer")
+        try:
+            review_hours = max(1, int(os.environ.get("PAYLOAD_ORPHAN_AUDIT_NOTIFY_REVIEW_HOURS", "24")))
+        except ValueError:
+            review_hours = 24
+
+        success = orphan_result.returncode == 0 and (payload_result is None or payload_result.returncode == 0)
+        subject = _notification_subject(run_id, success=success)
+        body = _notification_body(
+            run_id=run_id,
+            captured_at=summary["captured_at"],
+            db_path=args.db,
+            roots=roots,
+            run_dir=run_dir,
+            orphan_json=orphan_json,
+            orphan_rc=orphan_result.returncode,
+            payload_rc=None if payload_result is None else payload_result.returncode,
+            review_hours=review_hours,
+            timer_unit=timer_unit,
+        )
+        email_ok, email_details = _send_system_email(recipient=recipient, subject=subject, body=body)
+        if email_ok:
+            print(f"Notification email sent to {recipient} ({email_details})")
+        else:
+            print(f"Notification email failed for {recipient}: {email_details}")
+
+    print(f"Snapshot captured: {run_dir}")
     if orphan_json:
         print(
             "   orphan_audit: "

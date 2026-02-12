@@ -92,6 +92,21 @@ Disable timer:
 make payload-orphan-timer-disable
 ```
 
+### Timer-run system email reminder
+
+Timer runs send a local system email to `michael` by default with:
+
+- run result and snapshot directory,
+- when to review (default `within 24h`),
+- how to review (`payload-orphan-timer-status`, latest `summary.json`),
+- how to disable automation (`make payload-orphan-timer-disable`).
+
+The service sets these defaults:
+
+- `PAYLOAD_ORPHAN_AUDIT_NOTIFY_EMAIL=1`
+- `PAYLOAD_ORPHAN_AUDIT_NOTIFY_TO=michael`
+- `PAYLOAD_ORPHAN_AUDIT_NOTIFY_REVIEW_HOURS=24`
+
 ### Timer overrides via env file
 
 Optional file: `~/.config/hashall/payload-orphan-snapshot.env`
@@ -102,12 +117,14 @@ Example:
 PAYLOAD_ORPHAN_AUDIT_ROOTS=/pool/data,/stash/media,/data/media
 PAYLOAD_ORPHAN_AUDIT_OUTPUT_DIR=/home/michael/.logs/hashall/orphan-audit
 PAYLOAD_ORPHAN_AUDIT_SKIP_AUTO=0
+PAYLOAD_ORPHAN_AUDIT_NOTIFY_EMAIL=1
+PAYLOAD_ORPHAN_AUDIT_NOTIFY_TO=michael
+PAYLOAD_ORPHAN_AUDIT_NOTIFY_REVIEW_HOURS=24
 ```
 
 ### Bootstrap-managed systems note
 
 If your host uses a bootstrap-managed config repo for system/user files, keep these unit files as source-of-truth in repo and deploy via that bootstrap workflow (not ad-hoc edits under `~/.config/systemd/user` or `/etc/systemd/system`).
-
 
 ## Optional cron (operator-owned)
 
