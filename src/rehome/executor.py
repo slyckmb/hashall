@@ -8,12 +8,14 @@ import sqlite3
 import shutil
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import json
 
 # Import hashall and qBittorrent modules
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from hashall.device import ensure_files_table
+from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.qbittorrent import get_qbittorrent_client
 from hashall.payload import get_files_for_path
 from rehome.view_builder import build_torrent_view
@@ -108,6 +110,66 @@ class DemotionExecutor:
             except ValueError:
                 continue
         return False
+
+    def _get_device_mount_info(
+        self,
+        conn: sqlite3.Connection,
+        device_id: Optional[int],
+    ) -> Tuple[Optional[Path], Optional[Path]]:
+        """Fetch mount_point and preferred_mount_point for a device."""
+        if device_id is None:
+            return None, None
+
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='devices'"
+        ).fetchone():
+            return None, None
+
+        try:
+            row = conn.execute(
+                "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = conn.execute(
+                "SELECT mount_point, mount_point FROM devices WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()
+
+        if not row or not row[0]:
+            return None, None
+
+        mount_point = Path(row[0])
+        preferred_mount = Path(row[1] or row[0])
+        return mount_point, preferred_mount
+
+    def _to_device_relpath(
+        self,
+        abs_path: Path,
+        mount_point: Optional[Path],
+        preferred_mount: Optional[Path],
+    ) -> Optional[str]:
+        """Map an absolute path to a device-relative path, including mount aliases."""
+        p = canonicalize_path(abs_path)
+        for base in (preferred_mount, mount_point):
+            if base is None:
+                continue
+            rel = to_relpath(p, base)
+            if rel is not None:
+                return str(rel)
+
+        # Handle alternate mount aliases (for example /data/media vs /stash/media).
+        for base in (preferred_mount, mount_point):
+            if base is None:
+                continue
+            remapped = remap_to_mount_alias(p, base)
+            if remapped is None:
+                continue
+            rel = to_relpath(remapped, base)
+            if rel is not None:
+                return str(rel)
+
+        return None
 
     def _get_torrent_view_path(self, conn: sqlite3.Connection, torrent_hash: str) -> Optional[Path]:
         """Get the on-disk view path for a torrent from the catalog."""
@@ -534,9 +596,125 @@ class DemotionExecutor:
                         (plan.get("target_device_id"), r.get("target_save_path"), r.get("torrent_hash"))
                     )
 
+                self._sync_files_catalog_for_move(conn, plan)
+
             conn.commit()
         finally:
             conn.close()
+
+    def _sync_files_catalog_for_move(self, conn: sqlite3.Connection, plan: Dict) -> None:
+        """
+        Reconcile per-device file rows after MOVE without requiring a follow-up scan.
+
+        This keeps catalog state aligned when a payload has already been moved on disk
+        before a rehome apply run is executed (idempotent recovery path).
+        """
+        source_device_id = plan.get("source_device_id")
+        target_device_id = plan.get("target_device_id")
+        if source_device_id is None or target_device_id is None:
+            return
+
+        source_table = ensure_files_table(conn.cursor(), source_device_id)
+        target_table = ensure_files_table(conn.cursor(), target_device_id)
+
+        source_mount, source_preferred = self._get_device_mount_info(conn, source_device_id)
+        target_mount, target_preferred = self._get_device_mount_info(conn, target_device_id)
+
+        source_path = Path(plan["source_path"])
+        target_path = Path(plan["target_path"])
+
+        source_rel_root = self._to_device_relpath(source_path, source_mount, source_preferred)
+        target_rel_root = self._to_device_relpath(target_path, target_mount, target_preferred)
+        if source_rel_root is None or target_rel_root is None:
+            self._log("catalog_sync move skipped reason=unmapped_paths", "warning")
+            return
+
+        pattern = f"{source_rel_root}/%"
+        source_rows = conn.execute(
+            f"""
+            SELECT path, size, mtime, quick_hash, sha1, sha256, hash_source, inode,
+                   first_seen_at, discovered_under
+            FROM {source_table}
+            WHERE status = 'active' AND (path = ? OR path LIKE ?)
+            ORDER BY path
+            """,
+            (source_rel_root, pattern),
+        ).fetchall()
+
+        conn.execute(
+            f"""
+            UPDATE {source_table}
+            SET status = 'deleted',
+                last_seen_at = CURRENT_TIMESTAMP,
+                last_modified_at = CURRENT_TIMESTAMP
+            WHERE status = 'active' AND (path = ? OR path LIKE ?)
+            """,
+            (source_rel_root, pattern),
+        )
+
+        if not source_rows:
+            self._log("catalog_sync move source_rows=0", "warning")
+            return
+
+        for row in source_rows:
+            src_rel_path = row[0]
+            if src_rel_path == source_rel_root:
+                rel_suffix = ""
+            elif src_rel_path.startswith(source_rel_root + "/"):
+                rel_suffix = src_rel_path[len(source_rel_root) + 1:]
+            else:
+                continue
+
+            if rel_suffix:
+                target_rel_path = (
+                    rel_suffix if target_rel_root == "." else f"{target_rel_root}/{rel_suffix}"
+                )
+                target_abs_path = target_path / rel_suffix
+            else:
+                target_rel_path = target_rel_root
+                target_abs_path = target_path
+
+            size, mtime, quick_hash, sha1, sha256, hash_source, inode, first_seen_at, _ = row[1:]
+            if target_abs_path.exists() and target_abs_path.is_file():
+                stat = target_abs_path.stat()
+                size = stat.st_size
+                mtime = stat.st_mtime
+                inode = stat.st_ino
+
+            conn.execute(
+                f"""
+                INSERT INTO {target_table}
+                    (path, size, mtime, quick_hash, sha1, sha256, hash_source,
+                     inode, first_seen_at, last_seen_at, last_modified_at,
+                     status, discovered_under)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP),
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'active', ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    size = excluded.size,
+                    mtime = excluded.mtime,
+                    quick_hash = COALESCE(excluded.quick_hash, {target_table}.quick_hash),
+                    sha1 = COALESCE(excluded.sha1, {target_table}.sha1),
+                    sha256 = COALESCE(excluded.sha256, {target_table}.sha256),
+                    hash_source = COALESCE(excluded.hash_source, {target_table}.hash_source),
+                    inode = excluded.inode,
+                    status = 'active',
+                    discovered_under = excluded.discovered_under,
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    last_modified_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    target_rel_path,
+                    size,
+                    mtime,
+                    quick_hash,
+                    sha1,
+                    sha256,
+                    hash_source,
+                    inode,
+                    first_seen_at,
+                    str(target_path),
+                ),
+            )
 
     def _rescan_after_rehome(self, plan: Dict) -> None:
         """Rescan relevant roots to refresh file tables after execution."""
@@ -705,33 +883,38 @@ class DemotionExecutor:
         source_path = Path(plan['source_path'])
         target_path = Path(plan['target_path'])
 
-        # 1. Verify source exists
+        moved_payload = False
+
+        # 1. Verify source / idempotent target
         self._log(f"step=verify_source path={source_path}")
-        if not source_path.exists():
-            raise RuntimeError(f"Source path does not exist: {source_path}")
-        if not self._verify_file_count(source_path, plan['file_count']):
-            raise RuntimeError(f"Source file count mismatch")
-        if not self._verify_total_bytes(source_path, plan['total_bytes']):
-            raise RuntimeError(f"Source total bytes mismatch")
+        if source_path.exists():
+            if not self._verify_file_count(source_path, plan['file_count']):
+                raise RuntimeError("Source file count mismatch")
+            if not self._verify_total_bytes(source_path, plan['total_bytes']):
+                raise RuntimeError("Source total bytes mismatch")
 
-        # 2. Move payload root
-        self._log(f"step=move_payload source={source_path} target={target_path}")
+            if target_path.exists():
+                raise RuntimeError(f"Target path already exists before move: {target_path}")
 
-        # Ensure parent directory exists
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Move the directory
-        try:
-            shutil.move(str(source_path), str(target_path))
-        except Exception as e:
-            raise RuntimeError(f"Failed to move payload: {e}")
+            # 2. Move payload root
+            self._log(f"step=move_payload source={source_path} target={target_path}")
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.move(str(source_path), str(target_path))
+                moved_payload = True
+            except Exception as e:
+                raise RuntimeError(f"Failed to move payload: {e}")
+        else:
+            if not target_path.exists():
+                raise RuntimeError(f"Source path does not exist: {source_path}")
+            self._log("step=verify_source source_missing=true mode=idempotent_reconcile", "warning")
 
         # 3. Verify target
         self._log(f"step=verify_target path={target_path}")
         if not self._verify_file_count(target_path, plan['file_count']):
-            raise RuntimeError(f"Target file count mismatch after move")
+            raise RuntimeError("Target file count mismatch after move")
         if not self._verify_total_bytes(target_path, plan['total_bytes']):
-            raise RuntimeError(f"Target total bytes mismatch after move")
+            raise RuntimeError("Target total bytes mismatch after move")
 
         # Spot-check (optional)
         self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
@@ -752,11 +935,14 @@ class DemotionExecutor:
         except Exception as e:
             # Rollback: move payload back to stash if ANY torrent fails
             self._log("relocation_failed rolling_back_payload", "error")
-            try:
-                shutil.move(str(target_path), str(source_path))
-                self._log(f"  Rolled back payload to {source_path}", "warning")
-            except Exception as rollback_error:
-                self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
+            if moved_payload:
+                try:
+                    shutil.move(str(target_path), str(source_path))
+                    self._log(f"  Rolled back payload to {source_path}", "warning")
+                except Exception as rollback_error:
+                    self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
+            else:
+                self._log("  rollback skipped reason=idempotent_mode_no_move", "warning")
             raise
 
         # 5. Verify source is removed
