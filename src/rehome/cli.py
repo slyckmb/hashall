@@ -4,6 +4,7 @@ Command-line interface for rehome.
 
 import click
 import json
+import sqlite3
 from pathlib import Path
 from typing import Optional
 
@@ -228,6 +229,129 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
 
     click.echo()
     click.echo(f"Next step: rehome apply {output_path} --dryrun")
+
+
+@cli.command("audit-tags")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--run-id", type=int,
+              help="Specific rehome run ID to audit (default: latest successful run)")
+@click.option("--samples", type=int, default=5,
+              help="How many non-compliant torrent samples to print")
+def audit_tags_cmd(catalog, run_id, samples):
+    """Audit rehome provenance tags for a run using catalog torrent tag snapshots."""
+
+    def _parse_tags(raw: Optional[str]) -> set[str]:
+        if not raw:
+            return set()
+        return {tag.strip() for tag in str(raw).split(',') if tag and tag.strip()}
+
+    conn = sqlite3.connect(catalog)
+    try:
+        if run_id is None:
+            run_row = conn.execute(
+                """
+                SELECT id, direction, payload_id, payload_hash, status, started_at, finished_at
+                FROM rehome_runs
+                WHERE status = 'success'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if not run_row:
+                click.echo("❌ No successful rehome_runs found", err=True)
+                raise click.Abort()
+        else:
+            run_row = conn.execute(
+                """
+                SELECT id, direction, payload_id, payload_hash, status, started_at, finished_at
+                FROM rehome_runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if not run_row:
+                click.echo(f"❌ Run not found: {run_id}", err=True)
+                raise click.Abort()
+
+        run_id_v, direction, payload_id, payload_hash, status, started_at, finished_at = run_row
+
+        if status != 'success':
+            click.echo(f"⚠ Run {run_id_v} status is '{status}' (expected success)")
+
+        if direction == 'promote':
+            expected_core = {'rehome', 'rehome_from_pool', 'rehome_to_stash'}
+        else:
+            expected_core = {'rehome', 'rehome_from_stash', 'rehome_to_pool'}
+
+        payload_ids = [payload_id]
+        torrents = conn.execute(
+            """
+            SELECT torrent_hash, tags
+            FROM torrent_instances
+            WHERE payload_id = ?
+            ORDER BY torrent_hash
+            """,
+            (payload_id,),
+        ).fetchall()
+
+        if not torrents and payload_hash:
+            payload_rows = conn.execute(
+                "SELECT payload_id FROM payloads WHERE payload_hash = ? ORDER BY payload_id",
+                (payload_hash,),
+            ).fetchall()
+            payload_ids = [int(row[0]) for row in payload_rows]
+            if payload_ids:
+                placeholders = ",".join("?" for _ in payload_ids)
+                torrents = conn.execute(
+                    f"""
+                    SELECT torrent_hash, tags
+                    FROM torrent_instances
+                    WHERE payload_id IN ({placeholders})
+                    ORDER BY torrent_hash
+                    """,
+                    payload_ids,
+                ).fetchall()
+
+        if not torrents:
+            click.echo(
+                f"⚠ No torrent_instances found for payload_id={payload_id}"
+                f" (payload_hash={str(payload_hash)[:16]}...)"
+            )
+            return
+
+        bad = []
+        for torrent_hash, tags_raw in torrents:
+            tags = _parse_tags(tags_raw)
+            missing_core = sorted(expected_core - tags)
+            has_date = any(tag.startswith('rehome_at_') for tag in tags)
+            if missing_core or not has_date:
+                bad.append((torrent_hash, missing_core, has_date, tags_raw or ''))
+
+        compliant = len(torrents) - len(bad)
+
+        click.echo("🔎 Rehome tag audit")
+        click.echo(f"   run_id: {run_id_v}")
+        click.echo(f"   direction: {direction}")
+        click.echo(f"   payload_hash: {str(payload_hash)[:16]}...")
+        click.echo(f"   payload_ids_checked: {payload_ids}")
+        click.echo(f"   torrents: {len(torrents)}")
+        click.echo(f"   compliant: {compliant}")
+        click.echo(f"   non_compliant: {len(bad)}")
+
+        if bad:
+            click.echo("   samples:")
+            for torrent_hash, missing_core, has_date, raw_tags in bad[: max(1, samples)]:
+                missing_str = ','.join(missing_core) if missing_core else '-'
+                date_str = 'yes' if has_date else 'no'
+                click.echo(
+                    f"     {torrent_hash[:16]}... missing_core={missing_str} has_rehome_at={date_str} tags={raw_tags}"
+                )
+            raise click.exceptions.Exit(1)
+
+        click.echo("✅ Rehome tags are compliant for this run")
+    finally:
+        conn.close()
 
 
 @cli.command("apply")
