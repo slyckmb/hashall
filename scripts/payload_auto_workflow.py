@@ -263,6 +263,17 @@ def main() -> int:
                         result=sync_result,
                     )
                     return 1
+                if args.dry_run:
+                    print("✅ Workflow dry-run preview complete")
+                    _log_event(
+                        log_path,
+                        "run_complete_dry_run",
+                        run_id=run_id,
+                        iteration=iteration,
+                        reason="scan_and_resync_previewed",
+                        state=state,
+                    )
+                    break
                 continue  # Re-check from top
 
             # Step 2: Check for incomplete payloads (need upgrade)
@@ -290,6 +301,17 @@ def main() -> int:
                     )
                     return 1
                 action_taken = True
+                if args.dry_run:
+                    print("✅ Workflow dry-run preview complete")
+                    _log_event(
+                        log_path,
+                        "run_complete_dry_run",
+                        run_id=run_id,
+                        iteration=iteration,
+                        reason="payload_upgrade_previewed",
+                        state=state,
+                    )
+                    break
                 continue  # Re-check from top
 
             # Step 3: Check collision groups (scoped to roots)
@@ -317,6 +339,17 @@ def main() -> int:
                     )
                     return 1
                 action_taken = True
+                if args.dry_run:
+                    print("✅ Workflow dry-run preview complete")
+                    _log_event(
+                        log_path,
+                        "run_complete_dry_run",
+                        run_id=run_id,
+                        iteration=iteration,
+                        reason="collision_upgrade_previewed",
+                        state=state,
+                    )
+                    break
                 continue  # Re-check from top
 
             if not action_taken:

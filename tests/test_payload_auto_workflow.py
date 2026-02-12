@@ -521,3 +521,67 @@ def test_batch_live_active_file_counts_handles_mount_root(tmp_path):
 
     assert counts[(49, "/data/media")] == 2
     assert counts[(49, "/data/media/torrents/seeding/A")] == 1
+
+
+
+def test_main_dry_run_previews_once_when_upgrade_needed(monkeypatch, tmp_path):
+    workflow = _load_workflow_module()
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    calls = {"collect": 0, "sync": 0}
+
+    monkeypatch.setattr(workflow, "connect_db", lambda db_path: DummyConn())
+    monkeypatch.setattr(workflow, "_discover_roots", lambda _conn: ["/stash/media"])
+    monkeypatch.setattr(workflow, "_load_completed_torrent_hashes", lambda: (set(), True, None))
+    monkeypatch.setattr(
+        workflow,
+        "_qbit_manage_freshness",
+        lambda: {
+            "status": "fresh",
+            "path": "/tmp/activity.log",
+            "age_seconds": 10,
+            "max_age_seconds": 7200,
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(workflow, "_workflow_log_path", lambda run_id: tmp_path / "payload-auto.jsonl")
+
+    def fake_collect(*args, **kwargs):
+        calls["collect"] += 1
+        return {
+            "dirty_in_scope": 0,
+            "dirty_noncomplete_in_scope": 0,
+            "dirty_orphan_in_scope": 0,
+            "dirty_orphan_alias_in_scope": 0,
+            "dirty_total_in_scope": 0,
+            "dirty_out_of_scope": 0,
+            "incomplete_in_scope": 3,
+            "collision_groups_in_scope": 0,
+            "collision_groups_global": 0,
+            "scan_path": None,
+            "dirty_samples_out_of_scope": [],
+            "dirty_noncomplete_samples_in_scope": [],
+            "dirty_orphan_samples_in_scope": [],
+            "dirty_orphan_alias_samples_in_scope": [],
+            "mount_alias_hint": None,
+            "orphan_gc_tracked_in_scope": 0,
+            "orphan_gc_aged_in_scope": 0,
+            "completion_filter_active": True,
+        }
+
+    def fake_sync(*args, **kwargs):
+        calls["sync"] += 1
+        return {"cmd": ["payload", "sync"], "rc": 0, "ok": True, "duration_s": 0.0, "dry_run": True}
+
+    monkeypatch.setattr(workflow, "collect_workflow_state", fake_collect)
+    monkeypatch.setattr(workflow, "run_payload_sync", fake_sync)
+    monkeypatch.setattr(workflow.sys, "argv", ["payload_auto_workflow.py", "--db", str(tmp_path / "catalog.db"), "--dry-run"])
+
+    rc = workflow.main()
+
+    assert rc == 0
+    assert calls["collect"] == 1
+    assert calls["sync"] == 1
