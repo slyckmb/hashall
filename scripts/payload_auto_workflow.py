@@ -24,6 +24,7 @@ STALL_THRESHOLD = 2
 ORPHAN_GC_MIN_SEEN_RUNS = 2
 ORPHAN_GC_MIN_AGE_SECONDS = 24 * 60 * 60
 QBIT_COMPLETE_PROGRESS = 0.999999
+QBIT_MANAGE_FRESHNESS_MAX_MINUTES = 120
 
 
 def main() -> int:
@@ -59,6 +60,7 @@ def main() -> int:
         return 1
 
     completed_hashes, completion_filter_active, completion_filter_error = _load_completed_torrent_hashes()
+    qbm_freshness = _qbit_manage_freshness()
 
     run_id = uuid.uuid4().hex[:10]
     log_path = _workflow_log_path(run_id)
@@ -73,6 +75,7 @@ def main() -> int:
         dry_run=args.dry_run,
         completion_filter_active=completion_filter_active,
         completion_filter_error=completion_filter_error,
+        qbm_freshness=qbm_freshness,
     )
 
     print(f"Automated payload workflow")
@@ -87,6 +90,20 @@ def main() -> int:
         print(f"  qB completion filter: active (ignoring refs below 100% progress)")
     elif completion_filter_error:
         print(f"  qB completion filter: disabled ({completion_filter_error})")
+
+    qbm_age = qbm_freshness.get("age_seconds")
+    if qbm_freshness["status"] == "fresh":
+        print(
+            "  qbit_manage freshness: fresh "
+            f"(age={int(qbm_age)}s <= {int(qbm_freshness['max_age_seconds'])}s)"
+        )
+    elif qbm_freshness["status"] == "stale":
+        print(
+            "  ⚠ qbit_manage freshness: stale "
+            f"(age={int(qbm_age)}s > {int(qbm_freshness['max_age_seconds'])}s)"
+        )
+    else:
+        print(f"  qbit_manage freshness: unknown ({qbm_freshness.get('reason')})")
     print()
 
     previous_signature = None
@@ -661,6 +678,57 @@ def _live_active_file_count(
 
     cache[key] = count
     return count
+
+
+def _qbit_manage_freshness() -> dict[str, object]:
+    """Return qbit_manage activity freshness from local logs."""
+    max_age_minutes_raw = os.environ.get(
+        "HASHALL_QBM_FRESH_MAX_MINUTES",
+        str(QBIT_MANAGE_FRESHNESS_MAX_MINUTES),
+    )
+    try:
+        max_age_minutes = max(1, int(max_age_minutes_raw))
+    except ValueError:
+        max_age_minutes = QBIT_MANAGE_FRESHNESS_MAX_MINUTES
+    max_age_seconds = max_age_minutes * 60
+
+    configured_log = os.environ.get("HASHALL_QBM_ACTIVITY_LOG")
+    candidates: list[Path] = []
+    if configured_log:
+        candidates.append(Path(configured_log))
+
+    log_only = os.environ.get("HASHALL_QBM_ACTIVITY_LOG_ONLY") == "1"
+    if not log_only:
+        candidates.extend(
+            [
+                Path("/dump/docker/qbit_manage/logs/activity.log"),
+                Path("/data/docker/qbit_manage/logs/activity.log"),
+            ]
+        )
+
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+            age_seconds = max(0.0, time.time() - candidate.stat().st_mtime)
+            status = "fresh" if age_seconds <= max_age_seconds else "stale"
+            return {
+                "status": status,
+                "path": str(candidate),
+                "age_seconds": round(age_seconds, 3),
+                "max_age_seconds": max_age_seconds,
+                "reason": None,
+            }
+        except OSError:
+            continue
+
+    return {
+        "status": "unknown",
+        "path": str(candidates[0]) if candidates else None,
+        "age_seconds": None,
+        "max_age_seconds": max_age_seconds,
+        "reason": "activity_log_not_found",
+    }
 
 
 def _mount_alias_hint(conn, roots: list[str], dirty_out_scope_paths: list[str]) -> str | None:

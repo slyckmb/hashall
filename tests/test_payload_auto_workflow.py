@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import json
 from pathlib import Path
 
@@ -338,3 +339,52 @@ def test_backup_db_creates_timestamped_copy(tmp_path):
     assert backup_path.parent == backup_dir
     assert backup_path.name.startswith("catalog.db.backup-")
     assert backup_path.read_bytes() == b"db-bytes"
+
+
+def test_qbit_manage_freshness_fresh(tmp_path, monkeypatch):
+    workflow = _load_workflow_module()
+    log_path = tmp_path / "activity.log"
+    log_path.write_text("ok\n", encoding="utf-8")
+    now = 2_000_000_000
+    os.utime(log_path, (now - 30, now - 30))
+    monkeypatch.setenv("HASHALL_QBM_ACTIVITY_LOG", str(log_path))
+    monkeypatch.setenv("HASHALL_QBM_ACTIVITY_LOG_ONLY", "1")
+    monkeypatch.setenv("HASHALL_QBM_FRESH_MAX_MINUTES", "5")
+    monkeypatch.setattr(workflow.time, "time", lambda: float(now))
+
+    result = workflow._qbit_manage_freshness()
+
+    assert result["status"] == "fresh"
+    assert result["path"] == str(log_path)
+    assert result["max_age_seconds"] == 300
+
+
+def test_qbit_manage_freshness_stale(tmp_path, monkeypatch):
+    workflow = _load_workflow_module()
+    log_path = tmp_path / "activity.log"
+    log_path.write_text("ok\n", encoding="utf-8")
+    now = 2_000_000_000
+    os.utime(log_path, (now - 601, now - 601))
+    monkeypatch.setenv("HASHALL_QBM_ACTIVITY_LOG", str(log_path))
+    monkeypatch.setenv("HASHALL_QBM_ACTIVITY_LOG_ONLY", "1")
+    monkeypatch.setenv("HASHALL_QBM_FRESH_MAX_MINUTES", "10")
+    monkeypatch.setattr(workflow.time, "time", lambda: float(now))
+
+    result = workflow._qbit_manage_freshness()
+
+    assert result["status"] == "stale"
+    assert result["path"] == str(log_path)
+    assert result["max_age_seconds"] == 600
+
+
+def test_qbit_manage_freshness_unknown_when_log_missing(tmp_path, monkeypatch):
+    workflow = _load_workflow_module()
+    missing_log = tmp_path / "missing.log"
+    monkeypatch.setenv("HASHALL_QBM_ACTIVITY_LOG", str(missing_log))
+    monkeypatch.setenv("HASHALL_QBM_ACTIVITY_LOG_ONLY", "1")
+
+    result = workflow._qbit_manage_freshness()
+
+    assert result["status"] == "unknown"
+    assert result["reason"] == "activity_log_not_found"
+    assert result["path"] == str(missing_log)
