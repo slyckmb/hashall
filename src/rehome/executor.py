@@ -46,6 +46,7 @@ class DemotionExecutor:
         """
         self.catalog_path = catalog_path
         self.qbit_client = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
+        self.tag_strict = os.getenv("HASHALL_REHOME_TAG_STRICT") == "1"
 
     def _get_db_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -495,6 +496,7 @@ class DemotionExecutor:
         date_tag = f"rehome_at_{datetime.now().strftime('%Y%m%d')}"
         return ["rehome", source_tag, target_tag, date_tag]
 
+
     def _apply_rehome_provenance_tags(self, plan: Dict) -> None:
         """Apply idempotent provenance tags to all affected torrents."""
         torrent_hashes = plan.get("affected_torrents") or []
@@ -502,6 +504,8 @@ class DemotionExecutor:
             return
 
         desired_tags = self._build_rehome_provenance_tags(plan)
+        failures: List[str] = []
+
         for torrent_hash in torrent_hashes:
             try:
                 torrent_info = self.qbit_client.get_torrent_info(torrent_hash)
@@ -515,28 +519,32 @@ class DemotionExecutor:
 
                 if stale_tags and hasattr(self.qbit_client, "remove_tags"):
                     if not self.qbit_client.remove_tags(torrent_hash, stale_tags):
-                        self._log(
-                            f"rehome_tag_remove_failed hash={torrent_hash[:16]} tags={','.join(stale_tags)}",
-                            "warning",
-                        )
+                        msg = f"rehome_tag_remove_failed hash={torrent_hash[:16]} tags={','.join(stale_tags)}"
+                        failures.append(msg)
+                        self._log(msg, "warning")
 
                 if hasattr(self.qbit_client, "add_tags"):
                     if not self.qbit_client.add_tags(torrent_hash, desired_tags):
-                        self._log(
-                            f"rehome_tag_add_failed hash={torrent_hash[:16]} tags={','.join(desired_tags)}",
-                            "warning",
-                        )
+                        msg = f"rehome_tag_add_failed hash={torrent_hash[:16]} tags={','.join(desired_tags)}"
+                        failures.append(msg)
+                        self._log(msg, "warning")
                     else:
                         self._log(
                             f"rehome_tag_update hash={torrent_hash[:16]} tags={','.join(desired_tags)}"
                         )
                 else:
-                    self._log(
-                        f"rehome_tag_update_skipped hash={torrent_hash[:16]} reason=no_add_tags_api",
-                        "warning",
-                    )
+                    msg = f"rehome_tag_update_skipped hash={torrent_hash[:16]} reason=no_add_tags_api"
+                    failures.append(msg)
+                    self._log(msg, "warning")
             except Exception as e:
-                self._log(f"rehome_tag_update_failed hash={torrent_hash[:16]} error={e}", "warning")
+                msg = f"rehome_tag_update_failed hash={torrent_hash[:16]} error={e}"
+                failures.append(msg)
+                self._log(msg, "warning")
+
+        if failures and self.tag_strict:
+            raise RuntimeError(
+                f"rehome tag update failed in strict mode ({len(failures)} issues): {failures[0]}"
+            )
 
 
     def execute(self, plan: Dict, cleanup_source_views: bool = False,

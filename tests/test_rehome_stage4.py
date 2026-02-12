@@ -585,5 +585,38 @@ class TestRehomeTagging:
         )
 
 
+def test_apply_rehome_provenance_tags_strict_mode_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("HASHALL_REHOME_TAG_STRICT", "1")
+
+    db_path = TestDatabase.create_test_db(tmp_path)
+    executor = DemotionExecutor(catalog_path=db_path)
+
+    mock_info = QBitTorrent(
+        hash="torrent_strict",
+        name="Strict Torrent",
+        save_path="/stash/torrents/seeding",
+        content_path="/stash/torrents/seeding/Strict Torrent",
+        category="",
+        tags="seed",
+        state="stalledUP",
+        size=100,
+        progress=1.0,
+    )
+
+    mock_client = Mock()
+    mock_client.get_torrent_info.return_value = mock_info
+    mock_client.add_tags.return_value = False
+    mock_client.remove_tags.return_value = True
+    executor.qbit_client = mock_client
+
+    with pytest.raises(RuntimeError, match="strict mode"):
+        executor._apply_rehome_provenance_tags(
+            {
+                "direction": "demote",
+                "affected_torrents": ["torrent_strict"],
+            }
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
