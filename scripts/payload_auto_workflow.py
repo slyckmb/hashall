@@ -602,29 +602,33 @@ def _batch_live_active_file_counts(
         if not rel_to_roots:
             continue
 
-        temp_table = f"payload_auto_roots_{device_id}"
-        conn.execute(f"DROP TABLE IF EXISTS temp.{temp_table}")
-        conn.execute(f"CREATE TEMP TABLE {temp_table} (rel_root TEXT PRIMARY KEY)")
-        conn.executemany(
-            f"INSERT OR IGNORE INTO {temp_table} (rel_root) VALUES (?)",
-            [(rel_root,) for rel_root in rel_to_roots.keys()],
-        )
-
-        rows = conn.execute(
-            f"""
-            SELECT r.rel_root, COUNT(f.path)
-            FROM {temp_table} r
-            LEFT JOIN {table_name} f
-              ON {status_clause}(f.path = r.rel_root OR f.path LIKE r.rel_root || '/%')
-            GROUP BY r.rel_root
-            """
+        rel_root_counts: dict[str, int] = {rel_root: 0 for rel_root in rel_to_roots.keys()}
+        rel_root_lookup = set(rel_root_counts.keys())
+        path_rows = conn.execute(
+            f"SELECT path FROM {table_name} WHERE {status_clause}1=1"
         ).fetchall()
 
-        for rel_root, count in rows:
+        for row in path_rows:
+            file_path = row[0]
+            if not file_path:
+                continue
+
+            if file_path in rel_root_lookup:
+                rel_root_counts[file_path] += 1
+
+            idx = 0
+            while True:
+                idx = file_path.find("/", idx)
+                if idx <= 0:
+                    break
+                prefix = file_path[:idx]
+                if prefix in rel_root_lookup:
+                    rel_root_counts[prefix] += 1
+                idx += 1
+
+        for rel_root, count in rel_root_counts.items():
             for root_path in rel_to_roots.get(rel_root, []):
                 out[(device_id, root_path)] = int(count or 0)
-
-        conn.execute(f"DROP TABLE IF EXISTS temp.{temp_table}")
 
     return out
 

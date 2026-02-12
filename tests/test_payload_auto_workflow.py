@@ -476,3 +476,48 @@ def test_main_fail_closed_stops_on_stale_qbit_manage(monkeypatch, tmp_path):
     lines = log_path.read_text(encoding="utf-8").strip().splitlines()
     assert any('"event": "run_failed"' in line for line in lines)
     assert any('"reason": "qbit_manage_freshness_not_fresh"' in line for line in lines)
+
+
+
+def test_batch_live_active_file_counts_handles_mount_root(tmp_path):
+    workflow = _load_workflow_module()
+    db_path = tmp_path / "catalog.db"
+    conn = connect_db(db_path)
+
+    conn.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("zfs-49", 49, "/data/media", "/stash/media"),
+    )
+    conn.execute(
+        """
+        CREATE TABLE files_49 (
+            path TEXT PRIMARY KEY,
+            size INTEGER,
+            sha256 TEXT,
+            status TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO files_49 (path, size, sha256, status) VALUES (?, ?, ?, ?)",
+        [
+            ("torrents/seeding/A/file1.mkv", 1, "a", "active"),
+            ("torrents/seeding/B/file1.mkv", 1, "b", "active"),
+        ],
+    )
+    conn.commit()
+
+    counts = workflow._batch_live_active_file_counts(
+        conn,
+        [
+            (49, "/data/media"),
+            (49, "/data/media/torrents/seeding/A"),
+        ],
+    )
+    conn.close()
+
+    assert counts[(49, "/data/media")] == 2
+    assert counts[(49, "/data/media/torrents/seeding/A")] == 1
