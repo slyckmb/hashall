@@ -58,6 +58,8 @@ PAYLOAD_ORPHAN_AUDIT_JSON ?= 0
 PAYLOAD_ORPHAN_AUDIT_ROOTS ?= /pool/data,/stash/media,/data/media
 PAYLOAD_ORPHAN_AUDIT_OUTPUT_DIR ?= $(HOME)/.logs/hashall/orphan-audit
 PAYLOAD_ORPHAN_AUDIT_SKIP_AUTO ?= 0
+PAYLOAD_ORPHAN_TIMER_UNIT ?= hashall-payload-orphan-snapshot.timer
+PAYLOAD_ORPHAN_TIMER_SERVICE ?= hashall-payload-orphan-snapshot.service
 PAYLOAD_AUTO_QBM_FAIL_CLOSED ?= 0
 PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES ?= 120
 PAYLOAD_AUTO_QBM_ACTIVITY_LOG ?=
@@ -132,7 +134,7 @@ help:  ## Show this help message
 	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-workflow|payload-auto|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -164,6 +166,8 @@ help:  ## Show this help message
 	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media'  # Non-destructive orphan staging audit"
 	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media' PAYLOAD_ORPHAN_AUDIT_JSON=1  # JSON snapshot for trend checks"
 	@echo "  make payload-orphan-snapshot PAYLOAD_ORPHAN_AUDIT_ROOTS='/pool/data,/stash/media,/data/media'  # Timestamped snapshot bundle"
+	@echo "  make payload-orphan-timer-install             # Install+enable user timer"
+	@echo "  make payload-orphan-timer-status              # Show timer status/next runs"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media' DRY_RUN=1  # Preview actions"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media'            # Run to completion"
 	@echo "  make rehome-checklist                     # Rehome checklist"
@@ -555,6 +559,21 @@ payload-orphan-snapshot:  ## Capture timestamped orphan-audit + payload-auto dry
 	@set -- --db "$(DB_FILE)" --roots "$(PAYLOAD_ORPHAN_AUDIT_ROOTS)" --samples "$(PAYLOAD_ORPHAN_AUDIT_SAMPLES)" --output-dir "$(PAYLOAD_ORPHAN_AUDIT_OUTPUT_DIR)"; \
 	if [ "$(PAYLOAD_ORPHAN_AUDIT_SKIP_AUTO)" = "1" ]; then set -- "$$@" --skip-payload-auto; fi; \
 	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/payload_orphan_audit_snapshot.py "$$@"
+
+.PHONY: payload-orphan-timer-install
+payload-orphan-timer-install:  ## Install and enable payload orphan snapshot user timer
+	@$(PYTHON) scripts/payload_orphan_audit_snapshot.py --help >/dev/null
+	@bash scripts/install_payload_orphan_snapshot_user_timer.sh
+
+.PHONY: payload-orphan-timer-status
+payload-orphan-timer-status:  ## Show payload orphan snapshot timer status
+	@systemctl --user status $(PAYLOAD_ORPHAN_TIMER_UNIT) --no-pager || true
+	@systemctl --user list-timers --all | grep -E 'hashall-payload-orphan-snapshot|NEXT|LEFT' || true
+
+.PHONY: payload-orphan-timer-disable
+payload-orphan-timer-disable:  ## Disable payload orphan snapshot timer (keeps unit files)
+	@systemctl --user disable --now $(PAYLOAD_ORPHAN_TIMER_UNIT) || true
+	@echo "Timer disabled: $(PAYLOAD_ORPHAN_TIMER_UNIT)"
 
 .PHONY: payload-workflow
 payload-workflow:  ## Show payload workflow status across all roots

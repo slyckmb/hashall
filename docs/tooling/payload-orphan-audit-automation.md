@@ -67,6 +67,48 @@ Do **not** enable destructive prune until:
 3. Confirm no unexpected spikes.
 4. If stable, propose phase-2 destructive prune policy with dry-run + safety caps + backup requirement.
 
+## Optional systemd user timer (recommended)
+
+Repo-managed unit files:
+
+- `ops/systemd/user/hashall-payload-orphan-snapshot.service`
+- `ops/systemd/user/hashall-payload-orphan-snapshot.timer`
+
+Install + enable:
+
+```bash
+make payload-orphan-timer-install
+```
+
+Check status:
+
+```bash
+make payload-orphan-timer-status
+```
+
+Disable timer:
+
+```bash
+make payload-orphan-timer-disable
+```
+
+### Timer overrides via env file
+
+Optional file: `~/.config/hashall/payload-orphan-snapshot.env`
+
+Example:
+
+```bash
+PAYLOAD_ORPHAN_AUDIT_ROOTS=/pool/data,/stash/media,/data/media
+PAYLOAD_ORPHAN_AUDIT_OUTPUT_DIR=/home/michael/.logs/hashall/orphan-audit
+PAYLOAD_ORPHAN_AUDIT_SKIP_AUTO=0
+```
+
+### Bootstrap-managed systems note
+
+If your host uses a bootstrap-managed config repo for system/user files, keep these unit files as source-of-truth in repo and deploy via that bootstrap workflow (not ad-hoc edits under `~/.config/systemd/user` or `/etc/systemd/system`).
+
+
 ## Optional cron (operator-owned)
 
 Example (every 6 hours):

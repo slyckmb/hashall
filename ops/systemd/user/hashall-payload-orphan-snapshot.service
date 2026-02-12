@@ -1,0 +1,17 @@
+[Unit]
+Description=Hashall payload orphan snapshot capture
+Documentation=file:///home/michael/dev/work/hashall/docs/tooling/payload-orphan-audit-automation.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/work/hashall
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/.config/hashall/payload-orphan-snapshot.env
+ExecStart=/usr/bin/make payload-orphan-snapshot
+StandardOutput=append:%h/.logs/hashall/orphan-audit-timer.log
+StandardError=append:%h/.logs/hashall/orphan-audit-timer.log
+
+[Install]
+WantedBy=default.target
