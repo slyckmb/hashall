@@ -25,6 +25,8 @@ from hashall.link_executor import (
     _JdupesHistoryStats,
     _JdupesRateTracker,
     _summarize_unique_inode_work,
+    update_action_status,
+    update_plan_progress,
 )
 from hashall.link_query import ActionInfo
 
@@ -331,6 +333,70 @@ def test_execution_result_creation():
     assert result.actions_executed == 10
     assert result.actions_failed == 2
     assert len(result.errors) == 2
+
+
+def test_update_action_status_commit_false_defers_commit():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE link_actions (
+            id INTEGER PRIMARY KEY,
+            status TEXT,
+            bytes_saved INTEGER,
+            error_message TEXT,
+            executed_at TEXT
+        )
+    """)
+    cursor.execute(
+        "INSERT INTO link_actions (id, status, bytes_saved, error_message) VALUES (1, 'pending', 0, NULL)"
+    )
+    conn.commit()
+
+    assert not conn.in_transaction
+    update_action_status(conn, 1, "completed", bytes_saved=123, commit=False)
+    assert conn.in_transaction
+    row = conn.execute("SELECT status, bytes_saved FROM link_actions WHERE id = 1").fetchone()
+    assert row == ("completed", 123)
+    conn.rollback()
+    conn.close()
+
+
+def test_update_plan_progress_accepts_cached_counts():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE link_plans (
+            id INTEGER PRIMARY KEY,
+            status TEXT DEFAULT 'pending',
+            actions_executed INTEGER DEFAULT 0,
+            actions_failed INTEGER DEFAULT 0,
+            actions_skipped INTEGER DEFAULT 0,
+            total_bytes_saved INTEGER DEFAULT 0,
+            started_at TEXT,
+            completed_at TEXT
+        )
+    """)
+    cursor.execute("INSERT INTO link_plans (id, status) VALUES (1, 'pending')")
+    conn.commit()
+
+    update_plan_progress(
+        conn,
+        1,
+        start_execution=True,
+        executed=7,
+        failed=1,
+        skipped=2,
+        total_saved=777,
+        commit=False,
+    )
+    assert conn.in_transaction
+    row = conn.execute(
+        "SELECT status, actions_executed, actions_failed, actions_skipped, total_bytes_saved "
+        "FROM link_plans WHERE id = 1"
+    ).fetchone()
+    assert row == ("in_progress", 7, 1, 2, 777)
+    conn.rollback()
+    conn.close()
 
 
 def test_compute_fast_hash_sample():

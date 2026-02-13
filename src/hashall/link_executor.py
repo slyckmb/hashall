@@ -958,7 +958,9 @@ def update_action_status(
     action_id: int,
     status: str,
     bytes_saved: int = 0,
-    error_message: Optional[str] = None
+    error_message: Optional[str] = None,
+    *,
+    commit: bool = True,
 ):
     """
     Update action status in database.
@@ -981,14 +983,21 @@ def update_action_status(
         WHERE id = ?
     """, (status, bytes_saved, error_message, action_id))
 
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def update_plan_progress(
     conn: sqlite3.Connection,
     plan_id: int,
     start_execution: bool = False,
-    complete_execution: bool = False
+    complete_execution: bool = False,
+    *,
+    executed: Optional[int] = None,
+    failed: Optional[int] = None,
+    skipped: Optional[int] = None,
+    total_saved: Optional[int] = None,
+    commit: bool = True,
 ):
     """
     Update plan execution progress.
@@ -1001,19 +1010,20 @@ def update_plan_progress(
     """
     cursor = conn.cursor()
 
-    # Count action statuses
-    cursor.execute("""
-        SELECT
-            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as executed,
-            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-            SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped,
-            SUM(CASE WHEN status = 'completed' THEN bytes_saved ELSE 0 END) as total_saved
-        FROM link_actions
-        WHERE plan_id = ?
-    """, (plan_id,))
+    if executed is None or failed is None or skipped is None or total_saved is None:
+        # Count action statuses
+        cursor.execute("""
+            SELECT
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as executed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped,
+                SUM(CASE WHEN status = 'completed' THEN bytes_saved ELSE 0 END) as total_saved
+            FROM link_actions
+            WHERE plan_id = ?
+        """, (plan_id,))
 
-    row = cursor.fetchone()
-    executed, failed, skipped, total_saved = row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0
+        row = cursor.fetchone()
+        executed, failed, skipped, total_saved = row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0
 
     # Determine new status
     if complete_execution:
@@ -1046,7 +1056,8 @@ def update_plan_progress(
             WHERE id = ?
         """, (executed, failed, skipped, total_saved, plan_id))
 
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def execute_plan(
@@ -1122,10 +1133,6 @@ def execute_plan(
     if limit > 0:
         actions = actions[:limit]
 
-    # Mark plan as in_progress (unless dry-run)
-    if not dry_run:
-        update_plan_progress(conn, plan_id, start_execution=True)
-
     # Execute actions
     executed = 0
     failed = 0
@@ -1134,6 +1141,8 @@ def execute_plan(
     errors = []
     total_actions = len(actions)
     processed = 0
+    status_updates: list[tuple[str, int, Optional[str], int]] = []
+    status_flush_threshold = 200
 
     jdupes_cmd = None
     if use_jdupes:
@@ -1183,14 +1192,45 @@ def execute_plan(
             ):
                 _maybe_refresh_files_for_action(conn, action, plan.mount_point)
             if status == 'completed':
-                update_action_status(conn, action.id, 'completed', bytes_saved=bytes_saved)
+                status_updates.append(('completed', bytes_saved, None, action.id))
             elif status == 'failed':
-                update_action_status(conn, action.id, 'failed', error_message=error_message)
+                status_updates.append(('failed', 0, error_message, action.id))
             else:
-                update_action_status(conn, action.id, 'skipped')
+                status_updates.append(('skipped', 0, None, action.id))
 
-            if processed % 10 == 0:
-                update_plan_progress(conn, plan_id)
+            if len(status_updates) >= status_flush_threshold:
+                conn.executemany("""
+                    UPDATE link_actions
+                    SET status = ?,
+                        bytes_saved = ?,
+                        error_message = ?,
+                        executed_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, status_updates)
+                status_updates.clear()
+                update_plan_progress(
+                    conn,
+                    plan_id,
+                    start_execution=True,
+                    executed=executed,
+                    failed=failed,
+                    skipped=skipped,
+                    total_saved=total_bytes_saved,
+                    commit=False,
+                )
+                conn.commit()
+
+    if not dry_run:
+        update_plan_progress(
+            conn,
+            plan_id,
+            start_execution=True,
+            executed=0,
+            failed=0,
+            skipped=0,
+            total_saved=0,
+            commit=True,
+        )
 
     if use_jdupes:
         groups = {}
@@ -1493,6 +1533,18 @@ def execute_plan(
 
     # Final progress update
     if not dry_run:
+        if status_updates:
+            conn.executemany("""
+                UPDATE link_actions
+                SET status = ?,
+                    bytes_saved = ?,
+                    error_message = ?,
+                    executed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, status_updates)
+            status_updates.clear()
+            conn.commit()
+
         # Check if all actions are done
         cursor.execute("""
             SELECT COUNT(*) FROM link_actions
@@ -1501,10 +1553,16 @@ def execute_plan(
 
         remaining = cursor.fetchone()[0]
 
-        if remaining == 0:
-            update_plan_progress(conn, plan_id, complete_execution=True)
-        else:
-            update_plan_progress(conn, plan_id)
+        update_plan_progress(
+            conn,
+            plan_id,
+            complete_execution=(remaining == 0),
+            executed=executed,
+            failed=failed,
+            skipped=skipped,
+            total_saved=total_bytes_saved,
+            commit=True,
+        )
 
     if zfs_mismatch_paths:
         unique_paths = list(dict.fromkeys(zfs_mismatch_paths))
