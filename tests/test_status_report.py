@@ -151,8 +151,12 @@ def test_render_phone_includes_summary_pockets_and_actions():
             "link_actions_zero_bytes": 5,
             "link_actions_possible": 9,
         },
+        "db_health": {
+            "quick_check": "ok",
+        },
         "rehome": {
             "stash_to_pool_groups": 7,
+            "stash_to_pool_estimated_bytes": 8192,
             "pool_to_stash_groups": 0,
         },
         "duplicate_pockets": [
@@ -164,8 +168,9 @@ def test_render_phone_includes_summary_pockets_and_actions():
     }
 
     text = _render_phone(report, width=78, top=3)
-    assert "summary:" in text
-    assert "hot pockets:" in text
-    assert "/stash/media/torrents" in text
-    assert "next:" in text
+    assert "snapshot:" in text
+    assert "do_now:" in text
+    assert "converge payload state" in text
+    assert "reclaim duplicate file bytes now" in text
+    assert "review rehome queue" in text
     assert "make payload-auto" in text

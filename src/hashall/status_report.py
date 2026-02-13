@@ -861,47 +861,101 @@ def _render_markdown(report: dict, db_path: str) -> str:
 
 def _render_phone(report: dict, *, width: int, top: int) -> str:
     totals = report["totals"]
+    db_ok = str(report.get("db_health", {}).get("quick_check", "")).lower() == "ok"
+    dirty_actionable = int(totals.get("dirty_actionable", 0))
+    dirty_orphan = int(totals.get("dirty_orphan", 0))
+    payload_incomplete = int(totals.get("payload_incomplete", 0))
+    link_nonzero = int(totals.get("link_actions_nonzero", 0))
+    link_zero = int(totals.get("link_actions_zero_bytes", 0))
+    saveable_bytes = int(totals.get("bytes_saveable", 0))
+    rehome_stash_to_pool = int(report.get("rehome", {}).get("stash_to_pool_groups", 0))
+    rehome_stash_to_pool_bytes = int(report.get("rehome", {}).get("stash_to_pool_estimated_bytes", 0))
+
+    if not db_ok:
+        posture = "critical"
+    elif dirty_actionable > 0 or link_nonzero > 0:
+        posture = "action_required"
+    elif payload_incomplete > 0:
+        posture = "watch"
+    else:
+        posture = "stable"
+
     lines: list[str] = []
     lines.append(
-        "summary: "
+        "snapshot: "
+        f"posture={posture} "
+        f"db={'ok' if db_ok else report.get('db_health', {}).get('quick_check', 'unknown')}"
+    )
+    lines.append(
+        "inventory: "
         f"files={totals['active_files']:,} "
-        f"saveable={_fmt_bytes(totals['bytes_saveable'])} "
-        f"dup_groups={totals['duplicate_sha256_groups']:,}"
+        f"dup_groups={totals['duplicate_sha256_groups']:,} "
+        f"payload_complete={totals['payload_complete']:,}"
     )
     lines.append(
-        "payload: "
-        f"complete={totals['payload_complete']:,} "
-        f"incomplete={totals['payload_incomplete']:,} "
-        f"dirty={totals['dirty_actionable']:,}/{totals['dirty_orphan']:,}"
+        "pressure: "
+        f"dirty_actionable={dirty_actionable:,} "
+        f"dirty_orphan={dirty_orphan:,} "
+        f"payload_incomplete={payload_incomplete:,}"
     )
     lines.append(
-        "links: "
-        f"nonzero={totals['link_actions_nonzero']:,} "
-        f"zero={totals['link_actions_zero_bytes']:,} "
-        f"total={totals['link_actions_possible']:,}"
+        "cleanup: "
+        f"link_nonzero={link_nonzero:,} "
+        f"link_zero={link_zero:,} "
+        f"reclaim_now={_fmt_bytes(saveable_bytes)}"
     )
     lines.append(
         "rehome: "
-        f"stash->pool={report['rehome']['stash_to_pool_groups']:,} "
-        f"pool->stash={report['rehome']['pool_to_stash_groups']:,}"
+        f"stash_to_pool={rehome_stash_to_pool:,} "
+        f"({ _fmt_bytes(rehome_stash_to_pool_bytes) }) "
+        f"pool_to_stash={report['rehome']['pool_to_stash_groups']:,}"
     )
 
-    pockets = report.get("duplicate_pockets", [])[: max(1, top)]
+    pockets = report.get("duplicate_pockets", [])
     if pockets:
-        lines.append("hot pockets:")
-        for pocket in pockets:
-            lines.append(
-                "  "
-                f"{int(pocket['actions']):,}x "
-                f"{_fmt_bytes(int(pocket['bytes_saveable']))} "
-                f"{pocket['pocket']}"
-            )
+        top_actions = max(int(p.get("actions", 0)) for p in pockets)
+        top_saveable = max(int(p.get("bytes_saveable", 0)) for p in pockets)
+        lines.append(
+            "heat: "
+            f"pockets={len(pockets):,} "
+            f"top_actions={top_actions:,} "
+            f"top_saveable={_fmt_bytes(top_saveable)}"
+        )
 
-    actions = report.get("actions", [])[: max(1, top)]
-    if actions:
-        lines.append("next:")
-        for action in actions:
-            lines.append(f"  [{action['priority']}] {action['command']}")
+    lines.append("do_now:")
+    step_num = 1
+    if dirty_actionable > 0:
+        lines.append(
+            f"{step_num}. converge payload state ({dirty_actionable:,} actionable): "
+            "make payload-auto ROOTS='/pool/data,/stash/media,/data/media'"
+        )
+        step_num += 1
+    if link_nonzero > 0:
+        lines.append(
+            f"{step_num}. reclaim duplicate file bytes now ({_fmt_bytes(saveable_bytes)}): "
+            "make hardlink-auto ROOTS='/pool/data,/stash/media,/data/media' HARDLINK_AUTO_EXECUTE=1"
+        )
+        step_num += 1
+    elif link_zero > 0:
+        lines.append(
+            f"{step_num}. optional zero-byte metadata cleanup ({link_zero:,} actions): "
+            "make hardlink-auto ROOTS='/pool/data,/stash/media,/data/media' HARDLINK_AUTO_EXECUTE=1"
+        )
+        step_num += 1
+    if payload_incomplete > 0:
+        lines.append(
+            f"{step_num}. review why payloads are still incomplete ({payload_incomplete:,}): "
+            "make payload-workflow PW_PATHS='/pool/data /stash/media /data/media'"
+        )
+        step_num += 1
+    if rehome_stash_to_pool > 0:
+        lines.append(
+            f"{step_num}. review rehome queue (stash->pool={rehome_stash_to_pool:,}): "
+            "make rehome-checklist"
+        )
+        step_num += 1
+    if step_num == 1:
+        lines.append("1. no immediate actions required")
 
     wrapped: list[str] = []
     for line in lines:
