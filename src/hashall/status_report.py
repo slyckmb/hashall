@@ -15,10 +15,14 @@ import json
 import os
 import sqlite3
 from collections import defaultdict
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import textwrap
+import shutil
+import sys
+import threading
+import time
 from typing import Optional
 
 from hashall.fs_utils import get_filesystem_uuid, get_mount_source
@@ -545,6 +549,120 @@ def _collect_db_health(conn: sqlite3.Connection) -> dict:
     return {"quick_check": quick_check_status}
 
 
+def _db_fingerprint(db_path: Path) -> dict:
+    db_stat = db_path.stat()
+    wal_path = Path(f"{db_path}-wal")
+    shm_path = Path(f"{db_path}-shm")
+    wal_stat = wal_path.stat() if wal_path.exists() else None
+    shm_stat = shm_path.stat() if shm_path.exists() else None
+    return {
+        "db_path": str(db_path.resolve()),
+        "db_mtime_ns": int(db_stat.st_mtime_ns),
+        "db_size": int(db_stat.st_size),
+        "wal_mtime_ns": int(wal_stat.st_mtime_ns) if wal_stat else 0,
+        "wal_size": int(wal_stat.st_size) if wal_stat else 0,
+        "shm_mtime_ns": int(shm_stat.st_mtime_ns) if shm_stat else 0,
+        "shm_size": int(shm_stat.st_size) if shm_stat else 0,
+    }
+
+
+def _cache_key(
+    *,
+    db_path: Path,
+    roots_arg: Optional[str],
+    media_root: str,
+    pocket_depth: int,
+    top_n: int,
+) -> dict:
+    roots_norm = ",".join(
+        sorted({part.strip() for part in (roots_arg or "").split(",") if part.strip()})
+    )
+    return {
+        "fingerprint": _db_fingerprint(db_path),
+        "roots": roots_norm,
+        "media_root": str(Path(media_root)),
+        "pocket_depth": int(pocket_depth),
+        "top_n": int(top_n),
+    }
+
+
+def _cache_file(output_dir: str) -> Path:
+    return Path(output_dir) / "hashall-status-cache.json"
+
+
+def _load_cached_report(
+    *,
+    cache_path: Path,
+    expected_key: dict,
+    ttl_seconds: int,
+) -> Optional[dict]:
+    if ttl_seconds <= 0 or not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    created_at = float(payload.get("created_at_epoch", 0))
+    if created_at <= 0 or (time.time() - created_at) > ttl_seconds:
+        return None
+
+    if payload.get("key") != expected_key:
+        return None
+
+    report = payload.get("report")
+    if not isinstance(report, dict):
+        return None
+    return report
+
+
+def _write_cached_report(*, cache_path: Path, cache_key: dict, report: dict) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "created_at_epoch": time.time(),
+        "key": cache_key,
+        "report": report,
+    }
+    cache_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+class _Spinner(AbstractContextManager):
+    def __init__(self, message: str, *, enabled: bool) -> None:
+        self._message = message
+        self._enabled = enabled
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def __enter__(self) -> "_Spinner":
+        if not self._enabled:
+            return self
+
+        def _run() -> None:
+            frames = "|/-\\"
+            i = 0
+            while not self._stop.is_set():
+                frame = frames[i % len(frames)]
+                sys.stderr.write(f"\r{self._message} {frame}")
+                sys.stderr.flush()
+                i += 1
+                self._stop.wait(0.1)
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> Optional[bool]:
+        if not self._enabled:
+            return None
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+        sys.stderr.write(f"\r{self._message} done\n")
+        sys.stderr.flush()
+        return None
+
+
 def _build_actions(report: dict) -> list[dict]:
     actions: list[dict] = []
     roots_csv = ",".join(item["root"] for item in report["roots"])
@@ -957,13 +1075,22 @@ def _render_phone(report: dict, *, width: int, top: int) -> str:
     if step_num == 1:
         lines.append("1. no immediate actions required")
 
-    wrapped: list[str] = []
-    for line in lines:
-        if not line:
-            wrapped.append("")
-            continue
-        wrapped.extend(textwrap.wrap(line, width=width, break_long_words=False, break_on_hyphens=False))
-    return "\n".join(wrapped)
+    return "\n".join(_truncate_line(line, width=max(20, width)) for line in lines)
+
+
+def _truncate_line(line: str, width: int) -> str:
+    if width <= 0 or len(line) <= width:
+        return line
+    if width <= 3:
+        return "." * width
+    return line[: width - 3] + "..."
+
+
+def _resolve_phone_width(requested_width: int) -> int:
+    if requested_width > 0:
+        return max(20, requested_width)
+    detected = shutil.get_terminal_size(fallback=(100, 24)).columns
+    return max(20, int(detected))
 
 
 def write_report_files(report: dict, *, output_dir: str, db_path: str) -> tuple[Path, Path]:
@@ -986,8 +1113,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--media-root", default="/data/media")
     parser.add_argument("--pocket-depth", type=int, default=2)
     parser.add_argument("--top", type=int, default=15)
+    parser.add_argument("--cache-ttl-seconds", type=int, default=300)
+    parser.add_argument("--refresh-cache", action="store_true")
     parser.add_argument("--print-phone", action="store_true", help="Print compact phone-friendly summary")
-    parser.add_argument("--phone-width", type=int, default=78)
+    parser.add_argument("--phone-width", type=int, default=0, help="0 = auto-detect terminal width")
     parser.add_argument("--phone-top", type=int, default=5)
     parser.add_argument("--print-json", action="store_true", help="Print JSON summary to stdout")
     return parser.parse_args(argv)
@@ -995,23 +1124,54 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
-    conn = connect_db(Path(args.db), read_only=True, apply_migrations=False)
-    try:
-        report = build_status_report(
-            conn,
-            roots_arg=args.roots,
-            media_root=args.media_root,
-            pocket_depth=max(1, args.pocket_depth),
-            top_n=max(1, args.top),
+    db_path = Path(args.db)
+    cache_key = _cache_key(
+        db_path=db_path,
+        roots_arg=args.roots,
+        media_root=args.media_root,
+        pocket_depth=max(1, args.pocket_depth),
+        top_n=max(1, args.top),
+    )
+    cache_path = _cache_file(args.output_dir)
+
+    report = None
+    cache_used = False
+    if not args.refresh_cache:
+        report = _load_cached_report(
+            cache_path=cache_path,
+            expected_key=cache_key,
+            ttl_seconds=max(0, args.cache_ttl_seconds),
         )
-    finally:
-        conn.close()
+        cache_used = report is not None
+
+    if report is None:
+        with _Spinner("Generating status report", enabled=sys.stderr.isatty()):
+            conn = connect_db(db_path, read_only=True, apply_migrations=False)
+            try:
+                report = build_status_report(
+                    conn,
+                    roots_arg=args.roots,
+                    media_root=args.media_root,
+                    pocket_depth=max(1, args.pocket_depth),
+                    top_n=max(1, args.top),
+                )
+            finally:
+                conn.close()
+        _write_cached_report(cache_path=cache_path, cache_key=cache_key, report=report)
 
     md_path, json_path = write_report_files(report, output_dir=args.output_dir, db_path=args.db)
 
     print("Hashall status report generated")
     print(f"  DB: {args.db}")
     print(f"  Roots: {', '.join(item['root'] for item in report['roots'])}")
+    print(
+        "  Cache: "
+        + (
+            f"hit (ttl={max(0, args.cache_ttl_seconds)}s)"
+            if cache_used
+            else f"miss (ttl={max(0, args.cache_ttl_seconds)}s)"
+        )
+    )
     print(f"  Markdown: {md_path}")
     print(f"  JSON: {json_path}")
     print(
@@ -1022,8 +1182,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"rehome(pool->stash)={report['rehome']['pool_to_stash_groups']}"
     )
     if args.print_phone:
+        phone_width = _resolve_phone_width(args.phone_width)
         print()
-        print(_render_phone(report, width=max(40, args.phone_width), top=max(1, args.phone_top)))
+        print(_render_phone(report, width=phone_width, top=max(1, args.phone_top)))
     if args.print_json:
         print(json.dumps(report, indent=2))
     return 0

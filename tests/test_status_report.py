@@ -2,9 +2,14 @@ import sqlite3
 
 from hashall.status_report import (
     RootContext,
+    _cache_key,
     _collect_duplicate_pockets,
     _collect_payload_groups,
+    _load_cached_report,
     _render_phone,
+    _resolve_phone_width,
+    _truncate_line,
+    _write_cached_report,
 )
 
 
@@ -174,3 +179,63 @@ def test_render_phone_includes_summary_pockets_and_actions():
     assert "reclaim duplicate file bytes now" in text
     assert "review rehome queue" in text
     assert "make payload-auto" in text
+
+
+def test_render_phone_truncates_lines_to_width():
+    report = {
+        "totals": {
+            "active_files": 100,
+            "bytes_saveable": 2048,
+            "duplicate_sha256_groups": 3,
+            "payload_complete": 10,
+            "payload_incomplete": 2,
+            "dirty_actionable": 1,
+            "dirty_orphan": 9,
+            "link_actions_nonzero": 4,
+            "link_actions_zero_bytes": 5,
+            "link_actions_possible": 9,
+        },
+        "db_health": {
+            "quick_check": "ok",
+        },
+        "rehome": {
+            "stash_to_pool_groups": 7,
+            "stash_to_pool_estimated_bytes": 8192,
+            "pool_to_stash_groups": 0,
+        },
+        "duplicate_pockets": [],
+        "actions": [],
+    }
+
+    text = _render_phone(report, width=40, top=3)
+    assert "..." in text
+    for line in text.splitlines():
+        assert len(line) <= 40
+
+
+def test_truncate_line_keeps_short_lines():
+    assert _truncate_line("abc", 5) == "abc"
+    assert _truncate_line("abcdef", 3) == "..."
+    assert _truncate_line("abcdef", 5) == "ab..."
+
+
+def test_cache_roundtrip(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    db_path.write_text("db", encoding="utf-8")
+    key = _cache_key(
+        db_path=db_path,
+        roots_arg="/pool/data,/stash/media",
+        media_root="/data/media",
+        pocket_depth=2,
+        top_n=10,
+    )
+    cache_path = tmp_path / "cache.json"
+    report = {"roots": [], "totals": {"active_files": 0}}
+    _write_cached_report(cache_path=cache_path, cache_key=key, report=report)
+
+    loaded = _load_cached_report(cache_path=cache_path, expected_key=key, ttl_seconds=60)
+    assert loaded == report
+
+
+def test_resolve_phone_width_uses_requested_value():
+    assert _resolve_phone_width(77) == 77

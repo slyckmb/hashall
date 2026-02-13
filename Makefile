@@ -65,8 +65,10 @@ STATUS_REPORT_TOP ?= 15
 STATUS_REPORT_POCKET_DEPTH ?= 2
 STATUS_REPORT_OUTPUT_DIR ?= out/reports
 STATUS_REPORT_MEDIA_ROOT ?= /data/media
-STATUS_REPORT_PHONE_WIDTH ?= 78
+STATUS_REPORT_PHONE_WIDTH ?= 0
 STATUS_REPORT_PHONE_TOP ?= 5
+STATUS_REPORT_CACHE_TTL ?= 300
+STATUS_REPORT_REFRESH ?= 0
 PAYLOAD_AUTO_QBM_FAIL_CLOSED ?= 0
 PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES ?= 120
 PAYLOAD_AUTO_QBM_ACTIVITY_LOG ?=
@@ -590,7 +592,8 @@ payload-workflow:  ## Show payload workflow status across all roots
 
 .PHONY: status-report
 status-report:  ## Generate operations status report (inventory, duplicate heat map, rehome signals)
-	@set -- --db "$(DB_FILE)" --output-dir "$(STATUS_REPORT_OUTPUT_DIR)" --top "$(STATUS_REPORT_TOP)" --pocket-depth "$(STATUS_REPORT_POCKET_DEPTH)" --media-root "$(STATUS_REPORT_MEDIA_ROOT)"; \
+	@set -- --db "$(DB_FILE)" --output-dir "$(STATUS_REPORT_OUTPUT_DIR)" --top "$(STATUS_REPORT_TOP)" --pocket-depth "$(STATUS_REPORT_POCKET_DEPTH)" --media-root "$(STATUS_REPORT_MEDIA_ROOT)" --cache-ttl-seconds "$(STATUS_REPORT_CACHE_TTL)"; \
+	if [ "$(STATUS_REPORT_REFRESH)" = "1" ]; then set -- "$$@" --refresh-cache; fi; \
 	roots="$(STATUS_ROOTS)"; \
 	if [ -z "$$roots" ] && [ -n "$(ROOTS)" ]; then roots="$(ROOTS)"; fi; \
 	if [ -n "$$roots" ]; then set -- "$$@" --roots "$$roots"; fi; \
@@ -598,7 +601,8 @@ status-report:  ## Generate operations status report (inventory, duplicate heat 
 
 .PHONY: status-report-phone
 status-report-phone:  ## Generate compact status report for narrow terminals/phones
-	@set -- --db "$(DB_FILE)" --output-dir "$(STATUS_REPORT_OUTPUT_DIR)" --top "$(STATUS_REPORT_TOP)" --pocket-depth "$(STATUS_REPORT_POCKET_DEPTH)" --media-root "$(STATUS_REPORT_MEDIA_ROOT)" --print-phone --phone-width "$(STATUS_REPORT_PHONE_WIDTH)" --phone-top "$(STATUS_REPORT_PHONE_TOP)"; \
+	@set -- --db "$(DB_FILE)" --output-dir "$(STATUS_REPORT_OUTPUT_DIR)" --top "$(STATUS_REPORT_TOP)" --pocket-depth "$(STATUS_REPORT_POCKET_DEPTH)" --media-root "$(STATUS_REPORT_MEDIA_ROOT)" --cache-ttl-seconds "$(STATUS_REPORT_CACHE_TTL)" --print-phone --phone-width "$(STATUS_REPORT_PHONE_WIDTH)" --phone-top "$(STATUS_REPORT_PHONE_TOP)"; \
+	if [ "$(STATUS_REPORT_REFRESH)" = "1" ]; then set -- "$$@" --refresh-cache; fi; \
 	roots="$(STATUS_ROOTS)"; \
 	if [ -z "$$roots" ] && [ -n "$(ROOTS)" ]; then roots="$(ROOTS)"; fi; \
 	if [ -n "$$roots" ]; then set -- "$$@" --roots "$$roots"; fi; \
