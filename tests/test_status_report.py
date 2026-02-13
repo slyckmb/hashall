@@ -4,6 +4,7 @@ from hashall.status_report import (
     RootContext,
     _cache_key,
     _collect_duplicate_pockets,
+    _collect_payload_metrics,
     _collect_payload_groups,
     _load_cached_report,
     _render_phone,
@@ -140,6 +141,52 @@ def test_collect_payload_groups_emits_rehome_signals():
     assert groups["confirmed_groups"] == 2
     assert groups["rehome_opportunities"]["stash_to_pool_groups"] == 1
     assert groups["rehome_opportunities"]["pool_to_stash_groups"] == 1
+    assert groups["rehome_opportunities"]["stash_to_pool_no_growth_groups"] == 0
+
+
+def test_collect_payload_metrics_classifies_noncomplete_refs_as_noise():
+    contexts = [
+        RootContext(
+            root_input="/data/media",
+            canonical_root="/data/media",
+            device_id=3,
+            device_alias="media",
+            rel_root=".",
+            root_kind="media",
+            fs_uuid="dev-3",
+            scan_last_scanned_at=None,
+        ),
+    ]
+    payload_rows = [
+        {
+            "payload_id": 10,
+            "payload_hash": None,
+            "status": "incomplete",
+            "file_count": 0,
+            "total_bytes": 100,
+            "root_path": "/data/media/torrents/a",
+            "device_id": 3,
+            "ref_count": 1,
+            "has_complete_ref": False,
+        },
+        {
+            "payload_id": 11,
+            "payload_hash": None,
+            "status": "incomplete",
+            "file_count": 0,
+            "total_bytes": 100,
+            "root_path": "/data/media/torrents/b",
+            "device_id": 3,
+            "ref_count": 1,
+            "has_complete_ref": True,
+        },
+    ]
+
+    per_root = _collect_payload_metrics(contexts, payload_rows, completion_filter_active=True)
+    row = per_root["/data/media"]
+    assert row["dirty_actionable"] == 1
+    assert row["dirty_noncomplete"] == 1
+    assert row["dirty_orphan"] == 0
 
 
 def test_render_phone_includes_summary_pockets_and_actions():
@@ -150,7 +197,9 @@ def test_render_phone_includes_summary_pockets_and_actions():
             "duplicate_sha256_groups": 3,
             "payload_complete": 10,
             "payload_incomplete": 2,
+            "payload_needs_upgrade": 2,
             "dirty_actionable": 1,
+            "dirty_noncomplete": 1,
             "dirty_orphan": 9,
             "link_actions_nonzero": 4,
             "link_actions_zero_bytes": 5,
@@ -162,8 +211,13 @@ def test_render_phone_includes_summary_pockets_and_actions():
         "rehome": {
             "stash_to_pool_groups": 7,
             "stash_to_pool_estimated_bytes": 8192,
+            "stash_to_pool_no_growth_groups": 5,
+            "stash_to_pool_no_growth_estimated_bytes": 4096,
             "pool_to_stash_groups": 0,
         },
+        "completion_filter_active": True,
+        "completion_filter_error": None,
+        "recovery_no_growth": {"available": False},
         "duplicate_pockets": [
             {"actions": 3, "bytes_saveable": 1024, "pocket": "/stash/media/torrents"},
         ],
@@ -178,6 +232,7 @@ def test_render_phone_includes_summary_pockets_and_actions():
     assert "converge payload state" in text
     assert "reclaim duplicate file bytes now" in text
     assert "review rehome queue" in text
+    assert "refs below 100%" in text
     assert "make payload-auto" in text
 
 
@@ -189,7 +244,9 @@ def test_render_phone_truncates_lines_to_width():
             "duplicate_sha256_groups": 3,
             "payload_complete": 10,
             "payload_incomplete": 2,
+            "payload_needs_upgrade": 0,
             "dirty_actionable": 1,
+            "dirty_noncomplete": 2,
             "dirty_orphan": 9,
             "link_actions_nonzero": 4,
             "link_actions_zero_bytes": 5,
@@ -201,8 +258,13 @@ def test_render_phone_truncates_lines_to_width():
         "rehome": {
             "stash_to_pool_groups": 7,
             "stash_to_pool_estimated_bytes": 8192,
+            "stash_to_pool_no_growth_groups": 5,
+            "stash_to_pool_no_growth_estimated_bytes": 4096,
             "pool_to_stash_groups": 0,
         },
+        "completion_filter_active": True,
+        "completion_filter_error": None,
+        "recovery_no_growth": {"available": False},
         "duplicate_pockets": [],
         "actions": [],
     }
@@ -228,6 +290,7 @@ def test_cache_roundtrip(tmp_path):
         media_root="/data/media",
         pocket_depth=2,
         top_n=10,
+        recovery_prefix="/data/media/torrents/seeding/recovery_20260211",
     )
     cache_path = tmp_path / "cache.json"
     report = {"roots": [], "totals": {"active_files": 0}}

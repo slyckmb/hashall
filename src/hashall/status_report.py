@@ -27,6 +27,7 @@ from typing import Optional
 
 from hashall.fs_utils import get_filesystem_uuid, get_mount_source
 from hashall.model import connect_db
+from hashall.payload_completion import load_completed_torrent_hashes
 from hashall.pathing import canonicalize_path, is_under
 from hashall.scan import _canonicalize_root
 
@@ -355,7 +356,12 @@ def _collect_duplicate_pockets(
     return ranked[:top_n]
 
 
-def _load_payload_rows(conn: sqlite3.Connection) -> tuple[list[dict], dict[int, int]]:
+def _load_payload_rows(
+    conn: sqlite3.Connection,
+    *,
+    completed_hashes: set[str],
+    completion_filter_active: bool,
+) -> list[dict]:
     payload_rows = conn.execute(
         """
         SELECT payload_id, payload_hash, status, file_count, total_bytes, root_path, device_id
@@ -364,29 +370,37 @@ def _load_payload_rows(conn: sqlite3.Connection) -> tuple[list[dict], dict[int, 
         """
     ).fetchall()
 
-    ref_rows = conn.execute(
-        """
-        SELECT payload_id, COUNT(*) AS ref_count
-        FROM torrent_instances
-        GROUP BY payload_id
-        """
-    ).fetchall()
-    ref_counts = {int(row[0]): int(row[1]) for row in ref_rows}
+    ref_rows = conn.execute("SELECT payload_id, torrent_hash FROM torrent_instances").fetchall()
+    ref_counts: dict[int, int] = {}
+    complete_ref_by_payload: dict[int, bool] = {}
+    completed_lc = {h.lower() for h in completed_hashes}
+    for payload_id, torrent_hash in ref_rows:
+        pid = int(payload_id)
+        ref_counts[pid] = ref_counts.get(pid, 0) + 1
+        if (
+            completion_filter_active
+            and torrent_hash
+            and str(torrent_hash).lower() in completed_lc
+        ):
+            complete_ref_by_payload[pid] = True
 
     rows = []
     for row in payload_rows:
+        payload_id = int(row[0])
         rows.append(
             {
-                "payload_id": int(row[0]),
+                "payload_id": payload_id,
                 "payload_hash": str(row[1]) if row[1] else None,
                 "status": str(row[2]),
                 "file_count": int(row[3] or 0),
                 "total_bytes": int(row[4] or 0),
                 "root_path": str(row[5]),
                 "device_id": int(row[6]) if row[6] is not None else None,
+                "ref_count": int(ref_counts.get(payload_id, 0)),
+                "has_complete_ref": bool(complete_ref_by_payload.get(payload_id, False)),
             }
         )
-    return rows, ref_counts
+    return rows
 
 
 def _root_for_payload(payload_root: str, contexts: list[RootContext]) -> Optional[RootContext]:
@@ -399,14 +413,18 @@ def _root_for_payload(payload_root: str, contexts: list[RootContext]) -> Optiona
 def _collect_payload_metrics(
     contexts: list[RootContext],
     payload_rows: list[dict],
-    ref_counts: dict[int, int],
+    *,
+    completion_filter_active: bool,
 ) -> dict:
     per_root = {
         ctx.root_input: {
             "payload_total": 0,
             "payload_complete": 0,
             "payload_incomplete": 0,
+            "payload_needs_upgrade": 0,
+            "payload_incomplete_zero_files": 0,
             "dirty_actionable": 0,
+            "dirty_noncomplete": 0,
             "dirty_orphan": 0,
         }
         for ctx in contexts
@@ -422,11 +440,18 @@ def _collect_payload_metrics(
             bucket["payload_complete"] += 1
         else:
             bucket["payload_incomplete"] += 1
+            if int(row["file_count"]) > 0:
+                bucket["payload_needs_upgrade"] += 1
+            else:
+                bucket["payload_incomplete_zero_files"] += 1
 
-        if row["file_count"] == 0:
-            ref_count = ref_counts.get(row["payload_id"], 0)
+        if int(row["file_count"]) == 0:
+            ref_count = int(row.get("ref_count", 0))
             if ref_count > 0:
-                bucket["dirty_actionable"] += 1
+                if completion_filter_active and not bool(row.get("has_complete_ref", False)):
+                    bucket["dirty_noncomplete"] += 1
+                else:
+                    bucket["dirty_actionable"] += 1
             else:
                 bucket["dirty_orphan"] += 1
 
@@ -456,6 +481,9 @@ def _collect_payload_groups(
     stash_to_pool_bytes = 0
     pool_to_stash_groups = 0
     pool_to_stash_bytes = 0
+    stash_to_pool_no_growth_groups = 0
+    stash_to_pool_no_growth_bytes = 0
+    no_growth_group_summaries: list[dict] = []
 
     for payload_hash, rows in groups.items():
         if len(rows) < 2:
@@ -468,14 +496,27 @@ def _collect_payload_groups(
                 roots_present.add(owner.root_kind)
 
         has_media = any(_path_in_root(row["root_path"], media_root) for row in rows)
+        has_stash = "stash" in roots_present
+        has_pool = "pool" in roots_present
         total_bytes = max(int(row["total_bytes"]) for row in rows)
 
-        if "stash" in roots_present and not has_media:
+        if has_stash and not has_media:
             stash_to_pool_groups += 1
             stash_to_pool_bytes += total_bytes
-        if "pool" in roots_present and has_media:
+        if has_pool and has_media:
             pool_to_stash_groups += 1
             pool_to_stash_bytes += total_bytes
+        if has_stash and has_pool:
+            stash_to_pool_no_growth_groups += 1
+            stash_to_pool_no_growth_bytes += total_bytes
+            no_growth_group_summaries.append(
+                {
+                    "payload_hash": payload_hash,
+                    "copies": len(rows),
+                    "total_bytes": total_bytes,
+                    "sample_paths": sorted(row["root_path"] for row in rows)[:4],
+                }
+            )
 
         group_summaries.append(
             {
@@ -490,16 +531,185 @@ def _collect_payload_groups(
 
     group_summaries.sort(key=lambda item: (item["copies"], item["total_bytes"]), reverse=True)
     top_groups = group_summaries[:top_n]
+    no_growth_group_summaries.sort(key=lambda item: (item["total_bytes"], item["copies"]), reverse=True)
+    top_no_growth_groups = no_growth_group_summaries[:top_n]
 
     return {
         "confirmed_groups": len(group_summaries),
         "top_groups": top_groups,
+        "top_no_growth_groups": top_no_growth_groups,
         "rehome_opportunities": {
             "stash_to_pool_groups": stash_to_pool_groups,
             "stash_to_pool_estimated_bytes": stash_to_pool_bytes,
             "pool_to_stash_groups": pool_to_stash_groups,
             "pool_to_stash_estimated_bytes": pool_to_stash_bytes,
+            "stash_to_pool_no_growth_groups": stash_to_pool_no_growth_groups,
+            "stash_to_pool_no_growth_estimated_bytes": stash_to_pool_no_growth_bytes,
         },
+    }
+
+
+def _path_to_rel_for_context(path: str, ctx: RootContext) -> Optional[str]:
+    try:
+        normalized = str(canonicalize_path(Path(path)))
+    except Exception:
+        normalized = str(Path(path))
+    for base in (ctx.canonical_root, ctx.root_input):
+        if normalized == base:
+            return "."
+        prefix = base.rstrip("/") + "/"
+        if normalized.startswith(prefix):
+            return normalized[len(prefix):]
+    return None
+
+
+def _collect_recovery_no_growth(
+    conn: sqlite3.Connection,
+    *,
+    contexts: list[RootContext],
+    recovery_prefix: str,
+    top_n: int,
+) -> dict:
+    stash_ctx = next((c for c in contexts if c.root_kind == "stash"), None)
+    pool_ctx = next((c for c in contexts if c.root_kind == "pool"), None)
+    if stash_ctx is None or pool_ctx is None:
+        return {
+            "available": False,
+            "reason": "missing_pool_or_stash_root",
+            "recovery_prefix": recovery_prefix,
+            "matched_files": 0,
+            "matched_bytes": 0,
+            "unmatched_files": 0,
+            "unmatched_bytes": 0,
+            "samples": [],
+        }
+
+    rel_prefix = _path_to_rel_for_context(recovery_prefix, stash_ctx)
+    if rel_prefix is None:
+        return {
+            "available": False,
+            "reason": "prefix_not_under_stash_root",
+            "recovery_prefix": recovery_prefix,
+            "matched_files": 0,
+            "matched_bytes": 0,
+            "unmatched_files": 0,
+            "unmatched_bytes": 0,
+            "samples": [],
+        }
+
+    stash_table = f"files_{stash_ctx.device_id}"
+    pool_table = f"files_{pool_ctx.device_id}"
+    stash_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        (stash_table,),
+    ).fetchone()
+    pool_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        (pool_table,),
+    ).fetchone()
+    if not stash_exists or not pool_exists:
+        return {
+            "available": False,
+            "reason": "missing_pool_or_stash_file_tables",
+            "recovery_prefix": recovery_prefix,
+            "matched_files": 0,
+            "matched_bytes": 0,
+            "unmatched_files": 0,
+            "unmatched_bytes": 0,
+            "samples": [],
+        }
+
+    if rel_prefix == ".":
+        scope_sql = "1=1"
+        scope_params: tuple = ()
+    else:
+        scope_sql = "(path = ? OR path LIKE ?)"
+        scope_params = (rel_prefix, f"{rel_prefix.rstrip('/')}/%")
+
+    totals_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total_files,
+            COALESCE(SUM(size), 0) AS total_bytes,
+            COALESCE(SUM(CASE WHEN sha256 IS NOT NULL THEN 1 ELSE 0 END), 0) AS hashed_files,
+            COALESCE(SUM(CASE WHEN sha256 IS NOT NULL THEN size ELSE 0 END), 0) AS hashed_bytes
+        FROM {stash_table}
+        WHERE status = 'active' AND {scope_sql}
+        """,
+        scope_params,
+    ).fetchone()
+    total_files = int(totals_row[0] or 0)
+    total_bytes = int(totals_row[1] or 0)
+    hashed_files = int(totals_row[2] or 0)
+    hashed_bytes = int(totals_row[3] or 0)
+
+    matched_row = conn.execute(
+        f"""
+        WITH rec AS (
+            SELECT path, size, sha256
+            FROM {stash_table}
+            WHERE status = 'active' AND sha256 IS NOT NULL AND {scope_sql}
+        ),
+        pool AS (
+            SELECT DISTINCT sha256, size
+            FROM {pool_table}
+            WHERE status = 'active' AND sha256 IS NOT NULL
+        )
+        SELECT
+            COUNT(*) AS matched_files,
+            COALESCE(SUM(rec.size), 0) AS matched_bytes
+        FROM rec
+        JOIN pool ON pool.sha256 = rec.sha256 AND pool.size = rec.size
+        """,
+        scope_params,
+    ).fetchone()
+    matched_files = int(matched_row[0] or 0)
+    matched_bytes = int(matched_row[1] or 0)
+
+    sample_rows = conn.execute(
+        f"""
+        WITH rec AS (
+            SELECT path, size, sha256
+            FROM {stash_table}
+            WHERE status = 'active' AND sha256 IS NOT NULL AND {scope_sql}
+        ),
+        pool AS (
+            SELECT DISTINCT sha256, size
+            FROM {pool_table}
+            WHERE status = 'active' AND sha256 IS NOT NULL
+        )
+        SELECT rec.path, rec.size
+        FROM rec
+        JOIN pool ON pool.sha256 = rec.sha256 AND pool.size = rec.size
+        ORDER BY rec.size DESC, rec.path ASC
+        LIMIT ?
+        """,
+        (*scope_params, max(1, top_n)),
+    ).fetchall()
+    samples = []
+    for row in sample_rows:
+        rel_path = str(row[0])
+        abs_path = (
+            str(Path(stash_ctx.canonical_root) / rel_path)
+            if rel_path != "."
+            else stash_ctx.canonical_root
+        )
+        samples.append({"path": abs_path, "bytes": int(row[1] or 0)})
+
+    return {
+        "available": True,
+        "reason": None,
+        "recovery_prefix": recovery_prefix,
+        "recovery_rel_prefix": rel_prefix,
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "hashed_files": hashed_files,
+        "hashed_bytes": hashed_bytes,
+        "matched_files": matched_files,
+        "matched_bytes": matched_bytes,
+        "unmatched_files": max(0, hashed_files - matched_files),
+        "unmatched_bytes": max(0, hashed_bytes - matched_bytes),
+        "samples": samples,
     }
 
 
@@ -573,6 +783,7 @@ def _cache_key(
     media_root: str,
     pocket_depth: int,
     top_n: int,
+    recovery_prefix: str,
 ) -> dict:
     roots_norm = ",".join(
         sorted({part.strip() for part in (roots_arg or "").split(",") if part.strip()})
@@ -583,6 +794,7 @@ def _cache_key(
         "media_root": str(Path(media_root)),
         "pocket_depth": int(pocket_depth),
         "top_n": int(top_n),
+        "recovery_prefix": str(Path(recovery_prefix)),
     }
 
 
@@ -684,21 +896,22 @@ def _build_actions(report: dict) -> list[dict]:
                 "command": f"make hardlink-auto ROOTS='{roots_csv}' HARDLINK_AUTO_EXECUTE=1",
             }
         )
-    elif report["totals"]["link_actions_zero_bytes"] > 0:
-        actions.append(
-            {
-                "priority": "P2",
-                "reason": "only zero-byte hardlink actions remain (optional cleanup)",
-                "command": f"make hardlink-auto ROOTS='{roots_csv}' HARDLINK_AUTO_EXECUTE=1",
-            }
-        )
 
-    if report["totals"]["payload_incomplete"] > 0:
+    if report["totals"]["payload_needs_upgrade"] > 0:
         actions.append(
             {
                 "priority": "P1",
-                "reason": "incomplete payloads still exist",
-                "command": f"make payload-workflow PW_PATHS='{' '.join(item['root'] for item in report['roots'])}'",
+                "reason": "payload rows have files but are still incomplete (missing SHA256)",
+                "command": f"make payload-sync PAYLOAD_UPGRADE_MISSING=1 PAYLOAD_PARALLEL=1 PAYLOAD_PATH_PREFIXES='{' '.join(item['root'] for item in report['roots'])}'",
+            }
+        )
+
+    if report["totals"]["dirty_noncomplete"] > 0:
+        actions.append(
+            {
+                "priority": "P3",
+                "reason": "refs below 100% completion were ignored (informational noise)",
+                "command": "make payload-workflow PW_PATHS='/pool/data /stash/media /data/media'",
             }
         )
 
@@ -719,6 +932,14 @@ def _build_actions(report: dict) -> list[dict]:
                 "command": "make rehome-checklist",
             }
         )
+    if report["rehome"]["stash_to_pool_no_growth_groups"] > 0:
+        actions.append(
+            {
+                "priority": "P1",
+                "reason": "no-pool-growth stash demote candidates detected",
+                "command": "make rehome-checklist",
+            }
+        )
 
     return actions
 
@@ -730,10 +951,19 @@ def build_status_report(
     media_root: str,
     pocket_depth: int,
     top_n: int,
+    recovery_prefix: str,
+    completed_hashes: Optional[set[str]] = None,
+    completion_filter_active: Optional[bool] = None,
+    completion_filter_error: Optional[str] = None,
 ) -> dict:
     roots = _resolve_roots(conn, roots_arg)
     if not roots:
         raise RuntimeError("No roots discovered. Pass --roots or run scans first.")
+
+    if completion_filter_active is None:
+        completed_hashes, completion_filter_active, completion_filter_error = load_completed_torrent_hashes()
+    completed_hashes = set(completed_hashes or set())
+    completion_filter_active = bool(completion_filter_active)
 
     contexts = [_resolve_root_context(conn, root) for root in roots]
 
@@ -784,12 +1014,26 @@ def build_status_report(
             }
         )
 
-    payload_rows, ref_counts = _load_payload_rows(conn)
-    payload_per_root = _collect_payload_metrics(contexts, payload_rows, ref_counts)
+    payload_rows = _load_payload_rows(
+        conn,
+        completed_hashes=completed_hashes,
+        completion_filter_active=completion_filter_active,
+    )
+    payload_per_root = _collect_payload_metrics(
+        contexts,
+        payload_rows,
+        completion_filter_active=completion_filter_active,
+    )
     payload_groups = _collect_payload_groups(
         contexts,
         payload_rows,
         media_root=media_root,
+        top_n=top_n,
+    )
+    recovery_no_growth = _collect_recovery_no_growth(
+        conn,
+        contexts=contexts,
+        recovery_prefix=recovery_prefix,
         top_n=top_n,
     )
 
@@ -838,7 +1082,10 @@ def build_status_report(
         "payload_total": sum(int(r.get("payload_total", 0)) for r in roots_out),
         "payload_complete": sum(int(r.get("payload_complete", 0)) for r in roots_out),
         "payload_incomplete": sum(int(r.get("payload_incomplete", 0)) for r in roots_out),
+        "payload_needs_upgrade": sum(int(r.get("payload_needs_upgrade", 0)) for r in roots_out),
+        "payload_incomplete_zero_files": sum(int(r.get("payload_incomplete_zero_files", 0)) for r in roots_out),
         "dirty_actionable": sum(int(r.get("dirty_actionable", 0)) for r in roots_out),
+        "dirty_noncomplete": sum(int(r.get("dirty_noncomplete", 0)) for r in roots_out),
         "dirty_orphan": sum(int(r.get("dirty_orphan", 0)) for r in roots_out),
     }
 
@@ -846,12 +1093,17 @@ def build_status_report(
         "generated_at": _now_stamp(),
         "generated_at_utc": _utc_stamp(),
         "media_root": media_root,
+        "recovery_prefix": recovery_prefix,
         "roots": roots_out,
         "totals": totals,
+        "completion_filter_active": completion_filter_active,
+        "completion_filter_error": completion_filter_error,
         "duplicate_pockets": top_pockets,
         "payload_groups": payload_groups["top_groups"],
+        "payload_groups_no_growth": payload_groups["top_no_growth_groups"],
         "payload_group_count": payload_groups["confirmed_groups"],
         "rehome": payload_groups["rehome_opportunities"],
+        "recovery_no_growth": recovery_no_growth,
         "orphans": orphan_gc,
         "db_health": db_health,
     }
@@ -866,6 +1118,7 @@ def _render_markdown(report: dict, db_path: str) -> str:
     lines.append(f"- Generated: `{report['generated_at']}`")
     lines.append(f"- Database: `{db_path}`")
     lines.append(f"- Media root policy anchor: `{report['media_root']}`")
+    lines.append(f"- Recovery prefix: `{report['recovery_prefix']}`")
     lines.append("")
 
     totals = report["totals"]
@@ -880,17 +1133,30 @@ def _render_markdown(report: dict, db_path: str) -> str:
         f"(total {totals['link_actions_possible']:,})"
     )
     lines.append(f"- Estimated bytes saveable: **{_fmt_bytes(totals['bytes_saveable'])}**")
-    lines.append(f"- Payloads complete/incomplete: **{totals['payload_complete']:,} / {totals['payload_incomplete']:,}**")
-    lines.append(f"- Dirty payloads (actionable/orphan): **{totals['dirty_actionable']:,} / {totals['dirty_orphan']:,}**")
+    lines.append(
+        f"- Payloads complete/incomplete: **{totals['payload_complete']:,} / {totals['payload_incomplete']:,}**"
+    )
+    lines.append(
+        "- Dirty payloads (actionable/noncomplete/orphan): "
+        f"**{totals['dirty_actionable']:,} / {totals['dirty_noncomplete']:,} / {totals['dirty_orphan']:,}**"
+    )
+    lines.append(
+        "- Incomplete payload rows (needs-upgrade/zero-files): "
+        f"**{totals['payload_needs_upgrade']:,} / {totals['payload_incomplete_zero_files']:,}**"
+    )
+    if report.get("completion_filter_active"):
+        lines.append("- qB completion filter: **active** (refs below 100% are informational)")
+    elif report.get("completion_filter_error"):
+        lines.append(f"- qB completion filter: **disabled** ({report['completion_filter_error']})")
     lines.append("")
 
     lines.append("## Roots")
     lines.append("")
-    lines.append("| Root | Device | Active files | Hardlinked files | Dup groups | Actions (nonzero/zero) | Saveable | Payload complete/incomplete | Dirty actionable/orphan | Scope note |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    lines.append("| Root | Device | Active files | Hardlinked files | Dup groups | Actions (nonzero/zero) | Saveable | Payload complete/incomplete | Needs upgrade | Dirty actionable/noncomplete/orphan | Scope note |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
     for row in report["roots"]:
         lines.append(
-            "| {root} | {device} | {files:,} | {hardlinked:,} ({ratio:.1%}) | {dups:,} | {actions_nonzero:,}/{actions_zero:,} | {saveable} | {pc:,}/{pi:,} | {da:,}/{do:,} | {scope_note} |".format(
+            "| {root} | {device} | {files:,} | {hardlinked:,} ({ratio:.1%}) | {dups:,} | {actions_nonzero:,}/{actions_zero:,} | {saveable} | {pc:,}/{pi:,} | {needs_upgrade:,} | {da:,}/{dn:,}/{do:,} | {scope_note} |".format(
                 root=row["root"],
                 device=row["device_id"],
                 files=int(row["active_files"]),
@@ -902,7 +1168,9 @@ def _render_markdown(report: dict, db_path: str) -> str:
                 saveable=_fmt_bytes(int(row["bytes_saveable"])),
                 pc=int(row.get("payload_complete", 0)),
                 pi=int(row.get("payload_incomplete", 0)),
+                needs_upgrade=int(row.get("payload_needs_upgrade", 0)),
                 da=int(row.get("dirty_actionable", 0)),
+                dn=int(row.get("dirty_noncomplete", 0)),
                 do=int(row.get("dirty_orphan", 0)),
                 scope_note=(
                     f"alias of `{row['scope_alias_of']}`"
@@ -937,8 +1205,19 @@ def _render_markdown(report: dict, db_path: str) -> str:
     lines.append("## Payload Groups & Rehome Signals")
     lines.append("")
     lines.append(f"- Confirmed payload groups (copies >= 2): **{report['payload_group_count']:,}**")
-    lines.append(f"- Rehome opportunities stash -> pool: **{report['rehome']['stash_to_pool_groups']:,}** groups (~{_fmt_bytes(report['rehome']['stash_to_pool_estimated_bytes'])})")
-    lines.append(f"- Rehome opportunities pool -> stash: **{report['rehome']['pool_to_stash_groups']:,}** groups (~{_fmt_bytes(report['rehome']['pool_to_stash_estimated_bytes'])})")
+    lines.append(
+        f"- Rehome opportunities stash -> pool: **{report['rehome']['stash_to_pool_groups']:,}** groups "
+        f"(~{_fmt_bytes(report['rehome']['stash_to_pool_estimated_bytes'])})"
+    )
+    lines.append(
+        f"- Rehome opportunities pool -> stash: **{report['rehome']['pool_to_stash_groups']:,}** groups "
+        f"(~{_fmt_bytes(report['rehome']['pool_to_stash_estimated_bytes'])})"
+    )
+    lines.append(
+        "- No-pool-growth stash demote candidates (already on pool): "
+        f"**{report['rehome']['stash_to_pool_no_growth_groups']:,}** groups "
+        f"(~{_fmt_bytes(report['rehome']['stash_to_pool_no_growth_estimated_bytes'])})"
+    )
     lines.append("")
     lines.append("| Payload hash | Copies | Roots | Has media copy | Bytes | Sample paths |")
     lines.append("|---|---:|---|---|---:|---|")
@@ -955,6 +1234,48 @@ def _render_markdown(report: dict, db_path: str) -> str:
         )
     if not report["payload_groups"]:
         lines.append("| _none_ | 0 | - | - | 0 B | - |")
+    lines.append("")
+
+    lines.append("## No-Pool-Growth Shortlist")
+    lines.append("")
+    lines.append("| Payload hash | Bytes | Copies | Sample paths |")
+    lines.append("|---|---:|---:|---|")
+    for group in report["payload_groups_no_growth"]:
+        lines.append(
+            "| `{h}` | {bytes} | {copies:,} | {samples} |".format(
+                h=str(group["payload_hash"])[:16],
+                bytes=_fmt_bytes(int(group["total_bytes"])),
+                copies=int(group["copies"]),
+                samples="; ".join(f"`{p}`" for p in group["sample_paths"]),
+            )
+        )
+    if not report["payload_groups_no_growth"]:
+        lines.append("| _none_ | 0 B | 0 | - |")
+    lines.append("")
+
+    lines.append("## Recovery Dataset (Non-qB)")
+    lines.append("")
+    rec = report["recovery_no_growth"]
+    if rec.get("available"):
+        lines.append(
+            "- Recovery files (total/hashed): "
+            f"**{rec['total_files']:,} / {rec['hashed_files']:,}** "
+            f"(bytes {_fmt_bytes(rec['total_bytes'])} / {_fmt_bytes(rec['hashed_bytes'])})"
+        )
+        lines.append(
+            "- Already on pool (no-growth candidates): "
+            f"**{rec['matched_files']:,}** (~{_fmt_bytes(rec['matched_bytes'])})"
+        )
+        lines.append(
+            "- Not on pool yet: "
+            f"**{rec['unmatched_files']:,}** (~{_fmt_bytes(rec['unmatched_bytes'])})"
+        )
+        if rec.get("samples"):
+            lines.append("- Matched samples:")
+            for sample in rec["samples"][:5]:
+                lines.append(f"  - `{sample['path']}` ({_fmt_bytes(sample['bytes'])})")
+    else:
+        lines.append(f"- Not available: `{rec.get('reason')}`")
     lines.append("")
 
     lines.append("## Orphan GC & DB Health")
@@ -981,19 +1302,24 @@ def _render_phone(report: dict, *, width: int, top: int) -> str:
     totals = report["totals"]
     db_ok = str(report.get("db_health", {}).get("quick_check", "")).lower() == "ok"
     dirty_actionable = int(totals.get("dirty_actionable", 0))
+    dirty_noncomplete = int(totals.get("dirty_noncomplete", 0))
     dirty_orphan = int(totals.get("dirty_orphan", 0))
     payload_incomplete = int(totals.get("payload_incomplete", 0))
+    payload_needs_upgrade = int(totals.get("payload_needs_upgrade", 0))
     link_nonzero = int(totals.get("link_actions_nonzero", 0))
     link_zero = int(totals.get("link_actions_zero_bytes", 0))
     saveable_bytes = int(totals.get("bytes_saveable", 0))
     rehome_stash_to_pool = int(report.get("rehome", {}).get("stash_to_pool_groups", 0))
     rehome_stash_to_pool_bytes = int(report.get("rehome", {}).get("stash_to_pool_estimated_bytes", 0))
+    rehome_no_growth = int(report.get("rehome", {}).get("stash_to_pool_no_growth_groups", 0))
+    rehome_no_growth_bytes = int(report.get("rehome", {}).get("stash_to_pool_no_growth_estimated_bytes", 0))
+    recovery_no_growth = report.get("recovery_no_growth", {})
 
     if not db_ok:
         posture = "critical"
     elif dirty_actionable > 0 or link_nonzero > 0:
         posture = "action_required"
-    elif payload_incomplete > 0:
+    elif payload_needs_upgrade > 0:
         posture = "watch"
     else:
         posture = "stable"
@@ -1013,21 +1339,33 @@ def _render_phone(report: dict, *, width: int, top: int) -> str:
     lines.append(
         "pressure: "
         f"dirty_actionable={dirty_actionable:,} "
+        f"dirty_noncomplete={dirty_noncomplete:,} "
         f"dirty_orphan={dirty_orphan:,} "
-        f"payload_incomplete={payload_incomplete:,}"
+        f"needs_upgrade={payload_needs_upgrade:,}"
     )
     lines.append(
         "cleanup: "
         f"link_nonzero={link_nonzero:,} "
-        f"link_zero={link_zero:,} "
+        f"maintenance_zero={link_zero:,} "
         f"reclaim_now={_fmt_bytes(saveable_bytes)}"
     )
     lines.append(
         "rehome: "
         f"stash_to_pool={rehome_stash_to_pool:,} "
         f"({ _fmt_bytes(rehome_stash_to_pool_bytes) }) "
-        f"pool_to_stash={report['rehome']['pool_to_stash_groups']:,}"
+        f"no_growth={rehome_no_growth:,} ({_fmt_bytes(rehome_no_growth_bytes)})"
     )
+    if recovery_no_growth.get("available"):
+        lines.append(
+            "recovery: "
+            f"matched={int(recovery_no_growth.get('matched_files', 0)):,} "
+            f"({_fmt_bytes(int(recovery_no_growth.get('matched_bytes', 0)))}) "
+            f"unmatched={int(recovery_no_growth.get('unmatched_files', 0)):,}"
+        )
+    if report.get("completion_filter_active"):
+        lines.append("qbit_filter: active (refs <100% excluded from actionable counts)")
+    elif report.get("completion_filter_error"):
+        lines.append(f"qbit_filter: disabled ({report['completion_filter_error']})")
 
     pockets = report.get("duplicate_pockets", [])
     if pockets:
@@ -1054,22 +1392,38 @@ def _render_phone(report: dict, *, width: int, top: int) -> str:
             "make hardlink-auto ROOTS='/pool/data,/stash/media,/data/media' HARDLINK_AUTO_EXECUTE=1"
         )
         step_num += 1
-    elif link_zero > 0:
+    elif link_zero > 0 and link_nonzero == 0:
         lines.append(
-            f"{step_num}. optional zero-byte metadata cleanup ({link_zero:,} actions): "
-            "make hardlink-auto ROOTS='/pool/data,/stash/media,/data/media' HARDLINK_AUTO_EXECUTE=1"
+            f"{step_num}. zero-byte metadata cleanup pending ({link_zero:,}); defer to maintenance window"
         )
         step_num += 1
-    if payload_incomplete > 0:
+    if payload_needs_upgrade > 0:
         lines.append(
-            f"{step_num}. review why payloads are still incomplete ({payload_incomplete:,}): "
+            f"{step_num}. upgrade incomplete payload rows with files ({payload_needs_upgrade:,}): "
+            "make payload-sync PAYLOAD_UPGRADE_MISSING=1 PAYLOAD_PARALLEL=1 "
+            "PAYLOAD_PATH_PREFIXES='/pool/data /stash/media /data/media'"
+        )
+        step_num += 1
+    if payload_incomplete > 0 and payload_needs_upgrade == 0:
+        lines.append(
+            f"{step_num}. incomplete rows are currently zero-file records ({payload_incomplete:,}); "
             "make payload-workflow PW_PATHS='/pool/data /stash/media /data/media'"
+        )
+        step_num += 1
+    if dirty_noncomplete > 0:
+        lines.append(
+            f"{step_num}. refs below 100% are ignored ({dirty_noncomplete:,}); resume/finish those torrents or ignore"
         )
         step_num += 1
     if rehome_stash_to_pool > 0:
         lines.append(
             f"{step_num}. review rehome queue (stash->pool={rehome_stash_to_pool:,}): "
             "make rehome-checklist"
+        )
+        step_num += 1
+    if rehome_no_growth > 0:
+        lines.append(
+            f"{step_num}. prioritize no-pool-growth demotes ({rehome_no_growth:,} groups): make rehome-checklist"
         )
         step_num += 1
     if step_num == 1:
@@ -1111,6 +1465,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--roots", help="Comma-separated roots (auto-discover if omitted)")
     parser.add_argument("--output-dir", default="out/reports")
     parser.add_argument("--media-root", default="/data/media")
+    parser.add_argument("--recovery-prefix", default="/data/media/torrents/seeding/recovery_20260211")
     parser.add_argument("--pocket-depth", type=int, default=2)
     parser.add_argument("--top", type=int, default=15)
     parser.add_argument("--cache-ttl-seconds", type=int, default=300)
@@ -1131,6 +1486,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         media_root=args.media_root,
         pocket_depth=max(1, args.pocket_depth),
         top_n=max(1, args.top),
+        recovery_prefix=args.recovery_prefix,
     )
     cache_path = _cache_file(args.output_dir)
 
@@ -1154,6 +1510,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     media_root=args.media_root,
                     pocket_depth=max(1, args.pocket_depth),
                     top_n=max(1, args.top),
+                    recovery_prefix=args.recovery_prefix,
                 )
             finally:
                 conn.close()
@@ -1178,7 +1535,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "  Summary: "
         f"saveable={_fmt_bytes(report['totals']['bytes_saveable'])} "
         f"actionable_dirty={report['totals']['dirty_actionable']} "
+        f"ignored_noncomplete={report['totals']['dirty_noncomplete']} "
         f"rehome(stash->pool)={report['rehome']['stash_to_pool_groups']} "
+        f"rehome_no_growth(stash->pool)={report['rehome']['stash_to_pool_no_growth_groups']} "
         f"rehome(pool->stash)={report['rehome']['pool_to_stash_groups']}"
     )
     if args.print_phone:

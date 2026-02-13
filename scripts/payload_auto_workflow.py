@@ -19,11 +19,11 @@ if REPO_SRC.exists():
     sys.path.insert(0, str(REPO_SRC))
 
 from hashall.model import connect_db
+from hashall.payload_completion import load_completed_torrent_hashes
 
 STALL_THRESHOLD = 2
 ORPHAN_GC_MIN_SEEN_RUNS = 2
 ORPHAN_GC_MIN_AGE_SECONDS = 24 * 60 * 60
-QBIT_COMPLETE_PROGRESS = 0.999999
 QBIT_MANAGE_FRESHNESS_MAX_MINUTES = 120
 
 
@@ -59,7 +59,7 @@ def main() -> int:
         print("No roots found. Run 'make payload-sync' first.")
         return 1
 
-    completed_hashes, completion_filter_active, completion_filter_error = _load_completed_torrent_hashes()
+    completed_hashes, completion_filter_active, completion_filter_error = load_completed_torrent_hashes()
     qbm_freshness = _qbit_manage_freshness()
 
     run_id = uuid.uuid4().hex[:10]
@@ -760,28 +760,6 @@ def _count_collision_groups_from_rows(
             g["incomplete_count"] += 1
 
     return sum(1 for g in groups.values() if g["count"] > 1 and g["incomplete_count"] > 0)
-
-
-def _load_completed_torrent_hashes() -> tuple[set[str], bool, str | None]:
-    """Return completed torrent hashes from qB; disable filtering if unavailable."""
-    try:
-        from hashall.qbittorrent import get_qbittorrent_client
-    except Exception as exc:
-        return set(), False, f"qB client import failed: {exc}"
-
-    qbit = get_qbittorrent_client()
-    if not qbit.test_connection():
-        return set(), False, f"qB unreachable: {qbit.last_error or 'connection failed'}"
-    if not qbit.login():
-        return set(), False, f"qB login failed: {qbit.last_error or 'authentication failed'}"
-
-    torrents = qbit.get_torrents()
-    completed = {
-        str(t.hash).lower()
-        for t in torrents
-        if t.hash and float(t.progress or 0.0) >= QBIT_COMPLETE_PROGRESS
-    }
-    return completed, True, None
 
 
 def _qbit_manage_freshness() -> dict[str, object]:

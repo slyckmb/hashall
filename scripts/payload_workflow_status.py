@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from hashall.model import connect_db
+from hashall.payload_completion import load_completed_torrent_hashes
 
 # ---------------------------------------------------------------------------
 # Display helpers (shared style with workflow_status.py)
@@ -110,33 +111,8 @@ def _payload_upgrade_collisions_cli(root: str, db: str) -> str:
 # State collection
 # ---------------------------------------------------------------------------
 
-QBIT_COMPLETE_PROGRESS = 0.999999
-
-
 def _in_scope(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
-
-
-def _load_completed_torrent_hashes() -> tuple[set[str], bool, str | None]:
-    """Return completed torrent hashes from qB; disable filtering if unavailable."""
-    try:
-        from hashall.qbittorrent import get_qbittorrent_client
-    except Exception as exc:
-        return set(), False, f"qB client import failed: {exc}"
-
-    qbit = get_qbittorrent_client()
-    if not qbit.test_connection():
-        return set(), False, f"qB unreachable: {qbit.last_error or 'connection failed'}"
-    if not qbit.login():
-        return set(), False, f"qB login failed: {qbit.last_error or 'authentication failed'}"
-
-    torrents = qbit.get_torrents()
-    completed = {
-        str(t.hash).lower()
-        for t in torrents
-        if t.hash and float(t.progress or 0.0) >= QBIT_COMPLETE_PROGRESS
-    }
-    return completed, True, None
 
 
 def _count_collision_groups(rows: list[dict[str, object]], *, in_scope_only: bool, require_refs: bool, completion_filter_active: bool) -> tuple[int, set[tuple[int, int]]]:
@@ -169,7 +145,7 @@ def _collect_status_context(
     completion_filter_error: str | None = None,
 ) -> dict:
     if completion_filter_active is None:
-        completed_hashes, completion_filter_active, completion_filter_error = _load_completed_torrent_hashes()
+        completed_hashes, completion_filter_active, completion_filter_error = load_completed_torrent_hashes()
 
     completed_hashes = {h.lower() for h in (completed_hashes or set())}
 
