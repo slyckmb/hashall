@@ -141,6 +141,20 @@ def test_build_payload_empty(test_db):
     assert payload.payload_hash is None
 
 
+def test_build_payload_already_canonical_skips_remap_helpers(test_db, monkeypatch):
+    import hashall.payload as payload_module
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("path remap helpers should not run when already_canonical=True")
+
+    monkeypatch.setattr(payload_module, "canonicalize_path", _unexpected)
+    monkeypatch.setattr(payload_module, "remap_to_mount_alias", _unexpected)
+
+    payload = build_payload(test_db, "/test/root", device_id=49, already_canonical=True)
+    assert payload.file_count == 3
+    assert payload.status == "complete"
+
+
 def test_upsert_payload(test_db):
     """Test inserting and updating payloads."""
     # Create payload

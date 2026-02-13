@@ -44,9 +44,15 @@ def _get_mount_info(conn: sqlite3.Connection, device_id: int):
     return mount_point, preferred_mount
 
 
-def _resolve_rel_root(root_path: str, mount_point: Optional[Path], preferred_mount: Optional[Path]):
+def _resolve_rel_root(
+    root_path: str,
+    mount_point: Optional[Path],
+    preferred_mount: Optional[Path],
+    *,
+    already_canonical: bool = False,
+):
     root = Path(root_path)
-    if root.is_absolute():
+    if root.is_absolute() and not already_canonical:
         root = canonicalize_path(root)
 
     if mount_point:
@@ -59,7 +65,7 @@ def _resolve_rel_root(root_path: str, mount_point: Optional[Path], preferred_mou
 
             # Handle alternate mount targets for the same filesystem, e.g.
             # /data/media/... (qBittorrent) vs /stash/media/... (preferred mount).
-            if rel_root is None:
+            if rel_root is None and not already_canonical:
                 for base in (preferred_mount, mount_point):
                     if base is None:
                         continue
@@ -190,7 +196,13 @@ def compute_payload_fast_signature(files: List[PayloadFastFile]) -> Optional[str
     return hasher.hexdigest()
 
 
-def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> List[PayloadFile]:
+def get_files_for_path(
+    conn: sqlite3.Connection,
+    device_id: int,
+    root_path: str,
+    *,
+    already_canonical: bool = False,
+) -> List[PayloadFile]:
     """
     Get all files under a given root path from the per-device table.
 
@@ -230,7 +242,12 @@ def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str)
     if _table_exists("devices"):
         mount_point, preferred_mount = _get_mount_info(conn, device_id)
 
-    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    rel_root, _ = _resolve_rel_root(
+        root_path,
+        mount_point,
+        preferred_mount,
+        already_canonical=already_canonical,
+    )
     if rel_root is None:
         return []
     rel_root_str = str(rel_root)
@@ -719,8 +736,13 @@ def get_payload_file_rows(
     return results
 
 
-def build_payload(conn: sqlite3.Connection, root_path: str,
-                 device_id: Optional[int] = None) -> Payload:
+def build_payload(
+    conn: sqlite3.Connection,
+    root_path: str,
+    device_id: Optional[int] = None,
+    *,
+    already_canonical: bool = False,
+) -> Payload:
     """
     Build or update payload for a given root path.
 
@@ -734,7 +756,7 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
     """
     # Canonicalize root path for consistent device resolution
     root = Path(root_path)
-    if root.is_absolute():
+    if root.is_absolute() and not already_canonical:
         root = canonicalize_path(root)
 
     # Derive device_id from root_path if not provided
@@ -756,23 +778,24 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
 
     # Normalize to preferred mount point when the same filesystem is mounted at
     # multiple targets (ZFS alternate mount points, etc).
-    try:
-        if conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
-        ).fetchone():
-            mount_point, preferred_mount = _get_mount_info(conn, device_id)
-            for base in (preferred_mount, mount_point):
-                if base is None:
-                    continue
-                remapped = remap_to_mount_alias(root, base)
-                if remapped is not None:
-                    root = remapped
-                    break
-    except Exception:
-        pass
+    if not already_canonical:
+        try:
+            if conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+            ).fetchone():
+                mount_point, preferred_mount = _get_mount_info(conn, device_id)
+                for base in (preferred_mount, mount_point):
+                    if base is None:
+                        continue
+                    remapped = remap_to_mount_alias(root, base)
+                    if remapped is not None:
+                        root = remapped
+                        break
+        except Exception:
+            pass
 
     # Get files from device-specific table
-    files = get_files_for_path(conn, device_id, str(root))
+    files = get_files_for_path(conn, device_id, str(root), already_canonical=already_canonical)
 
     if not files:
         return Payload(

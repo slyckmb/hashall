@@ -412,14 +412,14 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             if str(root_canon) != root_path:
                 print(f"   Canonical: {root_canon}")
 
-            payload = build_payload(conn, str(root_canon), device_id=None)
+            payload = build_payload(conn, str(root_canon), device_id=None, already_canonical=True)
             if payload.file_count == 0:
                 missing_in_catalog += 1
 
             if (not dry_run) and payload.status != 'complete' and upgrade_missing:
                 upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id, parallel=parallel, workers=workers)
                 if upgraded > 0:
-                    payload = build_payload(conn, root_path, device_id=payload.device_id)
+                    payload = build_payload(conn, str(root_canon), device_id=payload.device_id, already_canonical=True)
 
             if not dry_run:
                 # Insert/update payload
