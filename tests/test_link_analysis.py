@@ -136,6 +136,11 @@ def test_analyze_device(test_db):
     assert group1.unique_inodes == 3
     assert group1.file_size == 1000
     assert group1.potential_savings == 2000  # (3-1) * 1000
+    assert len(group1.files) == len(group1.inodes)
+    group1_pairs = dict(zip(group1.files, group1.inodes))
+    assert group1_pairs["/test/file1.txt"] == 101
+    assert group1_pairs["/test/file2.txt"] == 102
+    assert group1_pairs["/test/file3.txt"] == 103
 
     # Check second group (hash3, 2 files, 500 bytes each)
     group2 = result.duplicate_groups[1]

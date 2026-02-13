@@ -21,7 +21,7 @@ class DuplicateGroup:
         file_count: Total number of files with this hash
         unique_inodes: Number of distinct inodes (files not yet deduplicated)
         files: List of file paths
-        inodes: List of unique inode numbers
+        inodes: Inode numbers aligned by index with `files`
         potential_savings: Bytes that could be saved by deduplication
     """
     hash: str
@@ -139,8 +139,7 @@ def analyze_device(
         size,
         COUNT(*) as file_count,
         COUNT(DISTINCT inode) as unique_inodes,
-        GROUP_CONCAT(path, '|||') as paths,
-        GROUP_CONCAT(DISTINCT inode) as inode_csv,
+        GROUP_CONCAT(path || char(31) || inode, '|||') as path_inode_pairs,
         (COUNT(DISTINCT inode) - 1) * size as potential_savings
     FROM {table_name}
     WHERE status = 'active'
@@ -175,26 +174,23 @@ def analyze_device(
             file_size,
             file_count,
             unique_inodes,
-            paths_str,
-            inode_csv,
+            path_inode_pairs,
             potential_savings
         ) = row
 
-        files = paths_str.split('|||') if paths_str else []
+        files = []
         inodes = []
-        if inode_csv:
-            seen: set[int] = set()
-            for raw in str(inode_csv).split(","):
-                raw = raw.strip()
-                if not raw:
+        if path_inode_pairs:
+            sep = chr(31)
+            for raw in str(path_inode_pairs).split("|||"):
+                if sep not in raw:
                     continue
+                file_path, inode_raw = raw.rsplit(sep, 1)
                 try:
-                    inode = int(raw)
+                    inode = int(inode_raw)
                 except ValueError:
                     continue
-                if inode in seen:
-                    continue
-                seen.add(inode)
+                files.append(file_path)
                 inodes.append(inode)
 
         duplicate_groups.append(DuplicateGroup(

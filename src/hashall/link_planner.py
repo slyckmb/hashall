@@ -189,24 +189,18 @@ def create_plan(
             device_id
         )
 
+        inode_by_path: dict[str, int] = {}
+        for file_path, inode in zip(group.files, group.inodes):
+            inode_by_path.setdefault(file_path, inode)
+
         # Generate HARDLINK actions for all non-canonical files
         for file_path in group.files:
             if file_path == canonical_path:
                 continue  # Skip canonical file
 
-            # Get inode for this file
-            cursor = conn.cursor()
-            table_name = f"files_{device_id}"
-            cursor.execute(
-                f"SELECT inode FROM {table_name} WHERE path = ? AND status = 'active'",
-                (file_path,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                # File not found or inactive, skip
+            duplicate_inode = inode_by_path.get(file_path)
+            if duplicate_inode is None:
                 continue
-
-            duplicate_inode = row[0]
 
             # Create action
             action = LinkAction(
