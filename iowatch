@@ -174,17 +174,17 @@ def get_process_io():
         try:
             pid = pid_dir.name
             io_file = pid_dir / 'io'
-            if io_file.exists():
-                with open(io_file, 'r') as f:
-                    data = f.read()
-                    r_match = re.search(r'read_bytes:\s+(\d+)', data)
-                    w_match = re.search(r'write_bytes:\s+(\d+)', data)
-                    if r_match or w_match:
-                        p_io[pid] = {
-                            'read': int(r_match.group(1)) if r_match else 0,
-                            'write': int(w_match.group(1)) if w_match else 0
-                        }
-        except (PermissionError, FileNotFoundError):
+            # /proc entries can disappear between listing and open/stat; treat as normal churn.
+            with open(io_file, 'r') as f:
+                data = f.read()
+                r_match = re.search(r'read_bytes:\s+(\d+)', data)
+                w_match = re.search(r'write_bytes:\s+(\d+)', data)
+                if r_match or w_match:
+                    p_io[pid] = {
+                        'read': int(r_match.group(1)) if r_match else 0,
+                        'write': int(w_match.group(1)) if w_match else 0
+                    }
+        except (PermissionError, FileNotFoundError, ProcessLookupError, OSError):
             continue
     return p_io
 
