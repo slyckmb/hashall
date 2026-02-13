@@ -47,6 +47,7 @@ class DemotionExecutor:
         self.catalog_path = catalog_path
         self.qbit_client = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
         self.tag_strict = os.getenv("HASHALL_REHOME_TAG_STRICT") == "1"
+        self.disable_atm_on_rehome = os.getenv("HASHALL_REHOME_DISABLE_ATM", "1") != "0"
 
     def _get_db_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -272,6 +273,23 @@ class DemotionExecutor:
         paused = []
         moved = []
 
+        if self.disable_atm_on_rehome:
+            for r in relocations:
+                torrent_hash = r["torrent_hash"]
+                info = self.qbit_client.get_torrent_info(torrent_hash)
+                auto_enabled = bool(getattr(info, "auto_tmm", False)) if info else False
+                self._log(
+                    f"  auto_tmm_before hash={torrent_hash[:16]} enabled={str(auto_enabled).lower()}"
+                )
+                if auto_enabled:
+                    if not hasattr(self.qbit_client, "set_auto_management"):
+                        raise RuntimeError(
+                            f"qB client missing set_auto_management for torrent {torrent_hash[:16]}"
+                        )
+                    self._log(f"  disable_auto_tmm hash={torrent_hash[:16]}")
+                    if not self.qbit_client.set_auto_management(torrent_hash, False):
+                        raise RuntimeError(f"Failed to disable ATM for torrent {torrent_hash[:16]}")
+
         for r in relocations:
             torrent_hash = r["torrent_hash"]
             if not self.qbit_client.pause_torrent(torrent_hash):
@@ -313,6 +331,25 @@ class DemotionExecutor:
                     raise RuntimeError(
                         f"Torrent {torrent_hash[:16]} location verification failed: "
                         f"expected={expected_path}, actual={actual_path}"
+                    )
+                if self.disable_atm_on_rehome:
+                    if bool(getattr(torrent_info, "auto_tmm", False)):
+                        self._log(
+                            f"  auto_tmm_after hash={torrent_hash[:16]} enabled=true (re-disabling)",
+                            "warning",
+                        )
+                        if not self.qbit_client.set_auto_management(torrent_hash, False):
+                            raise RuntimeError(
+                                f"Failed to keep ATM disabled for torrent {torrent_hash[:16]}"
+                            )
+                        torrent_info = self.qbit_client.get_torrent_info(torrent_hash)
+                        if torrent_info and bool(getattr(torrent_info, "auto_tmm", False)):
+                            raise RuntimeError(
+                                f"ATM still enabled after relocation for torrent {torrent_hash[:16]}"
+                            )
+                    self._log(
+                        f"  auto_tmm_after hash={torrent_hash[:16]} "
+                        f"enabled={str(bool(getattr(torrent_info, 'auto_tmm', False))).lower()}"
                     )
         except Exception as e:
             # Rollback to original locations if possible
@@ -366,6 +403,19 @@ class DemotionExecutor:
         """
         self._log(f"relocate_torrent hash={torrent_hash[:16]} new_path={new_path}")
 
+        if self.disable_atm_on_rehome:
+            info_before = self.qbit_client.get_torrent_info(torrent_hash)
+            auto_before = bool(getattr(info_before, "auto_tmm", False)) if info_before else False
+            self._log(f"  auto_tmm_before hash={torrent_hash[:16]} enabled={str(auto_before).lower()}")
+            if auto_before:
+                if not hasattr(self.qbit_client, "set_auto_management"):
+                    raise RuntimeError(
+                        f"qB client missing set_auto_management for torrent {torrent_hash[:16]}"
+                    )
+                self._log(f"  disable_auto_tmm hash={torrent_hash[:16]}")
+                if not self.qbit_client.set_auto_management(torrent_hash, False):
+                    raise RuntimeError(f"Failed to disable ATM for torrent {torrent_hash[:16]}")
+
         # 1. Pause torrent
         self._log(f"  pause_torrent hash={torrent_hash[:16]}")
         if not self.qbit_client.pause_torrent(torrent_hash):
@@ -399,6 +449,22 @@ class DemotionExecutor:
             raise RuntimeError(
                 f"Torrent {torrent_hash[:16]} location verification failed: "
                 f"expected={expected_path}, actual={actual_path}"
+            )
+
+        if self.disable_atm_on_rehome:
+            if bool(getattr(torrent_info, "auto_tmm", False)):
+                self._log(
+                    f"  auto_tmm_after hash={torrent_hash[:16]} enabled=true (re-disabling)",
+                    "warning",
+                )
+                if not self.qbit_client.set_auto_management(torrent_hash, False):
+                    raise RuntimeError(f"Failed to keep ATM disabled for torrent {torrent_hash[:16]}")
+                torrent_info = self.qbit_client.get_torrent_info(torrent_hash)
+                if torrent_info and bool(getattr(torrent_info, "auto_tmm", False)):
+                    raise RuntimeError(f"ATM still enabled after relocation for torrent {torrent_hash[:16]}")
+            self._log(
+                f"  auto_tmm_after hash={torrent_hash[:16]} "
+                f"enabled={str(bool(getattr(torrent_info, 'auto_tmm', False))).lower()}"
             )
 
         self._log(f"  verified hash={torrent_hash[:16]} save_path={actual_path}", "success")
@@ -652,6 +718,8 @@ class DemotionExecutor:
                          r.get("target_save_path"), r.get("torrent_hash"))
                     )
 
+                self._sync_files_catalog_for_reuse_cleanup(conn, plan)
+
             elif plan.get("decision") == "MOVE":
                 # Update payload location
                 conn.execute(
@@ -678,6 +746,59 @@ class DemotionExecutor:
             conn.commit()
         finally:
             conn.close()
+
+    def _sync_files_catalog_for_reuse_cleanup(self, conn: sqlite3.Connection, plan: Dict) -> None:
+        """
+        Mark cleaned source payload paths as deleted in files_<source_device>.
+
+        REUSE plans can remove source payload roots during cleanup without a follow-up
+        scan. This reconciles source file rows immediately when those roots are gone.
+        """
+        source_device_id = plan.get("source_device_id")
+        target_path = Path(plan.get("target_path") or "").resolve() if plan.get("target_path") else None
+        if source_device_id is None:
+            return
+
+        source_table = ensure_files_table(conn.cursor(), source_device_id)
+        source_mount, source_preferred = self._get_device_mount_info(conn, source_device_id)
+
+        roots_to_check: List[Path] = []
+        group = plan.get("payload_group") or []
+        for entry in group:
+            root = Path(entry.get("root_path") or "").resolve()
+            if not root:
+                continue
+            if target_path and root == target_path:
+                continue
+            roots_to_check.append(root)
+
+        if not roots_to_check and plan.get("source_path"):
+            roots_to_check.append(Path(plan["source_path"]).resolve())
+
+        seen: set[str] = set()
+        for root in roots_to_check:
+            key = str(root)
+            if key in seen:
+                continue
+            seen.add(key)
+            if root.exists():
+                continue
+
+            rel_root = self._to_device_relpath(root, source_mount, source_preferred)
+            if rel_root is None:
+                continue
+
+            pattern = f"{rel_root}/%"
+            conn.execute(
+                f"""
+                UPDATE {source_table}
+                SET status = 'deleted',
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    last_modified_at = CURRENT_TIMESTAMP
+                WHERE status = 'active' AND (path = ? OR path LIKE ?)
+                """,
+                (rel_root, pattern),
+            )
 
     def _sync_files_catalog_for_move(self, conn: sqlite3.Connection, plan: Dict) -> None:
         """
