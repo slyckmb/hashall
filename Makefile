@@ -60,6 +60,11 @@ PAYLOAD_ORPHAN_AUDIT_OUTPUT_DIR ?= $(HOME)/.logs/hashall/orphan-audit
 PAYLOAD_ORPHAN_AUDIT_SKIP_AUTO ?= 0
 PAYLOAD_ORPHAN_TIMER_UNIT ?= hashall-payload-orphan-snapshot.timer
 PAYLOAD_ORPHAN_TIMER_SERVICE ?= hashall-payload-orphan-snapshot.service
+STATUS_ROOTS ?=
+STATUS_REPORT_TOP ?= 15
+STATUS_REPORT_POCKET_DEPTH ?= 2
+STATUS_REPORT_OUTPUT_DIR ?= out/reports
+STATUS_REPORT_MEDIA_ROOT ?= /data/media
 PAYLOAD_AUTO_QBM_FAIL_CLOSED ?= 0
 PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES ?= 120
 PAYLOAD_AUTO_QBM_ACTIVITY_LOG ?=
@@ -134,7 +139,7 @@ help:  ## Show this help message
 	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|status-report|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -162,6 +167,7 @@ help:  ## Show this help message
 	@echo "  make payload-sync                         # Sync torrents -> payloads"
 	@echo "  make payload-workflow                     # Cross-device payload status"
 	@echo "  make payload-workflow PW_PATHS='/pool/data /stash/media'  # Explicit roots"
+	@echo "  make status-report ROOTS='/pool/data,/stash/media,/data/media'  # Operations report + heat map"
 	@echo "  make payload-unmanaged PAYLOAD_UNMANAGED_PATH_PREFIXES='/pool/data /stash/media'  # Orphan inventory"
 	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media'  # Non-destructive orphan staging audit"
 	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media' PAYLOAD_ORPHAN_AUDIT_JSON=1  # JSON snapshot for trend checks"
@@ -578,6 +584,14 @@ payload-orphan-timer-disable:  ## Disable payload orphan snapshot timer (keeps u
 .PHONY: payload-workflow
 payload-workflow:  ## Show payload workflow status across all roots
 	@$(PYTHON) scripts/payload_workflow_status.py --db "$(DB_FILE)" $(foreach p,$(PW_PATHS),"$(p)")
+
+.PHONY: status-report
+status-report:  ## Generate operations status report (inventory, duplicate heat map, rehome signals)
+	@set -- --db "$(DB_FILE)" --output-dir "$(STATUS_REPORT_OUTPUT_DIR)" --top "$(STATUS_REPORT_TOP)" --pocket-depth "$(STATUS_REPORT_POCKET_DEPTH)" --media-root "$(STATUS_REPORT_MEDIA_ROOT)"; \
+	roots="$(STATUS_ROOTS)"; \
+	if [ -z "$$roots" ] && [ -n "$(ROOTS)" ]; then roots="$(ROOTS)"; fi; \
+	if [ -n "$$roots" ]; then set -- "$$@" --roots "$$roots"; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -m hashall.status_report "$$@"
 
 .PHONY: payload-auto
 payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' PAYLOAD_AUTO_BACKUP=1 optional)
