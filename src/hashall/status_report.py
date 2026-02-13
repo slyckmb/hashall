@@ -18,6 +18,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import textwrap
 from typing import Optional
 
 from hashall.fs_utils import get_filesystem_uuid, get_mount_source
@@ -858,6 +859,59 @@ def _render_markdown(report: dict, db_path: str) -> str:
     return "\n".join(lines)
 
 
+def _render_phone(report: dict, *, width: int, top: int) -> str:
+    totals = report["totals"]
+    lines: list[str] = []
+    lines.append(
+        "summary: "
+        f"files={totals['active_files']:,} "
+        f"saveable={_fmt_bytes(totals['bytes_saveable'])} "
+        f"dup_groups={totals['duplicate_sha256_groups']:,}"
+    )
+    lines.append(
+        "payload: "
+        f"complete={totals['payload_complete']:,} "
+        f"incomplete={totals['payload_incomplete']:,} "
+        f"dirty={totals['dirty_actionable']:,}/{totals['dirty_orphan']:,}"
+    )
+    lines.append(
+        "links: "
+        f"nonzero={totals['link_actions_nonzero']:,} "
+        f"zero={totals['link_actions_zero_bytes']:,} "
+        f"total={totals['link_actions_possible']:,}"
+    )
+    lines.append(
+        "rehome: "
+        f"stash->pool={report['rehome']['stash_to_pool_groups']:,} "
+        f"pool->stash={report['rehome']['pool_to_stash_groups']:,}"
+    )
+
+    pockets = report.get("duplicate_pockets", [])[: max(1, top)]
+    if pockets:
+        lines.append("hot pockets:")
+        for pocket in pockets:
+            lines.append(
+                "  "
+                f"{int(pocket['actions']):,}x "
+                f"{_fmt_bytes(int(pocket['bytes_saveable']))} "
+                f"{pocket['pocket']}"
+            )
+
+    actions = report.get("actions", [])[: max(1, top)]
+    if actions:
+        lines.append("next:")
+        for action in actions:
+            lines.append(f"  [{action['priority']}] {action['command']}")
+
+    wrapped: list[str] = []
+    for line in lines:
+        if not line:
+            wrapped.append("")
+            continue
+        wrapped.extend(textwrap.wrap(line, width=width, break_long_words=False, break_on_hyphens=False))
+    return "\n".join(wrapped)
+
+
 def write_report_files(report: dict, *, output_dir: str, db_path: str) -> tuple[Path, Path]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -878,6 +932,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--media-root", default="/data/media")
     parser.add_argument("--pocket-depth", type=int, default=2)
     parser.add_argument("--top", type=int, default=15)
+    parser.add_argument("--print-phone", action="store_true", help="Print compact phone-friendly summary")
+    parser.add_argument("--phone-width", type=int, default=78)
+    parser.add_argument("--phone-top", type=int, default=5)
     parser.add_argument("--print-json", action="store_true", help="Print JSON summary to stdout")
     return parser.parse_args(argv)
 
@@ -910,6 +967,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"rehome(stash->pool)={report['rehome']['stash_to_pool_groups']} "
         f"rehome(pool->stash)={report['rehome']['pool_to_stash_groups']}"
     )
+    if args.print_phone:
+        print()
+        print(_render_phone(report, width=max(40, args.phone_width), top=max(1, args.phone_top)))
     if args.print_json:
         print(json.dumps(report, indent=2))
     return 0

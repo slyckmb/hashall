@@ -4,6 +4,7 @@ from hashall.status_report import (
     RootContext,
     _collect_duplicate_pockets,
     _collect_payload_groups,
+    _render_phone,
 )
 
 
@@ -134,3 +135,37 @@ def test_collect_payload_groups_emits_rehome_signals():
     assert groups["confirmed_groups"] == 2
     assert groups["rehome_opportunities"]["stash_to_pool_groups"] == 1
     assert groups["rehome_opportunities"]["pool_to_stash_groups"] == 1
+
+
+def test_render_phone_includes_summary_pockets_and_actions():
+    report = {
+        "totals": {
+            "active_files": 100,
+            "bytes_saveable": 2048,
+            "duplicate_sha256_groups": 3,
+            "payload_complete": 10,
+            "payload_incomplete": 2,
+            "dirty_actionable": 1,
+            "dirty_orphan": 9,
+            "link_actions_nonzero": 4,
+            "link_actions_zero_bytes": 5,
+            "link_actions_possible": 9,
+        },
+        "rehome": {
+            "stash_to_pool_groups": 7,
+            "pool_to_stash_groups": 0,
+        },
+        "duplicate_pockets": [
+            {"actions": 3, "bytes_saveable": 1024, "pocket": "/stash/media/torrents"},
+        ],
+        "actions": [
+            {"priority": "P0", "command": "make payload-auto ROOTS='/pool/data,/stash/media'"},
+        ],
+    }
+
+    text = _render_phone(report, width=78, top=3)
+    assert "summary:" in text
+    assert "hot pockets:" in text
+    assert "/stash/media/torrents" in text
+    assert "next:" in text
+    assert "make payload-auto" in text
