@@ -285,7 +285,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     from hashall.qbittorrent import get_qbittorrent_client
     from hashall.payload import (
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
-        upgrade_payload_missing_sha256, prune_orphan_payloads
+        upgrade_payload_missing_sha256, prune_orphan_payloads,
     )
     from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
 
@@ -379,6 +379,9 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     skipped_prefix = 0
     processed = 0
     prune_stats = None
+    root_path_from_content_path = 0
+    write_batch_ops = 0
+    write_batch_threshold = 400
 
     with TwoLineProgress(
         total=len(torrents),
@@ -392,6 +395,8 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
 
             # Get torrent root path
             root_path = qbit.get_torrent_root_path(torrent)
+            if torrent.content_path:
+                root_path_from_content_path += 1
             root_canon = _canonicalize_payload_root_path(root_path)
 
             if prefix_paths:
@@ -407,7 +412,6 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             if str(root_canon) != root_path:
                 print(f"   Canonical: {root_canon}")
 
-            # Build payload from database
             payload = build_payload(conn, str(root_canon), device_id=None)
             if payload.file_count == 0:
                 missing_in_catalog += 1
@@ -419,7 +423,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
 
             if not dry_run:
                 # Insert/update payload
-                payload_id = upsert_payload(conn, payload)
+                payload_id = upsert_payload(conn, payload, commit=False)
 
                 # Insert/update torrent instance
                 torrent_instance = TorrentInstance(
@@ -432,7 +436,11 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                     tags=torrent.tags,
                     last_seen_at=time.time()
                 )
-                upsert_torrent_instance(conn, torrent_instance)
+                upsert_torrent_instance(conn, torrent_instance, commit=False)
+                write_batch_ops += 2
+                if write_batch_ops >= write_batch_threshold:
+                    conn.commit()
+                    write_batch_ops = 0
 
             if payload.status == 'complete':
                 print(f"   ✅ Payload complete (hash: {payload.payload_hash[:16]}...)")
@@ -444,6 +452,9 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             processed += 1
             progress.update(advance=1)
 
+    if not dry_run and write_batch_ops:
+        conn.commit()
+
     if (not dry_run) and limit == 0:
         prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
         prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
@@ -453,11 +464,16 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     else:
         print(f"\n✅ Sync complete!")
     print(f"   processed: {processed}")
-    if prefix_strings:
+    if prefix_paths:
         print(f"   skipped (path-prefix): {skipped_prefix}")
     print(f"   complete payloads: {synced_count}")
     print(f"   incomplete payloads: {incomplete_count}")
     print(f"   missing in catalog: {missing_in_catalog}")
+    print(
+        "   root path source: "
+        f"content_path={root_path_from_content_path}, "
+        f"files_api_fallback={getattr(qbit, 'root_path_files_fallback_calls', 0)}"
+    )
     if prune_stats is not None:
         print(
             "   orphan gc candidates: "
@@ -1940,6 +1956,8 @@ def link_plan_cmd(name, db, device, min_size, include_empty, dry_run, upgrade_co
         hashall link plan "Include empties" --device pool --include-empty
         hashall link plan "Test plan" --device 49 --dry-run
     """
+    import threading
+    import time
     from pathlib import Path
     from hashall.model import connect_db
     from hashall.link_planner import create_plan, save_plan, format_plan_summary
@@ -1983,7 +2001,48 @@ def link_plan_cmd(name, db, device, min_size, include_empty, dry_run, upgrade_co
         click.echo(f"   Analyzing...")
         click.echo()
 
-        plan = create_plan(conn, name, device_id, min_size=min_size)
+        progress_state = {
+            "stage": "analysis_start",
+            "groups_processed": 0,
+            "groups_total": 0,
+            "actions_generated": 0,
+        }
+        progress_lock = threading.Lock()
+        heartbeat_stop = threading.Event()
+        started = time.monotonic()
+
+        def _update_progress(**kwargs):
+            with progress_lock:
+                progress_state.update(kwargs)
+
+        def _heartbeat():
+            while not heartbeat_stop.wait(20.0):
+                with progress_lock:
+                    stage = progress_state.get("stage", "analysis")
+                    groups_processed = int(progress_state.get("groups_processed", 0) or 0)
+                    groups_total = progress_state.get("groups_total", 0) or 0
+                    actions_generated = int(progress_state.get("actions_generated", 0) or 0)
+                elapsed = int(time.monotonic() - started)
+                total_label = groups_total if groups_total else "?"
+                click.echo(
+                    f"   ⏳ still working ({elapsed}s) "
+                    f"stage={stage} groups={groups_processed}/{total_label} "
+                    f"actions={actions_generated}"
+                )
+
+        heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+        heartbeat_thread.start()
+        try:
+            plan = create_plan(
+                conn,
+                name,
+                device_id,
+                min_size=min_size,
+                progress_callback=_update_progress,
+            )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=0.2)
 
         if dry_run:
             # Dry-run mode: just show plan, don't save

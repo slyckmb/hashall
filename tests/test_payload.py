@@ -182,6 +182,25 @@ def test_upsert_payload(test_db):
     assert row[0] == 15
 
 
+def test_upsert_payload_commit_false_defers_commit(test_db):
+    payload = Payload(
+        payload_id=None,
+        payload_hash="batch_hash",
+        device_id=49,
+        root_path="/test/batch",
+        file_count=1,
+        total_bytes=10,
+        status='complete',
+        last_built_at=1234567890.0
+    )
+
+    assert not test_db.in_transaction
+    payload_id = upsert_payload(test_db, payload, commit=False)
+    assert payload_id > 0
+    assert test_db.in_transaction
+    test_db.rollback()
+
+
 def test_upsert_payload_device_scoped(test_db):
     """Test that payloads are scoped by device_id + root_path."""
     payload_a = Payload(
@@ -209,6 +228,39 @@ def test_upsert_payload_device_scoped(test_db):
     id_b = upsert_payload(test_db, payload_b)
 
     assert id_a != id_b
+
+
+def test_upsert_torrent_instance_commit_false_defers_commit(test_db):
+    from hashall.payload import upsert_torrent_instance, TorrentInstance
+    import time
+
+    payload = Payload(
+        payload_id=None,
+        payload_hash="shared_hash_batch",
+        device_id=49,
+        root_path="/test/shared_batch",
+        file_count=5,
+        total_bytes=500,
+        status='complete',
+        last_built_at=time.time()
+    )
+    payload_id = upsert_payload(test_db, payload)
+
+    torrent = TorrentInstance(
+        torrent_hash="batchhash1",
+        payload_id=payload_id,
+        device_id=49,
+        save_path="/test",
+        root_name="torrent_batch",
+        category="test",
+        tags="",
+        last_seen_at=time.time()
+    )
+
+    assert not test_db.in_transaction
+    upsert_torrent_instance(test_db, torrent, commit=False)
+    assert test_db.in_transaction
+    test_db.rollback()
 
 
 def test_torrent_siblings(test_db):

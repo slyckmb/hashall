@@ -936,7 +936,7 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
     return upgraded
 
 
-def upsert_payload(conn: sqlite3.Connection, payload: Payload) -> int:
+def upsert_payload(conn: sqlite3.Connection, payload: Payload, *, commit: bool = True) -> int:
     """
     Insert or update a payload in the database.
 
@@ -987,11 +987,12 @@ def upsert_payload(conn: sqlite3.Connection, payload: Payload) -> int:
         ))
         payload_id = cursor.lastrowid
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return payload_id
 
 
-def upsert_torrent_instance(conn: sqlite3.Connection, torrent: TorrentInstance) -> None:
+def upsert_torrent_instance(conn: sqlite3.Connection, torrent: TorrentInstance, *, commit: bool = True) -> None:
     """
     Insert or update a torrent instance in the database.
 
@@ -1009,7 +1010,8 @@ def upsert_torrent_instance(conn: sqlite3.Connection, torrent: TorrentInstance) 
         torrent.save_path, torrent.root_name, torrent.category,
         torrent.tags, torrent.last_seen_at
     ))
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_payload_by_id(conn: sqlite3.Connection, payload_id: int) -> Optional[Payload]:

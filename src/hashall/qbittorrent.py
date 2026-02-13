@@ -59,6 +59,7 @@ class QBittorrentClient:
         self.session = requests.Session()
         self._authenticated = False
         self.last_error: Optional[str] = None
+        self.root_path_files_fallback_calls = 0
 
     def login(self) -> bool:
         """
@@ -185,11 +186,12 @@ class QBittorrentClient:
         Returns:
             Absolute path to payload root
         """
-        if files is None:
-            files = self.get_torrent_files(torrent.hash)
-
         if torrent.content_path:
             return str(Path(torrent.content_path))
+
+        if files is None:
+            self.root_path_files_fallback_calls += 1
+            files = self.get_torrent_files(torrent.hash)
 
         save_path = Path(torrent.save_path)
 

@@ -7,6 +7,7 @@ IMPORTANT: These tests create actual files and hardlinks to verify safety featur
 import sqlite3
 import tempfile
 import shutil
+import os
 from pathlib import Path
 import pytest
 
@@ -20,7 +21,10 @@ from hashall.link_executor import (
     verify_not_already_linked,
     create_hardlink_atomic,
     execute_action,
-    ExecutionResult
+    ExecutionResult,
+    _JdupesHistoryStats,
+    _JdupesRateTracker,
+    _summarize_unique_inode_work,
 )
 from hashall.link_query import ActionInfo
 
@@ -421,3 +425,55 @@ def test_verify_file_unchanged_mtime_mismatch():
         assert "modified" in error.lower()
     finally:
         temp_path.unlink()
+
+
+def test_summarize_unique_inode_work_counts_each_inode_once():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        canonical = root / "canonical.bin"
+        canonical.write_bytes(b"a" * 1024)
+
+        hardlink_copy = root / "hardlink-copy.bin"
+        os.link(canonical, hardlink_copy)
+
+        distinct = root / "distinct.bin"
+        distinct.write_bytes(b"b" * 2048)
+
+        inode_count, inode_bytes = _summarize_unique_inode_work([canonical, hardlink_copy, distinct])
+        assert inode_count == 2
+        assert inode_bytes == (1024 + 2048)
+
+
+def test_jdupes_rate_tracker_estimate_and_ema_update():
+    history = _JdupesHistoryStats(
+        baseline_rate_bps=100.0,
+        baseline_group_bytes=1000.0,
+        baseline_invoked_ratio=0.5,
+        invoked_samples=10,
+        total_samples=20,
+    )
+    tracker = _JdupesRateTracker.from_history(history)
+
+    estimate = tracker.estimate(
+        group_index=1,
+        group_total=5,
+        group_inode_bytes=500,
+        will_invoke=True,
+    )
+
+    assert estimate["rate_source"] == "history"
+    assert estimate["eta_group_sec"] == pytest.approx(5.0)
+    # remaining_groups=4, invoked_ratio=0.5, avg_group_bytes=1000, rate=100 => 20s remaining
+    assert estimate["eta_total_sec"] == pytest.approx(25.0)
+
+    tracker.observe_group(invoked=True, group_inode_bytes=500, elapsed_seconds=2.0)
+    post = tracker.estimate(
+        group_index=2,
+        group_total=5,
+        group_inode_bytes=500,
+        will_invoke=True,
+    )
+
+    assert post["rate_source"] == "rt-ema"
+    # observed rate should be > history baseline after update
+    assert post["rate_bps"] > 100.0
