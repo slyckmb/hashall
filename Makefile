@@ -109,6 +109,22 @@ REHOME_RESCAN ?= 0
 REHOME_CLEANUP_SOURCE_VIEWS ?= 0
 REHOME_CLEANUP_EMPTY_DIRS ?= 0
 REHOME_CLEANUP_DUPLICATE_PAYLOAD ?= 0
+REHOME_SAFE_ROOTS ?= /pool/data,/stash/media,/data/media
+REHOME_SAFE_LIMIT ?= 5
+REHOME_SAFE_APPLY ?= 0
+REHOME_SAFE_SEEDING_ROOT ?= /stash/media
+REHOME_SAFE_LIBRARY_ROOT ?= /stash/media
+REHOME_SAFE_RUN_LOG_DIR ?= out/reports/rehome-safe-runs
+REHOME_SAFE_RUN_LOG ?=
+REHOME_SAFE_VERIFY_STRICT ?= 1
+REHOME_SAFE_VERIFY_CLEANUP ?= 0
+REHOME_SAFE_VERIFY_PRINT_TORRENTS ?= 1
+RECOVERY_WORKFLOW_PREFIX ?= /data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207
+RECOVERY_WORKFLOW_STASH_DEVICE ?= 49
+RECOVERY_WORKFLOW_POOL_DEVICE ?= 44
+RECOVERY_WORKFLOW_LIMIT ?= 20
+RECOVERY_WORKFLOW_APPLY ?= 0
+RECOVERY_WORKFLOW_OUTPUT_DIR ?= out/reports/recovery-workflow
 
 REHOME_SEEDING_ARGS := $(foreach r,$(REHOME_SEEDING_ROOTS),--seeding-root "$(r)")
 HELP_BANNER := hashall - $(shell PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c "from hashall import __version__; print(__version__)" 2>/dev/null || echo unknown) - $(shell TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)
@@ -144,7 +160,7 @@ help:  ## Show this help message
 	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|status-report|status-report-phone|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|status-report|status-report-phone|recovery-auto|recovery-auto-apply|rehome-safe-auto|rehome-safe-verify|rehome-safe-cleanup|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -182,6 +198,12 @@ help:  ## Show this help message
 	@echo "  make payload-orphan-timer-status              # Show timer status/next runs"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media' DRY_RUN=1  # Preview actions"
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media'            # Run to completion"
+	@echo "  make recovery-auto RECOVERY_WORKFLOW_PREFIX='/data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207'  # Audit recovered content"
+	@echo "  make recovery-auto-apply RECOVERY_WORKFLOW_LIMIT=10  # Prune exact duplicate recovered units"
+	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44  # Top safe rehome dry-run batch"
+	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44 REHOME_SAFE_APPLY=1  # Execute safe rehomes"
+	@echo "  make rehome-safe-verify                    # Gate check latest safe run (qB+DB+source)"
+	@echo "  make rehome-safe-cleanup                   # Delete source paths only when gates pass"
 	@echo "  make rehome-checklist                     # Rehome checklist"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
@@ -625,6 +647,56 @@ payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' P
 # ============================================================================
 # Rehome (Payload Moves)
 # ============================================================================
+
+.PHONY: rehome-safe-auto
+rehome-safe-auto:  ## Run top safe stash->pool rehomes (MOVE + 100% movable-bytes), dry-run by default
+	@if [ -z "$(REHOME_STASH_DEVICE)" ] || [ -z "$(REHOME_POOL_DEVICE)" ]; then \
+		echo "❌ REHOME_STASH_DEVICE and REHOME_POOL_DEVICE are required"; \
+		echo "💡 Example: make rehome-safe-auto REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44"; \
+		exit 1; \
+	fi; \
+	set -- \
+		--db "$(DB_FILE)" \
+		--roots "$(REHOME_SAFE_ROOTS)" \
+		--limit "$(REHOME_SAFE_LIMIT)" \
+		--seeding-root "$(REHOME_SAFE_SEEDING_ROOT)" \
+		--library-root "$(REHOME_SAFE_LIBRARY_ROOT)" \
+		--run-log-dir "$(REHOME_SAFE_RUN_LOG_DIR)" \
+		--stash-device "$(REHOME_STASH_DEVICE)" \
+		--pool-device "$(REHOME_POOL_DEVICE)"; \
+	if [ "$(REHOME_SAFE_APPLY)" = "1" ]; then set -- "$$@" --apply; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/rehome_safe_workflow.py "$$@"
+
+.PHONY: rehome-safe-verify
+rehome-safe-verify:  ## Verify latest/selected safe rehome run gates (qB + DB + source refs)
+	@set -- --run-log-dir "$(REHOME_SAFE_RUN_LOG_DIR)"; \
+	if [ -n "$(REHOME_SAFE_RUN_LOG)" ]; then set -- "$$@" --run-log "$(REHOME_SAFE_RUN_LOG)"; fi; \
+	if [ "$(REHOME_SAFE_VERIFY_STRICT)" = "1" ]; then set -- "$$@" --strict; fi; \
+	if [ "$(REHOME_SAFE_VERIFY_PRINT_TORRENTS)" = "1" ]; then set -- "$$@" --print-torrents; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/rehome_safe_verify_cleanup.py "$$@"
+
+.PHONY: rehome-safe-cleanup
+rehome-safe-cleanup:  ## Cleanup source paths only for safe groups that pass verify gates
+	@set -- --run-log-dir "$(REHOME_SAFE_RUN_LOG_DIR)" --cleanup; \
+	if [ -n "$(REHOME_SAFE_RUN_LOG)" ]; then set -- "$$@" --run-log "$(REHOME_SAFE_RUN_LOG)"; fi; \
+	if [ "$(REHOME_SAFE_VERIFY_STRICT)" = "1" ]; then set -- "$$@" --strict; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/rehome_safe_verify_cleanup.py "$$@"
+
+.PHONY: recovery-auto
+recovery-auto:  ## Audit recovered non-seeding content and classify exact dupes/support/unique units
+	@set -- \
+		--db "$(DB_FILE)" \
+		--recovery-prefix "$(RECOVERY_WORKFLOW_PREFIX)" \
+		--stash-device "$(RECOVERY_WORKFLOW_STASH_DEVICE)" \
+		--pool-device "$(RECOVERY_WORKFLOW_POOL_DEVICE)" \
+		--limit "$(RECOVERY_WORKFLOW_LIMIT)" \
+		--output-dir "$(RECOVERY_WORKFLOW_OUTPUT_DIR)"; \
+	if [ "$(RECOVERY_WORKFLOW_APPLY)" = "1" ]; then set -- "$$@" --apply; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/recovery_nonseeding_workflow.py "$$@"
+
+.PHONY: recovery-auto-apply
+recovery-auto-apply:  ## Apply exact-duplicate prune for recovered non-seeding units
+	@$(MAKE) recovery-auto RECOVERY_WORKFLOW_APPLY=1
 
 .PHONY: rehome-plan
 rehome-plan:  ## Create a rehome plan (set REHOME_MODE, REHOME_* vars)
