@@ -54,6 +54,46 @@ def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
     assert executor.qbit_client.save_paths["t1"] == "/stash/seeding"
 
 
+def test_atomic_relocation_retries_and_waits_for_qb_save_path(tmp_path, monkeypatch):
+    class FlakyQbitClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.set_calls = {}
+            self.pending_paths = {}
+            self.visible_after = {}
+
+        def set_location(self, torrent_hash: str, new_location: str) -> bool:
+            call_count = self.set_calls.get(torrent_hash, 0) + 1
+            self.set_calls[torrent_hash] = call_count
+            if call_count == 1:
+                return False
+            self.pending_paths[torrent_hash] = new_location
+            self.visible_after[torrent_hash] = 2
+            return True
+
+        def get_torrent_info(self, torrent_hash: str):
+            remaining = self.visible_after.get(torrent_hash, 0)
+            if remaining > 0:
+                self.visible_after[torrent_hash] = remaining - 1
+            else:
+                pending = self.pending_paths.get(torrent_hash)
+                if pending:
+                    self.save_paths[torrent_hash] = pending
+            return SimpleNamespace(save_path=self.save_paths.get(torrent_hash, self.default_path), auto_tmm=False)
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FlakyQbitClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+
+    executor._relocate_torrents_atomic(relocations)
+    assert executor.qbit_client.set_calls["t1"] >= 2
+    assert executor.qbit_client.save_paths["t1"] == "/pool/seeding"
+
+
 def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()

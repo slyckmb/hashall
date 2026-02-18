@@ -340,12 +340,12 @@ class DemotionExecutor:
         for r in relocations:
             torrent_hash = r["torrent_hash"]
             target_save_path = r["target_save_path"]
-            if not self.qbit_client.set_location(torrent_hash, target_save_path):
+            if not self._set_location_with_retry(torrent_hash, target_save_path):
                 # Rollback any moved torrents
                 for m in moved:
                     src = m.get("source_save_path")
                     if src:
-                        self.qbit_client.set_location(m["torrent_hash"], src)
+                        self._set_location_with_retry(m["torrent_hash"], src, attempts=3, delay_seconds=1.0)
                 for h in paused:
                     self.qbit_client.resume_torrent(h)
                 raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
@@ -356,16 +356,18 @@ class DemotionExecutor:
                 if not self.qbit_client.resume_torrent(h):
                     raise RuntimeError(f"Failed to resume torrent {h[:16]}")
 
-            # Verify locations
-            import time
-            time.sleep(1)
+            # Verify locations (qB can apply setLocation asynchronously).
             for r in relocations:
                 torrent_hash = r["torrent_hash"]
-                expected_path = Path(r["target_save_path"]).resolve()
-                torrent_info = self.qbit_client.get_torrent_info(torrent_hash)
+                expected_path = canonicalize_path(Path(r["target_save_path"]).resolve())
+                torrent_info, actual_path = self._wait_for_save_path(
+                    torrent_hash,
+                    expected_path,
+                    timeout_seconds=45.0,
+                    interval_seconds=1.0,
+                )
                 if not torrent_info:
                     raise RuntimeError(f"Failed to verify torrent {torrent_hash[:16]} after relocation")
-                actual_path = Path(torrent_info.save_path).resolve()
                 if actual_path != expected_path:
                     raise RuntimeError(
                         f"Torrent {torrent_hash[:16]} location verification failed: "
@@ -395,8 +397,58 @@ class DemotionExecutor:
             for m in moved:
                 src = m.get("source_save_path")
                 if src:
-                    self.qbit_client.set_location(m["torrent_hash"], src)
+                    self._set_location_with_retry(m["torrent_hash"], src, attempts=3, delay_seconds=1.0)
             raise
+
+    def _set_location_with_retry(
+        self,
+        torrent_hash: str,
+        target_save_path: str,
+        *,
+        attempts: int = 6,
+        delay_seconds: float = 1.0,
+    ) -> bool:
+        """Set torrent location with retries to tolerate transient qB conflicts."""
+        import time
+
+        for attempt in range(1, attempts + 1):
+            if self.qbit_client.set_location(torrent_hash, target_save_path):
+                return True
+            if attempt < attempts:
+                self._log(
+                    f"  retry_set_location hash={torrent_hash[:16]} "
+                    f"attempt={attempt + 1}/{attempts}",
+                    "warning",
+                )
+                time.sleep(delay_seconds)
+        return False
+
+    def _wait_for_save_path(
+        self,
+        torrent_hash: str,
+        expected_path: Path,
+        *,
+        timeout_seconds: float = 45.0,
+        interval_seconds: float = 1.0,
+    ) -> tuple[Optional[object], Optional[Path]]:
+        """Poll qB until save_path matches expected, or timeout."""
+        import time
+
+        deadline = time.monotonic() + timeout_seconds
+        last_info = None
+        last_actual: Optional[Path] = None
+        while time.monotonic() <= deadline:
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if info:
+                last_info = info
+                try:
+                    last_actual = canonicalize_path(Path(info.save_path).resolve())
+                except Exception:
+                    last_actual = Path(info.save_path).resolve()
+                if last_actual == expected_path:
+                    return info, last_actual
+            time.sleep(interval_seconds)
+        return last_info, last_actual
 
     def _spot_check_payload(self, payload_root: Path, device_id: int, sample: int) -> None:
         """Spot-check a payload by verifying SHA256 on a sample of files."""
