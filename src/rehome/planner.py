@@ -55,15 +55,36 @@ def _build_view_targets(
     placeholders = ",".join(["?"] * len(torrent_hashes))
     rows = conn.execute(
         f"""
-        SELECT torrent_hash, save_path, root_name
+        SELECT torrent_hash, save_path, root_name, device_id
         FROM torrent_instances
         WHERE torrent_hash IN ({placeholders})
         """,
         torrent_hashes,
     ).fetchall()
 
+    device_mounts: Dict[int, List[Path]] = {}
+    try:
+        mount_rows = conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall()
+    except sqlite3.Error:
+        mount_rows = []
+    for device_id, mount_point, preferred_mount in mount_rows:
+        if device_id is None:
+            continue
+        mounts: List[Path] = []
+        for candidate in (preferred_mount, mount_point):
+            if not candidate:
+                continue
+            canon = canonicalize_path(Path(candidate))
+            if canon not in mounts:
+                mounts.append(canon)
+        if mounts:
+            device_mounts[int(device_id)] = mounts
+    mount_groups: List[List[Path]] = list(device_mounts.values())
+
     view_targets = []
-    for torrent_hash, save_path, root_name in rows:
+    for torrent_hash, save_path, root_name, device_id in rows:
         if not save_path:
             raise ValueError(f"Missing save_path for torrent {torrent_hash}")
 
@@ -75,6 +96,37 @@ def _build_view_targets(
             (root for root in resolved_sources if is_under(save_path_path, root)),
             None,
         )
+
+        if source_root is None:
+            candidate_mount_groups: List[List[Path]] = []
+            if device_id is not None:
+                specific = device_mounts.get(int(device_id), [])
+                if specific:
+                    candidate_mount_groups.append(specific)
+            candidate_mount_groups.extend(mount_groups)
+
+            remapped: Optional[Path] = None
+            for mounts in candidate_mount_groups:
+                for mount in mounts:
+                    rel = to_relpath(save_path_path, mount)
+                    if rel is None:
+                        continue
+                    for alias_mount in mounts:
+                        candidate = alias_mount / rel
+                        source_root = next(
+                            (root for root in resolved_sources if is_under(candidate, root)),
+                            None,
+                        )
+                        if source_root is not None:
+                            remapped = candidate
+                            break
+                    if source_root is not None:
+                        break
+                if source_root is not None:
+                    break
+            if remapped is not None:
+                save_path_path = remapped
+
         if source_root is None:
             raise ValueError(
                 f"Torrent save_path {save_path_path} is not under any source root"
@@ -360,11 +412,18 @@ class DemotionPlanner:
             return None
 
         prefixes: List[tuple[str, Path]] = []
+        aliases_by_uuid: Dict[str, List[Path]] = {}
         for fs_uuid, mount_point, preferred in device_rows:
+            alias_paths: List[Path] = []
             for candidate in (preferred, mount_point):
                 if not candidate:
                     continue
-                prefixes.append((fs_uuid, canonicalize_path(Path(candidate))))
+                canon = canonicalize_path(Path(candidate))
+                prefixes.append((fs_uuid, canon))
+                if canon not in alias_paths:
+                    alias_paths.append(canon)
+            if alias_paths:
+                aliases_by_uuid[fs_uuid] = alias_paths
         prefixes = sorted(prefixes, key=lambda item: len(str(item[1])), reverse=True)
 
         scanned_by_uuid: Dict[str, List[Path]] = {}
@@ -385,7 +444,21 @@ class DemotionPlanner:
             if not scanned_roots:
                 return False
 
-            if not any(is_under(root_canon, scanned) for scanned in scanned_roots):
+            covered = any(is_under(root_canon, scanned) for scanned in scanned_roots)
+            if not covered:
+                alias_roots = aliases_by_uuid.get(fs_uuid, [])
+                for alias_root in alias_roots:
+                    rel = to_relpath(root_canon, alias_root)
+                    if rel is None:
+                        continue
+                    for alias_target in alias_roots:
+                        remapped = alias_target / rel
+                        if any(is_under(remapped, scanned) for scanned in scanned_roots):
+                            covered = True
+                            break
+                    if covered:
+                        break
+            if not covered:
                 return False
         return True
 

@@ -493,6 +493,70 @@ class TestReusePlan:
         assert plan['source_path'] == stash_root
         assert plan.get('payload_group')
 
+    def test_reuse_with_save_path_alias_and_scan_root_alias(self, tmp_path):
+        """Allow REUSE when save_path and scan_roots use alternate mount aliases."""
+        db_path = TestDatabase.create_test_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+
+        stash_root = "/stash/media/torrents/seeding/Movie.2024"
+        pool_root = "/pool/data/seeds/Movie.2024"
+        payload_hash = "shared_alias_payload_hash"
+
+        conn.executescript(f"""
+            CREATE TABLE devices (
+                device_id INTEGER PRIMARY KEY,
+                fs_uuid TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT
+            );
+
+            INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
+            VALUES
+                (50, 'fs-stash', '/data/media', '/stash/media'),
+                (49, 'fs-pool', '/pool/data', '/pool/data');
+
+            CREATE TABLE scan_roots (
+                fs_uuid TEXT,
+                root_path TEXT,
+                last_scanned_at TEXT,
+                scan_count INTEGER,
+                PRIMARY KEY (fs_uuid, root_path)
+            );
+
+            INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count)
+            VALUES
+                ('fs-stash', '/stash/media', '2026-02-18', 1),
+                ('fs-pool', '/pool/data', '2026-02-18', 1);
+
+            INSERT INTO files_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('torrents/seeding/Movie.2024/video.mkv', 8001, 1000000, 1234567890, 'abc123', 'active');
+
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES
+                (1, '{payload_hash}', 50, '{stash_root}', 1, 1000000, 'complete'),
+                (2, '{payload_hash}', 49, '{pool_root}', 1, 1000000, 'complete');
+
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+            VALUES ('torrent_alias_123', 1, 50, '/data/media/torrents/seeding', 'Movie.2024');
+        """)
+        conn.commit()
+        conn.close()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/data/media", "/stash/media", "/pool/data"],
+            library_roots=["/data/media", "/stash/media"],
+            stash_device=50,
+            pool_device=49,
+            stash_seeding_root="/stash/media/torrents/seeding",
+            pool_seeding_root="/pool/data/seeds",
+            pool_payload_root="/pool/data/seeds",
+        )
+
+        plan = planner.plan_demotion("torrent_alias_123")
+        assert plan["decision"] == "REUSE"
+        assert plan["target_path"] == pool_root
+
 
 class TestMovePlan:
     """Test MOVE decision when payload doesn't exist on pool."""
