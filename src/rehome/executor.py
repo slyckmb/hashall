@@ -114,7 +114,7 @@ class DemotionExecutor:
 
     def _copy_with_rsync_progress(self, source_path: Path, target_path: Path) -> None:
         """Copy payload with rsync progress output, preserving metadata and hardlinks."""
-        cmd = [
+        rsync_cmd = [
             "rsync",
             "-aHAX",
             "--partial",
@@ -122,11 +122,21 @@ class DemotionExecutor:
             "--info=progress2",
         ]
         if source_path.is_dir():
-            cmd.extend([f"{source_path}/", f"{target_path}/"])
+            rsync_cmd.extend([f"{source_path}/", f"{target_path}/"])
         else:
-            cmd.extend([str(source_path), str(target_path)])
+            rsync_cmd.extend([str(source_path), str(target_path)])
 
-        self._log(f"step=move_payload method=rsync source={source_path} target={target_path}")
+        # Keep transfer low-priority to reduce interference with interactive use.
+        cmd: List[str] = []
+        if shutil.which("ionice"):
+            cmd.extend(["ionice", "-c3"])
+        if shutil.which("nice"):
+            cmd.extend(["nice", "-n", "15"])
+        cmd.extend(rsync_cmd)
+
+        self._log(
+            f"step=move_payload method=rsync low_priority=true source={source_path} target={target_path}"
+        )
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as exc:

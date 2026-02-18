@@ -88,7 +88,7 @@ def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, m
 
     executor._execute_move(plan, spot_check=0)
 
-    assert rsync_calls["cmd"][0] == "rsync"
+    assert "rsync" in rsync_calls["cmd"]
     assert target_path.exists()
     assert not source_path.exists()
 
