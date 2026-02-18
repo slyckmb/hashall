@@ -20,6 +20,7 @@ from hashall.device import ensure_files_table
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.qbittorrent import get_qbittorrent_client
 from hashall.payload import get_files_for_path
+from hashall.scan import compute_sha256
 from rehome.view_builder import build_torrent_view
 
 

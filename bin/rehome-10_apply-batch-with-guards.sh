@@ -11,6 +11,7 @@ Options:
   --pool-name NAME          ZFS pool name to guard (default: pool)
   --min-free-pct N          Minimum required free percent on pool (default: 20)
   --pool-device ID          Pool device_id for DB checks (default: 44)
+  --stash-device ID         Stash device_id for done-checks (default: 49)
   --spot-check N            Spot-check files during dryrun/apply (default: 1)
   --hash HASH               Add one payload hash (repeatable)
   --hashes-file PATH        File with payload hashes (one per line)
@@ -40,6 +41,7 @@ DB_PATH="/home/michael/.hashall/catalog.db"
 POOL_NAME="pool"
 MIN_FREE_PCT=20
 POOL_DEVICE_ID=44
+STASH_DEVICE_ID=49
 SPOT_CHECK=1
 
 HASHES=()
@@ -54,6 +56,8 @@ while [[ $# -gt 0 ]]; do
       MIN_FREE_PCT="${2:-}"; shift 2 ;;
     --pool-device)
       POOL_DEVICE_ID="${2:-}"; shift 2 ;;
+    --stash-device)
+      STASH_DEVICE_ID="${2:-}"; shift 2 ;;
     --spot-check)
       SPOT_CHECK="${2:-}"; shift 2 ;;
     --hash)
@@ -153,6 +157,17 @@ print("checks_ok=decision,target_source,db_pool_payload")
 PY
 }
 
+payload_counts() {
+  local hash="$1"
+  sqlite3 -separator ' ' "$DB_PATH" "
+    SELECT
+      SUM(CASE WHEN device_id = ${STASH_DEVICE_ID} AND status = 'complete' THEN 1 ELSE 0 END) AS stash_complete,
+      SUM(CASE WHEN device_id = ${POOL_DEVICE_ID} AND status = 'complete' THEN 1 ELSE 0 END) AS pool_complete
+    FROM payloads
+    WHERE payload_hash = '${hash}';
+  " | awk '{print ($1==""?0:$1) " " ($2==""?0:$2)}'
+}
+
 echo "batch_total=${#HASHES[@]}"
 
 idx=0
@@ -166,15 +181,51 @@ for hash in "${HASHES[@]}"; do
     echo "==== batch=${idx}/${#HASHES[@]} hash=${hash} ===="
     assert_pool_space
 
-    echo "step=plan_and_dryrun"
-    plan_output="$(bin/rehome-05_pilot-batch_plan-and-dryrun.sh --payload-hash "$hash" --spot-check "$SPOT_CHECK")"
-    echo "$plan_output"
+    echo "step=plan"
+    plan_path="out/reports/rehome-pilot/rehome-pilot-${prefix}-${stamp}.json"
+    PYTHONPATH=src python -m rehome.cli plan \
+      --demote \
+      --payload-hash "$hash" \
+      --catalog "$DB_PATH" \
+      --seeding-root /stash/media \
+      --seeding-root /data/media \
+      --seeding-root /pool/data \
+      --library-root /stash/media \
+      --library-root /data/media \
+      --stash-device "$STASH_DEVICE_ID" \
+      --pool-device "$POOL_DEVICE_ID" \
+      --stash-seeding-root /stash/media/torrents/seeding \
+      --pool-seeding-root /pool/data/seeds \
+      --pool-payload-root /pool/data/seeds \
+      --output "$plan_path"
 
-    plan_path="$(printf '%s\n' "$plan_output" | awk -F= '/^plan=/{print $2}' | tail -n1)"
-    if [[ -z "$plan_path" || ! -f "$plan_path" ]]; then
+    if [[ ! -f "$plan_path" ]]; then
       echo "ERROR: plan_path_not_found" >&2
       exit 20
     fi
+
+    decision="$(PYTHONPATH=src python - "$plan_path" <<'PY'
+import json, sys
+from pathlib import Path
+plan = json.loads(Path(sys.argv[1]).read_text())
+print(plan.get("decision",""))
+PY
+)"
+    read -r stash_complete pool_complete <<<"$(payload_counts "$hash")"
+    echo "payload_counts stash_complete=${stash_complete} pool_complete=${pool_complete} decision=${decision}"
+
+    if [[ "$pool_complete" -ge 1 && "$stash_complete" -eq 0 ]]; then
+      echo "skip_ok already_done hash=${hash} reason=pool_complete_and_no_stash_payload"
+      continue
+    fi
+
+    if [[ "$decision" == "BLOCK" ]]; then
+      echo "ERROR: blocked_and_not_already_done hash=${hash}" >&2
+      exit 25
+    fi
+
+    echo "step=dryrun_apply plan=${plan_path}"
+    PYTHONPATH=src python -m rehome.cli apply "$plan_path" --dryrun --catalog "$DB_PATH" --spot-check "$SPOT_CHECK"
 
     echo "step=live_apply plan=${plan_path}"
     set +e
