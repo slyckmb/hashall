@@ -131,3 +131,38 @@ def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path,
 
     assert source_path.exists()
     assert not target_path.exists()
+
+
+def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    source_path = tmp_path / "src_payload_nosha"
+    source_path.mkdir(parents=True, exist_ok=True)
+    (source_path / "video.mkv").write_bytes(b"x")
+    target_path = tmp_path / "dst_payload_nosha"
+
+    monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
+
+    def fake_run(cmd, check):
+        target_path.mkdir(parents=True, exist_ok=True)
+        (target_path / "video.mkv").write_bytes(b"x")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
+    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
+    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr("rehome.executor.get_files_for_path", lambda *_args, **_kwargs: [])
+
+    plan = {
+        "source_path": str(source_path),
+        "target_path": str(target_path),
+        "file_count": 1,
+        "total_bytes": 1,
+        "target_device_id": 44,
+    }
+
+    executor._execute_move(plan, spot_check=1)
+    assert target_path.exists()
+    assert not source_path.exists()

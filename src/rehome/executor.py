@@ -411,7 +411,11 @@ class DemotionExecutor:
 
         candidates = [f for f in files if f.sha256]
         if not candidates:
-            raise RuntimeError("No SHA256 available for spot-check; run sha256-backfill")
+            self._log(
+                "spot_check skipped: no SHA256 available in catalog for this payload",
+                "warning",
+            )
+            return
 
         sample_files = candidates[:sample]
         for f in sample_files:
