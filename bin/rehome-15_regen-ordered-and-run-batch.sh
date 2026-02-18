@@ -4,10 +4,10 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  bin/rehome-15_regen-ordered-and-run-batch.sh [batch-script args...]
+  bin/rehome-15_regen-ordered-and-run-batch.sh [--regen-only] [batch-script args...]
 
 What it does:
-  1) Rebuild eligible rehome hash list from current DB/planner decisions.
+  1) Rebuild eligible rehome hash list from current DB status report groups.
   2) Order hashes by:
        - group_items (torrent refs in payload hash group), DESC
        - payload_bytes (largest first), DESC
@@ -22,6 +22,12 @@ Notes:
   - Defaults (db/devices/space guard) come from the guarded batch script.
 USAGE
 }
+
+regen_only=0
+if [[ "${1:-}" == "--regen-only" ]]; then
+  regen_only=1
+  shift
+fi
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
@@ -44,89 +50,68 @@ PYTHONPATH=src python -u - <<'PY' "$hashes_file" "$report_file"
 import sys
 from pathlib import Path
 
-import sqlite3
-from rehome.planner import DemotionPlanner
+from hashall.model import connect_db
+from hashall.status_report import build_status_report
 
 hashes_path = Path(sys.argv[1])
 report_path = Path(sys.argv[2])
 
 db = "/home/michael/.hashall/catalog.db"
-stash_device = 49
-pool_device = 44
-
-planner = DemotionPlanner(
-    catalog_path=Path(db),
-    seeding_roots=["/stash/media", "/data/media", "/pool/data"],
-    library_roots=["/stash/media", "/data/media"],
-    stash_device=stash_device,
-    pool_device=pool_device,
-    stash_seeding_root="/stash/media/torrents/seeding",
-    pool_seeding_root="/pool/data/seeds",
-    pool_payload_root="/pool/data/seeds",
+conn = connect_db(db, read_only=True, apply_migrations=False)
+report = build_status_report(
+    conn,
+    roots_arg="/pool/data,/stash/media,/data/media",
+    media_root="/data/media",
+    pocket_depth=2,
+    top_n=50000,
+    recovery_prefix="/data/media/torrents/seeding/recovery_20260211",
 )
-conn = sqlite3.connect(db)
-conn.row_factory = sqlite3.Row
-rows = conn.execute(
-    """
-    SELECT
-      p.payload_hash,
-      COUNT(DISTINCT ti.torrent_hash) AS group_items,
-      COALESCE(SUM(CASE WHEN p.device_id = ? AND p.status='complete' THEN p.total_bytes ELSE 0 END), 0) AS payload_bytes,
-      COALESCE(SUM(CASE WHEN p.device_id = ? AND p.status='complete' THEN p.file_count ELSE 0 END), 0) AS stash_total_files
-    FROM payloads p
-    JOIN torrent_instances ti ON ti.payload_id = p.payload_id
-    WHERE p.payload_hash IS NOT NULL
-    GROUP BY p.payload_hash
-    HAVING SUM(CASE WHEN p.device_id = ? AND p.status='complete' THEN 1 ELSE 0 END) > 0
-    """,
-    (stash_device, stash_device, stash_device),
-).fetchall()
-print(f"phase=regenerate status=loaded_payload_hashes total={len(rows)}", flush=True)
+conn.close()
+groups = report.get("rehome_impact_groups", [])
+print(f"phase=regenerate status=loaded_impact_groups total={len(groups)}", flush=True)
 
 eligible = []
 blocked = []
-for idx, r in enumerate(rows, 1):
-    payload_hash = str(r["payload_hash"] or "").strip()
+for idx, g in enumerate(groups, 1):
+    payload_hash = str(g.get("payload_hash") or "").strip()
     if not payload_hash:
         continue
-    try:
-        plan = planner.plan_batch_demotion_by_payload_hash(payload_hash)
-    except Exception as exc:
+    recommendation = str(g.get("recommendation") or "").upper()
+    reasons = g.get("block_reason_counts") or {}
+    group_items = int(g.get("copies") or 0)
+    payload_bytes = int(g.get("stash_total_bytes") or 0)
+    stash_total_files = int(g.get("stash_total_files") or 0)
+
+    # Keep regular MOVE groups and add "copy-first" groups:
+    # groups blocked only because pool copy is missing.
+    if recommendation == "MOVE":
+        decision = "MOVE_EXISTING"
+    elif reasons and set(reasons.keys()) == {"pool_copy_missing"}:
+        decision = "MOVE_COPY_FIRST"
+    else:
         blocked.append(
             {
                 "payload_hash": payload_hash,
-                "decision": "ERROR",
-                "reason": str(exc).strip()[:300],
-                "group_items": int(r["group_items"] or 0),
-                "payload_bytes": int(r["payload_bytes"] or 0),
+                "decision": recommendation or "SKIP",
+                "reason": ",".join(sorted(reasons.keys())),
+                "group_items": group_items,
+                "payload_bytes": payload_bytes,
             }
         )
         continue
-    decision = str(plan.get("decision") or "").upper()
-    if decision not in {"MOVE", "REUSE"}:
-        reasons = plan.get("reasons") or []
-        blocked.append(
-            {
-                "payload_hash": payload_hash,
-                "decision": decision or "BLOCK",
-                "reason": str(reasons[0])[:300] if reasons else "",
-                "group_items": int(r["group_items"] or 0),
-                "payload_bytes": int(r["payload_bytes"] or 0),
-            }
-        )
-        continue
+
     eligible.append(
         {
             "payload_hash": payload_hash,
             "decision": decision,
-            "group_items": int(r["group_items"] or 0),
-            "payload_bytes": int(r["payload_bytes"] or 0),
-            "stash_total_files": int(r["stash_total_files"] or 0),
+            "group_items": group_items,
+            "payload_bytes": payload_bytes,
+            "stash_total_files": stash_total_files,
         }
     )
-    if idx == 1 or idx % 25 == 0:
+    if idx == 1 or idx % 50 == 0:
         print(
-            f"phase=regenerate progress={idx}/{len(rows)} eligible={len(eligible)} blocked={len(blocked)}",
+            f"phase=regenerate progress={idx}/{len(groups)} eligible={len(eligible)} blocked={len(blocked)}",
             flush=True,
         )
 
@@ -165,6 +150,11 @@ fi
 echo "hash_file=$hash_file"
 echo "report_file=$report_file"
 echo "run_log=$run_log"
+
+if [[ "$regen_only" -eq 1 ]]; then
+  echo "phase=run skipped=true reason=regen_only"
+  exit 0
+fi
 
 {
   echo "cmd=bin/rehome-10_apply-batch-with-guards.sh --hashes-file '$hash_file' $*"
