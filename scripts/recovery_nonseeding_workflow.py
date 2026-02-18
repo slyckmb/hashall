@@ -521,10 +521,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"ERROR: db not found: {db_path}", file=sys.stderr)
         return 2
 
-    if args.apply:
-        conn = sqlite3.connect(db_path)
-    else:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    # build_report creates temp tables, so use a normal connection even for
+    # report-only mode (readonly connections reject temp table writes).
+    conn = sqlite3.connect(db_path)
     try:
         report = build_report(
             conn,
