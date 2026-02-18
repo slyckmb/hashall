@@ -7,6 +7,7 @@ Applies demotion plans by moving payloads and relocating torrents.
 import sqlite3
 import shutil
 import os
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import json
@@ -103,6 +104,33 @@ class DemotionExecutor:
 
         actual_bytes = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
         return actual_bytes == expected_bytes
+
+    def _is_cross_filesystem(self, source_path: Path, target_parent: Path) -> bool:
+        """Return True when source and target parent are on different filesystems."""
+        try:
+            return source_path.stat().st_dev != target_parent.stat().st_dev
+        except FileNotFoundError:
+            return False
+
+    def _copy_with_rsync_progress(self, source_path: Path, target_path: Path) -> None:
+        """Copy payload with rsync progress output, preserving metadata and hardlinks."""
+        cmd = [
+            "rsync",
+            "-aHAX",
+            "--partial",
+            "--human-readable",
+            "--info=progress2",
+        ]
+        if source_path.is_dir():
+            cmd.extend([f"{source_path}/", f"{target_path}/"])
+        else:
+            cmd.extend([str(source_path), str(target_path)])
+
+        self._log(f"step=move_payload method=rsync source={source_path} target={target_path}")
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"Failed to copy payload with rsync: {exc}") from exc
 
     def _is_under_roots(self, path: Path, roots: List[Path]) -> bool:
         """Check if a path is under any of the given roots."""
@@ -1082,6 +1110,7 @@ class DemotionExecutor:
         target_path = Path(plan['target_path'])
 
         moved_payload = False
+        move_strategy = "rename"
 
         # 1. Verify source / idempotent target
         self._log(f"step=verify_source path={source_path}")
@@ -1091,14 +1120,19 @@ class DemotionExecutor:
             if not self._verify_total_bytes(source_path, plan['total_bytes']):
                 raise RuntimeError("Source total bytes mismatch")
 
-            if target_path.exists():
+            is_cross_fs = self._is_cross_filesystem(source_path, target_path.parent)
+            if target_path.exists() and not is_cross_fs:
                 raise RuntimeError(f"Target path already exists before move: {target_path}")
 
             # 2. Move payload root
-            self._log(f"step=move_payload source={source_path} target={target_path}")
             target_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                shutil.move(str(source_path), str(target_path))
+                if is_cross_fs:
+                    move_strategy = "rsync_copy"
+                    self._copy_with_rsync_progress(source_path, target_path)
+                else:
+                    self._log(f"step=move_payload method=rename source={source_path} target={target_path}")
+                    shutil.move(str(source_path), str(target_path))
                 moved_payload = True
             except Exception as e:
                 raise RuntimeError(f"Failed to move payload: {e}")
@@ -1131,17 +1165,40 @@ class DemotionExecutor:
             self._log("step=relocate_siblings")
             self._relocate_torrents_atomic(relocations)
         except Exception as e:
-            # Rollback: move payload back to stash if ANY torrent fails
+            # Rollback: restore source state if sibling relocation fails
             self._log("relocation_failed rolling_back_payload", "error")
             if moved_payload:
-                try:
-                    shutil.move(str(target_path), str(source_path))
-                    self._log(f"  Rolled back payload to {source_path}", "warning")
-                except Exception as rollback_error:
-                    self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
+                if move_strategy == "rename":
+                    try:
+                        shutil.move(str(target_path), str(source_path))
+                        self._log(f"  Rolled back payload to {source_path}", "warning")
+                    except Exception as rollback_error:
+                        self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
+                else:
+                    # rsync strategy leaves source in place until relocation succeeds.
+                    if target_path.exists():
+                        try:
+                            if target_path.is_dir():
+                                shutil.rmtree(target_path)
+                            else:
+                                target_path.unlink()
+                            self._log(f"  Removed copied target after failure: {target_path}", "warning")
+                        except Exception as rollback_error:
+                            self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
             else:
                 self._log("  rollback skipped reason=idempotent_mode_no_move", "warning")
             raise
+
+        # For rsync-based cross-filesystem moves, remove source only after relocation succeeded.
+        if move_strategy == "rsync_copy" and source_path.exists():
+            self._log(f"step=cleanup_source_after_rsync path={source_path}")
+            try:
+                if source_path.is_dir():
+                    shutil.rmtree(source_path)
+                else:
+                    source_path.unlink()
+            except Exception as e:
+                raise RuntimeError(f"Failed to remove source after rsync move: {e}") from e
 
         # 5. Verify source is removed
         self._log(f"step=verify_source_removed path={source_path}")
