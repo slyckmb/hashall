@@ -37,7 +37,10 @@ hashes_file="out/reports/rehome-pilot/rehome-eligible-ordered-${stamp}.txt"
 report_file="out/reports/rehome-pilot/rehome-eligible-ordered-${stamp}.tsv"
 run_log="out/reports/rehome-pilot/rehome-batch-run-${stamp}.log"
 
-PYTHONPATH=src python - <<'PY' "$hashes_file" "$report_file"
+echo "phase=regenerate start=$(TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)"
+echo "phase=regenerate status=loading_db"
+
+PYTHONPATH=src python -u - <<'PY' "$hashes_file" "$report_file"
 import sys
 from pathlib import Path
 
@@ -78,6 +81,7 @@ rows = conn.execute(
     """,
     (stash_device, stash_device, stash_device),
 ).fetchall()
+print(f"phase=regenerate status=loaded_payload_hashes total={len(rows)}", flush=True)
 
 eligible = []
 blocked = []
@@ -120,8 +124,11 @@ for idx, r in enumerate(rows, 1):
             "stash_total_files": int(r["stash_total_files"] or 0),
         }
     )
-    if idx % 100 == 0:
-        print(f"progress={idx}/{len(rows)} eligible={len(eligible)} blocked={len(blocked)}")
+    if idx == 1 or idx % 25 == 0:
+        print(
+            f"phase=regenerate progress={idx}/{len(rows)} eligible={len(eligible)} blocked={len(blocked)}",
+            flush=True,
+        )
 
 eligible.sort(key=lambda x: (-x["group_items"], -x["payload_bytes"], x["payload_hash"]))
 blocked.sort(key=lambda x: (-x["group_items"], -x["payload_bytes"], x["payload_hash"]))
@@ -146,6 +153,7 @@ print(f"report_file={report_path}")
 print(f"eligible_total={len(eligible)}")
 print(f"blocked_total={len(blocked)}")
 PY
+echo "phase=regenerate done=$(TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)"
 
 hash_file="$hashes_file"
 
