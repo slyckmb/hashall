@@ -5,6 +5,7 @@ Tests for atomic relocation rollback behavior.
 from pathlib import Path
 from types import SimpleNamespace
 import shutil
+import sqlite3
 
 import pytest
 
@@ -333,7 +334,7 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
     monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
     monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
-    monkeypatch.setattr("rehome.executor.get_files_for_path", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("rehome.executor.get_payload_file_rows", lambda *_args, **_kwargs: [])
 
     plan = {
         "source_path": str(source_path),
@@ -346,6 +347,59 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
     executor._execute_move(plan, spot_check=1)
     assert target_path.exists()
     assert not source_path.exists()
+
+
+def test_spot_check_persists_sha256_and_inode_peers(tmp_path, monkeypatch):
+    db_path = tmp_path / "spotcheck.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE files_44 (
+            path TEXT PRIMARY KEY,
+            size INTEGER NOT NULL,
+            sha256 TEXT,
+            hash_source TEXT,
+            inode INTEGER,
+            status TEXT NOT NULL DEFAULT 'active',
+            last_modified_at TEXT
+        );
+        """
+    )
+    payload_root = tmp_path / "payload_root"
+    payload_root.mkdir(parents=True, exist_ok=True)
+    payload_file = payload_root / "video.mkv"
+    payload_file.write_bytes(b"demo-bytes")
+    peer_path = tmp_path / "outside-peer.mkv"
+    peer_path.write_bytes(b"demo-bytes")
+
+    size = payload_file.stat().st_size
+    conn.execute(
+        "INSERT INTO files_44(path,size,sha256,hash_source,inode,status) VALUES (?,?,?,?,?,?)",
+        (str(payload_file), size, None, None, 777, "active"),
+    )
+    conn.execute(
+        "INSERT INTO files_44(path,size,sha256,hash_source,inode,status) VALUES (?,?,?,?,?,?)",
+        (str(peer_path), size, None, None, 777, "active"),
+    )
+    conn.commit()
+    conn.close()
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    monkeypatch.setattr("rehome.executor.compute_sha256", lambda _p: "abc123hash")
+
+    executor._spot_check_payload(payload_root, device_id=44, sample=1)
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT path, sha256, hash_source FROM files_44 WHERE inode=777 ORDER BY path"
+    ).fetchall()
+    conn.close()
+
+    assert len(rows) == 2
+    assert all(r[1] == "abc123hash" for r in rows)
+    as_map = {row[0]: row[2] for row in rows}
+    assert as_map[str(payload_file)] == "calculated"
+    assert as_map[str(peer_path)] == "inode:777"
 
 
 def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tmp_path, monkeypatch):

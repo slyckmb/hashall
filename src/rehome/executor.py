@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from hashall.device import ensure_files_table
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.qbittorrent import get_qbittorrent_client
-from hashall.payload import get_files_for_path
+from hashall.payload import get_payload_file_rows
 from hashall.scan import compute_sha256
 from rehome.view_builder import build_torrent_view
 
@@ -703,53 +703,106 @@ class DemotionExecutor:
         )
 
     def _spot_check_payload(self, payload_root: Path, device_id: int, sample: int) -> None:
-        """Spot-check a payload by verifying SHA256 on a sample of files."""
+        """Spot-check a payload by verifying SHA256 and persisting computed values."""
         if sample <= 0:
             return
 
         conn = self._get_db_connection()
         try:
-            files = get_files_for_path(conn, device_id, str(payload_root))
+            rows = get_payload_file_rows(conn, str(payload_root), device_id=device_id)
+            if not rows:
+                self._log(
+                    f"spot_check skipped: no payload rows found root={payload_root}",
+                    "warning",
+                )
+                return
+
+            table_name = f"files_{device_id}"
+            hash_source_supported = "hash_source" in {
+                str(r[1]) for r in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+
+            # De-duplicate by inode so we never hash the same content twice in one check.
+            unique_by_inode = {}
+            for row in rows:
+                inode_key = row.inode if row.inode is not None else row.path
+                unique_by_inode.setdefault(inode_key, row)
+
+            # Prefer smaller files for faster checks while still validating real content.
+            sample_files = sorted(unique_by_inode.values(), key=lambda f: f.size)[:sample]
+            self._log(
+                f"spot_check start sample={len(sample_files)} root={payload_root}"
+            )
+
+            persisted_rows = 0
+            persisted_groups = 0
+            for idx, f in enumerate(sample_files, start=1):
+                if payload_root.is_file():
+                    abs_path = payload_root
+                else:
+                    abs_path = payload_root / f.relative_path
+                self._log(
+                    f"  spot_check_progress done={idx}/{len(sample_files)} "
+                    f"size_bytes={f.size} path={abs_path}"
+                )
+                actual = compute_sha256(abs_path)
+                if f.sha256 and actual != f.sha256:
+                    raise RuntimeError(f"Spot-check hash mismatch for {abs_path}")
+
+                if f.inode is None:
+                    if hash_source_supported:
+                        cursor = conn.execute(
+                            f"""
+                            UPDATE {table_name}
+                            SET sha256 = ?, hash_source = ?, last_modified_at = datetime('now')
+                            WHERE path = ? AND status = 'active'
+                            """,
+                            (actual, "calculated", f.path),
+                        )
+                    else:
+                        cursor = conn.execute(
+                            f"""
+                            UPDATE {table_name}
+                            SET sha256 = ?, last_modified_at = datetime('now')
+                            WHERE path = ? AND status = 'active'
+                            """,
+                            (actual, f.path),
+                        )
+                    persisted_rows += int(cursor.rowcount or 0)
+                else:
+                    if hash_source_supported:
+                        cursor = conn.execute(
+                            f"""
+                            UPDATE {table_name}
+                            SET sha256 = ?,
+                                hash_source = CASE WHEN path = ? THEN 'calculated' ELSE ? END,
+                                last_modified_at = datetime('now')
+                            WHERE inode = ? AND size = ? AND status = 'active'
+                            """,
+                            (actual, f.path, f"inode:{f.inode}", f.inode, f.size),
+                        )
+                    else:
+                        cursor = conn.execute(
+                            f"""
+                            UPDATE {table_name}
+                            SET sha256 = ?, last_modified_at = datetime('now')
+                            WHERE inode = ? AND size = ? AND status = 'active'
+                            """,
+                            (actual, f.inode, f.size),
+                        )
+                    persisted_rows += int(cursor.rowcount or 0)
+                persisted_groups += 1
+
+            conn.commit()
+            self._log(
+                f"spot_check persisted_rows={persisted_rows} persisted_inode_groups={persisted_groups}"
+            )
+            self._log(
+                f"spot_check complete sample={len(sample_files)} root={payload_root}",
+                "success",
+            )
         finally:
             conn.close()
-
-        candidates = [f for f in files if f.sha256]
-        if not candidates:
-            self._log(
-                "spot_check skipped: no SHA256 available in catalog for this payload",
-                "warning",
-            )
-            return
-
-        # De-duplicate by inode so we never hash the same content twice in one check.
-        unique_by_inode = {}
-        for f in candidates:
-            inode_key = getattr(f, "inode", None)
-            if inode_key is None:
-                inode_key = f.relative_path
-            unique_by_inode.setdefault(inode_key, f)
-
-        # Prefer smaller files for faster checks while still validating real content.
-        sample_files = sorted(unique_by_inode.values(), key=lambda f: f.size)[:sample]
-        self._log(
-            f"spot_check start sample={len(sample_files)} root={payload_root}"
-        )
-        for idx, f in enumerate(sample_files, start=1):
-            if payload_root.is_file():
-                abs_path = payload_root
-            else:
-                abs_path = payload_root / f.relative_path
-            self._log(
-                f"  spot_check_progress done={idx}/{len(sample_files)} "
-                f"size_bytes={f.size} path={abs_path}"
-            )
-            actual = compute_sha256(abs_path)
-            if actual != f.sha256:
-                raise RuntimeError(f"Spot-check hash mismatch for {abs_path}")
-        self._log(
-            f"spot_check complete sample={len(sample_files)} root={payload_root}",
-            "success",
-        )
 
     def _relocate_torrent(self, torrent_hash: str, new_path: str) -> None:
         """
