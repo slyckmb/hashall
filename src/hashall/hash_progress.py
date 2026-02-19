@@ -80,7 +80,7 @@ class HashProgressReporter:
         self._start_ts = 0.0
         self._last_render_ts = 0.0
         self._last_progress_ts = 0.0
-        self._last_batch_bytes_done = -1
+        self._last_progress_bytes_done = -1
         self._last_group_logged = -1
         self._total_groups = 0
         self._total_bytes = 0
@@ -98,7 +98,7 @@ class HashProgressReporter:
             self._start_ts = time.monotonic()
             self._last_render_ts = self._start_ts
             self._last_progress_ts = self._start_ts
-            self._last_batch_bytes_done = 0
+            self._last_progress_bytes_done = 0
             self._last_group_logged = 0
             self._total_groups = max(0, int(total_groups))
             self._total_bytes = max(0, int(total_bytes))
@@ -154,9 +154,9 @@ class HashProgressReporter:
                 self._total_bytes = total_bytes_val
 
             bytes_done = max(0, int(batch_bytes_done or 0))
-            if bytes_done != self._last_batch_bytes_done:
+            if bytes_done != self._last_progress_bytes_done:
                 self._last_progress_ts = now
-                self._last_batch_bytes_done = bytes_done
+                self._last_progress_bytes_done = bytes_done
 
             if self.mode == "minimal":
                 if event == "done":
