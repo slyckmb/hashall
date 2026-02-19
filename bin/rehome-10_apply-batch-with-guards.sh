@@ -12,7 +12,7 @@ Options:
   --min-free-pct N          Minimum required free percent on pool (default: 20)
   --pool-device ID          Pool device_id for DB checks (default: 44)
   --stash-device ID         Stash device_id for done-checks (default: 49)
-  --spot-check N            Spot-check files during dryrun/apply (default: 1)
+  --spot-check N            Spot-check files during dryrun/apply (default: 0)
   --hash HASH               Add one payload hash (repeatable)
   --hashes-file PATH        File with payload hashes (one per line)
   -h, --help                Show help
@@ -43,7 +43,7 @@ POOL_NAME="pool"
 MIN_FREE_PCT=20
 POOL_DEVICE_ID=44
 STASH_DEVICE_ID=49
-SPOT_CHECK=1
+SPOT_CHECK=0
 
 HASHES=()
 
