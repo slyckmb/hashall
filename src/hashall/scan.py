@@ -602,8 +602,10 @@ def _hash_file_worker(
             # Check if we need to hash based on mode
             if hash_mode == 'fast' and quick_hash is not None:
                 need_hash = False
-            elif hash_mode == 'full' and sha1 is not None and sha256 is not None:
-                need_hash = False
+            elif hash_mode == 'full':
+                # In full mode, unchanged metadata still needs hash upgrade when
+                # either full hash column is missing.
+                need_hash = (sha1 is None or sha256 is None)
             elif hash_mode == 'upgrade' and (sha1 is None or sha256 is None):
                 need_hash = True  # Need to compute full hashes
             else:
