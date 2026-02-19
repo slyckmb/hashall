@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from hashall.device import ensure_files_table
+from hashall.qbittorrent import QBitFile
 from rehome.executor import DemotionExecutor
 
 
@@ -32,6 +33,15 @@ class FakeQbitClient:
 
     def get_torrent_files(self, torrent_hash: str):
         return []
+
+
+class FakeQbitClientWithFiles(FakeQbitClient):
+    def __init__(self, default_path: str, files):
+        super().__init__(default_path=default_path)
+        self._files = files
+
+    def get_torrent_files(self, torrent_hash: str):
+        return list(self._files)
 
 
 def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
@@ -733,3 +743,58 @@ def test_reuse_same_device_without_target_payload_row_repoints_source_payload(tm
 
     assert payload10 == (str(target_file),)
     assert torrent_row == (10, 44, str(target_file.parent))
+
+
+def test_build_views_skips_duplicate_target_entries(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            mount_point TEXT,
+            preferred_mount_point TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-44", 44, str(tmp_path), str(tmp_path)),
+    )
+    conn.commit()
+    conn.close()
+
+    payload_file = tmp_path / "canonical" / "Movie.2024.mkv"
+    payload_file.parent.mkdir(parents=True, exist_ok=True)
+    payload_file.write_bytes(b"payload")
+
+    target_save = tmp_path / "views" / "cross-seed" / "TrackerA"
+    target_save.mkdir(parents=True, exist_ok=True)
+
+    plan = {
+        "target_device_id": 44,
+        "file_count": 1,
+        "total_bytes": payload_file.stat().st_size,
+    }
+    view_targets = [
+        {
+            "torrent_hash": "hash_a",
+            "target_save_path": str(target_save),
+            "root_name": payload_file.name,
+        },
+        {
+            "torrent_hash": "hash_b",
+            "target_save_path": str(target_save),
+            "root_name": payload_file.name,
+        },
+    ]
+
+    files = [QBitFile(name=payload_file.name, size=payload_file.stat().st_size)]
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.qbit_client = FakeQbitClientWithFiles(default_path=str(target_save), files=files)
+
+    executor._build_views(payload_file, view_targets, plan)
+    built = target_save / payload_file.name
+    assert built.exists()
+    assert built.stat().st_ino == payload_file.stat().st_ino

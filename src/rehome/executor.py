@@ -346,6 +346,7 @@ class DemotionExecutor:
         total = len(view_targets)
         progress_every = 5 if total <= 50 else 25
         files_cache: Dict[str, List] = {}
+        seen_view_targets: set[tuple[str, str]] = set()
 
         conn = self._get_db_connection()
         table_name = self._get_device_table_name(conn, plan.get("target_device_id"))
@@ -370,6 +371,14 @@ class DemotionExecutor:
                 torrent_hash = target["torrent_hash"]
                 target_save_path = Path(target["target_save_path"])
                 root_name = target.get("root_name")
+                view_key = (str(target_save_path), str(root_name or ""))
+                if view_key in seen_view_targets:
+                    self._log(
+                        "  build_views_progress phase=skip_duplicate_view "
+                        f"done={idx}/{total} hash={torrent_hash[:16]}"
+                    )
+                    continue
+                seen_view_targets.add(view_key)
 
                 if idx == 1 or idx == total or idx % progress_every == 0:
                     self._log(

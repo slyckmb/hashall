@@ -103,21 +103,29 @@ def _ensure_hardlink(
                     )
                     last_log = now
 
-    if dst.exists():
-        src_stat = os.stat(src)
-        dst_stat = os.stat(dst)
-        if src_stat.st_ino == dst_stat.st_ino and src_stat.st_dev == dst_stat.st_dev:
-            return
+    def _accept_or_reject_existing(a: Path, b: Path) -> bool:
+        try:
+            a_stat = os.stat(a)
+            b_stat = os.stat(b)
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"Destination exists but is not a resolvable file: {b}") from exc
+
+        if a_stat.st_ino == b_stat.st_ino and a_stat.st_dev == b_stat.st_dev:
+            return True
         if compare_hint is not None:
-            hinted = compare_hint(src, dst)
+            hinted = compare_hint(a, b)
             if hinted is True:
-                return
+                return True
             if hinted is False:
-                raise RuntimeError(f"Destination exists and differs: {dst}")
-        if _same_content(src, dst):
+                raise RuntimeError(f"Destination exists and differs: {b}")
+        if _same_content(a, b):
             # Accept an existing identical file (already materialized by previous runs/manual copy).
-            return
-        raise RuntimeError(f"Destination exists and differs: {dst}")
+            return True
+        raise RuntimeError(f"Destination exists and differs: {b}")
+
+    if dst.exists() or dst.is_symlink():
+        _accept_or_reject_existing(src, dst)
+        return
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -126,7 +134,17 @@ def _ensure_hardlink(
     if src_stat.st_dev != dst_parent_stat.st_dev:
         raise RuntimeError(f"Cannot hardlink across filesystems: {src} -> {dst}")
 
-    os.link(src, dst)
+    try:
+        os.link(src, dst)
+    except FileExistsError:
+        # Another writer created the path between exists() and os.link(); treat this as
+        # idempotent if destination now matches source.
+        if progress_cb:
+            progress_cb(f"build_views_progress phase=link_race dst={dst}")
+        if dst.exists() or dst.is_symlink():
+            _accept_or_reject_existing(src, dst)
+            return
+        raise
 
 
 def build_torrent_view(

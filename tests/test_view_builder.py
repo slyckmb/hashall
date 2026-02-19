@@ -3,6 +3,7 @@ Tests for torrent view builder.
 """
 
 import os
+import errno
 from pathlib import Path
 
 import pytest
@@ -117,3 +118,29 @@ def test_build_view_compare_hint_rejects_existing(tmp_path):
             root_name=None,
             compare_hint=lambda _src, _dst: False,
         )
+
+
+def test_build_view_accepts_link_race_file_exists(tmp_path, monkeypatch):
+    payload_root = tmp_path / "payload" / "race.mkv"
+    payload_root.parent.mkdir(parents=True)
+    payload_root.write_bytes(b"RACE")
+
+    files = [QBitFile(name="race.mkv", size=payload_root.stat().st_size)]
+    target_save = tmp_path / "views"
+    target_save.mkdir()
+    dst = target_save / "race.mkv"
+
+    real_link = os.link
+
+    def link_with_race(src, target, *args, **kwargs):
+        # Simulate another process creating the link between exists() and os.link().
+        if not os.path.exists(target):
+            real_link(src, target)
+        raise FileExistsError(errno.EEXIST, "File exists", target)
+
+    monkeypatch.setattr("rehome.view_builder.os.link", link_with_race)
+
+    result = build_torrent_view(payload_root, target_save, files, root_name=None)
+    assert result.view_root == target_save
+    assert dst.exists()
+    assert os.stat(dst).st_ino == os.stat(payload_root).st_ino
