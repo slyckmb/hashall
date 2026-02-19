@@ -597,15 +597,32 @@ class DemotionExecutor:
             )
             return
 
-        sample_files = candidates[:sample]
-        for f in sample_files:
+        # De-duplicate by inode so we never hash the same content twice in one check.
+        unique_by_inode = {}
+        for f in candidates:
+            unique_by_inode.setdefault(f.inode, f)
+
+        # Prefer smaller files for faster checks while still validating real content.
+        sample_files = sorted(unique_by_inode.values(), key=lambda f: f.size)[:sample]
+        self._log(
+            f"spot_check start sample={len(sample_files)} root={payload_root}"
+        )
+        for idx, f in enumerate(sample_files, start=1):
             if payload_root.is_file():
                 abs_path = payload_root
             else:
                 abs_path = payload_root / f.relative_path
+            self._log(
+                f"  spot_check_progress done={idx}/{len(sample_files)} "
+                f"size_bytes={f.size} path={abs_path}"
+            )
             actual = compute_sha256(abs_path)
             if actual != f.sha256:
                 raise RuntimeError(f"Spot-check hash mismatch for {abs_path}")
+        self._log(
+            f"spot_check complete sample={len(sample_files)} root={payload_root}",
+            "success",
+        )
 
     def _relocate_torrent(self, torrent_hash: str, new_path: str) -> None:
         """

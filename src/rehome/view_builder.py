@@ -13,6 +13,8 @@ import os
 
 from hashall.qbittorrent import QBitFile
 
+_CONTENT_EQ_CACHE: dict[tuple[int, int, int, int, int, int], bool] = {}
+
 
 @dataclass
 class ViewBuildResult:
@@ -51,15 +53,30 @@ def _normalize_rel_path(
 
 def _ensure_hardlink(src: Path, dst: Path) -> None:
     def _same_content(a: Path, b: Path) -> bool:
-        if os.path.getsize(a) != os.path.getsize(b):
+        a_stat = os.stat(a)
+        b_stat = os.stat(b)
+        if a_stat.st_size != b_stat.st_size:
             return False
+        cache_key = (
+            a_stat.st_dev,
+            a_stat.st_ino,
+            b_stat.st_dev,
+            b_stat.st_ino,
+            a_stat.st_size,
+            b_stat.st_size,
+        )
+        cached = _CONTENT_EQ_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         with a.open("rb") as fa, b.open("rb") as fb:
             while True:
                 ba = fa.read(1024 * 1024)
                 bb = fb.read(1024 * 1024)
                 if ba != bb:
+                    _CONTENT_EQ_CACHE[cache_key] = False
                     return False
                 if not ba:
+                    _CONTENT_EQ_CACHE[cache_key] = True
                     return True
 
     if dst.exists():
