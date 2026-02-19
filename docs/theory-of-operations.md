@@ -77,11 +77,11 @@ Expected outcome:
 - **05 pilot batch**: first safe preview cycle (plan + dry-run).
 - **10 guarded apply**: execute a vetted small batch with checks.
 - **15 regenerate and run**: refresh candidate ordering and continue batch work.
-- **20 normalize plan/dry/apply with logs**: full normalize cycle with captured logs.
-- **21 normalize refresh plan**: rebuild normalize plan from current state.
-- **22 recover skipped and replan**: re-sync skipped items from prior plan, then rebuild.
-- **23 scan/sync/replan**: deeper recovery pass (scan roots, sync, replan).
-- **24 live-prefix hash-sync/replan**: derive active prefixes from live torrent mappings, hash-upgrade those roots, then replan.
+- **20 normalize refresh plan**: rebuild normalize plan from current state.
+- **21 recover skipped and replan**: re-sync skipped items from prior plan, then rebuild.
+- **22 scan/sync/replan**: deeper recovery pass (scan roots, sync, replan).
+- **23 live-prefix hash-sync/replan**: derive active prefixes from live torrent mappings, hash-upgrade those roots, then replan.
+- **24 normalize plan/dry/apply with logs**: full normalize cycle with captured logs.
 
 ### Recovery scripts
 - **05 audit recovered content**: classify recovered tree without deleting.
@@ -105,4 +105,3 @@ This means the tool intentionally paused automatic deletion until seeding health
 - Follow-up clears verify-pending and cleanup-required tags.
 - Re-planning after apply trends toward fewer candidates and fewer skips.
 - Pool paths converge under consistent category/tracker-aware structure.
-

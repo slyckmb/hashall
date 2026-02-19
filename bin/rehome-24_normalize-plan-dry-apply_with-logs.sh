@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  bin/rehome-20_normalize-plan-dry-apply_with-logs.sh [options]
+  bin/rehome-24_normalize-plan-dry-apply_with-logs.sh [options]
 
 What it does:
   1) Build normalize plan (misplaced pool payload roots).
@@ -24,8 +24,8 @@ Options:
   -h, --help                Show help
 
 Examples:
-  bin/rehome-20_normalize-plan-dry-apply_with-logs.sh
-  bin/rehome-20_normalize-plan-dry-apply_with-logs.sh --limit 5 --apply --debug
+  bin/rehome-24_normalize-plan-dry-apply_with-logs.sh
+  bin/rehome-24_normalize-plan-dry-apply_with-logs.sh --limit 5 --apply --debug
 USAGE
 }
 
@@ -131,4 +131,3 @@ echo "dry_log=${dry_log}" | tee -a "$run_log"
 if [[ "$DO_APPLY" == "1" ]]; then
   echo "apply_log=${apply_log}" | tee -a "$run_log"
 fi
-

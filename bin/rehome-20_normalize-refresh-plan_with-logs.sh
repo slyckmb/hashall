@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  bin/rehome-21_normalize-refresh-plan_with-logs.sh [options]
+  bin/rehome-20_normalize-refresh-plan_with-logs.sh [options]
 
 What it does:
   1) Refresh payload metadata from qB into catalog (scoped by pool root).
