@@ -126,6 +126,13 @@ REHOME_FOLLOWUP_LIMIT ?= 0
 REHOME_FOLLOWUP_PRINT_TORRENTS ?= 0
 REHOME_FOLLOWUP_OUTPUT ?=
 REHOME_FOLLOWUP_PAYLOAD_HASH ?=
+REHOME_NORMALIZE_POOL_ROOT ?= /pool/data/seeds
+REHOME_NORMALIZE_STASH_ROOT ?= /stash/media/torrents/seeding
+REHOME_NORMALIZE_LIMIT ?= 0
+REHOME_NORMALIZE_FLAT_ONLY ?= 1
+REHOME_NORMALIZE_PRINT_SKIPPED ?= 0
+REHOME_NORMALIZE_PAYLOAD_HASH ?=
+REHOME_NORMALIZE_OUTPUT ?=
 RECOVERY_WORKFLOW_PREFIX ?= /data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207
 RECOVERY_WORKFLOW_STASH_DEVICE ?= 49
 RECOVERY_WORKFLOW_POOL_DEVICE ?= 44
@@ -167,7 +174,7 @@ help:  ## Show this help message
 	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|status-report|status-report-phone|recovery-auto|recovery-auto-apply|rehome-safe-auto|rehome-safe-verify|rehome-safe-cleanup|rehome-followup|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|status-report|status-report-phone|recovery-auto|recovery-auto-apply|rehome-safe-auto|rehome-safe-verify|rehome-safe-cleanup|rehome-followup|rehome-normalize-plan|rehome-normalize-apply|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -212,6 +219,8 @@ help:  ## Show this help message
 	@echo "  make rehome-safe-verify                    # Gate check latest safe run (qB+DB+source)"
 	@echo "  make rehome-safe-cleanup                   # Delete source paths only when gates pass"
 	@echo "  make rehome-followup                       # Process rehome_verify_pending + cleanup-required tags"
+	@echo "  make rehome-normalize-plan REHOME_POOL_DEVICE=44  # Build batch plan for misplaced pool payload roots"
+	@echo "  make rehome-normalize-apply REHOME_PLAN=rehome-plan-normalize-*.json  # Apply normalization + cleanup old roots"
 	@echo "  make rehome-checklist                     # Rehome checklist"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
@@ -700,6 +709,36 @@ rehome-followup:  ## Re-evaluate rehome_verify_pending/cleanup-required tags and
 	if [ -n "$(REHOME_FOLLOWUP_OUTPUT)" ]; then set -- "$$@" --output "$(REHOME_FOLLOWUP_OUTPUT)"; fi; \
 	if [ -n "$(REHOME_FOLLOWUP_PAYLOAD_HASH)" ]; then set -- "$$@" --payload-hash "$(REHOME_FOLLOWUP_PAYLOAD_HASH)"; fi; \
 	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) "$$@"
+
+.PHONY: rehome-normalize-plan
+rehome-normalize-plan:  ## Build batch plan to normalize misplaced pool payload root paths
+	@if [ -z "$(REHOME_POOL_DEVICE)" ]; then \
+		echo "❌ REHOME_POOL_DEVICE is required"; \
+		exit 1; \
+	fi; \
+	set -- normalize-plan \
+		--catalog "$(REHOME_CATALOG)" \
+		--pool-device "$(REHOME_POOL_DEVICE)" \
+		--pool-seeding-root "$(REHOME_NORMALIZE_POOL_ROOT)" \
+		--stash-seeding-root "$(REHOME_NORMALIZE_STASH_ROOT)" \
+		--limit "$(REHOME_NORMALIZE_LIMIT)"; \
+	if [ "$(REHOME_NORMALIZE_FLAT_ONLY)" = "0" ]; then set -- "$$@" --all-mismatches; fi; \
+	if [ "$(REHOME_NORMALIZE_PRINT_SKIPPED)" = "1" ]; then set -- "$$@" --print-skipped; fi; \
+	if [ -n "$(REHOME_NORMALIZE_PAYLOAD_HASH)" ]; then set -- "$$@" --payload-hash "$(REHOME_NORMALIZE_PAYLOAD_HASH)"; fi; \
+	if [ -n "$(REHOME_NORMALIZE_OUTPUT)" ]; then set -- "$$@" --output "$(REHOME_NORMALIZE_OUTPUT)"; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) "$$@"
+
+.PHONY: rehome-normalize-apply
+rehome-normalize-apply:  ## Apply normalization plan and prune source canonical roots
+	@plan="$(REHOME_PLAN)"; \
+	if [ -z "$$plan" ] && [ -n "$(REHOME_NORMALIZE_OUTPUT)" ]; then plan="$(REHOME_NORMALIZE_OUTPUT)"; fi; \
+	if [ -z "$$plan" ]; then \
+		echo "❌ REHOME_PLAN (or REHOME_NORMALIZE_OUTPUT) is required"; \
+		exit 1; \
+	fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) apply "$$plan" --force \
+		--catalog "$(REHOME_CATALOG)" \
+		--cleanup-duplicate-payload
 
 .PHONY: recovery-auto
 recovery-auto:  ## Audit recovered non-seeding content and classify exact dupes/support/unique units

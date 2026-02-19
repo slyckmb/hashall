@@ -12,6 +12,7 @@ from typing import Optional
 
 from rehome import __version__
 from rehome.followup import run_followup
+from rehome.normalize import build_pool_path_normalization_batch
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
@@ -561,6 +562,93 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, 
     pending_or_failed = int(summary.get("groups_pending", 0)) + int(summary.get("groups_failed", 0))
     if strict and pending_or_failed > 0:
         raise click.exceptions.Exit(1)
+
+
+@cli.command("normalize-plan")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--pool-device", type=int, required=True,
+              help="Pool device_id in catalog")
+@click.option("--pool-seeding-root", type=click.Path(), required=True,
+              help="Pool seeding root (example: /pool/data/seeds)")
+@click.option("--stash-seeding-root", type=click.Path(),
+              help="Optional stash seeding root for source-relative mapping")
+@click.option("--payload-hash", "payload_hashes", multiple=True,
+              help="Restrict normalization planning to specific payload hash(es)")
+@click.option("--limit", type=int, default=0,
+              help="Max normalization candidates to include (0 = all)")
+@click.option("--flat-only/--all-mismatches", default=True,
+              help="Plan only payloads directly under pool root (default) or all mismatches")
+@click.option("--output", "-o", type=click.Path(),
+              help="Output batch plan JSON (default: rehome-plan-normalize-<timestamp>.json)")
+@click.option("--print-skipped", is_flag=True,
+              help="Print skipped payload reasons")
+def normalize_plan_cmd(
+    catalog,
+    pool_device,
+    pool_seeding_root,
+    stash_seeding_root,
+    payload_hashes,
+    limit,
+    flat_only,
+    output,
+    print_skipped,
+):
+    """Create batch plan(s) to normalize pool payload root paths."""
+    catalog_path = Path(catalog)
+
+    try:
+        report = build_pool_path_normalization_batch(
+            catalog_path=catalog_path,
+            pool_device=pool_device,
+            pool_seeding_root=pool_seeding_root,
+            stash_seeding_root=stash_seeding_root,
+            payload_hashes=set(payload_hashes) if payload_hashes else None,
+            limit=limit,
+            flat_only=flat_only,
+        )
+    except Exception as e:
+        click.echo(f"❌ normalize-plan failed: {e}", err=True)
+        raise click.Abort()
+
+    if not output:
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        output = f"rehome-plan-normalize-{stamp}.json"
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    summary = report.get("summary", {})
+    plans = report.get("plans", [])
+    click.echo(f"✅ Normalize plan written to: {output_path}")
+    click.echo(
+        "summary="
+        f"candidates:{summary.get('candidates', 0)} "
+        f"reuse:{summary.get('decision_reuse', 0)} "
+        f"move:{summary.get('decision_move', 0)} "
+        f"skipped:{summary.get('skipped', 0)}"
+    )
+    if plans:
+        for plan in plans[:5]:
+            click.echo(
+                f"  {str(plan.get('decision', '')):5s} "
+                f"payload={str(plan.get('payload_hash', ''))[:16]} "
+                f"source={plan.get('source_path')} "
+                f"target={plan.get('target_path')}"
+            )
+        if len(plans) > 5:
+            click.echo(f"  ... ({len(plans) - 5} more)")
+
+    if print_skipped:
+        for item in report.get("skipped", []):
+            click.echo(
+                f"  skipped payload={str(item.get('payload_hash', ''))[:16]} "
+                f"reason={item.get('reason')} source={item.get('source_path')}"
+            )
+
+    click.echo()
+    click.echo(f"Next step: rehome apply {output_path} --dryrun")
 
 
 if __name__ == "__main__":
