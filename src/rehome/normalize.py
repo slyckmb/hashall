@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
+from urllib.parse import quote
 
 from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias, to_relpath
 
@@ -29,6 +30,17 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
         (table_name,),
     ).fetchone()
     return row is not None
+
+
+def _table_has_columns(conn: sqlite3.Connection, table_name: str, required: Set[str]) -> bool:
+    if not _table_exists(conn, table_name):
+        return False
+    cols = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        if len(row) > 1
+    }
+    return required.issubset(cols)
 
 
 def _resolve_rel(
@@ -71,7 +83,7 @@ def _preferred_expected_target(
     pool_torrents: Sequence[sqlite3.Row],
 ) -> Tuple[Optional[Path], str]:
     # Prefer original source->target relative path from successful demote runs.
-    if _table_exists(conn, "rehome_runs"):
+    if _table_has_columns(conn, "rehome_runs", {"direction", "payload_hash", "status", "source_path"}):
         run_rows = conn.execute(
             """
             SELECT source_path
@@ -128,7 +140,10 @@ def build_pool_path_normalization_batch(
     (when target is absent). They are safe to execute with existing
     `rehome apply` workflow.
     """
-    conn = sqlite3.connect(catalog_path)
+    catalog_uri = (
+        f"file:{quote(str(Path(catalog_path).expanduser().resolve()))}?mode=ro&immutable=1"
+    )
+    conn = sqlite3.connect(catalog_uri, uri=True)
     conn.row_factory = sqlite3.Row
     pool_root = _canonical(pool_seeding_root)
     stash_root = _canonical(stash_seeding_root) if stash_seeding_root else None
@@ -319,4 +334,3 @@ def build_pool_path_normalization_batch(
             "decision_move": sum(1 for p in plans if p.get("decision") == "MOVE"),
         },
     }
-
