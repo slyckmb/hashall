@@ -167,13 +167,13 @@ if os.getenv("REHOME_REGEN_DEBUG", "0") == "1":
         head = eligible[:5]
         print(
             "debug_top_eligible="
-            + ",".join(f\"{x['payload_hash'][:12]}:{x['group_items']}:{x['payload_bytes']}\" for x in head)
+            + ",".join(f"{x['payload_hash'][:12]}:{x['group_items']}:{x['payload_bytes']}" for x in head)
         )
     if blocked:
         head_b = blocked[:5]
         print(
             "debug_top_blocked="
-            + ",".join(f\"{x['payload_hash'][:12]}:{x['reason']}\" for x in head_b)
+            + ",".join(f"{x['payload_hash'][:12]}:{x['reason']}" for x in head_b)
         )
 PY
 echo "phase=regenerate done=$(TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)"
