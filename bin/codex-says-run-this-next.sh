@@ -240,21 +240,101 @@ print(
 PY
 }
 
+stage0_migrate_legacy_cross_seed() {
+  local src_root="$1"
+  local dst_root="$2"
+
+  if [[ ! -d "$src_root" ]]; then
+    echo "step=0 legacy-migrate status=skip reason=missing_source root=$src_root"
+    return 0
+  fi
+
+  local src_bytes_before
+  src_bytes_before="$(du -sb "$src_root" 2>/dev/null | awk '{print $1}')"
+  if [[ "${src_bytes_before:-0}" -eq 0 ]]; then
+    echo "step=0 legacy-migrate status=skip reason=empty_source root=$src_root"
+    return 0
+  fi
+
+  mkdir -p "$dst_root"
+
+  local rsync_bin
+  rsync_bin="$(command -v rsync || true)"
+  if [[ -z "$rsync_bin" ]]; then
+    echo "step=0 legacy-migrate status=error reason=rsync_missing"
+    return 1
+  fi
+
+  echo "step=0 legacy-migrate source=$src_root target=$dst_root mode=real"
+  local moved_trackers=0
+  local merged_trackers=0
+  local conflict_trackers=0
+  local failed_trackers=0
+
+  shopt -s nullglob dotglob
+  for src_tracker in "$src_root"/*; do
+    [[ -e "$src_tracker" ]] || continue
+    local tracker_name
+    tracker_name="$(basename "$src_tracker")"
+    local dst_tracker="$dst_root/$tracker_name"
+
+    if [[ ! -e "$dst_tracker" ]]; then
+      if mv "$src_tracker" "$dst_tracker"; then
+        moved_trackers=$((moved_trackers + 1))
+        echo "  stage0_tracker tracker=$tracker_name action=mv status=ok"
+      else
+        failed_trackers=$((failed_trackers + 1))
+        echo "  stage0_tracker tracker=$tracker_name action=mv status=error"
+      fi
+      continue
+    fi
+
+    if [[ -d "$src_tracker" && -d "$dst_tracker" ]]; then
+      echo "  stage0_tracker tracker=$tracker_name action=merge status=running"
+      if "$rsync_bin" -a --ignore-existing --remove-source-files "$src_tracker"/ "$dst_tracker"/; then
+        merged_trackers=$((merged_trackers + 1))
+        find "$src_tracker" -type d -empty -delete 2>/dev/null || true
+        rmdir "$src_tracker" 2>/dev/null || true
+        if [[ -d "$src_tracker" ]]; then
+          local remaining_files
+          remaining_files="$(find "$src_tracker" -type f 2>/dev/null | wc -l | tr -d '[:space:]')"
+          if [[ "${remaining_files:-0}" -gt 0 ]]; then
+            conflict_trackers=$((conflict_trackers + 1))
+            echo "  stage0_tracker tracker=$tracker_name action=merge status=conflict remaining_files=$remaining_files path=$src_tracker"
+          else
+            rmdir "$src_tracker" 2>/dev/null || true
+            echo "  stage0_tracker tracker=$tracker_name action=merge status=ok"
+          fi
+        else
+          echo "  stage0_tracker tracker=$tracker_name action=merge status=ok"
+        fi
+      else
+        failed_trackers=$((failed_trackers + 1))
+        echo "  stage0_tracker tracker=$tracker_name action=merge status=error"
+      fi
+      continue
+    fi
+
+    failed_trackers=$((failed_trackers + 1))
+    echo "  stage0_tracker tracker=$tracker_name action=type_conflict status=error source=$src_tracker target=$dst_tracker"
+  done
+  shopt -u nullglob dotglob
+
+  local src_bytes_after dst_bytes_after
+  src_bytes_after="$(du -sb "$src_root" 2>/dev/null | awk '{print $1}')"
+  dst_bytes_after="$(du -sb "$dst_root" 2>/dev/null | awk '{print $1}')"
+  echo "step=0 legacy-migrate-summary moved_trackers=$moved_trackers merged_trackers=$merged_trackers conflict_trackers=$conflict_trackers failed_trackers=$failed_trackers src_bytes_before=${src_bytes_before:-0} src_bytes_after=${src_bytes_after:-0} dst_bytes_after=${dst_bytes_after:-0}"
+}
+
 echo "run_log=$run_log"
 
 LEGACY_CROSS_SEED_ROOT="/pool/data/cross-seed"
-if [[ -d "$LEGACY_CROSS_SEED_ROOT" ]]; then
-  legacy_bytes="$(du -sb "$LEGACY_CROSS_SEED_ROOT" 2>/dev/null | awk '{print $1}')"
-  if [[ "${legacy_bytes:-0}" -gt 0 ]]; then
-    echo "warning=legacy_cross_seed_not_migrated root=$LEGACY_CROSS_SEED_ROOT bytes=$legacy_bytes"
-    echo "note=this workflow normalizes /pool/data/seeds only; legacy /pool/data/cross-seed migration is separate"
-  fi
-fi
 
 LIMIT="${REHOME_NORMALIZE_LIMIT:-50}"
 POOL_ROOT="${REHOME_NORMALIZE_POOL_ROOT:-/pool/data/seeds}"
 STASH_ROOT="${REHOME_NORMALIZE_STASH_ROOT:-/stash/media/torrents/seeding}"
 POOL_DEVICE="${REHOME_POOL_DEVICE:-44}"
+LEGACY_MIGRATE="${REHOME_STAGE0_MIGRATE_LEGACY:-1}"
 HASH_PROGRESS="${PAYLOAD_HASH_PROGRESS:-auto}"
 case "${HASH_PROGRESS}" in
   auto|minimal|full) ;;
@@ -267,7 +347,18 @@ RUN_RECOVERY_STEPS="${REHOME_NORMALIZE_RUN_RECOVERY:-0}"
 CLEANUP_DUPLICATE="${REHOME_CLEANUP_DUPLICATE_PAYLOAD:-1}"
 
 echo "mode=frozen-one-pass limit=${LIMIT} pool_root=${POOL_ROOT} pool_device=${POOL_DEVICE}"
-echo "sanitize_live_filter=${REHOME_SANITIZE_LIVE:-0} recovery_steps=${RUN_RECOVERY_STEPS} cleanup_duplicate=${CLEANUP_DUPLICATE}"
+echo "sanitize_live_filter=${REHOME_SANITIZE_LIVE:-0} recovery_steps=${RUN_RECOVERY_STEPS} cleanup_duplicate=${CLEANUP_DUPLICATE} stage0_legacy_migrate=${LEGACY_MIGRATE}"
+
+if [[ "$LEGACY_MIGRATE" == "1" ]]; then
+  stage0_migrate_legacy_cross_seed "$LEGACY_CROSS_SEED_ROOT" "${POOL_ROOT%/}/cross-seed"
+else
+  legacy_bytes="$(du -sb "$LEGACY_CROSS_SEED_ROOT" 2>/dev/null | awk '{print $1}')"
+  if [[ "${legacy_bytes:-0}" -gt 0 ]]; then
+    echo "warning=legacy_cross_seed_not_migrated root=$LEGACY_CROSS_SEED_ROOT bytes=$legacy_bytes"
+  fi
+  echo "step=0 legacy-migrate status=skip reason=disabled"
+fi
+
 echo "step=sync-snapshot"
 make payload-sync \
   PAYLOAD_PATH_PREFIXES="${POOL_ROOT}" \
