@@ -415,22 +415,52 @@ class DemotionExecutor:
         torrent_hash: str,
         target_save_path: str,
         *,
-        attempts: int = 6,
+        attempts: int = 10,
         delay_seconds: float = 1.0,
     ) -> bool:
         """Set torrent location with retries to tolerate transient qB conflicts."""
         import time
 
+        expected = canonicalize_path(Path(target_save_path).resolve())
+        current_info, current_path = self._wait_for_save_path(
+            torrent_hash,
+            expected,
+            timeout_seconds=0.0,
+            interval_seconds=0.0,
+        )
+        if current_info and current_path == expected:
+            return True
+
         for attempt in range(1, attempts + 1):
             if self.qbit_client.set_location(torrent_hash, target_save_path):
                 return True
+            # qB can return 409 while already applying the path change.
+            info, actual = self._wait_for_save_path(
+                torrent_hash,
+                expected,
+                timeout_seconds=2.0,
+                interval_seconds=0.5,
+            )
+            if info and actual == expected:
+                return True
             if attempt < attempts:
+                if attempt in {4, 8}:
+                    self.qbit_client.pause_torrent(torrent_hash)
                 self._log(
                     f"  retry_set_location hash={torrent_hash[:16]} "
                     f"attempt={attempt + 1}/{attempts}",
                     "warning",
                 )
-                time.sleep(delay_seconds)
+                time.sleep(min(delay_seconds * attempt, 3.0))
+        # Final check in case qB committed late.
+        info, actual = self._wait_for_save_path(
+            torrent_hash,
+            expected,
+            timeout_seconds=5.0,
+            interval_seconds=0.5,
+        )
+        if info and actual == expected:
+            return True
         return False
 
     def _wait_for_save_path(

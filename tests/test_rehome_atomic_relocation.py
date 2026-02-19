@@ -94,6 +94,25 @@ def test_atomic_relocation_retries_and_waits_for_qb_save_path(tmp_path, monkeypa
     assert executor.qbit_client.save_paths["t1"] == "/pool/seeding"
 
 
+def test_set_location_retry_succeeds_when_qb_reports_conflict_but_path_is_set(tmp_path, monkeypatch):
+    class ConflictButMoved(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def set_location(self, torrent_hash: str, new_location: str) -> bool:
+            self.calls += 1
+            self.save_paths[torrent_hash] = new_location
+            return False
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = ConflictButMoved()
+
+    assert executor._set_location_with_retry("t1", "/pool/seeding", attempts=2, delay_seconds=0.01) is True
+    assert executor.qbit_client.calls >= 1
+
+
 def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()
