@@ -1128,6 +1128,14 @@ class DemotionExecutor:
             if plan.get("decision") == "REUSE":
                 # Reassign torrents to payload on target device
                 target_path = plan.get("target_path")
+                target_device_id = plan.get("target_device_id")
+                source_device_id = plan.get("source_device_id")
+                same_device_reuse = (
+                    target_path
+                    and target_device_id is not None
+                    and source_device_id is not None
+                    and int(target_device_id) == int(source_device_id)
+                )
                 target_payload_row = conn.execute(
                     """
                     SELECT payload_id
@@ -1146,21 +1154,34 @@ class DemotionExecutor:
                     ),
                 ).fetchone()
 
-                if not target_payload_row:
-                    raise RuntimeError("Target payload not found for catalog sync")
+                target_payload_id: Optional[int] = None
+                if target_payload_row:
+                    target_payload_id = int(target_payload_row[0])
+                elif same_device_reuse and plan.get("payload_id") is not None:
+                    # Normalization case: target path can already exist on disk while
+                    # catalog still points to source payload row on the same device.
+                    source_payload_row = conn.execute(
+                        """
+                        SELECT payload_id
+                        FROM payloads
+                        WHERE payload_id = ? AND payload_hash = ? AND device_id = ? AND status = 'complete'
+                        LIMIT 1
+                        """,
+                        (
+                            int(plan.get("payload_id")),
+                            plan.get("payload_hash"),
+                            int(target_device_id),
+                        ),
+                    ).fetchone()
+                    if source_payload_row:
+                        target_payload_id = int(source_payload_row[0])
 
-                target_payload_id = target_payload_row[0]
-                target_device_id = plan.get("target_device_id")
-                source_device_id = plan.get("source_device_id")
+                if target_payload_id is None:
+                    raise RuntimeError("Target payload not found for catalog sync")
 
                 # Same-device REUSE may intentionally "re-point" the canonical payload
                 # root to an existing target view path (normalization flow).
-                if (
-                    target_path
-                    and target_device_id is not None
-                    and source_device_id is not None
-                    and int(target_device_id) == int(source_device_id)
-                ):
+                if same_device_reuse:
                     conn.execute(
                         """
                         UPDATE payloads
