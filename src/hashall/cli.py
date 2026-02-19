@@ -7,6 +7,7 @@ import time
 import os
 import re
 import sys
+import threading
 import shutil
 import subprocess
 import grp
@@ -464,13 +465,17 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                     "last_total": 0,
                     "last_bytes_done": 0,
                     "last_bytes_total": 0,
+                    "last_path": "",
                     "done_event_seen": False,
                 }
                 hash_reporter = HashProgressReporter(label=torrent.name, mode=hash_progress.lower())
+                heartbeat_stop = threading.Event()
+                heartbeat_thread = None
 
                 def _hash_progress(event, done, total, abs_path, **meta):
                     hash_log_state["last_done"] = max(0, int(done or 0))
                     hash_log_state["last_total"] = max(0, int(total or 0))
+                    hash_log_state["last_path"] = str(abs_path or hash_log_state["last_path"])
                     hash_log_state["last_bytes_done"] = max(
                         0,
                         int(meta.get("hashed_bytes") or hash_log_state["last_bytes_done"]),
@@ -507,14 +512,48 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                             advance=0,
                         )
 
-                upgraded = upgrade_payload_missing_sha256(
-                    conn,
-                    root_path,
-                    device_id=payload.device_id,
-                    parallel=parallel,
-                    workers=workers,
-                    progress_cb=_hash_progress,
-                )
+                if hash_progress.lower() == "full":
+                    def _heartbeat_loop():
+                        while not heartbeat_stop.wait(5.0):
+                            if hash_log_state["last_total"] <= 0:
+                                continue
+                            hash_reporter.update(
+                                event="heartbeat",
+                                done_groups=hash_log_state["last_done"],
+                                total_groups=hash_log_state["last_total"],
+                                path=hash_log_state["last_path"] or torrent.name,
+                                batch_bytes_done=hash_log_state["last_bytes_done"],
+                                batch_bytes_total=hash_log_state["last_bytes_total"],
+                                force=True,
+                            )
+                            progress.update(
+                                desc=hash_reporter.status_desc(
+                                    done_groups=hash_log_state["last_done"],
+                                    total_groups=hash_log_state["last_total"],
+                                    path=torrent.name,
+                                ),
+                                advance=0,
+                            )
+
+                    heartbeat_thread = threading.Thread(
+                        target=_heartbeat_loop,
+                        daemon=True,
+                    )
+                    heartbeat_thread.start()
+
+                try:
+                    upgraded = upgrade_payload_missing_sha256(
+                        conn,
+                        root_path,
+                        device_id=payload.device_id,
+                        parallel=parallel,
+                        workers=workers,
+                        progress_cb=_hash_progress,
+                    )
+                finally:
+                    heartbeat_stop.set()
+                    if heartbeat_thread is not None:
+                        heartbeat_thread.join(timeout=0.2)
                 if hash_log_state["last_total"] > 0 and not hash_log_state["done_event_seen"]:
                     hash_reporter.finish(
                         done_groups=hash_log_state["last_done"],
