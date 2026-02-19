@@ -13,6 +13,7 @@ Options:
   --pool-device ID          Pool device_id for DB checks (default: 44)
   --stash-device ID         Stash device_id for done-checks (default: 49)
   --spot-check N            Spot-check files during dryrun/apply (default: 0)
+  --debug                   Enable verbose rehome/qB debug logs for apply
   --hash HASH               Add one payload hash (repeatable)
   --hashes-file PATH        File with payload hashes (one per line)
   -h, --help                Show help
@@ -44,6 +45,7 @@ MIN_FREE_PCT=20
 POOL_DEVICE_ID=44
 STASH_DEVICE_ID=49
 SPOT_CHECK=0
+DEBUG_MODE=0
 
 HASHES=()
 
@@ -61,6 +63,8 @@ while [[ $# -gt 0 ]]; do
       STASH_DEVICE_ID="${2:-}"; shift 2 ;;
     --spot-check)
       SPOT_CHECK="${2:-}"; shift 2 ;;
+    --debug)
+      DEBUG_MODE=1; shift ;;
     --hash)
       HASHES+=("${2:-}"); shift 2 ;;
     --hashes-file)
@@ -79,6 +83,10 @@ while [[ $# -gt 0 ]]; do
       exit 2 ;;
   esac
 done
+
+if [[ "$DEBUG_MODE" -eq 1 ]]; then
+  export HASHALL_REHOME_QB_DEBUG=1
+fi
 
 if [[ ${#HASHES[@]} -eq 0 ]]; then
   HASHES=(
@@ -232,6 +240,9 @@ PY
     fi
 
     echo "step=dryrun_apply plan=${plan_path}"
+    if [[ "$DEBUG_MODE" -eq 1 ]]; then
+      echo "debug_mode=1 HASHALL_REHOME_QB_DEBUG=${HASHALL_REHOME_QB_DEBUG:-0}"
+    fi
     PYTHONPATH=src python -u -m rehome.cli apply "$plan_path" --dryrun --catalog "$DB_PATH" --spot-check "$SPOT_CHECK"
 
     echo "step=live_apply plan=${plan_path}"
