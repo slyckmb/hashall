@@ -980,7 +980,7 @@ class DemotionExecutor:
             target_tag = "rehome_to_pool"
 
         date_tag = f"rehome_at_{datetime.now().strftime('%Y%m%d')}"
-        tags = ["rehome", source_tag, target_tag, date_tag]
+        tags = ["rehome", source_tag, target_tag, date_tag, "rehome_verify_pending"]
         if bool(plan.get("cleanup_source_deferred")):
             tags.append("rehome_cleanup_source_required")
         return tags
@@ -1005,6 +1005,9 @@ class DemotionExecutor:
                     or tag.startswith("rehome_to_")
                     or tag.startswith("rehome_at_")
                     or tag == "rehome_cleanup_source_required"
+                    or tag == "rehome_verify_pending"
+                    or tag == "rehome_verify_ok"
+                    or tag == "rehome_verify_failed"
                 ]
 
                 if stale_tags and hasattr(self.qbit_client, "remove_tags"):

@@ -608,7 +608,7 @@ class TestRehomeTagging:
         )
         mock_client.add_tags.assert_called_once_with(
             "torrent_tagged",
-            ["rehome", "rehome_from_stash", "rehome_to_pool", "rehome_at_20260212"],
+            ["rehome", "rehome_from_stash", "rehome_to_pool", "rehome_at_20260212", "rehome_verify_pending"],
         )
 
     def test_apply_rehome_provenance_tags_cleanup_deferred(self, tmp_path, monkeypatch):
@@ -663,6 +663,7 @@ class TestRehomeTagging:
                 "rehome_from_stash",
                 "rehome_to_pool",
                 "rehome_at_20260212",
+                "rehome_verify_pending",
                 "rehome_cleanup_source_required",
             ],
         )
@@ -709,7 +710,7 @@ class TestRehomeTagging:
         mock_client.remove_tags.assert_not_called()
         mock_client.add_tags.assert_called_once_with(
             "torrent_promote",
-            ["rehome", "rehome_from_pool", "rehome_to_stash", "rehome_at_20260212"],
+            ["rehome", "rehome_from_pool", "rehome_to_stash", "rehome_at_20260212", "rehome_verify_pending"],
         )
 
 

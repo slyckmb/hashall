@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from rehome import __version__
+from rehome.followup import run_followup
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
@@ -479,6 +480,87 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
         click.echo(f"To execute: rehome apply {plan_file} --force")
     else:
         click.echo("✅ Plan executed successfully")
+
+
+@cli.command("followup")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--cleanup", is_flag=True,
+              help="Attempt cleanup for groups tagged rehome_cleanup_source_required")
+@click.option("--payload-hash", "payload_hashes", multiple=True,
+              help="Limit follow-up to specific payload hash(es)")
+@click.option("--limit", type=int, default=0,
+              help="Max payload groups to process (0 = all)")
+@click.option("--retry-failed", is_flag=True,
+              help="Include rehome_verify_failed groups in this pass")
+@click.option("--strict", is_flag=True,
+              help="Exit non-zero if any group remains pending or failed")
+@click.option("--output", type=click.Path(),
+              help="Write JSON report to file")
+@click.option("--print-torrents", is_flag=True,
+              help="Print per-torrent follow-up gate details")
+def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, output, print_torrents):
+    """Run rehome verification follow-up and optional deferred cleanup retry."""
+    catalog_path = Path(catalog)
+    try:
+        report = run_followup(
+            catalog_path=catalog_path,
+            cleanup=cleanup,
+            payload_hashes=set(payload_hashes) if payload_hashes else None,
+            limit=limit,
+            retry_failed=retry_failed,
+        )
+    except Exception as e:
+        click.echo(f"❌ FOLLOWUP failed: {e}", err=True)
+        raise click.Abort()
+
+    summary = report.get("summary", {})
+    click.echo("🔁 Rehome follow-up summary")
+    click.echo(f"   catalog: {catalog_path}")
+    click.echo(f"   groups: {summary.get('groups_total', 0)}")
+    click.echo(f"   ok: {summary.get('groups_ok', 0)}")
+    click.echo(f"   pending: {summary.get('groups_pending', 0)}")
+    click.echo(f"   failed: {summary.get('groups_failed', 0)}")
+    click.echo(f"   cleanup_attempted: {summary.get('cleanup_attempted', 0)}")
+    click.echo(f"   cleanup_done: {summary.get('cleanup_done', 0)}")
+    click.echo(f"   cleanup_failed: {summary.get('cleanup_failed', 0)}")
+
+    for entry in report.get("entries", []):
+        payload_hash = str(entry.get("payload_hash", ""))
+        click.echo(
+            f"payload={payload_hash[:16]} outcome={entry.get('outcome')} "
+            f"cleanup_required={str(bool(entry.get('cleanup_required'))).lower()} "
+            f"cleanup_result={entry.get('cleanup_result')}"
+        )
+        db_reasons = entry.get("db_reasons") or []
+        source_reasons = entry.get("source_reasons") or []
+        if db_reasons:
+            click.echo(f"  db_reasons={','.join(db_reasons)}")
+        if source_reasons:
+            click.echo(f"  source_reasons={','.join(source_reasons)}")
+        if print_torrents:
+            for gate in entry.get("qb_checks", []):
+                reasons = gate.get("reasons") or []
+                reason_text = ",".join(reasons) if reasons else "none"
+                click.echo(
+                    "  torrent="
+                    f"{str(gate.get('torrent_hash', ''))[:16]} "
+                    f"ok={str(bool(gate.get('ok'))).lower()} "
+                    f"progress={gate.get('progress')} "
+                    f"state={gate.get('state')} "
+                    f"auto_tmm={gate.get('auto_tmm')} "
+                    f"reasons={reason_text}"
+                )
+
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        click.echo(f"report={output_path}")
+
+    pending_or_failed = int(summary.get("groups_pending", 0)) + int(summary.get("groups_failed", 0))
+    if strict and pending_or_failed > 0:
+        raise click.exceptions.Exit(1)
 
 
 if __name__ == "__main__":
