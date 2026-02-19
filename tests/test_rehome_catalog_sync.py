@@ -845,9 +845,9 @@ def test_sanitize_plan_live_torrents_filters_stale_hashes(tmp_path):
 
     files_cache = executor._sanitize_plan_live_torrents(plan)
 
-    assert plan["torrent_hash"] == "hash_nofiles"
-    assert plan["affected_torrents"] == ["hash_nofiles", "hash_live"]
-    assert [t["torrent_hash"] for t in plan["view_targets"]] == ["hash_nofiles", "hash_live"]
+    assert plan["torrent_hash"] == "hash_live"
+    assert plan["affected_torrents"] == ["hash_live"]
+    assert [t["torrent_hash"] for t in plan["view_targets"]] == ["hash_live"]
     assert list(files_cache) == ["hash_live"]
 
 
@@ -905,3 +905,81 @@ def test_build_views_uses_preloaded_files_cache(tmp_path):
     assert built.exists()
     assert built.stat().st_ino == payload_file.stat().st_ino
     assert after_calls == before_calls
+
+
+def test_execute_reuse_skips_stale_sibling_hash_with_missing_files(tmp_path, monkeypatch):
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            mount_point TEXT,
+            preferred_mount_point TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-44", 44, str(tmp_path), str(tmp_path)),
+    )
+    conn.commit()
+    conn.close()
+
+    payload_file = tmp_path / "canonical" / "Movie.2024.mkv"
+    payload_file.parent.mkdir(parents=True, exist_ok=True)
+    payload_file.write_bytes(b"payload")
+    payload_size = payload_file.stat().st_size
+
+    view_save = tmp_path / "views" / "cross-seed" / "TrackerA"
+    view_save.mkdir(parents=True, exist_ok=True)
+
+    files = [QBitFile(name=payload_file.name, size=payload_size)]
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.qbit_client = FakeQbitClientSelective(
+        default_path=str(view_save),
+        files_by_hash={"hash_live": files},
+    )
+
+    monkeypatch.setattr(executor, "_apply_cleanup", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_sync_catalog_after_rehome", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_apply_rehome_provenance_tags", lambda *args, **kwargs: None)
+
+    plan = {
+        "version": "1.0",
+        "direction": "demote",
+        "decision": "REUSE",
+        "torrent_hash": "hash_live",
+        "payload_hash": "payload_hash",
+        "payload_id": 1,
+        "source_path": str(tmp_path / "stale-source"),
+        "target_path": str(payload_file),
+        "source_device_id": 44,
+        "target_device_id": 44,
+        "file_count": 1,
+        "total_bytes": payload_size,
+        "affected_torrents": ["hash_live", "hash_stale_no_files"],
+        "view_targets": [
+            {
+                "torrent_hash": "hash_live",
+                "source_save_path": str(view_save),
+                "target_save_path": str(view_save),
+                "root_name": payload_file.name,
+            },
+            {
+                "torrent_hash": "hash_stale_no_files",
+                "source_save_path": str(view_save),
+                "target_save_path": str(view_save),
+                "root_name": payload_file.name,
+            },
+        ],
+    }
+
+    executor.execute(plan)
+
+    built = view_save / payload_file.name
+    assert built.exists()
+    assert built.stat().st_ino == payload_file.stat().st_ino
+    assert plan["affected_torrents"] == ["hash_live"]
+    assert [t["torrent_hash"] for t in plan["view_targets"]] == ["hash_live"]

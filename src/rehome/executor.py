@@ -1060,6 +1060,7 @@ class DemotionExecutor:
             seen_requested.add(key)
             requested.append(torrent_hash)
 
+        info_kept: List[str] = []
         kept: List[str] = []
         kept_lookup: set[str] = set()
         dropped_missing_info: List[str] = []
@@ -1077,14 +1078,31 @@ class DemotionExecutor:
                 no_files.append(torrent_hash)
             else:
                 files_cache[torrent_hash] = files
-            kept.append(torrent_hash)
-            kept_lookup.add(torrent_hash.lower())
+            info_kept.append(torrent_hash)
+
+        dropped_no_files = 0
+        if files_cache:
+            # Prefer hashes with confirmed file lists when at least one succeeds.
+            kept = [h for h in info_kept if h in files_cache]
+            dropped_no_files = len(no_files)
+        else:
+            # If qB files API is unavailable for all hashes, keep info-confirmed hashes.
+            kept = list(info_kept)
+            if no_files:
+                self._log(
+                    "preflight_files_api_unavailable "
+                    f"keeping_info_confirmed={len(kept)}",
+                    "warning",
+                )
+
+        kept_lookup = {h.lower() for h in kept}
 
         if dropped_missing_info or no_files:
             self._log(
                 "preflight_torrent_filter "
                 f"requested={len(requested)} kept={len(kept)} "
                 f"dropped_missing_info={len(dropped_missing_info)} "
+                f"dropped_no_files={dropped_no_files} "
                 f"no_files={len(no_files)}",
                 "warning",
             )
