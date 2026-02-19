@@ -7,6 +7,7 @@ Applies demotion plans by moving payloads and relocating torrents.
 import sqlite3
 import shutil
 import os
+import errno
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -113,6 +114,48 @@ class DemotionExecutor:
             return source_path.stat().st_dev != target_parent.stat().st_dev
         except FileNotFoundError:
             return False
+
+    @staticmethod
+    def _is_permission_error(exc: BaseException) -> bool:
+        """Return True when an exception indicates permission denied."""
+        if isinstance(exc, PermissionError):
+            return True
+        if isinstance(exc, OSError) and exc.errno in {errno.EACCES, errno.EPERM}:
+            return True
+        return False
+
+    def _delete_path(self, path: Path) -> None:
+        """Delete a file or directory path."""
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    def _repair_permissions_for_cleanup(self, path: Path) -> bool:
+        """
+        Repair ownership/mode drift on a specific path tree, then retry cleanup.
+
+        Scope is intentionally narrow (the failing payload path only).
+        """
+        if not path.exists():
+            return True
+
+        cmd_specs = [
+            ["sudo", "chown", "-R", "michael:michael", str(path)],
+            ["sudo", "find", str(path), "-type", "d", "-exec", "chmod", "2775", "{}", "+"],
+            ["sudo", "find", str(path), "-type", "f", "-exec", "chmod", "664", "{}", "+"],
+        ]
+        for cmd in cmd_specs:
+            try:
+                self._log(f"  cleanup_perm_repair cmd={' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+            except Exception as exc:
+                self._log(
+                    f"  cleanup_perm_repair failed cmd={' '.join(cmd)} error={exc}",
+                    "warning",
+                )
+                return False
+        return True
 
     def _copy_with_rsync_progress(self, source_path: Path, target_path: Path) -> None:
         """Copy payload with rsync progress output, preserving metadata and hardlinks."""
@@ -1415,20 +1458,52 @@ class DemotionExecutor:
             raise
 
         # For rsync-based cross-filesystem moves, remove source only after relocation succeeded.
+        cleanup_source_status = "deleted"
         if move_strategy == "rsync_copy" and source_path.exists():
             self._log(f"step=cleanup_source_after_rsync path={source_path}")
             try:
-                if source_path.is_dir():
-                    shutil.rmtree(source_path)
-                else:
-                    source_path.unlink()
+                self._delete_path(source_path)
             except Exception as e:
-                raise RuntimeError(f"Failed to remove source after rsync move: {e}") from e
+                if self._is_permission_error(e):
+                    self._log(
+                        f"cleanup_source_permission_denied path={source_path} error={e}",
+                        "warning",
+                    )
+                    repaired = self._repair_permissions_for_cleanup(source_path)
+                    if repaired:
+                        try:
+                            self._delete_path(source_path)
+                            self._log(
+                                f"cleanup_source_after_rsync recovered=true path={source_path}",
+                                "success",
+                            )
+                        except Exception as retry_exc:
+                            cleanup_source_status = "deferred"
+                            self._log(
+                                f"cleanup_source_deferred path={source_path} error={retry_exc}",
+                                "warning",
+                            )
+                    else:
+                        cleanup_source_status = "deferred"
+                        self._log(
+                            f"cleanup_source_deferred path={source_path} "
+                            "reason=permission_repair_failed",
+                            "warning",
+                        )
+                else:
+                    raise RuntimeError(f"Failed to remove source after rsync move: {e}") from e
 
         # 5. Verify source is removed
         self._log(f"step=verify_source_removed path={source_path}")
         if source_path.exists():
-            raise RuntimeError(f"Source still exists after move: {source_path}")
+            if cleanup_source_status == "deferred":
+                self._log(
+                    f"cleanup_required=true path={source_path}",
+                    "warning",
+                )
+            else:
+                raise RuntimeError(f"Source still exists after move: {source_path}")
+        self._log(f"cleanup_source_status={cleanup_source_status}")
 
         self._log("MOVE execution complete", "success")
 

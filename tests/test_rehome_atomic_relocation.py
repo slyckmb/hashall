@@ -4,6 +4,7 @@ Tests for atomic relocation rollback behavior.
 
 from pathlib import Path
 from types import SimpleNamespace
+import shutil
 
 import pytest
 
@@ -345,3 +346,91 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
     executor._execute_move(plan, spot_check=1)
     assert target_path.exists()
     assert not source_path.exists()
+
+
+def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    source_path = tmp_path / "src_payload_perm_fix"
+    source_path.mkdir(parents=True, exist_ok=True)
+    (source_path / "video.mkv").write_bytes(b"x")
+    target_path = tmp_path / "dst_payload_perm_fix"
+
+    monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
+
+    def fake_copy(_src, _dst):
+        target_path.mkdir(parents=True, exist_ok=True)
+        (target_path / "video.mkv").write_bytes(b"x")
+
+    monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
+    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
+    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+
+    calls = {"delete": 0, "repair": 0}
+
+    def fake_delete(path):
+        calls["delete"] += 1
+        if calls["delete"] == 1:
+            raise PermissionError(13, "Permission denied", str(path))
+        shutil.rmtree(path)
+
+    def fake_repair(_path):
+        calls["repair"] += 1
+        return True
+
+    monkeypatch.setattr(executor, "_delete_path", fake_delete)
+    monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", fake_repair)
+
+    plan = {
+        "source_path": str(source_path),
+        "target_path": str(target_path),
+        "file_count": 1,
+        "total_bytes": 1,
+        "target_device_id": 44,
+    }
+
+    executor._execute_move(plan, spot_check=0)
+    assert calls["repair"] == 1
+    assert target_path.exists()
+    assert not source_path.exists()
+
+
+def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    source_path = tmp_path / "src_payload_perm_deferred"
+    source_path.mkdir(parents=True, exist_ok=True)
+    (source_path / "video.mkv").write_bytes(b"x")
+    target_path = tmp_path / "dst_payload_perm_deferred"
+
+    monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
+
+    def fake_copy(_src, _dst):
+        target_path.mkdir(parents=True, exist_ok=True)
+        (target_path / "video.mkv").write_bytes(b"x")
+
+    monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
+    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
+    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        executor,
+        "_delete_path",
+        lambda _path: (_ for _ in ()).throw(PermissionError(13, "Permission denied")),
+    )
+    monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", lambda _path: False)
+
+    plan = {
+        "source_path": str(source_path),
+        "target_path": str(target_path),
+        "file_count": 1,
+        "total_bytes": 1,
+        "target_device_id": 44,
+    }
+
+    executor._execute_move(plan, spot_check=0)
+    assert target_path.exists()
+    assert source_path.exists()

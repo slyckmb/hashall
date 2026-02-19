@@ -186,7 +186,7 @@ DONE:
 - Library roots parsing tests for cross-seed and tracker registry configs.
 
 TODO:
-- None.
+- Persist rehome spot-check SHA256 results into `hashall` DB (inode-aware propagation to peers + `hash_source` provenance update).
 
 ### Stage 2 — Rehome Safety + View Building
 DONE:
