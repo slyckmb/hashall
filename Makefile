@@ -119,6 +119,13 @@ REHOME_SAFE_RUN_LOG ?=
 REHOME_SAFE_VERIFY_STRICT ?= 1
 REHOME_SAFE_VERIFY_CLEANUP ?= 0
 REHOME_SAFE_VERIFY_PRINT_TORRENTS ?= 1
+REHOME_FOLLOWUP_CLEANUP ?= 0
+REHOME_FOLLOWUP_STRICT ?= 0
+REHOME_FOLLOWUP_RETRY_FAILED ?= 0
+REHOME_FOLLOWUP_LIMIT ?= 0
+REHOME_FOLLOWUP_PRINT_TORRENTS ?= 0
+REHOME_FOLLOWUP_OUTPUT ?=
+REHOME_FOLLOWUP_PAYLOAD_HASH ?=
 RECOVERY_WORKFLOW_PREFIX ?= /data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207
 RECOVERY_WORKFLOW_STASH_DEVICE ?= 49
 RECOVERY_WORKFLOW_POOL_DEVICE ?= 44
@@ -160,7 +167,7 @@ help:  ## Show this help message
 	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Payload & Rehome:"
-	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|status-report|status-report-phone|recovery-auto|recovery-auto-apply|rehome-safe-auto|rehome-safe-verify|rehome-safe-cleanup|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|status-report|status-report-phone|recovery-auto|recovery-auto-apply|rehome-safe-auto|rehome-safe-verify|rehome-safe-cleanup|rehome-followup|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Devices & Stats:"
 	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -204,6 +211,7 @@ help:  ## Show this help message
 	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44 REHOME_SAFE_APPLY=1  # Execute safe rehomes"
 	@echo "  make rehome-safe-verify                    # Gate check latest safe run (qB+DB+source)"
 	@echo "  make rehome-safe-cleanup                   # Delete source paths only when gates pass"
+	@echo "  make rehome-followup                       # Process rehome_verify_pending + cleanup-required tags"
 	@echo "  make rehome-checklist                     # Rehome checklist"
 	@echo "  make devices                             # List all registered devices"
 	@echo "  make stats                               # Show catalog statistics"
@@ -681,6 +689,17 @@ rehome-safe-cleanup:  ## Cleanup source paths only for safe groups that pass ver
 	if [ -n "$(REHOME_SAFE_RUN_LOG)" ]; then set -- "$$@" --run-log "$(REHOME_SAFE_RUN_LOG)"; fi; \
 	if [ "$(REHOME_SAFE_VERIFY_STRICT)" = "1" ]; then set -- "$$@" --strict; fi; \
 	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/rehome_safe_verify_cleanup.py "$$@"
+
+.PHONY: rehome-followup
+rehome-followup:  ## Re-evaluate rehome_verify_pending/cleanup-required tags and retry cleanup when enabled
+	@set -- followup --catalog "$(REHOME_CATALOG)" --limit "$(REHOME_FOLLOWUP_LIMIT)"; \
+	if [ "$(REHOME_FOLLOWUP_CLEANUP)" = "1" ]; then set -- "$$@" --cleanup; fi; \
+	if [ "$(REHOME_FOLLOWUP_STRICT)" = "1" ]; then set -- "$$@" --strict; fi; \
+	if [ "$(REHOME_FOLLOWUP_RETRY_FAILED)" = "1" ]; then set -- "$$@" --retry-failed; fi; \
+	if [ "$(REHOME_FOLLOWUP_PRINT_TORRENTS)" = "1" ]; then set -- "$$@" --print-torrents; fi; \
+	if [ -n "$(REHOME_FOLLOWUP_OUTPUT)" ]; then set -- "$$@" --output "$(REHOME_FOLLOWUP_OUTPUT)"; fi; \
+	if [ -n "$(REHOME_FOLLOWUP_PAYLOAD_HASH)" ]; then set -- "$$@" --payload-hash "$(REHOME_FOLLOWUP_PAYLOAD_HASH)"; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) "$$@"
 
 .PHONY: recovery-auto
 recovery-auto:  ## Audit recovered non-seeding content and classify exact dupes/support/unique units

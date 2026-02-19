@@ -13,6 +13,10 @@ Options:
   --pool-device ID          Pool device_id for DB checks (default: 44)
   --stash-device ID         Stash device_id for done-checks (default: 49)
   --spot-check N            Spot-check files during dryrun/apply (default: 0)
+  --followup 0|1            Run rehome follow-up passes during batch loop (default: 1)
+  --followup-cleanup 0|1    Allow follow-up pass to retry source cleanup (default: 0)
+  --followup-every N        Run periodic follow-up every N batches (default: 10)
+  --retry-failed 0|1        Let follow-up include rehome_verify_failed groups (default: 0)
   --debug                   Enable verbose rehome/qB debug logs for apply
   --hash HASH               Add one payload hash (repeatable)
   --hashes-file PATH        File with payload hashes (one per line)
@@ -46,6 +50,10 @@ POOL_DEVICE_ID=44
 STASH_DEVICE_ID=49
 SPOT_CHECK=0
 DEBUG_MODE=0
+FOLLOWUP=1
+FOLLOWUP_CLEANUP=0
+FOLLOWUP_EVERY=10
+FOLLOWUP_RETRY_FAILED=0
 
 HASHES=()
 
@@ -63,6 +71,14 @@ while [[ $# -gt 0 ]]; do
       STASH_DEVICE_ID="${2:-}"; shift 2 ;;
     --spot-check)
       SPOT_CHECK="${2:-}"; shift 2 ;;
+    --followup)
+      FOLLOWUP="${2:-}"; shift 2 ;;
+    --followup-cleanup)
+      FOLLOWUP_CLEANUP="${2:-}"; shift 2 ;;
+    --followup-every)
+      FOLLOWUP_EVERY="${2:-}"; shift 2 ;;
+    --retry-failed)
+      FOLLOWUP_RETRY_FAILED="${2:-}"; shift 2 ;;
     --debug)
       DEBUG_MODE=1; shift ;;
     --hash)
@@ -86,6 +102,10 @@ done
 
 if [[ "$DEBUG_MODE" -eq 1 ]]; then
   export HASHALL_REHOME_QB_DEBUG=1
+fi
+
+if [[ "${FOLLOWUP_EVERY}" -lt 1 ]]; then
+  FOLLOWUP_EVERY=1
 fi
 
 if [[ ${#HASHES[@]} -eq 0 ]]; then
@@ -116,6 +136,33 @@ PY
 )"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "tool_semver_hashall=${HASHALL_SEMVER} tool_semver_rehome=${REHOME_SEMVER} git_sha=${GIT_SHA}"
+
+run_followup_pass() {
+  local reason="${1:-periodic}"
+  if [[ "${FOLLOWUP}" != "1" ]]; then
+    return 0
+  fi
+  echo "step=followup reason=${reason}"
+  set +e
+  cmd=(python -u -m rehome.cli followup --catalog "$DB_PATH")
+  if [[ "${FOLLOWUP_CLEANUP}" == "1" ]]; then
+    cmd+=(--cleanup)
+  fi
+  if [[ "${FOLLOWUP_RETRY_FAILED}" == "1" ]]; then
+    cmd+=(--retry-failed)
+  fi
+  if [[ "$DEBUG_MODE" -eq 1 ]]; then
+    cmd+=(--print-torrents)
+  fi
+  PYTHONPATH=src "${cmd[@]}"
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    echo "warn=followup_failed reason=${reason} rc=${rc}"
+  else
+    echo "followup_ok reason=${reason}"
+  fi
+}
 
 pool_free_pct() {
   local used_pct free_pct
@@ -197,6 +244,7 @@ payload_counts() {
 }
 
 echo "batch_total=${#HASHES[@]}"
+run_followup_pass "pre"
 
 idx=0
 for hash in "${HASHES[@]}"; do
@@ -275,6 +323,12 @@ PY
 
     echo "batch_ok=${idx} hash=${hash}"
   } 2>&1 | tee "$batch_log"
+
+  if [[ "${FOLLOWUP}" == "1" ]]; then
+    if [[ "$idx" -eq 1 || "$idx" -eq "${#HASHES[@]}" || $((idx % FOLLOWUP_EVERY)) -eq 0 ]]; then
+      run_followup_pass "batch_${idx}"
+    fi
+  fi
 
 done
 

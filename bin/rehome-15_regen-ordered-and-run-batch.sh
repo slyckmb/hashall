@@ -82,13 +82,14 @@ from pathlib import Path
 from collections import Counter
 
 from hashall.model import connect_db
+from hashall.qbittorrent import get_qbittorrent_client
 from hashall.status_report import build_status_report
 
 hashes_path = Path(sys.argv[1])
 report_path = Path(sys.argv[2])
 
-db = "/home/michael/.hashall/catalog.db"
-conn = connect_db(db, read_only=True, apply_migrations=False)
+db = Path("/home/michael/.hashall/catalog.db")
+conn = connect_db(db, read_only=False, apply_migrations=False)
 report = build_status_report(
     conn,
     roots_arg="/pool/data,/stash/media,/data/media",
@@ -97,9 +98,32 @@ report = build_status_report(
     top_n=50000,
     recovery_prefix="/data/media/torrents/seeding/recovery_20260211",
 )
-conn.close()
 groups = report.get("rehome_impact_groups", [])
 print(f"phase=regenerate status=loaded_impact_groups total={len(groups)}", flush=True)
+
+# Exclude payload groups currently tagged verify_failed in qB (manual intervention queue).
+failed_payload_hashes = set()
+try:
+    qbit = get_qbittorrent_client()
+    if qbit.test_connection() and qbit.login():
+        failed_torrents = qbit.get_torrents(tag="rehome_verify_failed")
+        for torrent in failed_torrents:
+            row = conn.execute(
+                """
+                SELECT p.payload_hash
+                FROM torrent_instances ti
+                JOIN payloads p ON p.payload_id = ti.payload_id
+                WHERE ti.torrent_hash = ?
+                LIMIT 1
+                """,
+                (torrent.hash,),
+            ).fetchone()
+            if row and row[0]:
+                failed_payload_hashes.add(str(row[0]))
+    else:
+        print("phase=regenerate warning=verify_failed_probe_skipped reason=qb_unavailable", flush=True)
+except Exception as e:
+    print(f"phase=regenerate warning=verify_failed_probe_error detail={e}", flush=True)
 
 eligible = []
 blocked = []
@@ -113,6 +137,19 @@ for idx, g in enumerate(groups, 1):
     group_items = int(g.get("copies") or 0)
     payload_bytes = int(g.get("stash_total_bytes") or 0)
     stash_total_files = int(g.get("stash_total_files") or 0)
+
+    if payload_hash in failed_payload_hashes:
+        reason_counter.update(["verify_failed_tag"])
+        blocked.append(
+            {
+                "payload_hash": payload_hash,
+                "decision": "SKIP_VERIFY_FAILED",
+                "reason": "verify_failed_tag",
+                "group_items": group_items,
+                "payload_bytes": payload_bytes,
+            }
+        )
+        continue
 
     # Keep regular MOVE groups and add "copy-first" groups:
     # groups blocked only because pool copy is missing.
@@ -170,6 +207,7 @@ print(f"hash_file={hashes_path}")
 print(f"report_file={report_path}")
 print(f"eligible_total={len(eligible)}")
 print(f"blocked_total={len(blocked)}")
+print(f"blocked_verify_failed={len(failed_payload_hashes)}")
 if os.getenv("REHOME_REGEN_DEBUG", "0") == "1":
     top_reasons = ",".join(
         f"{k}:{v}" for k, v in reason_counter.most_common(8)
