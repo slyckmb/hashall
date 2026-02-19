@@ -5,6 +5,8 @@ Command-line interface for rehome.
 import click
 import json
 import sqlite3
+import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -16,11 +18,17 @@ from rehome.library_roots import collect_library_roots
 DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
 
+def _emit_banner() -> None:
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+    script = Path(sys.argv[0]).name
+    print(f"🧾 {script} v{__version__} @ {timestamp}", flush=True)
+
+
 @click.group()
 @click.version_option(__version__)
 def cli():
     """Rehome - Seed payload demotion orchestrator."""
-    pass
+    _emit_banner()
 
 
 @cli.command("plan")

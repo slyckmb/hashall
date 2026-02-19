@@ -6,6 +6,7 @@ Connects to qBittorrent to retrieve torrent information for payload mapping.
 
 import os
 import requests
+import time
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,17 @@ class QBittorrentClient:
         self._authenticated = False
         self.last_error: Optional[str] = None
         self.root_path_files_fallback_calls = 0
+        try:
+            self.request_timeout = float(os.getenv("HASHALL_QB_HTTP_TIMEOUT", "20"))
+        except ValueError:
+            self.request_timeout = 20.0
+        try:
+            self.request_retries = max(1, int(os.getenv("HASHALL_QB_HTTP_RETRIES", "3")))
+        except ValueError:
+            self.request_retries = 3
+        self.debug_http = os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
 
     def login(self) -> bool:
         """
@@ -72,7 +84,8 @@ class QBittorrentClient:
         try:
             response = self.session.post(
                 f"{self.base_url}/api/v2/auth/login",
-                data={"username": self.username, "password": self.password}
+                data={"username": self.username, "password": self.password},
+                timeout=self.request_timeout,
             )
             if response.text == "Ok.":
                 self._authenticated = True
@@ -114,7 +127,8 @@ class QBittorrentClient:
         try:
             response = self.session.get(
                 f"{self.base_url}/api/v2/torrents/info",
-                params=params
+                params=params,
+                timeout=self.request_timeout,
             )
             response.raise_for_status()
             torrents_data = response.json()
@@ -152,26 +166,41 @@ class QBittorrentClient:
         """
         self._ensure_authenticated()
 
-        try:
-            response = self.session.get(
-                f"{self.base_url}/api/v2/torrents/files",
-                params={"hash": torrent_hash}
-            )
-            response.raise_for_status()
-            files_data = response.json()
+        for attempt in range(1, self.request_retries + 1):
+            try:
+                response = self.session.get(
+                    f"{self.base_url}/api/v2/torrents/files",
+                    params={"hash": torrent_hash},
+                    timeout=self.request_timeout,
+                )
+                response.raise_for_status()
+                files_data = response.json()
 
-            files = []
-            for f in files_data:
-                files.append(QBitFile(
-                    name=f.get('name', ''),
-                    size=f.get('size', 0)
-                ))
+                files = []
+                for f in files_data:
+                    files.append(QBitFile(
+                        name=f.get('name', ''),
+                        size=f.get('size', 0)
+                    ))
+                return files
 
-            return files
-
-        except requests.RequestException as e:
-            print(f"⚠️ Failed to get files for torrent {torrent_hash}: {e}")
-            return []
+            except requests.Timeout as e:
+                print(
+                    f"⚠️ qB files timeout hash={torrent_hash[:16]} "
+                    f"attempt={attempt}/{self.request_retries} timeout_s={self.request_timeout}: {e}"
+                )
+            except requests.RequestException as e:
+                if attempt == self.request_retries:
+                    print(f"⚠️ Failed to get files for torrent {torrent_hash}: {e}")
+                    break
+                if self.debug_http:
+                    print(
+                        f"⚠️ qB files retry hash={torrent_hash[:16]} "
+                        f"attempt={attempt}/{self.request_retries} error={e}"
+                    )
+            if attempt < self.request_retries:
+                time.sleep(min(0.5 * attempt, 2.0))
+        return []
 
     def get_torrent_root_path(self, torrent: QBitTorrent,
                              files: Optional[List[QBitFile]] = None) -> str:
@@ -224,7 +253,8 @@ class QBittorrentClient:
         try:
             response = self.session.post(
                 f"{self.base_url}/api/v2/torrents/pause",
-                data={"hashes": torrent_hash}
+                data={"hashes": torrent_hash},
+                timeout=self.request_timeout,
             )
             try:
                 response.raise_for_status()
@@ -234,7 +264,8 @@ class QBittorrentClient:
                 # Some qB builds expose stop/start instead of pause/resume.
                 fallback = self.session.post(
                     f"{self.base_url}/api/v2/torrents/stop",
-                    data={"hashes": torrent_hash}
+                    data={"hashes": torrent_hash},
+                    timeout=self.request_timeout,
                 )
                 fallback.raise_for_status()
             return True
@@ -261,7 +292,8 @@ class QBittorrentClient:
         try:
             response = self.session.post(
                 f"{self.base_url}/api/v2/torrents/resume",
-                data={"hashes": torrent_hash}
+                data={"hashes": torrent_hash},
+                timeout=self.request_timeout,
             )
             try:
                 response.raise_for_status()
@@ -271,7 +303,8 @@ class QBittorrentClient:
                 # Some qB builds expose stop/start instead of pause/resume.
                 fallback = self.session.post(
                     f"{self.base_url}/api/v2/torrents/start",
-                    data={"hashes": torrent_hash}
+                    data={"hashes": torrent_hash},
+                    timeout=self.request_timeout,
                 )
                 fallback.raise_for_status()
             return True
@@ -301,7 +334,8 @@ class QBittorrentClient:
         try:
             response = self.session.post(
                 f"{self.base_url}/api/v2/torrents/setLocation",
-                data={"hashes": torrent_hash, "location": new_location}
+                data={"hashes": torrent_hash, "location": new_location},
+                timeout=self.request_timeout,
             )
             response.raise_for_status()
             return True
@@ -342,7 +376,8 @@ class QBittorrentClient:
                 data={
                     "hashes": torrent_hash,
                     "enable": "true" if enabled else "false",
-                }
+                },
+                timeout=self.request_timeout,
             )
             response.raise_for_status()
             return True
@@ -365,6 +400,7 @@ class QBittorrentClient:
             response = self.session.post(
                 f"{self.base_url}/api/v2/torrents/addTags",
                 data={"hashes": torrent_hash, "tags": ",".join(clean_tags)},
+                timeout=self.request_timeout,
             )
             response.raise_for_status()
             return True
@@ -384,6 +420,7 @@ class QBittorrentClient:
             response = self.session.post(
                 f"{self.base_url}/api/v2/torrents/removeTags",
                 data={"hashes": torrent_hash, "tags": ",".join(clean_tags)},
+                timeout=self.request_timeout,
             )
             response.raise_for_status()
             return True
@@ -406,7 +443,8 @@ class QBittorrentClient:
         try:
             response = self.session.get(
                 f"{self.base_url}/api/v2/torrents/info",
-                params={"hashes": torrent_hash}
+                params={"hashes": torrent_hash},
+                timeout=self.request_timeout,
             )
             response.raise_for_status()
             torrents_data = response.json()

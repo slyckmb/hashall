@@ -104,6 +104,19 @@ cd "$repo_root"
 
 mkdir -p out/reports/rehome-pilot
 
+HASHALL_SEMVER="$(PYTHONPATH=src python - <<'PY'
+from hashall import __version__
+print(__version__)
+PY
+)"
+REHOME_SEMVER="$(PYTHONPATH=src python - <<'PY'
+from rehome import __version__
+print(__version__)
+PY
+)"
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "tool_semver_hashall=${HASHALL_SEMVER} tool_semver_rehome=${REHOME_SEMVER} git_sha=${GIT_SHA}"
+
 pool_free_pct() {
   local used_pct free_pct
   used_pct="$(zpool list -H -o cap "$POOL_NAME" | tr -d ' %')"

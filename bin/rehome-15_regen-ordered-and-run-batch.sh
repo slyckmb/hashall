@@ -55,6 +55,18 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 mkdir -p out/reports/rehome-pilot
+HASHALL_SEMVER="$(PYTHONPATH=src python - <<'PY'
+from hashall import __version__
+print(__version__)
+PY
+)"
+REHOME_SEMVER="$(PYTHONPATH=src python - <<'PY'
+from rehome import __version__
+print(__version__)
+PY
+)"
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "tool_semver_hashall=${HASHALL_SEMVER} tool_semver_rehome=${REHOME_SEMVER} git_sha=${GIT_SHA}"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 hashes_file="out/reports/rehome-pilot/rehome-eligible-ordered-${stamp}.txt"
 report_file="out/reports/rehome-pilot/rehome-eligible-ordered-${stamp}.tsv"

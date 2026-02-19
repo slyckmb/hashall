@@ -247,6 +247,8 @@ class DemotionExecutor:
         if not view_targets:
             return
 
+        import time
+
         total = len(view_targets)
         progress_every = 5 if total <= 50 else 25
 
@@ -259,16 +261,24 @@ class DemotionExecutor:
                 self._log(
                     f"  build_views_progress phase=fetch_files done={idx}/{total} hash={torrent_hash[:16]}"
                 )
+            fetch_start = time.monotonic()
             files = self.qbit_client.get_torrent_files(torrent_hash)
+            fetch_elapsed = time.monotonic() - fetch_start
+            self._log(
+                f"  build_views_progress phase=fetch_files_done done={idx}/{total} "
+                f"hash={torrent_hash[:16]} files={len(files)} elapsed_s={fetch_elapsed:.1f}"
+            )
             if not files:
                 raise RuntimeError(f"Failed to fetch files for torrent {torrent_hash[:16]}")
 
+            link_start = time.monotonic()
             result = build_torrent_view(
                 payload_root=payload_root,
                 target_save_path=target_save_path,
                 files=files,
                 root_name=root_name,
             )
+            link_elapsed = time.monotonic() - link_start
 
             if result.file_count != plan["file_count"] or result.total_bytes != plan["total_bytes"]:
                 raise RuntimeError(
@@ -276,10 +286,10 @@ class DemotionExecutor:
                     f"files={result.file_count}/{plan['file_count']} "
                     f"bytes={result.total_bytes}/{plan['total_bytes']}"
                 )
-            if idx == 1 or idx == total or idx % progress_every == 0:
-                self._log(
-                    f"  build_views_progress phase=link done={idx}/{total} hash={torrent_hash[:16]}"
-                )
+            self._log(
+                f"  build_views_progress phase=link done={idx}/{total} "
+                f"hash={torrent_hash[:16]} elapsed_s={link_elapsed:.1f}"
+            )
 
     def _build_relocations(self, conn: sqlite3.Connection, plan: Dict) -> List[Dict]:
         """Build relocation targets for all torrents in plan."""
