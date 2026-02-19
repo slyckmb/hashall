@@ -144,3 +144,28 @@ def test_build_view_accepts_link_race_file_exists(tmp_path, monkeypatch):
     assert result.view_root == target_save
     assert dst.exists()
     assert os.stat(dst).st_ino == os.stat(payload_root).st_ino
+
+
+def test_build_view_accepts_link_race_eexist_oserror(tmp_path, monkeypatch):
+    payload_root = tmp_path / "payload" / "race-oserror.mkv"
+    payload_root.parent.mkdir(parents=True)
+    payload_root.write_bytes(b"RACE2")
+
+    files = [QBitFile(name="race-oserror.mkv", size=payload_root.stat().st_size)]
+    target_save = tmp_path / "views"
+    target_save.mkdir()
+    dst = target_save / "race-oserror.mkv"
+
+    real_link = os.link
+
+    def link_with_race_oserror(src, target, *args, **kwargs):
+        if not os.path.exists(target):
+            real_link(src, target)
+        raise OSError(errno.EEXIST, "File exists", target)
+
+    monkeypatch.setattr("rehome.view_builder.os.link", link_with_race_oserror)
+
+    result = build_torrent_view(payload_root, target_save, files, root_name=None)
+    assert result.view_root == target_save
+    assert dst.exists()
+    assert os.stat(dst).st_ino == os.stat(payload_root).st_ino

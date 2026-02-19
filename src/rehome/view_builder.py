@@ -9,6 +9,7 @@ without duplicating data.
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
+import errno
 import os
 import time
 
@@ -136,7 +137,9 @@ def _ensure_hardlink(
 
     try:
         os.link(src, dst)
-    except FileExistsError:
+    except OSError as exc:
+        if exc.errno != errno.EEXIST:
+            raise
         # Another writer created the path between exists() and os.link(); treat this as
         # idempotent if destination now matches source.
         if progress_cb:
