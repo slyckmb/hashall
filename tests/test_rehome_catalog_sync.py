@@ -44,6 +44,23 @@ class FakeQbitClientWithFiles(FakeQbitClient):
         return list(self._files)
 
 
+class FakeQbitClientSelective(FakeQbitClient):
+    def __init__(self, default_path: str, files_by_hash, missing_info_hashes=None):
+        super().__init__(default_path=default_path)
+        self._files_by_hash = {k: list(v) for k, v in (files_by_hash or {}).items()}
+        self._missing_info_hashes = set(missing_info_hashes or [])
+        self.files_calls = []
+
+    def get_torrent_info(self, torrent_hash: str):
+        if torrent_hash in self._missing_info_hashes:
+            return None
+        return SimpleNamespace(save_path=self.save_paths.get(torrent_hash, self.default_path))
+
+    def get_torrent_files(self, torrent_hash: str):
+        self.files_calls.append(torrent_hash)
+        return list(self._files_by_hash.get(torrent_hash, []))
+
+
 def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
     db_path = tmp_path / "catalog.db"
     stash_mount = tmp_path / "stash" / "media"
@@ -798,3 +815,93 @@ def test_build_views_skips_duplicate_target_entries(tmp_path):
     built = target_save / payload_file.name
     assert built.exists()
     assert built.stat().st_ino == payload_file.stat().st_ino
+
+
+def test_sanitize_plan_live_torrents_filters_stale_hashes(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    db_path.write_text("")
+
+    payload_file = tmp_path / "payload.bin"
+    payload_file.write_bytes(b"payload")
+    files = [QBitFile(name=payload_file.name, size=payload_file.stat().st_size)]
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.qbit_client = FakeQbitClientSelective(
+        default_path=str(tmp_path),
+        files_by_hash={"hash_live": files},
+        missing_info_hashes={"hash_missing"},
+    )
+
+    plan = {
+        "decision": "REUSE",
+        "torrent_hash": "hash_missing",
+        "affected_torrents": ["hash_missing", "hash_nofiles", "hash_live"],
+        "view_targets": [
+            {"torrent_hash": "hash_missing", "target_save_path": str(tmp_path), "root_name": payload_file.name},
+            {"torrent_hash": "hash_nofiles", "target_save_path": str(tmp_path), "root_name": payload_file.name},
+            {"torrent_hash": "hash_live", "target_save_path": str(tmp_path), "root_name": payload_file.name},
+        ],
+    }
+
+    files_cache = executor._sanitize_plan_live_torrents(plan)
+
+    assert plan["torrent_hash"] == "hash_nofiles"
+    assert plan["affected_torrents"] == ["hash_nofiles", "hash_live"]
+    assert [t["torrent_hash"] for t in plan["view_targets"]] == ["hash_nofiles", "hash_live"]
+    assert list(files_cache) == ["hash_live"]
+
+
+def test_build_views_uses_preloaded_files_cache(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            mount_point TEXT,
+            preferred_mount_point TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-44", 44, str(tmp_path), str(tmp_path)),
+    )
+    conn.commit()
+    conn.close()
+
+    payload_file = tmp_path / "canonical" / "Movie.2024.mkv"
+    payload_file.parent.mkdir(parents=True, exist_ok=True)
+    payload_file.write_bytes(b"payload")
+    files = [QBitFile(name=payload_file.name, size=payload_file.stat().st_size)]
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.qbit_client = FakeQbitClientSelective(
+        default_path=str(tmp_path),
+        files_by_hash={"hash_live": files},
+        missing_info_hashes={"hash_missing"},
+    )
+
+    plan = {
+        "target_device_id": 44,
+        "decision": "REUSE",
+        "torrent_hash": "hash_missing",
+        "file_count": 1,
+        "total_bytes": payload_file.stat().st_size,
+        "affected_torrents": ["hash_live", "hash_missing"],
+        "view_targets": [
+            {"torrent_hash": "hash_live", "target_save_path": str(tmp_path / "views"), "root_name": payload_file.name},
+            {"torrent_hash": "hash_missing", "target_save_path": str(tmp_path / "views"), "root_name": payload_file.name},
+        ],
+    }
+
+    files_cache = executor._sanitize_plan_live_torrents(plan)
+    before_calls = len(executor.qbit_client.files_calls)
+    executor._build_views(payload_file, plan["view_targets"], plan, preloaded_files=files_cache)
+    after_calls = len(executor.qbit_client.files_calls)
+
+    built = tmp_path / "views" / payload_file.name
+    assert built.exists()
+    assert built.stat().st_ino == payload_file.stat().st_ino
+    assert after_calls == before_calls

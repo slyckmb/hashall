@@ -336,7 +336,14 @@ class DemotionExecutor:
         cache[key] = value
         return value
 
-    def _build_views(self, payload_root: Path, view_targets: List[Dict], plan: Dict) -> None:
+    def _build_views(
+        self,
+        payload_root: Path,
+        view_targets: List[Dict],
+        plan: Dict,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
         """Build torrent views using hardlinks to the payload root."""
         if not view_targets:
             return
@@ -345,8 +352,9 @@ class DemotionExecutor:
 
         total = len(view_targets)
         progress_every = 5 if total <= 50 else 25
-        files_cache: Dict[str, List] = {}
+        files_cache: Dict[str, List] = dict(preloaded_files or {})
         seen_view_targets: set[tuple[str, str]] = set()
+        skipped_hashes: set[str] = set()
 
         conn = self._get_db_connection()
         table_name = self._get_device_table_name(conn, plan.get("target_device_id"))
@@ -396,7 +404,13 @@ class DemotionExecutor:
                     f"hash={torrent_hash[:16]} files={len(files)} elapsed_s={fetch_elapsed:.1f}"
                 )
                 if not files:
-                    raise RuntimeError(f"Failed to fetch files for torrent {torrent_hash[:16]}")
+                    skipped_hashes.add(torrent_hash.lower())
+                    self._log(
+                        "  build_views_skip phase=missing_files "
+                        f"done={idx}/{total} hash={torrent_hash[:16]}",
+                        "warning",
+                    )
+                    continue
 
                 link_start = time.monotonic()
                 try:
@@ -431,6 +445,31 @@ class DemotionExecutor:
                     f"  build_views_progress phase=link done={idx}/{total} "
                     f"hash={torrent_hash[:16]} elapsed_s={link_elapsed:.1f}"
                 )
+
+            if skipped_hashes:
+                before = len(plan.get("affected_torrents") or [])
+                filtered_torrents = [
+                    h for h in (plan.get("affected_torrents") or [])
+                    if str(h).strip().lower() not in skipped_hashes
+                ]
+                plan["affected_torrents"] = filtered_torrents
+                if plan.get("torrent_hash", "").strip().lower() in skipped_hashes and filtered_torrents:
+                    plan["torrent_hash"] = filtered_torrents[0]
+
+                if plan.get("view_targets"):
+                    plan["view_targets"] = [
+                        t for t in plan.get("view_targets", [])
+                        if str(t.get("torrent_hash", "")).strip().lower() not in skipped_hashes
+                    ]
+
+                self._log(
+                    "  build_views_filter "
+                    f"removed={before - len(filtered_torrents)} "
+                    f"remaining={len(filtered_torrents)}",
+                    "warning",
+                )
+                if not filtered_torrents:
+                    raise RuntimeError("No live torrents remain after build_views file checks")
         finally:
             conn.close()
 
@@ -998,6 +1037,97 @@ class DemotionExecutor:
             return []
         return [tag.strip() for tag in str(raw_tags).split(',') if tag and tag.strip()]
 
+    def _sanitize_plan_live_torrents(self, plan: Dict) -> Dict[str, List]:
+        """
+        Filter plan torrents to hashes that are currently live in qB and have file lists.
+
+        Normalize plans are generated from catalog snapshots; qB can drift before apply.
+        This preflight keeps execution idempotent by trimming stale sibling hashes.
+
+        Returns:
+            Mapping of torrent_hash -> preloaded file list for view building.
+        """
+        requested_raw = [str(h).strip() for h in (plan.get("affected_torrents") or []) if str(h).strip()]
+        if not requested_raw:
+            raise RuntimeError("Plan has no affected_torrents to execute")
+
+        requested: List[str] = []
+        seen_requested: set[str] = set()
+        for torrent_hash in requested_raw:
+            key = torrent_hash.lower()
+            if key in seen_requested:
+                continue
+            seen_requested.add(key)
+            requested.append(torrent_hash)
+
+        kept: List[str] = []
+        kept_lookup: set[str] = set()
+        dropped_missing_info: List[str] = []
+        no_files: List[str] = []
+        files_cache: Dict[str, List] = {}
+
+        for torrent_hash in requested:
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if not info:
+                dropped_missing_info.append(torrent_hash)
+                continue
+
+            files = self.qbit_client.get_torrent_files(torrent_hash)
+            if not files:
+                no_files.append(torrent_hash)
+            else:
+                files_cache[torrent_hash] = files
+            kept.append(torrent_hash)
+            kept_lookup.add(torrent_hash.lower())
+
+        if dropped_missing_info or no_files:
+            self._log(
+                "preflight_torrent_filter "
+                f"requested={len(requested)} kept={len(kept)} "
+                f"dropped_missing_info={len(dropped_missing_info)} "
+                f"no_files={len(no_files)}",
+                "warning",
+            )
+            if self.debug_qb:
+                if dropped_missing_info:
+                    self._log(
+                        "preflight_missing_info_hashes="
+                        + ",".join(h[:16] for h in dropped_missing_info),
+                        "warning",
+                    )
+                if no_files:
+                    self._log(
+                        "preflight_no_files_hashes="
+                        + ",".join(h[:16] for h in no_files),
+                        "warning",
+                    )
+
+        if not kept:
+            raise RuntimeError("No live torrents with file lists remain in plan after qB preflight")
+
+        plan["affected_torrents"] = kept
+
+        plan_torrent_hash = str(plan.get("torrent_hash") or "").strip()
+        if not plan_torrent_hash or plan_torrent_hash.lower() not in kept_lookup:
+            plan["torrent_hash"] = kept[0]
+
+        view_targets = plan.get("view_targets") or []
+        if view_targets:
+            filtered_view_targets = []
+            for target in view_targets:
+                target_hash = str(target.get("torrent_hash") or "").strip()
+                if target_hash.lower() in kept_lookup:
+                    filtered_view_targets.append(target)
+            plan["view_targets"] = filtered_view_targets
+            if len(filtered_view_targets) != len(view_targets):
+                self._log(
+                    "preflight_view_target_filter "
+                    f"before={len(view_targets)} after={len(filtered_view_targets)}",
+                    "warning",
+                )
+
+        return files_cache
+
     def _build_rehome_provenance_tags(self, plan: Dict) -> List[str]:
         """Compute rehome provenance tags for a completed apply run."""
         direction = plan.get("direction", "demote")
@@ -1087,6 +1217,8 @@ class DemotionExecutor:
         if decision == 'BLOCK':
             raise RuntimeError("Cannot execute BLOCKED plan")
 
+        preloaded_files = self._sanitize_plan_live_torrents(plan)
+
         self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
 
         run_id = None
@@ -1100,11 +1232,23 @@ class DemotionExecutor:
             if direction == 'promote':
                 if decision != 'REUSE':
                     raise RuntimeError(f"Unknown promotion decision: {decision}")
-                self._execute_promote_reuse(plan, spot_check=spot_check)
+                self._execute_promote_reuse(
+                    plan,
+                    spot_check=spot_check,
+                    preloaded_files=preloaded_files,
+                )
             elif decision == 'REUSE':
-                self._execute_reuse(plan, spot_check=spot_check)
+                self._execute_reuse(
+                    plan,
+                    spot_check=spot_check,
+                    preloaded_files=preloaded_files,
+                )
             elif decision == 'MOVE':
-                self._execute_move(plan, spot_check=spot_check)
+                self._execute_move(
+                    plan,
+                    spot_check=spot_check,
+                    preloaded_files=preloaded_files,
+                )
             else:
                 raise RuntimeError(f"Unknown decision: {decision}")
 
@@ -1485,7 +1629,13 @@ class DemotionExecutor:
         )
         conn.commit()
 
-    def _execute_promote_reuse(self, plan: Dict, spot_check: int = 0) -> None:
+    def _execute_promote_reuse(
+        self,
+        plan: Dict,
+        spot_check: int = 0,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
         """
         Execute a PROMOTE_REUSE plan (pool → stash).
 
@@ -1514,6 +1664,17 @@ class DemotionExecutor:
         self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
         phase_times["verify"] = time.monotonic() - t0
 
+        # Build views (if mapping provided)
+        t0 = time.monotonic()
+        self._log("step=build_views")
+        self._build_views(
+            target_path,
+            plan.get("view_targets") or [],
+            plan,
+            preloaded_files=preloaded_files,
+        )
+        phase_times["build_views"] = time.monotonic() - t0
+
         t0 = time.monotonic()
         conn = self._get_db_connection()
         try:
@@ -1521,12 +1682,6 @@ class DemotionExecutor:
         finally:
             conn.close()
         phase_times["build_relocations"] = time.monotonic() - t0
-
-        # Build views (if mapping provided)
-        t0 = time.monotonic()
-        self._log("step=build_views")
-        self._build_views(target_path, plan.get("view_targets") or [], plan)
-        phase_times["build_views"] = time.monotonic() - t0
 
         # Relocate all torrents atomically
         t0 = time.monotonic()
@@ -1541,7 +1696,13 @@ class DemotionExecutor:
         )
         self._log("PROMOTE_REUSE execution complete", "success")
 
-    def _execute_reuse(self, plan: Dict, spot_check: int = 0) -> None:
+    def _execute_reuse(
+        self,
+        plan: Dict,
+        spot_check: int = 0,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
         """
         Execute a REUSE plan.
 
@@ -1572,6 +1733,17 @@ class DemotionExecutor:
         self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
         phase_times["verify"] = time.monotonic() - t0
 
+        # Build views (if mapping provided)
+        t0 = time.monotonic()
+        self._log("step=build_views")
+        self._build_views(
+            target_path,
+            plan.get("view_targets") or [],
+            plan,
+            preloaded_files=preloaded_files,
+        )
+        phase_times["build_views"] = time.monotonic() - t0
+
         t0 = time.monotonic()
         conn = self._get_db_connection()
         try:
@@ -1579,12 +1751,6 @@ class DemotionExecutor:
         finally:
             conn.close()
         phase_times["build_relocations"] = time.monotonic() - t0
-
-        # Build views (if mapping provided)
-        t0 = time.monotonic()
-        self._log("step=build_views")
-        self._build_views(target_path, plan.get("view_targets") or [], plan)
-        phase_times["build_views"] = time.monotonic() - t0
 
         # Relocate all torrents atomically
         t0 = time.monotonic()
@@ -1605,7 +1771,13 @@ class DemotionExecutor:
         )
         self._log("REUSE execution complete", "success")
 
-    def _execute_move(self, plan: Dict, spot_check: int = 0) -> None:
+    def _execute_move(
+        self,
+        plan: Dict,
+        spot_check: int = 0,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
         """
         Execute a MOVE plan.
 
@@ -1672,20 +1844,25 @@ class DemotionExecutor:
         self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
         phase_times["verify_target_and_spotcheck"] = time.monotonic() - t0
 
-        t0 = time.monotonic()
-        conn = self._get_db_connection()
-        try:
-            relocations = self._build_relocations(conn, plan)
-        finally:
-            conn.close()
-        phase_times["build_relocations"] = time.monotonic() - t0
-
         # 4. Build views and relocate atomically
         try:
             t0 = time.monotonic()
             self._log("step=build_views")
-            self._build_views(target_path, plan.get("view_targets") or [], plan)
+            self._build_views(
+                target_path,
+                plan.get("view_targets") or [],
+                plan,
+                preloaded_files=preloaded_files,
+            )
             phase_times["build_views"] = time.monotonic() - t0
+
+            t0 = time.monotonic()
+            conn = self._get_db_connection()
+            try:
+                relocations = self._build_relocations(conn, plan)
+            finally:
+                conn.close()
+            phase_times["build_relocations"] = time.monotonic() - t0
 
             t0 = time.monotonic()
             self._log("step=relocate_siblings")
