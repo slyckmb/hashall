@@ -169,6 +169,22 @@ class TestQBittorrentRelocation:
         assert mock_session.post.call_args_list[0].args[0].endswith("/api/v2/torrents/resume")
         assert mock_session.post.call_args_list[1].args[0].endswith("/api/v2/torrents/start")
 
+    def test_set_auto_management_calls_api(self):
+        mock_session = Mock()
+        ok = Mock()
+        ok.raise_for_status = Mock()
+        mock_session.post.return_value = ok
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.set_auto_management("abc123", False) is True
+        args, kwargs = mock_session.post.call_args
+        assert args[0].endswith("/api/v2/torrents/setAutoManagement")
+        assert kwargs["data"]["hashes"] == "abc123"
+        assert kwargs["data"]["enable"] == "false"
+
     def test_relocation_failure_handling(self, tmp_path):
         """Test that executor handles relocation failures gracefully."""
         # Create test database
@@ -197,6 +213,19 @@ class TestQBittorrentRelocation:
         mock_client.pause_torrent.return_value = True
         mock_client.set_location.return_value = False  # Fail here
         mock_client.resume_torrent.return_value = True
+        mock_client.set_auto_management.return_value = True
+        mock_client.get_torrent_info.return_value = QBitTorrent(
+            hash="torrent_fail_test",
+            name="Test",
+            save_path="/stash/torrents/seeding",
+            content_path="/stash/torrents/seeding/Movie.2024",
+            category="",
+            tags="",
+            state="uploading",
+            size=1000000,
+            progress=1.0,
+            auto_tmm=False,
+        )
 
         executor.qbit_client = mock_client
 
@@ -410,6 +439,7 @@ class TestRelocationVerification:
         mock_client.pause_torrent.return_value = True
         mock_client.set_location.return_value = True
         mock_client.resume_torrent.return_value = True
+        mock_client.set_auto_management.return_value = True
 
         # Mock get_torrent_info to return WRONG location
         wrong_location_torrent = QBitTorrent(
@@ -421,7 +451,8 @@ class TestRelocationVerification:
             tags="",
             state="uploading",
             size=1000000,
-            progress=1.0
+            progress=1.0,
+            auto_tmm=False,
         )
         mock_client.get_torrent_info.return_value = wrong_location_torrent
 
@@ -430,6 +461,47 @@ class TestRelocationVerification:
         # Try to relocate - should fail verification
         with pytest.raises(RuntimeError, match="location verification failed"):
             executor._relocate_torrent('verify_test', '/pool/torrents/content')
+
+    def test_relocation_disables_auto_management_before_move(self, tmp_path):
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        mock_client = Mock()
+        mock_client.pause_torrent.return_value = True
+        mock_client.set_location.return_value = True
+        mock_client.resume_torrent.return_value = True
+        mock_client.set_auto_management.return_value = True
+        mock_client.get_torrent_info.side_effect = [
+            QBitTorrent(
+                hash="atm_test",
+                name="Test",
+                save_path="/stash/torrents/seeding",
+                content_path="/stash/torrents/seeding/Test",
+                category="tv",
+                tags="",
+                state="uploading",
+                size=100,
+                progress=1.0,
+                auto_tmm=True,
+            ),
+            QBitTorrent(
+                hash="atm_test",
+                name="Test",
+                save_path="/pool/torrents/content",
+                content_path="/pool/torrents/content/Test",
+                category="tv",
+                tags="",
+                state="uploading",
+                size=100,
+                progress=1.0,
+                auto_tmm=False,
+            ),
+        ]
+        executor.qbit_client = mock_client
+
+        executor._relocate_torrent("atm_test", "/pool/torrents/content")
+
+        mock_client.set_auto_management.assert_called_once_with("atm_test", False)
 
 
 class TestSingleFileVerification:
@@ -537,6 +609,62 @@ class TestRehomeTagging:
         mock_client.add_tags.assert_called_once_with(
             "torrent_tagged",
             ["rehome", "rehome_from_stash", "rehome_to_pool", "rehome_at_20260212"],
+        )
+
+    def test_apply_rehome_provenance_tags_cleanup_deferred(self, tmp_path, monkeypatch):
+        import rehome.executor as executor_module
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls):
+                from datetime import datetime as _dt
+                return _dt(2026, 2, 12, 10, 0, 0)
+
+        monkeypatch.setattr(executor_module, "datetime", FakeDateTime)
+
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        old_tags = "keep,rehome_cleanup_source_required,rehome_at_20260210"
+        mock_info = QBitTorrent(
+            hash="torrent_cleanup",
+            name="Cleanup Torrent",
+            save_path="/stash/torrents/seeding",
+            content_path="/stash/torrents/seeding/Cleanup Torrent",
+            category="",
+            tags=old_tags,
+            state="stalledUP",
+            size=100,
+            progress=1.0,
+        )
+
+        mock_client = Mock()
+        mock_client.get_torrent_info.return_value = mock_info
+        mock_client.remove_tags.return_value = True
+        mock_client.add_tags.return_value = True
+        executor.qbit_client = mock_client
+
+        plan = {
+            "direction": "demote",
+            "affected_torrents": ["torrent_cleanup"],
+            "cleanup_source_deferred": True,
+        }
+
+        executor._apply_rehome_provenance_tags(plan)
+
+        mock_client.remove_tags.assert_called_once_with(
+            "torrent_cleanup",
+            ["rehome_cleanup_source_required", "rehome_at_20260210"],
+        )
+        mock_client.add_tags.assert_called_once_with(
+            "torrent_cleanup",
+            [
+                "rehome",
+                "rehome_from_stash",
+                "rehome_to_pool",
+                "rehome_at_20260212",
+                "rehome_cleanup_source_required",
+            ],
         )
 
     def test_apply_rehome_provenance_tags_promote(self, tmp_path, monkeypatch):

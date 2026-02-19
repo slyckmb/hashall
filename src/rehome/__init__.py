@@ -5,4 +5,4 @@ Rehome orchestrates moving seed-only payloads from stash to pool
 using hashall's catalog as the source of truth.
 """
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"

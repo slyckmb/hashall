@@ -856,7 +856,10 @@ class DemotionExecutor:
             target_tag = "rehome_to_pool"
 
         date_tag = f"rehome_at_{datetime.now().strftime('%Y%m%d')}"
-        return ["rehome", source_tag, target_tag, date_tag]
+        tags = ["rehome", source_tag, target_tag, date_tag]
+        if bool(plan.get("cleanup_source_deferred")):
+            tags.append("rehome_cleanup_source_required")
+        return tags
 
 
     def _apply_rehome_provenance_tags(self, plan: Dict) -> None:
@@ -877,6 +880,7 @@ class DemotionExecutor:
                     if tag.startswith("rehome_from_")
                     or tag.startswith("rehome_to_")
                     or tag.startswith("rehome_at_")
+                    or tag == "rehome_cleanup_source_required"
                 ]
 
                 if stale_tags and hasattr(self.qbit_client, "remove_tags"):
@@ -1459,6 +1463,8 @@ class DemotionExecutor:
 
         # For rsync-based cross-filesystem moves, remove source only after relocation succeeded.
         cleanup_source_status = "deleted"
+        plan["cleanup_source_deferred"] = False
+        plan.pop("cleanup_source_deferred_path", None)
         if move_strategy == "rsync_copy" and source_path.exists():
             self._log(f"step=cleanup_source_after_rsync path={source_path}")
             try:
@@ -1479,12 +1485,16 @@ class DemotionExecutor:
                             )
                         except Exception as retry_exc:
                             cleanup_source_status = "deferred"
+                            plan["cleanup_source_deferred"] = True
+                            plan["cleanup_source_deferred_path"] = str(source_path)
                             self._log(
                                 f"cleanup_source_deferred path={source_path} error={retry_exc}",
                                 "warning",
                             )
                     else:
                         cleanup_source_status = "deferred"
+                        plan["cleanup_source_deferred"] = True
+                        plan["cleanup_source_deferred_path"] = str(source_path)
                         self._log(
                             f"cleanup_source_deferred path={source_path} "
                             "reason=permission_repair_failed",
