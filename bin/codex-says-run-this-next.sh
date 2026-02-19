@@ -255,7 +255,14 @@ LIMIT="${REHOME_NORMALIZE_LIMIT:-50}"
 POOL_ROOT="${REHOME_NORMALIZE_POOL_ROOT:-/pool/data/seeds}"
 STASH_ROOT="${REHOME_NORMALIZE_STASH_ROOT:-/stash/media/torrents/seeding}"
 POOL_DEVICE="${REHOME_POOL_DEVICE:-44}"
-HASH_PROGRESS="${PAYLOAD_HASH_PROGRESS:-summary}"
+HASH_PROGRESS="${PAYLOAD_HASH_PROGRESS:-auto}"
+case "${HASH_PROGRESS}" in
+  auto|minimal|full) ;;
+  *)
+    echo "warning=invalid_hash_progress value=${HASH_PROGRESS} fallback=auto"
+    HASH_PROGRESS="auto"
+    ;;
+esac
 RUN_RECOVERY_STEPS="${REHOME_NORMALIZE_RUN_RECOVERY:-0}"
 
 echo "mode=frozen-one-pass limit=${LIMIT} pool_root=${POOL_ROOT} pool_device=${POOL_DEVICE}"
