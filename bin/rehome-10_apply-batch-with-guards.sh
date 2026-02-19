@@ -24,7 +24,8 @@ Behavior:
   - After apply, runs 4 checks and stops on any failure:
       1) apply exit code == 0
       2) plan decision is MOVE|REUSE
-      3) target path exists and source path is removed
+      3) target exists and source state matches decision
+         (MOVE=source removed, REUSE=source retained unless cleanup was requested)
       4) DB has complete payload on pool device for the payload_hash
 
 Defaults hashes (if none provided):
@@ -129,13 +130,19 @@ plan = json.loads(Path(plan_path).read_text())
 if plan.get("decision") not in {"MOVE", "REUSE"}:
     raise SystemExit(f"check_failed decision={plan.get('decision')}")
 
-# check #3: target exists + source removed
+# check #3: target exists + source state matches decision
 source_path = Path(plan["source_path"])
 target_path = Path(plan["target_path"])
+decision = plan.get("decision")
 if not target_path.exists():
     raise SystemExit(f"check_failed target_missing={target_path}")
-if source_path.exists():
-    raise SystemExit(f"check_failed source_still_exists={source_path}")
+if decision == "MOVE":
+    if source_path.exists():
+        raise SystemExit(f"check_failed source_still_exists={source_path}")
+elif decision == "REUSE":
+    # REUSE keeps source unless explicit cleanup flags are enabled at apply time.
+    if not source_path.exists():
+        raise SystemExit(f"check_failed reuse_source_missing_unexpectedly={source_path}")
 
 # check #4: DB payload on pool complete
 conn = sqlite3.connect(db_path)
