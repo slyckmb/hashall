@@ -54,6 +54,48 @@ def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
     assert executor.qbit_client.save_paths["t1"] == "/stash/seeding"
 
 
+def test_atomic_relocation_rollback_uses_qb_runtime_source_path(tmp_path, monkeypatch):
+    class AliasQbitClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__(default_path="/data/media/torrents/seeding")
+
+        def set_location(self, torrent_hash: str, new_location: str) -> bool:
+            if torrent_hash == "t2":
+                return False
+            self.save_paths[torrent_hash] = new_location
+            return True
+
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state="pausedUP",
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = AliasQbitClient()
+
+    relocations = [
+        {
+            "torrent_hash": "t1",
+            "source_save_path": "/stash/media/torrents/seeding",
+            "target_save_path": "/pool/data/seeds",
+        },
+        {
+            "torrent_hash": "t2",
+            "source_save_path": "/stash/media/torrents/seeding",
+            "target_save_path": "/pool/data/seeds",
+        },
+    ]
+
+    with pytest.raises(RuntimeError):
+        executor._relocate_torrents_atomic(relocations)
+
+    # Rollback should use qB's runtime path authority (/data/media...), not canonical stash alias.
+    assert executor.qbit_client.save_paths["t1"] == "/data/media/torrents/seeding"
+
+
 def test_atomic_relocation_retries_and_waits_for_qb_save_path(tmp_path, monkeypatch):
     class FlakyQbitClient(FakeQbitClient):
         def __init__(self):
@@ -92,6 +134,41 @@ def test_atomic_relocation_retries_and_waits_for_qb_save_path(tmp_path, monkeypa
     executor._relocate_torrents_atomic(relocations)
     assert executor.qbit_client.set_calls["t1"] >= 2
     assert executor.qbit_client.save_paths["t1"] == "/pool/seeding"
+
+
+def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
+    class OrderedQbitClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.resume_calls = 0
+
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state="pausedUP",
+            )
+
+        def resume_torrent(self, torrent_hash: str) -> bool:
+            self.resume_calls += 1
+            return True
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = OrderedQbitClient()
+
+    def fake_wait(_hash, expected, **_kwargs):
+        # Verify-time polling should happen before any resume call.
+        assert executor.qbit_client.resume_calls == 0
+        return SimpleNamespace(save_path=str(expected), auto_tmm=False), expected
+
+    monkeypatch.setattr(executor, "_wait_for_save_path", fake_wait)
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+    executor._relocate_torrents_atomic(relocations)
+    assert executor.qbit_client.resume_calls == 1
 
 
 def test_set_location_retry_succeeds_when_qb_reports_conflict_but_path_is_set(tmp_path, monkeypatch):

@@ -306,73 +306,68 @@ class DemotionExecutor:
         Steps:
         1. Pause all
         2. Set locations for all
-        3. Resume all
-        4. Verify all
+        3. Verify all while paused
+        4. Resume all
         Rollback location changes if any step fails.
         """
         paused = []
         moved = []
+        original_qb_paths: Dict[str, str] = {}
         total = len(relocations)
         progress_every = 5 if total <= 50 else 25
 
-        if self.disable_atm_on_rehome:
+        try:
+            # Capture runtime qB save_path as rollback source-of-truth.
             for r in relocations:
                 torrent_hash = r["torrent_hash"]
                 info = self.qbit_client.get_torrent_info(torrent_hash)
+                if not info or not getattr(info, "save_path", None):
+                    raise RuntimeError(f"Missing qB save_path for torrent {torrent_hash[:16]}")
+                original_qb_path = str(getattr(info, "save_path")).strip()
+                original_qb_paths[torrent_hash] = original_qb_path
+                r["original_save_path_qb"] = original_qb_path
+
                 auto_enabled = bool(getattr(info, "auto_tmm", False)) if info else False
-                self._log(
-                    f"  auto_tmm_before hash={torrent_hash[:16]} enabled={str(auto_enabled).lower()}"
-                )
-                if auto_enabled:
-                    if not hasattr(self.qbit_client, "set_auto_management"):
-                        raise RuntimeError(
-                            f"qB client missing set_auto_management for torrent {torrent_hash[:16]}"
-                        )
-                    self._log(f"  disable_auto_tmm hash={torrent_hash[:16]}")
-                    if not self.qbit_client.set_auto_management(torrent_hash, False):
-                        raise RuntimeError(f"Failed to disable ATM for torrent {torrent_hash[:16]}")
+                if self.disable_atm_on_rehome:
+                    self._log(
+                        f"  auto_tmm_before hash={torrent_hash[:16]} enabled={str(auto_enabled).lower()}"
+                    )
+                    if auto_enabled:
+                        if not hasattr(self.qbit_client, "set_auto_management"):
+                            raise RuntimeError(
+                                f"qB client missing set_auto_management for torrent {torrent_hash[:16]}"
+                            )
+                        self._log(f"  disable_auto_tmm hash={torrent_hash[:16]}")
+                        if not self.qbit_client.set_auto_management(torrent_hash, False):
+                            raise RuntimeError(f"Failed to disable ATM for torrent {torrent_hash[:16]}")
 
-        for idx, r in enumerate(relocations, start=1):
-            torrent_hash = r["torrent_hash"]
-            if not self.qbit_client.pause_torrent(torrent_hash):
-                for h in paused:
-                    self.qbit_client.resume_torrent(h)
-                raise RuntimeError(f"Failed to pause torrent {torrent_hash[:16]}")
-            paused.append(torrent_hash)
-            if idx == 1 or idx == total or idx % progress_every == 0:
-                self._log(f"  relocate_progress phase=pause done={idx}/{total}")
-
-        for idx, r in enumerate(relocations, start=1):
-            torrent_hash = r["torrent_hash"]
-            target_save_path = r["target_save_path"]
-            if not self._set_location_with_retry(torrent_hash, target_save_path):
-                # Rollback any moved torrents
-                for m in moved:
-                    src = m.get("source_save_path")
-                    if src:
-                        self._set_location_with_retry(m["torrent_hash"], src, attempts=8, delay_seconds=1.0)
-                for h in paused:
-                    self.qbit_client.resume_torrent(h)
-                raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
-            moved.append(r)
-            if idx == 1 or idx == total or idx % progress_every == 0:
-                self._log(f"  relocate_progress phase=set_location done={idx}/{total}")
-
-        try:
-            for idx, h in enumerate(paused, start=1):
-                if not self.qbit_client.resume_torrent(h):
-                    raise RuntimeError(f"Failed to resume torrent {h[:16]}")
+            for idx, r in enumerate(relocations, start=1):
+                torrent_hash = r["torrent_hash"]
+                if not self.qbit_client.pause_torrent(torrent_hash):
+                    raise RuntimeError(f"Failed to pause torrent {torrent_hash[:16]}")
+                if not self._wait_for_stable_qb_state(torrent_hash, timeout_seconds=20.0):
+                    raise RuntimeError(f"Torrent {torrent_hash[:16]} did not reach stable paused state")
+                paused.append(torrent_hash)
                 if idx == 1 or idx == total or idx % progress_every == 0:
-                    self._log(f"  relocate_progress phase=resume done={idx}/{total}")
+                    self._log(f"  relocate_progress phase=pause done={idx}/{total}")
 
-            # Verify locations (qB can apply setLocation asynchronously).
+            for idx, r in enumerate(relocations, start=1):
+                torrent_hash = r["torrent_hash"]
+                target_save_path = r["target_save_path"]
+                if not self._set_location_with_retry(torrent_hash, target_save_path):
+                    raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
+                moved.append(r)
+                if idx == 1 or idx == total or idx % progress_every == 0:
+                    self._log(f"  relocate_progress phase=set_location done={idx}/{total}")
+
+            # Verify locations while torrents are paused.
             for idx, r in enumerate(relocations, start=1):
                 torrent_hash = r["torrent_hash"]
                 expected_path = canonicalize_path(Path(r["target_save_path"]).resolve())
                 torrent_info, actual_path = self._wait_for_save_path(
                     torrent_hash,
                     expected_path,
-                    timeout_seconds=45.0,
+                    timeout_seconds=90.0,
                     interval_seconds=1.0,
                 )
                 if not torrent_info:
@@ -390,7 +385,6 @@ class DemotionExecutor:
                         attempts=12,
                         delay_seconds=1.0,
                     )
-                    self.qbit_client.resume_torrent(torrent_hash)
                     torrent_info, actual_path = self._wait_for_save_path(
                         torrent_hash,
                         expected_path,
@@ -423,12 +417,20 @@ class DemotionExecutor:
                     )
                 if idx == 1 or idx == total or idx % progress_every == 0:
                     self._log(f"  relocate_progress phase=verify done={idx}/{total}")
+
+            for idx, h in enumerate(paused, start=1):
+                if not self.qbit_client.resume_torrent(h):
+                    raise RuntimeError(f"Failed to resume torrent {h[:16]}")
+                if idx == 1 or idx == total or idx % progress_every == 0:
+                    self._log(f"  relocate_progress phase=resume done={idx}/{total}")
         except Exception as e:
             # Rollback to original locations if possible
             for m in moved:
-                src = m.get("source_save_path")
+                src = m.get("original_save_path_qb") or original_qb_paths.get(m["torrent_hash"])
                 if src:
-                    self._set_location_with_retry(m["torrent_hash"], src, attempts=8, delay_seconds=1.0)
+                    self._set_location_with_retry(m["torrent_hash"], src, attempts=12, delay_seconds=1.0)
+            for h in paused:
+                self.qbit_client.resume_torrent(h)
             raise
 
     def _set_location_with_retry(
@@ -482,6 +484,32 @@ class DemotionExecutor:
         )
         if info and actual == expected:
             return True
+        return False
+
+    def _wait_for_stable_qb_state(
+        self,
+        torrent_hash: str,
+        *,
+        timeout_seconds: float = 20.0,
+        interval_seconds: float = 0.5,
+    ) -> bool:
+        """Wait until torrent state is no longer in a transient move/check phase."""
+        import time
+
+        transient_markers = ("checking", "moving", "allocating", "queued")
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() <= deadline:
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if info:
+                state = str(getattr(info, "state", "")).lower()
+                if not any(marker in state for marker in transient_markers):
+                    return True
+                if self.debug_qb:
+                    self._log(
+                        f"  qb_wait_state hash={torrent_hash[:16]} state={state}",
+                        "warning",
+                    )
+            time.sleep(interval_seconds)
         return False
 
     def _wait_for_save_path(
