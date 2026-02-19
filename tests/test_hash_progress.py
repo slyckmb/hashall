@@ -52,3 +52,28 @@ def test_hash_progress_reporter_full_mode_includes_bytes():
     assert any("Hashing:" in line for line in lines)
     assert any("file=512 B/1.0 KiB" in line for line in lines)
     assert any("total=512 B/1.0 KiB" in line for line in lines)
+
+
+def test_hash_progress_reporter_full_mode_status_desc_includes_bytes():
+    lines = []
+    reporter = HashProgressReporter(
+        label="payload",
+        mode="full",
+        emit=lines.append,
+    )
+    reporter.start(total_groups=10, total_bytes=4096)
+    reporter.update(
+        event="chunk",
+        done_groups=0,
+        total_groups=10,
+        path="/pool/data/seeds/shows/example.mkv",
+        file_bytes_done=1024,
+        file_bytes_total=4096,
+        batch_bytes_done=1024,
+        batch_bytes_total=4096,
+        force=True,
+    )
+
+    status = reporter.status_desc(done_groups=0, total_groups=10, path="Example")
+    assert "hashing groups=0/10" in status
+    assert "total=1.0 KiB/4.0 KiB" in status

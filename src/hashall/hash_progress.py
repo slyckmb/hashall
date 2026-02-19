@@ -84,6 +84,13 @@ class HashProgressReporter:
         self._last_group_logged = -1
         self._total_groups = 0
         self._total_bytes = 0
+        self._last_status = ""
+        self._last_done_groups = 0
+        self._last_total_groups = 0
+        self._last_batch_bytes_done = 0
+        self._last_batch_bytes_total = 0
+        self._last_rate_bps = 0.0
+        self._last_eta_s = None
 
     def start(self, *, total_groups: int, total_bytes: int) -> None:
         with self._lock:
@@ -95,6 +102,16 @@ class HashProgressReporter:
             self._last_group_logged = 0
             self._total_groups = max(0, int(total_groups))
             self._total_bytes = max(0, int(total_bytes))
+            self._last_done_groups = 0
+            self._last_total_groups = self._total_groups
+            self._last_batch_bytes_done = 0
+            self._last_batch_bytes_total = self._total_bytes
+            self._last_rate_bps = 0.0
+            self._last_eta_s = None
+            self._last_status = (
+                f"hashing groups=0/{self._total_groups}"
+                + (f" total=0 B/{_format_bytes(self._total_bytes)}" if self._total_bytes else "")
+            )
             if self.mode == "minimal":
                 self._emit(
                     "   ⏳ Hashing inode groups: 0/"
@@ -188,6 +205,24 @@ class HashProgressReporter:
             if path:
                 progress_bits.append(f"path={_truncate_path(path)}")
 
+            self._last_done_groups = groups_done
+            self._last_total_groups = groups_total
+            self._last_batch_bytes_done = bytes_done
+            self._last_batch_bytes_total = total_bytes_val
+            self._last_rate_bps = rate_bps
+            self._last_eta_s = eta_s
+            status_bits = [f"hashing groups={groups_done}/{groups_total}"]
+            if total_bytes_val:
+                status_bits.append(
+                    f"total={_format_bytes(bytes_done)}/{_format_bytes(total_bytes_val)}"
+                )
+            if rate_bps > 0:
+                status_bits.append(f"rate={_format_bytes(rate_bps)}/s")
+            status_bits.append(f"eta={_format_duration(eta_s)}")
+            if path:
+                status_bits.append(f"path={_truncate_path(path, limit=28)}")
+            self._last_status = " ".join(status_bits)
+
             prefix = "   🔎 Hashing complete:" if event == "done" else "   ⏳ Hashing:"
             self._emit(prefix + " " + " ".join(progress_bits))
             self._last_render_ts = now
@@ -210,5 +245,8 @@ class HashProgressReporter:
         )
 
     def status_desc(self, *, done_groups: int, total_groups: int, path: str = "") -> str:
-        label = _truncate_path(path or self.label, limit=40)
-        return f"hashing {done_groups}/{total_groups} inode-groups: {label}"
+        with self._lock:
+            if self.mode == "full" and self._last_status:
+                return self._last_status
+            label = _truncate_path(path or self.label, limit=40)
+            return f"hashing {done_groups}/{total_groups} inode-groups: {label}"
