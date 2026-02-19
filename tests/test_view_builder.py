@@ -54,3 +54,20 @@ def test_build_view_single_file(tmp_path):
     assert result.view_root == target_save
     assert view_file.exists()
     assert os.stat(view_file).st_ino == os.stat(payload_root).st_ino
+
+
+def test_build_view_accepts_existing_identical_file(tmp_path):
+    payload_root = tmp_path / "payload" / "Longlegs.2024.mkv"
+    payload_root.parent.mkdir(parents=True)
+    payload_root.write_bytes(b"A" * 4096)
+
+    files = [QBitFile(name="Longlegs.2024.mkv", size=payload_root.stat().st_size)]
+    target_save = tmp_path / "views"
+    target_save.mkdir()
+    preexisting = target_save / "Longlegs.2024.mkv"
+    preexisting.write_bytes(b"A" * 4096)  # same bytes, different inode
+
+    result = build_torrent_view(payload_root, target_save, files, root_name=None)
+    assert result.view_root == target_save
+    assert preexisting.exists()
+    assert preexisting.read_bytes() == payload_root.read_bytes()

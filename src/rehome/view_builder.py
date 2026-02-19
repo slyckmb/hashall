@@ -50,10 +50,25 @@ def _normalize_rel_path(
 
 
 def _ensure_hardlink(src: Path, dst: Path) -> None:
+    def _same_content(a: Path, b: Path) -> bool:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with a.open("rb") as fa, b.open("rb") as fb:
+            while True:
+                ba = fa.read(1024 * 1024)
+                bb = fb.read(1024 * 1024)
+                if ba != bb:
+                    return False
+                if not ba:
+                    return True
+
     if dst.exists():
         src_stat = os.stat(src)
         dst_stat = os.stat(dst)
         if src_stat.st_ino == dst_stat.st_ino and src_stat.st_dev == dst_stat.st_dev:
+            return
+        if _same_content(src, dst):
+            # Accept an existing identical file (already materialized by previous runs/manual copy).
             return
         raise RuntimeError(f"Destination exists and differs: {dst}")
 
