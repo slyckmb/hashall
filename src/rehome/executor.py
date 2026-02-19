@@ -600,7 +600,10 @@ class DemotionExecutor:
         # De-duplicate by inode so we never hash the same content twice in one check.
         unique_by_inode = {}
         for f in candidates:
-            unique_by_inode.setdefault(f.inode, f)
+            inode_key = getattr(f, "inode", None)
+            if inode_key is None:
+                inode_key = f.relative_path
+            unique_by_inode.setdefault(inode_key, f)
 
         # Prefer smaller files for faster checks while still validating real content.
         sample_files = sorted(unique_by_inode.values(), key=lambda f: f.size)[:sample]
