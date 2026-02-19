@@ -264,9 +264,10 @@ case "${HASH_PROGRESS}" in
     ;;
 esac
 RUN_RECOVERY_STEPS="${REHOME_NORMALIZE_RUN_RECOVERY:-0}"
+CLEANUP_DUPLICATE="${REHOME_CLEANUP_DUPLICATE_PAYLOAD:-1}"
 
 echo "mode=frozen-one-pass limit=${LIMIT} pool_root=${POOL_ROOT} pool_device=${POOL_DEVICE}"
-echo "sanitize_live_filter=${REHOME_SANITIZE_LIVE:-0} recovery_steps=${RUN_RECOVERY_STEPS}"
+echo "sanitize_live_filter=${REHOME_SANITIZE_LIVE:-0} recovery_steps=${RUN_RECOVERY_STEPS} cleanup_duplicate=${CLEANUP_DUPLICATE}"
 echo "step=sync-snapshot"
 make payload-sync \
   PAYLOAD_PATH_PREFIXES="${POOL_ROOT}" \
@@ -322,9 +323,17 @@ if [[ "$(jq -r '.plans | length' "$PLAN_READY")" -eq 0 ]]; then
   echo "No live plan entries remain after sanitization; aborting."
   exit 1
 fi
-make rehome-apply-dry REHOME_PLAN="$PLAN_READY" REHOME_CLEANUP_DUPLICATE_PAYLOAD=1
+make rehome-apply-dry REHOME_PLAN="$PLAN_READY" REHOME_CLEANUP_DUPLICATE_PAYLOAD="$CLEANUP_DUPLICATE"
 echo "step=apply-live"
-make rehome-apply REHOME_PLAN="$PLAN_READY" REHOME_CLEANUP_DUPLICATE_PAYLOAD=1
+make rehome-apply REHOME_PLAN="$PLAN_READY" REHOME_CLEANUP_DUPLICATE_PAYLOAD="$CLEANUP_DUPLICATE"
 echo "step=followup"
 make rehome-followup REHOME_RECHECK_PATH=/pool/data/seeds
+missing_source_skips="$(rg -c 'cleanup_duplicate skip reason=missing_source' "$run_log" || true)"
+manual_actions="$(rg -c 'MANUAL_ACTION_REQUIRED' "$run_log" || true)"
+echo "post_summary missing_source_skips=${missing_source_skips:-0} manual_actions=${manual_actions:-0}"
+if rg -q '^payload=.* outcome=pending' "$run_log"; then
+  echo "post_summary pending_payloads_begin"
+  rg '^payload=.* outcome=pending' "$run_log"
+  echo "post_summary pending_payloads_end"
+fi
 echo "done=1 plan_used=$PLAN_READY source_plan=$PLAN run_log=$run_log"
