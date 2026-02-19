@@ -509,3 +509,80 @@ def test_reuse_same_device_prefers_target_root_path_row(tmp_path):
 
     assert payload20 == (str(target_file),)
     assert torrent_row == (20, 44, str(target_file.parent))
+
+
+def test_dry_run_cleanup_source_views_works_with_readonly_catalog(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    pool_mount = tmp_path / "pool" / "data"
+    source_file = pool_mount / "cross-seed" / "FearNoPeer" / "Example.mkv"
+
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_bytes(b"payload")
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT NOT NULL,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'incomplete',
+            last_built_at REAL,
+            updated_at REAL
+        );
+
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            device_id INTEGER,
+            save_path TEXT,
+            root_name TEXT,
+            category TEXT,
+            tags TEXT,
+            last_seen_at REAL
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (1, 'hash_ro', 44, ?, 1, ?, 'complete')
+        """,
+        (str(source_file), source_file.stat().st_size),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+        VALUES ('tor_ro', 1, 44, ?, ?)
+        """,
+        (str(source_file.parent), source_file.name),
+    )
+    conn.commit()
+    conn.close()
+
+    # Simulate readonly catalog (for example restored snapshots/symlinked DBs).
+    db_path.chmod(0o444)
+
+    plan = {
+        "version": "1.0",
+        "direction": "demote",
+        "decision": "REUSE",
+        "torrent_hash": "tor_ro",
+        "payload_id": 1,
+        "payload_hash": "hash_ro",
+        "affected_torrents": ["tor_ro"],
+        "source_path": str(source_file),
+        "target_path": str(source_file),
+        "source_device_id": 44,
+        "target_device_id": 44,
+        "file_count": 1,
+        "total_bytes": source_file.stat().st_size,
+        "seeding_roots": [str(pool_mount)],
+    }
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.qbit_client = FakeQbitClient(default_path=str(source_file.parent))
+    executor.dry_run(plan, cleanup_source_views=True)

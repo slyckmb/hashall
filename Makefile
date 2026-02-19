@@ -84,8 +84,8 @@ SCAN_LOW_PRIORITY ?= 0
 
 # Root scan CLI (force repo-local src to avoid editable-install path drift)
 HASHALL_CLI := PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -m hashall.cli
-# Rehome CLI
-REHOME_CLI := $(PYTHON) -m rehome.cli
+# Rehome CLI (force repo-local src to avoid editable-install path drift)
+REHOME_CLI := PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -m rehome.cli
 
 # Rehome defaults (override via make VAR=value)
 REHOME_CATALOG ?= $(DB_FILE)
@@ -809,12 +809,12 @@ rehome-apply-dry:  ## Dry-run a rehome plan (set REHOME_PLAN)
 		echo "❌ REHOME_PLAN is required (path to plan json)"; \
 		exit 1; \
 	fi; \
-	$(REHOME_CLI) apply "$(REHOME_PLAN)" --dryrun \
-		--catalog "$(REHOME_CATALOG)" \
-		$(if $(REHOME_SPOT_CHECK),--spot-check $(REHOME_SPOT_CHECK),) \
-		$(if $(REHOME_CLEANUP_SOURCE_VIEWS),--cleanup-source-views,) \
-		$(if $(REHOME_CLEANUP_EMPTY_DIRS),--cleanup-empty-dirs,) \
-		$(if $(REHOME_CLEANUP_DUPLICATE_PAYLOAD),--cleanup-duplicate-payload,)
+	set -- apply "$(REHOME_PLAN)" --dryrun --catalog "$(REHOME_CATALOG)"; \
+	if [ -n "$(REHOME_SPOT_CHECK)" ] && [ "$(REHOME_SPOT_CHECK)" != "0" ]; then set -- "$$@" --spot-check "$(REHOME_SPOT_CHECK)"; fi; \
+	if [ "$(REHOME_CLEANUP_SOURCE_VIEWS)" = "1" ]; then set -- "$$@" --cleanup-source-views; fi; \
+	if [ "$(REHOME_CLEANUP_EMPTY_DIRS)" = "1" ]; then set -- "$$@" --cleanup-empty-dirs; fi; \
+	if [ "$(REHOME_CLEANUP_DUPLICATE_PAYLOAD)" = "1" ]; then set -- "$$@" --cleanup-duplicate-payload; fi; \
+	$(REHOME_CLI) "$$@"
 
 .PHONY: rehome-apply
 rehome-apply:  ## Execute a rehome plan (set REHOME_PLAN)
@@ -823,13 +823,13 @@ rehome-apply:  ## Execute a rehome plan (set REHOME_PLAN)
 		echo "💡 Tip: use REHOME_OUTPUT in rehome-plan, or run 'make rehome-last-plan'"; \
 		exit 1; \
 	fi; \
-	$(REHOME_CLI) apply "$(REHOME_PLAN)" --force \
-		--catalog "$(REHOME_CATALOG)" \
-		$(if $(REHOME_SPOT_CHECK),--spot-check $(REHOME_SPOT_CHECK),) \
-		$(if $(REHOME_RESCAN),--rescan,) \
-		$(if $(REHOME_CLEANUP_SOURCE_VIEWS),--cleanup-source-views,) \
-		$(if $(REHOME_CLEANUP_EMPTY_DIRS),--cleanup-empty-dirs,) \
-		$(if $(REHOME_CLEANUP_DUPLICATE_PAYLOAD),--cleanup-duplicate-payload,)
+	set -- apply "$(REHOME_PLAN)" --force --catalog "$(REHOME_CATALOG)"; \
+	if [ -n "$(REHOME_SPOT_CHECK)" ] && [ "$(REHOME_SPOT_CHECK)" != "0" ]; then set -- "$$@" --spot-check "$(REHOME_SPOT_CHECK)"; fi; \
+	if [ "$(REHOME_RESCAN)" = "1" ]; then set -- "$$@" --rescan; fi; \
+	if [ "$(REHOME_CLEANUP_SOURCE_VIEWS)" = "1" ]; then set -- "$$@" --cleanup-source-views; fi; \
+	if [ "$(REHOME_CLEANUP_EMPTY_DIRS)" = "1" ]; then set -- "$$@" --cleanup-empty-dirs; fi; \
+	if [ "$(REHOME_CLEANUP_DUPLICATE_PAYLOAD)" = "1" ]; then set -- "$$@" --cleanup-duplicate-payload; fi; \
+	$(REHOME_CLI) "$$@"
 
 .PHONY: rehome-checklist
 rehome-checklist:  ## Show rehome checklist

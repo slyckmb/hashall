@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import json
 from datetime import datetime
+from urllib.parse import quote
 
 # Import hashall and qBittorrent modules
 import sys
@@ -53,9 +54,16 @@ class DemotionExecutor:
         self.disable_atm_on_rehome = os.getenv("HASHALL_REHOME_DISABLE_ATM", "1") != "0"
         self.debug_qb = os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
 
-    def _get_db_connection(self) -> sqlite3.Connection:
+    def _get_db_connection(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Get database connection."""
-        return sqlite3.connect(self.catalog_path)
+        if not read_only:
+            return sqlite3.connect(self.catalog_path)
+
+        catalog_uri = (
+            f"file:{quote(str(Path(self.catalog_path).expanduser().resolve()))}"
+            "?mode=ro&immutable=1"
+        )
+        return sqlite3.connect(catalog_uri, uri=True)
 
     def _log(self, message: str, prefix: str = "info"):
         """Log a message with key=value format."""
@@ -1775,7 +1783,7 @@ class DemotionExecutor:
         source_path = Path(plan['source_path']).resolve()
         target_path = Path(plan['target_path']).resolve() if plan.get('target_path') else None
 
-        conn = self._get_db_connection()
+        conn = self._get_db_connection(read_only=dry_run)
         try:
             for torrent_hash in plan['affected_torrents']:
                 view_path = self._get_torrent_view_path(conn, torrent_hash)

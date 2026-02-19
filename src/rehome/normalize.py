@@ -267,10 +267,10 @@ def build_pool_path_normalization_batch(
                         """
                         SELECT payload_id, device_id, root_path, file_count, total_bytes, status
                         FROM payloads
-                        WHERE payload_hash = ?
+                        WHERE payload_hash = ? AND device_id = ?
                         ORDER BY payload_id
                         """,
-                        (payload_hash,),
+                        (payload_hash, int(pool_device)),
                     ).fetchall()
                 ]
 
