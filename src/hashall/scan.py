@@ -4,13 +4,14 @@ import hashlib
 import sqlite3
 import uuid
 import time
+import threading
 import statistics
 import shutil
 import unicodedata
 import sys
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
-from typing import Dict, Set, Tuple, Optional
+from typing import Dict, Set, Tuple, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from tqdm import tqdm
@@ -18,6 +19,7 @@ from hashall.model import connect_db, init_db_schema
 from hashall.device import register_or_update_device, ensure_files_table
 from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source, get_zfs_metadata
 from hashall.pathing import canonicalize_path, is_under
+from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 
 BATCH_SIZE = 500
@@ -149,14 +151,40 @@ def compute_sha256(file_path):
     return h.hexdigest()
 
 
-def compute_full_hashes(file_path):
+def compute_full_hashes(
+    file_path,
+    *,
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    progress_step_bytes: int = 16 * 1024 * 1024,
+):
     """Compute full SHA1 + SHA256 hashes in a single pass."""
     h1 = hashlib.sha1()
     h256 = hashlib.sha256()
+    total_bytes = 0
+    bytes_done = 0
+    next_emit = max(1, int(progress_step_bytes))
+    if progress_cb is not None:
+        try:
+            total_bytes = max(0, int(os.path.getsize(file_path)))
+        except OSError:
+            total_bytes = 0
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
             h1.update(chunk)
             h256.update(chunk)
+            if progress_cb is not None:
+                bytes_done += len(chunk)
+                if bytes_done >= next_emit or (total_bytes and bytes_done >= total_bytes):
+                    try:
+                        progress_cb(bytes_done, total_bytes, str(file_path))
+                    except Exception:
+                        pass
+                    next_emit = bytes_done + max(1, int(progress_step_bytes))
+    if progress_cb is not None:
+        try:
+            progress_cb(bytes_done, total_bytes, str(file_path))
+        except Exception:
+            pass
     return h1.hexdigest(), h256.hexdigest()
 
 
@@ -548,7 +576,8 @@ def _hash_file_worker(
     alias_mounts: tuple[Path, ...],
     existing_files: Dict[str, dict],
     hash_mode: str = 'fast',
-    expected_device_id: Optional[int] = None
+    expected_device_id: Optional[int] = None,
+    hash_progress_cb: Optional[Callable[..., None]] = None,
 ):
     """
     Hash a file or inode group for incremental scanning.
@@ -588,7 +617,12 @@ def _hash_file_worker(
         existing_repr = existing_files.get(rel_path_repr)
 
         # Determine if we need to hash the representative file
-        need_hash = True
+        need_hash = _needs_representative_hash(
+            hash_mode=hash_mode,
+            existing_repr=existing_repr,
+            stat_size=stat.st_size,
+            stat_mtime=stat.st_mtime,
+        )
         quick_hash = None
         sha1 = None
         sha256 = None
@@ -599,23 +633,44 @@ def _hash_file_worker(
             sha1 = existing_repr.get('sha1')
             sha256 = existing_repr.get('sha256')
 
-            # Check if we need to hash based on mode
-            if hash_mode == 'fast' and quick_hash is not None:
-                need_hash = False
-            elif hash_mode == 'full':
-                # In full mode, unchanged metadata still needs hash upgrade when
-                # either full hash column is missing.
-                need_hash = (sha1 is None or sha256 is None)
-            elif hash_mode == 'upgrade' and (sha1 is None or sha256 is None):
-                need_hash = True  # Need to compute full hashes
-            else:
-                need_hash = False
-
         # Hash the representative file if needed
         if need_hash:
             quick_hash = compute_quick_hash(representative_path)
             if hash_mode == 'full' or hash_mode == 'upgrade':
-                sha1, sha256 = compute_full_hashes(representative_path)
+                if hash_progress_cb is not None:
+                    try:
+                        hash_progress_cb(
+                            event="group_start",
+                            path=str(representative_path),
+                            file_bytes_total=int(stat.st_size),
+                        )
+                    except Exception:
+                        pass
+
+                progress_cb = None
+                if hash_progress_cb is not None:
+                    def _emit_chunk(done_bytes: int, total_bytes: int, abs_path: str) -> None:
+                        try:
+                            hash_progress_cb(
+                                event="chunk",
+                                path=abs_path,
+                                file_bytes_done=int(done_bytes),
+                                file_bytes_total=int(total_bytes),
+                            )
+                        except Exception:
+                            pass
+                    progress_cb = _emit_chunk
+
+                sha1, sha256 = compute_full_hashes(representative_path, progress_cb=progress_cb)
+                if hash_progress_cb is not None:
+                    try:
+                        hash_progress_cb(
+                            event="group_done",
+                            path=str(representative_path),
+                            file_bytes_total=int(stat.st_size),
+                        )
+                    except Exception:
+                        pass
 
         # Build results for ALL paths in this inode group
         results = []
@@ -757,6 +812,29 @@ def _should_skip_deletion(*, existing_count: int, discovered_count: int, seen_co
     return seen_count < min_expected_seen
 
 
+def _needs_representative_hash(
+    *,
+    hash_mode: str,
+    existing_repr: Optional[dict],
+    stat_size: int,
+    stat_mtime: float,
+) -> bool:
+    """Return True when a representative file requires hash computation."""
+    if hash_mode not in {"fast", "full", "upgrade"}:
+        return True
+
+    if existing_repr and existing_repr["size"] == stat_size and abs(existing_repr["mtime"] - stat_mtime) < 0.001:
+        quick_hash = existing_repr.get("quick_hash")
+        sha1 = existing_repr.get("sha1")
+        sha256 = existing_repr.get("sha256")
+        if hash_mode == "fast":
+            return quick_hash is None
+        if hash_mode in {"full", "upgrade"}:
+            return sha1 is None or sha256 is None
+        return False
+    return True
+
+
 def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: bool, file=None) -> dict:
     kwargs = {
         "desc": "📦 Scanning",
@@ -799,7 +877,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
               workers: int | None = None, batch_size: int | None = None,
               tqdm_position: int | None = None, quiet: bool = False,
               hash_mode: str = 'fast', show_current_path: bool = False,
-              scan_nested_datasets: bool = False):
+              scan_nested_datasets: bool = False,
+              hash_progress: str = "auto"):
     """
     Incrementally scan a directory with per-device table tracking.
 
@@ -813,6 +892,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         quiet: Suppress verbose output (for nested progress bars)
         hash_mode: 'fast' (quick_hash only), 'full' (both hashes), 'upgrade' (add full hashes)
         scan_nested_datasets: Detect nested mountpoints/datasets and scan them separately
+        hash_progress: Hash progress style ('auto', 'minimal', 'full')
     """
     conn = connect_db(db_path)
     init_db_schema(conn)
@@ -1017,6 +1097,77 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         if not scan_nested_datasets:
             _emit(quiet, "   Use --scan-nested-datasets to scan them automatically")
 
+    hash_progress_cb = None
+    hash_progress_reporter = None
+    hash_progress_state = {"done_groups": 0, "done_bytes": 0}
+    hash_progress_total_groups = 0
+    hash_progress_total_bytes = 0
+    hash_mount_point = effective_mount
+    hash_alias_mounts = tuple(m for m in (current_mount, preferred_mount) if m != hash_mount_point)
+
+    if hash_mode in {"full", "upgrade"}:
+        for work_item in work_items:
+            try:
+                rel_path_repr = _relative_to_any_mount(
+                    work_item["representative_path"],
+                    hash_mount_point,
+                    hash_alias_mounts,
+                )
+            except ValueError:
+                continue
+            existing_repr = existing_files.get(rel_path_repr)
+            if not _needs_representative_hash(
+                hash_mode=hash_mode,
+                existing_repr=existing_repr,
+                stat_size=int(work_item["size"]),
+                stat_mtime=float(work_item["stat"].st_mtime),
+            ):
+                continue
+            hash_progress_total_groups += 1
+            hash_progress_total_bytes += max(0, int(work_item["size"]))
+
+        if hash_progress_total_groups > 0:
+            hash_progress_reporter = HashProgressReporter(
+                label=str(canonical_root),
+                mode=hash_progress,
+            )
+            hash_progress_reporter.start(
+                total_groups=hash_progress_total_groups,
+                total_bytes=hash_progress_total_bytes,
+            )
+            hash_progress_lock = threading.Lock()
+
+            def _scan_hash_progress_cb(*, event: str, path: str = "", file_bytes_done: int = 0, file_bytes_total: int = 0):
+                with hash_progress_lock:
+                    done_groups = int(hash_progress_state["done_groups"])
+                    done_bytes = int(hash_progress_state["done_bytes"])
+                    if event == "group_done":
+                        done_groups += 1
+                        done_bytes += max(0, int(file_bytes_total or 0))
+                        hash_progress_state["done_groups"] = done_groups
+                        hash_progress_state["done_bytes"] = done_bytes
+                        batch_done = done_bytes
+                        reporter_event = "progress"
+                    elif event == "chunk":
+                        batch_done = done_bytes + max(0, int(file_bytes_done or 0))
+                        reporter_event = "chunk"
+                    else:
+                        batch_done = done_bytes
+                        reporter_event = event
+
+                hash_progress_reporter.update(
+                    event=reporter_event,
+                    done_groups=done_groups,
+                    total_groups=hash_progress_total_groups,
+                    path=path,
+                    file_bytes_done=max(0, int(file_bytes_done or 0)),
+                    file_bytes_total=max(0, int(file_bytes_total or 0)),
+                    batch_bytes_done=batch_done,
+                    batch_bytes_total=hash_progress_total_bytes,
+                )
+
+            hash_progress_cb = _scan_hash_progress_cb
+
     # 10. Incremental scan logic
     stats = ScanStats()
     seen_paths: Set[str] = set()
@@ -1040,7 +1191,13 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         if progress.enabled:
             for work_item in work_items:
                 results = _hash_file_worker(
-                    work_item, mount_point, alias_mounts, existing_files, hash_mode, expected_device_id=device_id
+                    work_item,
+                    mount_point,
+                    alias_mounts,
+                    existing_files,
+                    hash_mode,
+                    expected_device_id=device_id,
+                    hash_progress_cb=hash_progress_cb,
                 )
                 if results is None:
                     worker_path_errors += 1
@@ -1075,7 +1232,13 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             )
             for work_item in tqdm(work_items, **pbar_kwargs):
                 results = _hash_file_worker(
-                    work_item, mount_point, alias_mounts, existing_files, hash_mode, expected_device_id=device_id
+                    work_item,
+                    mount_point,
+                    alias_mounts,
+                    existing_files,
+                    hash_mode,
+                    expected_device_id=device_id,
+                    hash_progress_cb=hash_progress_cb,
                 )
                 if results is None:
                     worker_path_errors += 1
@@ -1121,7 +1284,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     except StopIteration:
                         break
                     future = executor.submit(
-                        _hash_file_worker, work_item, mount_point, alias_mounts, existing_files, hash_mode, device_id
+                        _hash_file_worker,
+                        work_item,
+                        mount_point,
+                        alias_mounts,
+                        existing_files,
+                        hash_mode,
+                        device_id,
+                        hash_progress_cb,
                     )
                     pending.add(future)
                     future_to_item[future] = work_item
@@ -1187,7 +1357,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             except StopIteration:
                                 break
                             future = executor.submit(
-                                _hash_file_worker, work_item, mount_point, alias_mounts, existing_files, hash_mode, device_id
+                                _hash_file_worker,
+                                work_item,
+                                mount_point,
+                                alias_mounts,
+                                existing_files,
+                                hash_mode,
+                                device_id,
+                                hash_progress_cb,
                             )
                             pending.add(future)
                             future_to_item[future] = work_item
@@ -1256,8 +1433,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 except StopIteration:
                                     break
                                 future = executor.submit(
-                                    _hash_file_worker, work_item, alias_mounts=alias_mounts, mount_point=mount_point,
-                                    existing_files=existing_files, hash_mode=hash_mode, expected_device_id=device_id
+                                    _hash_file_worker,
+                                    work_item,
+                                    alias_mounts=alias_mounts,
+                                    mount_point=mount_point,
+                                    existing_files=existing_files,
+                                    hash_mode=hash_mode,
+                                    expected_device_id=device_id,
+                                    hash_progress_cb=hash_progress_cb,
                                 )
                                 pending.add(future)
                                 future_to_item[future] = work_item
@@ -1275,6 +1458,13 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     if progress.enabled:
         progress.close()
+    if hash_progress_reporter is not None:
+        hash_progress_reporter.finish(
+            done_groups=int(hash_progress_state["done_groups"]),
+            total_groups=hash_progress_total_groups,
+            batch_bytes_done=int(hash_progress_state["done_bytes"]),
+            batch_bytes_total=hash_progress_total_bytes,
+        )
 
     # 11. SCOPED deletion detection
     # Only mark files as deleted if:
@@ -1459,6 +1649,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 hash_mode=hash_mode,
                 show_current_path=show_current_path,
                 scan_nested_datasets=scan_nested_datasets,
+                hash_progress=hash_progress,
             )
 
     # Close connection to prevent resource leaks with hierarchical scanning

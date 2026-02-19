@@ -829,10 +829,10 @@ def build_payload(
     )
 
 
-def _hash_inode_group_worker(abs_path: str) -> tuple:
+def _hash_inode_group_worker(abs_path: str, progress_cb=None) -> tuple:
     """Worker: hash one inode group's representative file."""
     try:
-        sha1, sha256 = compute_full_hashes(abs_path)
+        sha1, sha256 = compute_full_hashes(abs_path, progress_cb=progress_cb)
         return (abs_path, sha1, sha256)
     except (OSError, IOError):
         return (abs_path, None, None)
@@ -918,6 +918,8 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
     upgraded = 0
     batch_size = 500
     total_groups = len(work_items)
+    total_bytes = sum(max(0, int(item[2] or 0)) for item in work_items)
+    completed_bytes = 0
 
     def _apply_result(abs_path_str, sha1, sha256, inode, size, rel_path):
         if sha1 is None:
@@ -952,16 +954,24 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
                 )
         return True
 
-    def _emit(event: str, done: int, path: str = "") -> None:
+    def _emit(event: str, done: int, path: str = "", **meta) -> None:
         if progress_cb is None:
             return
         try:
-            progress_cb(event, done, total_groups, path)
+            progress_cb(event, done, total_groups, path, **meta)
+            return
+        except TypeError:
+            # Backward-compatible callback signature.
+            try:
+                progress_cb(event, done, total_groups, path)
+            except Exception:
+                pass
+            return
         except Exception:
             # Keep hashing resilient even if progress output callback fails.
-            pass
+            return
 
-    _emit("start", 0, "")
+    _emit("start", 0, "", total_bytes=total_bytes, hashed_bytes=0)
 
     if parallel and len(work_items) > 1:
         pool_workers = max(1, workers or (os.cpu_count() or 1))
@@ -977,20 +987,59 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
                 result_path, sha1, sha256 = future.result()
                 if _apply_result(abs_path_str, sha1, sha256, inode, size, paths[0]):
                     upgraded += 1
-                _emit("progress", upgraded, abs_path_str)
+                    completed_bytes += max(0, int(size or 0))
+                _emit(
+                    "progress",
+                    upgraded,
+                    abs_path_str,
+                    group_bytes_total=max(0, int(size or 0)),
+                    group_bytes_done=max(0, int(size or 0)),
+                    total_bytes=total_bytes,
+                    hashed_bytes=completed_bytes,
+                )
                 batch_count += 1
                 if batch_count >= batch_size:
                     conn.commit()
                     batch_count = 0
     else:
         for abs_path_str, inode, size, paths in work_items:
-            _, sha1, sha256 = _hash_inode_group_worker(abs_path_str)
+            group_size = max(0, int(size or 0))
+            _emit(
+                "group_start",
+                upgraded,
+                abs_path_str,
+                group_bytes_total=group_size,
+                total_bytes=total_bytes,
+                hashed_bytes=completed_bytes,
+            )
+
+            def _chunk_progress(done_bytes: int, file_total_bytes: int, _abs_path: str) -> None:
+                _emit(
+                    "chunk",
+                    upgraded,
+                    abs_path_str,
+                    group_bytes_done=max(0, int(done_bytes or 0)),
+                    group_bytes_total=max(0, int(file_total_bytes or group_size)),
+                    total_bytes=total_bytes,
+                    hashed_bytes=completed_bytes + max(0, int(done_bytes or 0)),
+                )
+
+            _, sha1, sha256 = _hash_inode_group_worker(abs_path_str, progress_cb=_chunk_progress)
             if _apply_result(abs_path_str, sha1, sha256, inode, size, paths[0]):
                 upgraded += 1
-            _emit("progress", upgraded, abs_path_str)
+                completed_bytes += group_size
+            _emit(
+                "progress",
+                upgraded,
+                abs_path_str,
+                group_bytes_total=group_size,
+                group_bytes_done=group_size,
+                total_bytes=total_bytes,
+                hashed_bytes=completed_bytes,
+            )
 
     conn.commit()
-    _emit("done", upgraded, "")
+    _emit("done", upgraded, "", total_bytes=total_bytes, hashed_bytes=completed_bytes)
     return upgraded
 
 

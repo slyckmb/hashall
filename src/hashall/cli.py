@@ -15,6 +15,7 @@ from pathlib import Path
 from hashall.scan import scan_path
 from hashall.export import export_json
 from hashall.verify_trees import verify_trees
+from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 from hashall import __version__
 
@@ -189,8 +190,15 @@ def cli():
 @click.option("--show-path", is_flag=True, help="Show current file path above progress bar.")
 @click.option("--scan-nested-datasets", is_flag=True,
               help="Detect nested mountpoints/datasets and scan them separately.")
+@click.option(
+    "--hash-progress",
+    type=click.Choice(["auto", "minimal", "full"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Hash progress detail level for full/upgrade hashing.",
+)
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, low_priority):
+def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, hash_progress, low_priority):
     """Scan a directory and store file metadata in SQLite."""
     if low_priority:
         _apply_low_priority()
@@ -198,7 +206,8 @@ def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag,
     mode = hash_mode_flag if hash_mode_flag else hash_mode
     stats = scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
                       workers=workers, batch_size=batch_size, hash_mode=mode,
-                      show_current_path=show_path, scan_nested_datasets=scan_nested_datasets)
+                      show_current_path=show_path, scan_nested_datasets=scan_nested_datasets,
+                      hash_progress=hash_progress.lower())
     if getattr(stats, "safety_guard_triggered", False):
         raise click.ClickException(
             "Scan safety guard blocked deletion due path-resolution errors; "
@@ -277,8 +286,15 @@ def payload():
 @click.option("--parallel", is_flag=True, help="Parallel SHA256 hashing for --upgrade-missing.")
 @click.option("--workers", type=int, default=None,
               help="Worker threads for --parallel (default: CPU count).")
+@click.option(
+    "--hash-progress",
+    type=click.Choice(["auto", "minimal", "full"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Hash progress detail level for --upgrade-missing.",
+)
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, path_prefix_file, limit, dry_run, upgrade_missing, parallel, workers, low_priority):
+def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, path_prefix_file, limit, dry_run, upgrade_missing, parallel, workers, hash_progress, low_priority):
     """
     Sync torrent instances from qBittorrent and map to payloads.
 
@@ -443,17 +459,53 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                 missing_in_catalog += 1
 
             if (not dry_run) and payload.status != 'complete' and upgrade_missing:
-                hash_log_state = {"last_done": -1, "last_total": 0}
+                hash_log_state = {
+                    "last_done": 0,
+                    "last_total": 0,
+                    "last_bytes_done": 0,
+                    "last_bytes_total": 0,
+                    "done_event_seen": False,
+                }
+                hash_reporter = HashProgressReporter(label=torrent.name, mode=hash_progress.lower())
 
-                def _hash_progress(event, done, total, abs_path):
-                    hash_log_state["last_done"] = done
-                    hash_log_state["last_total"] = total
-                    if total > 0:
-                        progress.update(desc=f"hashing {done}/{total} inode-groups: {torrent.name[:40]}", advance=0)
+                def _hash_progress(event, done, total, abs_path, **meta):
+                    hash_log_state["last_done"] = max(0, int(done or 0))
+                    hash_log_state["last_total"] = max(0, int(total or 0))
+                    hash_log_state["last_bytes_done"] = max(
+                        0,
+                        int(meta.get("hashed_bytes") or hash_log_state["last_bytes_done"]),
+                    )
+                    hash_log_state["last_bytes_total"] = max(
+                        0,
+                        int(meta.get("total_bytes") or hash_log_state["last_bytes_total"]),
+                    )
+                    if event == "done":
+                        hash_log_state["done_event_seen"] = True
                     if event == "start":
-                        print(f"   ⏳ Hashing inode groups: 0/{total}")
-                    elif event == "progress" and (done == total or done % 50 == 0):
-                        print(f"   ⏳ Hashing inode groups: {done}/{total}")
+                        hash_reporter.start(
+                            total_groups=hash_log_state["last_total"],
+                            total_bytes=hash_log_state["last_bytes_total"],
+                        )
+                    else:
+                        hash_reporter.update(
+                            event=event,
+                            done_groups=hash_log_state["last_done"],
+                            total_groups=hash_log_state["last_total"],
+                            path=abs_path,
+                            file_bytes_done=meta.get("group_bytes_done"),
+                            file_bytes_total=meta.get("group_bytes_total"),
+                            batch_bytes_done=hash_log_state["last_bytes_done"],
+                            batch_bytes_total=hash_log_state["last_bytes_total"],
+                        )
+                    if hash_log_state["last_total"] > 0:
+                        progress.update(
+                            desc=hash_reporter.status_desc(
+                                done_groups=hash_log_state["last_done"],
+                                total_groups=hash_log_state["last_total"],
+                                path=torrent.name,
+                            ),
+                            advance=0,
+                        )
 
                 upgraded = upgrade_payload_missing_sha256(
                     conn,
@@ -463,10 +515,12 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                     workers=workers,
                     progress_cb=_hash_progress,
                 )
-                if hash_log_state["last_total"] > 0:
-                    print(
-                        "   🔎 Hashing complete: "
-                        f"{hash_log_state['last_done']}/{hash_log_state['last_total']} inode groups"
+                if hash_log_state["last_total"] > 0 and not hash_log_state["done_event_seen"]:
+                    hash_reporter.finish(
+                        done_groups=hash_log_state["last_done"],
+                        total_groups=hash_log_state["last_total"],
+                        batch_bytes_done=hash_log_state["last_bytes_done"],
+                        batch_bytes_total=hash_log_state["last_bytes_total"],
                     )
                 if upgraded > 0:
                     payload = build_payload(conn, str(root_canon), device_id=payload.device_id, already_canonical=True)
@@ -1265,8 +1319,15 @@ def payload_collisions_cmd(db, path_prefixes, limit, top):
 @click.option("--dry-run", is_flag=True, help="Report what would be upgraded (no hashing/DB writes).")
 @click.option("--parallel", is_flag=True, help="Parallel SHA256 hashing for missing hashes.")
 @click.option("--workers", type=int, default=None, help="Worker threads for --parallel (default: CPU count).")
+@click.option(
+    "--hash-progress",
+    type=click.Choice(["auto", "minimal", "full"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Hash progress detail level during SHA256 upgrades.",
+)
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run, parallel, workers, low_priority):
+def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run, parallel, workers, hash_progress, low_priority):
     """
     Upgrade candidate duplicate payloads by backfilling missing SHA256, then computing payload_hash.
 
@@ -1378,7 +1439,60 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run
             missing_before = count_missing_sha256_for_path(conn, device_id, root_path)
             print(f"   - #{payload_id} dev={device_id} missing_sha256={missing_before} root={root_path}")
 
-            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=device_id, parallel=parallel, workers=workers)
+            hash_state = {
+                "last_done": 0,
+                "last_total": 0,
+                "last_bytes_done": 0,
+                "last_bytes_total": 0,
+                "done_event_seen": False,
+            }
+            root_reporter = HashProgressReporter(label=root_path, mode=hash_progress.lower())
+
+            def _upgrade_progress(event, done, total, abs_path, **meta):
+                hash_state["last_done"] = max(0, int(done or 0))
+                hash_state["last_total"] = max(0, int(total or 0))
+                hash_state["last_bytes_done"] = max(
+                    0,
+                    int(meta.get("hashed_bytes") or hash_state["last_bytes_done"]),
+                )
+                hash_state["last_bytes_total"] = max(
+                    0,
+                    int(meta.get("total_bytes") or hash_state["last_bytes_total"]),
+                )
+                if event == "done":
+                    hash_state["done_event_seen"] = True
+                if event == "start":
+                    root_reporter.start(
+                        total_groups=hash_state["last_total"],
+                        total_bytes=hash_state["last_bytes_total"],
+                    )
+                    return
+                root_reporter.update(
+                    event=event,
+                    done_groups=hash_state["last_done"],
+                    total_groups=hash_state["last_total"],
+                    path=abs_path,
+                    file_bytes_done=meta.get("group_bytes_done"),
+                    file_bytes_total=meta.get("group_bytes_total"),
+                    batch_bytes_done=hash_state["last_bytes_done"],
+                    batch_bytes_total=hash_state["last_bytes_total"],
+                )
+
+            upgraded = upgrade_payload_missing_sha256(
+                conn,
+                root_path,
+                device_id=device_id,
+                parallel=parallel,
+                workers=workers,
+                progress_cb=_upgrade_progress,
+            )
+            if hash_state["last_total"] > 0 and not hash_state["done_event_seen"]:
+                root_reporter.finish(
+                    done_groups=hash_state["last_done"],
+                    total_groups=hash_state["last_total"],
+                    batch_bytes_done=hash_state["last_bytes_done"],
+                    batch_bytes_total=hash_state["last_bytes_total"],
+                )
             inode_groups_hashed += upgraded
 
             payload = build_payload(conn, root_path, device_id=device_id)
