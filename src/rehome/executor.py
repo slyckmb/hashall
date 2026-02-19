@@ -311,6 +311,8 @@ class DemotionExecutor:
         """
         paused = []
         moved = []
+        total = len(relocations)
+        progress_every = 5 if total <= 50 else 25
 
         if self.disable_atm_on_rehome:
             for r in relocations:
@@ -329,15 +331,17 @@ class DemotionExecutor:
                     if not self.qbit_client.set_auto_management(torrent_hash, False):
                         raise RuntimeError(f"Failed to disable ATM for torrent {torrent_hash[:16]}")
 
-        for r in relocations:
+        for idx, r in enumerate(relocations, start=1):
             torrent_hash = r["torrent_hash"]
             if not self.qbit_client.pause_torrent(torrent_hash):
                 for h in paused:
                     self.qbit_client.resume_torrent(h)
                 raise RuntimeError(f"Failed to pause torrent {torrent_hash[:16]}")
             paused.append(torrent_hash)
+            if idx == 1 or idx == total or idx % progress_every == 0:
+                self._log(f"  relocate_progress phase=pause done={idx}/{total}")
 
-        for r in relocations:
+        for idx, r in enumerate(relocations, start=1):
             torrent_hash = r["torrent_hash"]
             target_save_path = r["target_save_path"]
             if not self._set_location_with_retry(torrent_hash, target_save_path):
@@ -350,14 +354,18 @@ class DemotionExecutor:
                     self.qbit_client.resume_torrent(h)
                 raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
             moved.append(r)
+            if idx == 1 or idx == total or idx % progress_every == 0:
+                self._log(f"  relocate_progress phase=set_location done={idx}/{total}")
 
         try:
-            for h in paused:
+            for idx, h in enumerate(paused, start=1):
                 if not self.qbit_client.resume_torrent(h):
                     raise RuntimeError(f"Failed to resume torrent {h[:16]}")
+                if idx == 1 or idx == total or idx % progress_every == 0:
+                    self._log(f"  relocate_progress phase=resume done={idx}/{total}")
 
             # Verify locations (qB can apply setLocation asynchronously).
-            for r in relocations:
+            for idx, r in enumerate(relocations, start=1):
                 torrent_hash = r["torrent_hash"]
                 expected_path = canonicalize_path(Path(r["target_save_path"]).resolve())
                 torrent_info, actual_path = self._wait_for_save_path(
@@ -392,6 +400,8 @@ class DemotionExecutor:
                         f"  auto_tmm_after hash={torrent_hash[:16]} "
                         f"enabled={str(bool(getattr(torrent_info, 'auto_tmm', False))).lower()}"
                     )
+                if idx == 1 or idx == total or idx % progress_every == 0:
+                    self._log(f"  relocate_progress phase=verify done={idx}/{total}")
         except Exception as e:
             # Rollback to original locations if possible
             for m in moved:

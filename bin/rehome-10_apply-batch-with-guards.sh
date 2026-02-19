@@ -232,11 +232,11 @@ PY
     fi
 
     echo "step=dryrun_apply plan=${plan_path}"
-    PYTHONPATH=src python -m rehome.cli apply "$plan_path" --dryrun --catalog "$DB_PATH" --spot-check "$SPOT_CHECK"
+    PYTHONPATH=src python -u -m rehome.cli apply "$plan_path" --dryrun --catalog "$DB_PATH" --spot-check "$SPOT_CHECK"
 
     echo "step=live_apply plan=${plan_path}"
     set +e
-    PYTHONPATH=src python -m rehome.cli apply "$plan_path" --force --catalog "$DB_PATH" --spot-check "$SPOT_CHECK"
+    PYTHONPATH=src python -u -m rehome.cli apply "$plan_path" --force --catalog "$DB_PATH" --spot-check "$SPOT_CHECK"
     rc=$?
     set -e
 
