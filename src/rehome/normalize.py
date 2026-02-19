@@ -81,8 +81,38 @@ def _preferred_expected_target(
     pool_root: Path,
     stash_root: Optional[Path],
     pool_torrents: Sequence[sqlite3.Row],
+    source_path: Path,
+    expected_file_count: int,
+    expected_total_bytes: int,
 ) -> Tuple[Optional[Path], str]:
+    source_name = source_path.name
+
+    def _single_file_matches(path: Path) -> bool:
+        if not path.exists():
+            return False
+        if path.is_file():
+            try:
+                return int(path.stat().st_size) == int(expected_total_bytes)
+            except OSError:
+                return False
+        if not path.is_dir():
+            return False
+        single_size: Optional[int] = None
+        for item in path.rglob("*"):
+            if not item.is_file():
+                continue
+            if single_size is not None:
+                return False
+            try:
+                single_size = int(item.stat().st_size)
+            except OSError:
+                return False
+        if single_size is None:
+            return False
+        return single_size == int(expected_total_bytes)
+
     # Prefer original source->target relative path from successful demote runs.
+    run_fallback: Optional[Path] = None
     if _table_has_columns(conn, "rehome_runs", {"direction", "payload_hash", "status", "source_path"}):
         run_rows = conn.execute(
             """
@@ -101,24 +131,50 @@ def _preferred_expected_target(
             source_raw = str(run_row[0] or "").strip()
             if not source_raw:
                 continue
-            source_path = _canonical(source_raw)
-            rel = _resolve_rel(source_path, stash_root)
+            run_source_path = _canonical(source_raw)
+            rel = _resolve_rel(run_source_path, stash_root)
             if rel is None or str(rel) == ".":
                 continue
             candidate = _canonical(pool_root / rel)
-            if is_under(candidate, pool_root):
+            if not is_under(candidate, pool_root):
+                continue
+            if expected_file_count != 1:
                 return candidate, "rehome_runs"
+            if _single_file_matches(candidate):
+                return candidate, "rehome_runs"
+            if source_name:
+                alt = _canonical(candidate.parent / source_name)
+                if is_under(alt, pool_root) and _single_file_matches(alt):
+                    return alt, "rehome_runs_single_file_name"
+            if run_fallback is None:
+                run_fallback = candidate
+    if run_fallback is not None:
+        return run_fallback, "rehome_runs"
 
     # Fallback: infer from torrent save_path + root_name.
+    save_fallback: Optional[Path] = None
     for row in pool_torrents:
         save_path_raw = str(row["save_path"] or "").strip()
         root_name = str(row["root_name"] or "").strip()
         if not save_path_raw or not root_name:
             continue
         save_path = _canonical(save_path_raw)
-        candidate = _canonical(save_path / root_name)
-        if is_under(candidate, pool_root):
-            return candidate, "torrent_save_path"
+        candidates: List[Tuple[Path, str]] = [(_canonical(save_path / root_name), "torrent_save_path")]
+        if expected_file_count == 1 and source_name:
+            single_file_candidate = _canonical(save_path / source_name)
+            if single_file_candidate != candidates[0][0]:
+                candidates.append((single_file_candidate, "torrent_save_path_single_file_name"))
+        for candidate, hint in candidates:
+            if not is_under(candidate, pool_root):
+                continue
+            if expected_file_count != 1:
+                return candidate, "torrent_save_path"
+            if _single_file_matches(candidate):
+                return candidate, hint
+            if save_fallback is None:
+                save_fallback = candidate
+    if save_fallback is not None:
+        return save_fallback, "torrent_save_path"
 
     return None, "no_expected_target"
 
@@ -250,6 +306,30 @@ def build_pool_path_normalization_batch(
     skipped: List[NormalizationSkip] = []
     payload_group_cache: Dict[str, List[Dict]] = {}
 
+    def _source_row_score(row: sqlite3.Row) -> int:
+        score = 0
+        source = _canonical(str(row["root_path"]))
+        if not is_under(source, pool_root):
+            return -10_000
+        score += 100
+        if not flat_only or source.parent == pool_root:
+            score += 30
+        file_count = int(row["file_count"] or 0)
+        total_bytes = int(row["total_bytes"] or 0)
+        try:
+            if source.exists():
+                score += 40
+                if file_count == 1 and source.is_file():
+                    score += 70
+                    if int(source.stat().st_size) == total_bytes:
+                        score += 30
+                elif file_count > 1 and source.is_dir():
+                    score += 40
+        except OSError:
+            pass
+        score += max(0, 10_000 - int(row["payload_id"]))
+        return score
+
     try:
         payload_rows = conn.execute(
             """
@@ -261,19 +341,38 @@ def build_pool_path_normalization_batch(
             (pool_device,),
         ).fetchall()
 
+        payload_rows_by_hash: Dict[str, List[sqlite3.Row]] = {}
+        payload_hash_order: List[str] = []
         for row in payload_rows:
-            payload_id = int(row["payload_id"])
             payload_hash = str(row["payload_hash"] or "").strip()
             if not payload_hash:
                 continue
             if payload_hashes and payload_hash not in payload_hashes:
                 continue
+            if payload_hash not in payload_rows_by_hash:
+                payload_rows_by_hash[payload_hash] = []
+                payload_hash_order.append(payload_hash)
+            payload_rows_by_hash[payload_hash].append(row)
+
+        for payload_hash in payload_hash_order:
+            rows_for_hash = payload_rows_by_hash[payload_hash]
+            in_scope_rows: List[sqlite3.Row] = []
+            for row in rows_for_hash:
+                source = _canonical(str(row["root_path"]))
+                if not is_under(source, pool_root):
+                    continue
+                if flat_only and source.parent != pool_root:
+                    continue
+                in_scope_rows.append(row)
+            if not in_scope_rows:
+                continue
+
+            row = max(in_scope_rows, key=_source_row_score)
+            payload_id = int(row["payload_id"])
 
             source_path = _canonical(str(row["root_path"]))
-            if not is_under(source_path, pool_root):
-                continue
-            if flat_only and source_path.parent != pool_root:
-                continue
+            file_count = int(row["file_count"] or 0)
+            total_bytes = int(row["total_bytes"] or 0)
 
             pool_torrents = _fetch_pool_torrents(conn, payload_hash, pool_device)
             if not pool_torrents:
@@ -293,8 +392,11 @@ def build_pool_path_normalization_batch(
                 pool_root,
                 stash_root,
                 pool_torrents,
+                source_path,
+                file_count,
+                total_bytes,
             )
-            confidence = "high" if source_hint == "rehome_runs" else "medium"
+            confidence = "high" if source_hint.startswith("rehome_runs") else "medium"
             review_required = False
             fallback_used = False
             if target_path is None:
@@ -304,7 +406,7 @@ def build_pool_path_normalization_batch(
                     pool_torrents=pool_torrents,
                 )
                 fallback_used = True
-            elif target_path == source_path and source_hint == "torrent_save_path":
+            elif target_path == source_path and source_hint.startswith("torrent_save_path"):
                 # qB save_path/root_name can mirror the current flat payload root.
                 # In that case, apply category/tag fallback to produce a normalized layout.
                 fb_target, fb_hint, fb_confidence, fb_review = _fallback_expected_target(
@@ -318,6 +420,78 @@ def build_pool_path_normalization_batch(
                     confidence = fb_confidence
                     review_required = fb_review
                     fallback_used = True
+
+            if target_path is None:
+                skipped.append(
+                    NormalizationSkip(
+                        payload_id=payload_id,
+                        payload_hash=payload_hash,
+                        source_path=str(source_path),
+                        reason="no_expected_target",
+                    )
+                )
+                continue
+
+            if file_count == 1 and target_path.exists():
+                if target_path.is_file():
+                    try:
+                        if int(target_path.stat().st_size) != total_bytes:
+                            skipped.append(
+                                NormalizationSkip(
+                                    payload_id=payload_id,
+                                    payload_hash=payload_hash,
+                                    source_path=str(source_path),
+                                    reason="single_file_target_size_mismatch",
+                                )
+                            )
+                            continue
+                    except OSError:
+                        skipped.append(
+                            NormalizationSkip(
+                                payload_id=payload_id,
+                                payload_hash=payload_hash,
+                                source_path=str(source_path),
+                                reason="single_file_target_unreadable",
+                            )
+                        )
+                        continue
+                elif target_path.is_dir():
+                    candidate = _canonical(target_path.parent / source_path.name)
+                    if candidate.exists() and candidate.is_file():
+                        try:
+                            if int(candidate.stat().st_size) == total_bytes:
+                                target_path = candidate
+                                source_hint = "torrent_save_path_single_file_name"
+                            else:
+                                skipped.append(
+                                    NormalizationSkip(
+                                        payload_id=payload_id,
+                                        payload_hash=payload_hash,
+                                        source_path=str(source_path),
+                                        reason="single_file_target_size_mismatch",
+                                    )
+                                )
+                                continue
+                        except OSError:
+                            skipped.append(
+                                NormalizationSkip(
+                                    payload_id=payload_id,
+                                    payload_hash=payload_hash,
+                                    source_path=str(source_path),
+                                    reason="single_file_target_unreadable",
+                                )
+                            )
+                            continue
+                    else:
+                        skipped.append(
+                            NormalizationSkip(
+                                payload_id=payload_id,
+                                payload_hash=payload_hash,
+                                source_path=str(source_path),
+                                reason="single_file_target_dir_conflict",
+                            )
+                        )
+                        continue
 
             if source_path == target_path:
                 continue
@@ -406,8 +580,8 @@ def build_pool_path_normalization_batch(
                 "library_roots": [],
                 "view_targets": view_targets,
                 "payload_group": payload_group_cache[payload_hash],
-                "file_count": int(row["file_count"] or 0),
-                "total_bytes": int(row["total_bytes"] or 0),
+                "file_count": file_count,
+                "total_bytes": total_bytes,
                 "normalization": {
                     "mode": "pool_path",
                     "source_hint": source_hint,
