@@ -247,11 +247,18 @@ class DemotionExecutor:
         if not view_targets:
             return
 
-        for target in view_targets:
+        total = len(view_targets)
+        progress_every = 5 if total <= 50 else 25
+
+        for idx, target in enumerate(view_targets, start=1):
             torrent_hash = target["torrent_hash"]
             target_save_path = Path(target["target_save_path"])
             root_name = target.get("root_name")
 
+            if idx == 1 or idx == total or idx % progress_every == 0:
+                self._log(
+                    f"  build_views_progress phase=fetch_files done={idx}/{total} hash={torrent_hash[:16]}"
+                )
             files = self.qbit_client.get_torrent_files(torrent_hash)
             if not files:
                 raise RuntimeError(f"Failed to fetch files for torrent {torrent_hash[:16]}")
@@ -268,6 +275,10 @@ class DemotionExecutor:
                     f"View build mismatch for {torrent_hash[:16]}: "
                     f"files={result.file_count}/{plan['file_count']} "
                     f"bytes={result.total_bytes}/{plan['total_bytes']}"
+                )
+            if idx == 1 or idx == total or idx % progress_every == 0:
+                self._log(
+                    f"  build_views_progress phase=link done={idx}/{total} hash={torrent_hash[:16]}"
                 )
 
     def _build_relocations(self, conn: sqlite3.Connection, plan: Dict) -> List[Dict]:
