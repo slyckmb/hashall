@@ -497,13 +497,14 @@ def test_upgrade_missing_sha256_with_hardlinks(tmp_path):
     assert upgraded == 1
 
     rows = conn.execute(f"""
-        SELECT sha256
+        SELECT sha256, hash_source
         FROM {table_name}
         WHERE status = 'active'
         ORDER BY path
     """).fetchall()
     assert len(rows) == 3
     assert all(row[0] is not None for row in rows)
+    assert all(row[1] == "calculated" for row in rows)
     assert len({row[0] for row in rows}) == 1
 
     payload = build_payload(conn, str(root), device_id=device_id)

@@ -134,6 +134,43 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(payloads, 0)
         self.assertEqual(instances, 0)
 
+    def test_payload_sync_accepts_path_prefix_file(self):
+        torrents = [
+            QBitTorrent(
+                hash="t1",
+                name="torrent-1",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+        prefix_file = self.tmp_path / "prefixes.txt"
+        prefix_file.write_text(f"{self.tmp_path}\n", encoding="utf-8")
+
+        runner = CliRunner()
+        with patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--dry-run",
+                    "--path-prefix-file",
+                    str(prefix_file),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (path-prefix): 0", result.output)
+
     def test_payload_sync_remaps_alternate_mountpoints_for_prefix_filtering(self):
         """
         qBittorrent may report torrent roots under an alternate mount target

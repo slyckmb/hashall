@@ -259,6 +259,12 @@ def payload():
     help="Only process torrents whose payload root is under this path (repeatable).",
 )
 @click.option(
+    "--path-prefix-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Read additional --path-prefix entries from a newline-delimited file.",
+)
+@click.option(
     "--limit",
     type=int,
     default=0,
@@ -272,7 +278,7 @@ def payload():
 @click.option("--workers", type=int, default=None,
               help="Worker threads for --parallel (default: CPU count).")
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, limit, dry_run, upgrade_missing, parallel, workers, low_priority):
+def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, path_prefix_file, limit, dry_run, upgrade_missing, parallel, workers, low_priority):
     """
     Sync torrent instances from qBittorrent and map to payloads.
 
@@ -321,8 +327,16 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
         print("⚠️  DRY-RUN: ignoring --upgrade-missing (would modify DB)")
         upgrade_missing = False
 
+    prefix_inputs = list(path_prefixes)
+    if path_prefix_file:
+        for raw in Path(path_prefix_file).read_text(encoding="utf-8").splitlines():
+            cleaned = raw.strip()
+            if not cleaned or cleaned.startswith("#"):
+                continue
+            prefix_inputs.append(cleaned)
+
     prefix_paths = []
-    for p in path_prefixes:
+    for p in prefix_inputs:
         try:
             prefix_paths.append(canonicalize_path(Path(p)))
         except Exception:
@@ -417,7 +431,31 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                 missing_in_catalog += 1
 
             if (not dry_run) and payload.status != 'complete' and upgrade_missing:
-                upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id, parallel=parallel, workers=workers)
+                hash_log_state = {"last_done": -1, "last_total": 0}
+
+                def _hash_progress(event, done, total, abs_path):
+                    hash_log_state["last_done"] = done
+                    hash_log_state["last_total"] = total
+                    if total > 0:
+                        progress.update(desc=f"hashing {done}/{total} inode-groups: {torrent.name[:40]}", advance=0)
+                    if event == "start":
+                        print(f"   ⏳ Hashing inode groups: 0/{total}")
+                    elif event == "progress" and (done == total or done % 50 == 0):
+                        print(f"   ⏳ Hashing inode groups: {done}/{total}")
+
+                upgraded = upgrade_payload_missing_sha256(
+                    conn,
+                    root_path,
+                    device_id=payload.device_id,
+                    parallel=parallel,
+                    workers=workers,
+                    progress_cb=_hash_progress,
+                )
+                if hash_log_state["last_total"] > 0:
+                    print(
+                        "   🔎 Hashing complete: "
+                        f"{hash_log_state['last_done']}/{hash_log_state['last_total']} inode groups"
+                    )
                 if upgraded > 0:
                     payload = build_payload(conn, str(root_canon), device_id=payload.device_id, already_canonical=True)
 
@@ -466,6 +504,11 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     print(f"   processed: {processed}")
     if prefix_paths:
         print(f"   skipped (path-prefix): {skipped_prefix}")
+        if processed == 0 and len(torrents) > 0:
+            sample_prefixes = ", ".join(str(p) for p in prefix_paths[:3])
+            print("   ⚠️  no torrents matched current path-prefix filters")
+            print(f"      prefixes(sample): {sample_prefixes}")
+            print("      hint: verify canonical roots from qB content_path/save_path")
     print(f"   complete payloads: {synced_count}")
     print(f"   incomplete payloads: {incomplete_count}")
     print(f"   missing in catalog: {missing_in_catalog}")

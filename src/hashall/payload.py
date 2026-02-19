@@ -841,7 +841,8 @@ def _hash_inode_group_worker(abs_path: str) -> tuple:
 def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
                                    device_id: Optional[int] = None,
                                    parallel: bool = False,
-                                   workers: int | None = None) -> int:
+                                   workers: int | None = None,
+                                   progress_cb=None) -> int:
     """
     Upgrade missing SHA256 values for files in a payload.
 
@@ -911,25 +912,56 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
         work_items.append((str(abs_path), inode, size, paths))
 
     cursor = conn.cursor()
+    has_hash_source = "hash_source" in {
+        str(col[1]) for col in conn.execute(f"PRAGMA table_info({table_name})").fetchall() if len(col) > 1
+    }
     upgraded = 0
     batch_size = 500
+    total_groups = len(work_items)
 
     def _apply_result(abs_path_str, sha1, sha256, inode, size, rel_path):
         if sha1 is None:
             return False
         if inode is None:
-            cursor.execute(
-                f"UPDATE {table_name} SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now') "
-                f"WHERE path = ? AND status = 'active'",
-                (sha1, sha256, rel_path),
-            )
+            if has_hash_source:
+                cursor.execute(
+                    f"UPDATE {table_name} SET sha1 = ?, sha256 = ?, hash_source = ?, "
+                    f"last_modified_at = datetime('now') "
+                    f"WHERE path = ? AND status = 'active'",
+                    (sha1, sha256, "calculated", rel_path),
+                )
+            else:
+                cursor.execute(
+                    f"UPDATE {table_name} SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now') "
+                    f"WHERE path = ? AND status = 'active'",
+                    (sha1, sha256, rel_path),
+                )
         else:
-            cursor.execute(
-                f"UPDATE {table_name} SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now') "
-                f"WHERE inode = ? AND size = ? AND status = 'active'",
-                (sha1, sha256, inode, size),
-            )
+            if has_hash_source:
+                cursor.execute(
+                    f"UPDATE {table_name} SET sha1 = ?, sha256 = ?, hash_source = ?, "
+                    f"last_modified_at = datetime('now') "
+                    f"WHERE inode = ? AND size = ? AND status = 'active'",
+                    (sha1, sha256, "calculated", inode, size),
+                )
+            else:
+                cursor.execute(
+                    f"UPDATE {table_name} SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now') "
+                    f"WHERE inode = ? AND size = ? AND status = 'active'",
+                    (sha1, sha256, inode, size),
+                )
         return True
+
+    def _emit(event: str, done: int, path: str = "") -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(event, done, total_groups, path)
+        except Exception:
+            # Keep hashing resilient even if progress output callback fails.
+            pass
+
+    _emit("start", 0, "")
 
     if parallel and len(work_items) > 1:
         pool_workers = max(1, workers or (os.cpu_count() or 1))
@@ -945,17 +977,20 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
                 result_path, sha1, sha256 = future.result()
                 if _apply_result(abs_path_str, sha1, sha256, inode, size, paths[0]):
                     upgraded += 1
-                    batch_count += 1
-                    if batch_count >= batch_size:
-                        conn.commit()
-                        batch_count = 0
+                _emit("progress", upgraded, abs_path_str)
+                batch_count += 1
+                if batch_count >= batch_size:
+                    conn.commit()
+                    batch_count = 0
     else:
         for abs_path_str, inode, size, paths in work_items:
             _, sha1, sha256 = _hash_inode_group_worker(abs_path_str)
             if _apply_result(abs_path_str, sha1, sha256, inode, size, paths[0]):
                 upgraded += 1
+            _emit("progress", upgraded, abs_path_str)
 
     conn.commit()
+    _emit("done", upgraded, "")
     return upgraded
 
 
