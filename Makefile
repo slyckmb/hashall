@@ -724,6 +724,10 @@ rehome-normalize-plan:  ## Build batch plan to normalize misplaced pool payload 
 		--limit "$(REHOME_NORMALIZE_LIMIT)"; \
 	if [ "$(REHOME_NORMALIZE_FLAT_ONLY)" = "0" ]; then set -- "$$@" --all-mismatches; fi; \
 	if [ "$(REHOME_NORMALIZE_PRINT_SKIPPED)" = "1" ]; then set -- "$$@" --print-skipped; fi; \
+	if [ "$(REHOME_NORMALIZE_REFRESH)" = "1" ]; then set -- "$$@" --refresh-before-plan; fi; \
+	if [ -n "$(REHOME_NORMALIZE_REFRESH_CATEGORY)" ]; then set -- "$$@" --refresh-category "$(REHOME_NORMALIZE_REFRESH_CATEGORY)"; fi; \
+	if [ -n "$(REHOME_NORMALIZE_REFRESH_TAG)" ]; then set -- "$$@" --refresh-tag "$(REHOME_NORMALIZE_REFRESH_TAG)"; fi; \
+	if [ "$(REHOME_NORMALIZE_REFRESH_LIMIT)" != "0" ] && [ -n "$(REHOME_NORMALIZE_REFRESH_LIMIT)" ]; then set -- "$$@" --refresh-limit "$(REHOME_NORMALIZE_REFRESH_LIMIT)"; fi; \
 	if [ -n "$(REHOME_NORMALIZE_PAYLOAD_HASH)" ]; then set -- "$$@" --payload-hash "$(REHOME_NORMALIZE_PAYLOAD_HASH)"; fi; \
 	if [ -n "$(REHOME_NORMALIZE_OUTPUT)" ]; then set -- "$$@" --output "$(REHOME_NORMALIZE_OUTPUT)"; fi; \
 	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) "$$@"

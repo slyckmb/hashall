@@ -65,7 +65,7 @@ def _fetch_pool_torrents(
 ) -> List[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT ti.torrent_hash, ti.save_path, ti.root_name
+        SELECT ti.torrent_hash, ti.save_path, ti.root_name, ti.category, ti.tags
         FROM torrent_instances ti
         JOIN payloads p ON p.payload_id = ti.payload_id
         WHERE p.payload_hash = ? AND p.device_id = ?
@@ -121,6 +121,104 @@ def _preferred_expected_target(
             return candidate, "torrent_save_path"
 
     return None, "no_expected_target"
+
+
+def _split_tags(raw_tags: str) -> List[str]:
+    if not raw_tags:
+        return []
+    return [tag.strip() for tag in str(raw_tags).split(",") if tag and tag.strip()]
+
+
+def _sanitize_path_component(value: str) -> str:
+    text = str(value or "").strip().replace("/", "_")
+    return text or "_uncategorized"
+
+
+def _select_tracker_group(pool_torrents: Sequence[sqlite3.Row], pool_root: Path) -> Optional[str]:
+    # Prefer existing cross-seed folder already seen in torrent save_path.
+    for row in pool_torrents:
+        save_path_raw = str(row["save_path"] or "").strip()
+        if not save_path_raw:
+            continue
+        save_path = _canonical(save_path_raw)
+        rel = to_relpath(save_path, pool_root)
+        if rel is None or len(rel.parts) < 2:
+            continue
+        if rel.parts[0] == "cross-seed":
+            return rel.parts[1]
+
+    # Then prefer tags that look like tracker labels.
+    ignored = {
+        "cross-seed",
+        "cross_seed",
+        "crossseed",
+        "rehome",
+        "rehome_verify_pending",
+        "rehome_verify_ok",
+        "rehome_verify_failed",
+    }
+    for row in pool_torrents:
+        for tag in _split_tags(str(row["tags"] or "")):
+            lowered = tag.lower()
+            if lowered in ignored:
+                continue
+            if "(" in tag or "." in tag or "-" in tag or "_" in tag:
+                return tag
+    return None
+
+
+def _fallback_expected_target(
+    *,
+    source_path: Path,
+    pool_root: Path,
+    pool_torrents: Sequence[sqlite3.Row],
+) -> Tuple[Path, str, str, bool]:
+    categories = [
+        str(row["category"] or "").strip()
+        for row in pool_torrents
+        if str(row["category"] or "").strip()
+    ]
+    category = categories[0] if categories else ""
+    category_lower = category.lower()
+    is_cross_seed = category_lower in {"cross-seed", "cross_seed", "crossseed"}
+    if not is_cross_seed:
+        is_cross_seed = any(
+            "cross-seed" in tag.lower()
+            for row in pool_torrents
+            for tag in _split_tags(str(row["tags"] or ""))
+        )
+
+    leaf = source_path.name
+    if is_cross_seed:
+        tracker_group = _select_tracker_group(pool_torrents, pool_root)
+        if tracker_group:
+            return (
+                _canonical(pool_root / "cross-seed" / _sanitize_path_component(tracker_group) / leaf),
+                "qb_fallback_cross_seed",
+                "medium",
+                False,
+            )
+        return (
+            _canonical(pool_root / "cross-seed" / "_unknown_tracker" / leaf),
+            "qb_fallback_cross_seed_unknown_tracker",
+            "low",
+            True,
+        )
+
+    if category:
+        return (
+            _canonical(pool_root / _sanitize_path_component(category) / leaf),
+            "qb_fallback_category",
+            "medium",
+            False,
+        )
+
+    return (
+        _canonical(pool_root / "_uncategorized" / leaf),
+        "qb_fallback_uncategorized",
+        "low",
+        True,
+    )
 
 
 def build_pool_path_normalization_batch(
@@ -196,16 +294,30 @@ def build_pool_path_normalization_batch(
                 stash_root,
                 pool_torrents,
             )
+            confidence = "high" if source_hint == "rehome_runs" else "medium"
+            review_required = False
+            fallback_used = False
             if target_path is None:
-                skipped.append(
-                    NormalizationSkip(
-                        payload_id=payload_id,
-                        payload_hash=payload_hash,
-                        source_path=str(source_path),
-                        reason="no_expected_target",
-                    )
+                target_path, source_hint, confidence, review_required = _fallback_expected_target(
+                    source_path=source_path,
+                    pool_root=pool_root,
+                    pool_torrents=pool_torrents,
                 )
-                continue
+                fallback_used = True
+            elif target_path == source_path and source_hint == "torrent_save_path":
+                # qB save_path/root_name can mirror the current flat payload root.
+                # In that case, apply category/tag fallback to produce a normalized layout.
+                fb_target, fb_hint, fb_confidence, fb_review = _fallback_expected_target(
+                    source_path=source_path,
+                    pool_root=pool_root,
+                    pool_torrents=pool_torrents,
+                )
+                if fb_target != source_path:
+                    target_path = fb_target
+                    source_hint = fb_hint
+                    confidence = fb_confidence
+                    review_required = fb_review
+                    fallback_used = True
 
             if source_path == target_path:
                 continue
@@ -299,6 +411,9 @@ def build_pool_path_normalization_batch(
                 "normalization": {
                     "mode": "pool_path",
                     "source_hint": source_hint,
+                    "confidence": confidence,
+                    "fallback_used": bool(fallback_used),
+                    "review_required": bool(review_required),
                     "flat_only": bool(flat_only),
                 },
             }
@@ -332,5 +447,11 @@ def build_pool_path_normalization_batch(
             "skipped": len(skipped),
             "decision_reuse": sum(1 for p in plans if p.get("decision") == "REUSE"),
             "decision_move": sum(1 for p in plans if p.get("decision") == "MOVE"),
+            "fallback_used": sum(
+                1 for p in plans if bool((p.get("normalization") or {}).get("fallback_used"))
+            ),
+            "review_required": sum(
+                1 for p in plans if bool((p.get("normalization") or {}).get("review_required"))
+            ),
         },
     }

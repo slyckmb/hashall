@@ -4,12 +4,18 @@ Command-line interface for rehome.
 
 import click
 import json
+import os
 import sqlite3
+import subprocess
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import rehome
+from rehome import executor as rehome_executor
+from rehome import view_builder as rehome_view_builder
 from rehome import __version__
 from rehome.followup import run_followup
 from rehome.normalize import build_pool_path_normalization_batch
@@ -20,10 +26,66 @@ from rehome.library_roots import collect_library_roots
 DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
 
+def _debug_enabled() -> bool:
+    return os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _emit_banner() -> None:
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
     script = Path(sys.argv[0]).name
     print(f"🧾 {script} v{__version__} @ {timestamp}", flush=True)
+
+
+def _build_payload_sync_command(
+    *,
+    catalog: Path,
+    pool_seeding_root: str,
+    category: Optional[str] = None,
+    tag: Optional[str] = None,
+    limit: int = 0,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "hashall.cli",
+        "payload",
+        "sync",
+        "--db",
+        str(catalog),
+        "--path-prefix",
+        str(pool_seeding_root),
+    ]
+    if category:
+        cmd.extend(["--category", category])
+    if tag:
+        cmd.extend(["--tag", tag])
+    if limit and int(limit) > 0:
+        cmd.extend(["--limit", str(int(limit))])
+    return cmd
+
+
+def _refresh_catalog_from_qb(
+    *,
+    catalog: Path,
+    pool_seeding_root: str,
+    category: Optional[str] = None,
+    tag: Optional[str] = None,
+    limit: int = 0,
+) -> None:
+    cmd = _build_payload_sync_command(
+        catalog=catalog,
+        pool_seeding_root=pool_seeding_root,
+        category=category,
+        tag=tag,
+        limit=limit,
+    )
+    click.echo(
+        "🔄 Pre-plan refresh: "
+        f"{' '.join(cmd)}"
+    )
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"payload sync refresh failed (exit={result.returncode})")
 
 
 @click.group()
@@ -443,6 +505,11 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
     mode = "DRY-RUN" if dryrun else "EXECUTE"
     click.echo(f"{'🔍' if dryrun else '⚙️'} {mode} MODE")
     click.echo()
+    if _debug_enabled():
+        click.echo(f"debug_module rehome={Path(rehome.__file__).resolve()}")
+        click.echo(f"debug_module rehome.executor={Path(rehome_executor.__file__).resolve()}")
+        click.echo(f"debug_module rehome.view_builder={Path(rehome_view_builder.__file__).resolve()}")
+        click.echo(f"debug_version rehome={__version__}")
 
     try:
         for i, plan in enumerate(plans_to_apply, 1):
@@ -473,6 +540,10 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
 
     except Exception as e:
         click.echo(f"❌ {mode} failed: {e}", err=True)
+        if _debug_enabled():
+            click.echo("debug_traceback_begin", err=True)
+            click.echo(traceback.format_exc(), err=True)
+            click.echo("debug_traceback_end", err=True)
         raise click.Abort()
 
     click.echo()
@@ -583,6 +654,14 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, 
               help="Output batch plan JSON (default: rehome-plan-normalize-<timestamp>.json)")
 @click.option("--print-skipped", is_flag=True,
               help="Print skipped payload reasons")
+@click.option("--refresh-before-plan", is_flag=True,
+              help="Refresh qB torrent metadata into catalog before normalization planning")
+@click.option("--refresh-category", type=str,
+              help="Optional qB category filter for pre-plan refresh")
+@click.option("--refresh-tag", type=str,
+              help="Optional qB tag filter for pre-plan refresh")
+@click.option("--refresh-limit", type=int, default=0,
+              help="Optional torrent limit for pre-plan refresh (0 = all in scope)")
 def normalize_plan_cmd(
     catalog,
     pool_device,
@@ -593,11 +672,23 @@ def normalize_plan_cmd(
     flat_only,
     output,
     print_skipped,
+    refresh_before_plan,
+    refresh_category,
+    refresh_tag,
+    refresh_limit,
 ):
     """Create batch plan(s) to normalize pool payload root paths."""
     catalog_path = Path(catalog)
 
     try:
+        if refresh_before_plan:
+            _refresh_catalog_from_qb(
+                catalog=catalog_path,
+                pool_seeding_root=pool_seeding_root,
+                category=refresh_category,
+                tag=refresh_tag,
+                limit=refresh_limit,
+            )
         report = build_pool_path_normalization_batch(
             catalog_path=catalog_path,
             pool_device=pool_device,
@@ -627,7 +718,9 @@ def normalize_plan_cmd(
         f"candidates:{summary.get('candidates', 0)} "
         f"reuse:{summary.get('decision_reuse', 0)} "
         f"move:{summary.get('decision_move', 0)} "
-        f"skipped:{summary.get('skipped', 0)}"
+        f"skipped:{summary.get('skipped', 0)} "
+        f"fallback:{summary.get('fallback_used', 0)} "
+        f"review:{summary.get('review_required', 0)}"
     )
     if plans:
         for plan in plans[:5]:

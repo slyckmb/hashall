@@ -159,3 +159,90 @@ def test_normalize_plan_respects_flat_only_filter(tmp_path):
 
     assert flat_report["summary"]["candidates"] == 0
     assert all_report["summary"]["candidates"] == 1
+
+
+def test_normalize_plan_fallbacks_to_cross_seed_tracker_from_save_path(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    pool_root = tmp_path / "pool" / "data" / "seeds"
+    source = pool_root / "Movie.2024.mkv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (3, 'hash03', 44, ?, 1, 3, 'complete')
+        """,
+        (str(source),),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags)
+        VALUES ('thash3', 3, 44, ?, 'Movie.2024.mkv', 'cross-seed', 'cross-seed')
+        """,
+        (str(pool_root / "cross-seed" / "FearNoPeer"),),
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_pool_path_normalization_batch(
+        catalog_path=db_path,
+        pool_device=44,
+        pool_seeding_root=str(pool_root),
+        stash_seeding_root=None,
+        flat_only=True,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    assert report["summary"]["fallback_used"] == 0
+    assert report["summary"]["review_required"] == 0
+    plan = report["plans"][0]
+    assert plan["target_path"] == str(pool_root / "cross-seed" / "FearNoPeer" / "Movie.2024.mkv")
+    assert plan["normalization"]["source_hint"] == "torrent_save_path"
+    assert plan["normalization"]["confidence"] == "medium"
+
+
+def test_normalize_plan_fallback_unknown_cross_seed_tracker_marks_review(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    pool_root = tmp_path / "pool" / "data" / "seeds"
+    source = pool_root / "Unknown.Movie.mkv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (4, 'hash04', 44, ?, 1, 3, 'complete')
+        """,
+        (str(source),),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags)
+        VALUES ('thash4', 4, 44, ?, 'Unknown.Movie.mkv', 'cross-seed', 'cross-seed')
+        """,
+        (str(pool_root),),
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_pool_path_normalization_batch(
+        catalog_path=db_path,
+        pool_device=44,
+        pool_seeding_root=str(pool_root),
+        stash_seeding_root=None,
+        flat_only=True,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    assert report["summary"]["fallback_used"] == 1
+    assert report["summary"]["review_required"] == 1
+    plan = report["plans"][0]
+    assert plan["target_path"] == str(pool_root / "cross-seed" / "_unknown_tracker" / "Unknown.Movie.mkv")
+    assert plan["normalization"]["source_hint"] == "qb_fallback_cross_seed_unknown_tracker"
+    assert plan["normalization"]["confidence"] == "low"
+    assert plan["normalization"]["review_required"] is True

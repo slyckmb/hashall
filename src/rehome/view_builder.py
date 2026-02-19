@@ -128,7 +128,18 @@ def _ensure_hardlink(
         _accept_or_reject_existing(src, dst)
         return
 
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as exc:
+        if progress_cb:
+            progress_cb(
+                "build_views_error phase=mkdir_parent "
+                f"src={src} dst={dst} parent={dst.parent} "
+                f"parent_exists={dst.parent.exists()} parent_is_dir={dst.parent.is_dir()}"
+            )
+        raise RuntimeError(
+            f"Cannot create parent directory for destination: {dst.parent}"
+        ) from exc
 
     src_stat = os.stat(src)
     dst_parent_stat = os.stat(dst.parent)
@@ -174,22 +185,42 @@ def build_torrent_view(
     if single_file and len(files) != 1:
         raise RuntimeError("Single-file payload but torrent has multiple files")
 
+    common_prefix = _common_prefix(files)
+    single_file_direct_dst: Optional[Path] = None
     if single_file:
-        view_root = target_save_path
+        # Normal qB save_path points to a directory; tolerate file-form save_path too.
+        first_rel = _normalize_rel_path(files[0].name, common_prefix, root_name, payload_root)
+        if len(first_rel.parts) == 1 and target_save_path.name == first_rel.name:
+            single_file_direct_dst = target_save_path
+            view_root = target_save_path.parent
+            if progress_cb:
+                progress_cb(
+                    "build_views_progress phase=single_file_direct_target "
+                    f"target={target_save_path} view_root={view_root}"
+                )
+        else:
+            view_root = target_save_path
     else:
         view_root = target_save_path / (root_name or payload_root.name)
-
-    common_prefix = _common_prefix(files)
 
     total_bytes = 0
     for f in files:
         rel = _normalize_rel_path(f.name, common_prefix, root_name, payload_root)
         if single_file:
             src = payload_root
-            dst = view_root / rel
+            dst = single_file_direct_dst if single_file_direct_dst is not None else (view_root / rel)
         else:
             src = payload_root / rel
             dst = view_root / rel
+            if len(files) == 1 and len(rel.parts) == 1 and view_root.name == rel.name:
+                # Some single-entry torrents report root_name as the file name.
+                # In that case, place the file directly at target_save_path/root_name.
+                dst = view_root
+                if progress_cb:
+                    progress_cb(
+                        "build_views_progress phase=single_entry_root_is_file "
+                        f"target={target_save_path} root_name={root_name}"
+                    )
 
         if not src.exists():
             raise RuntimeError(f"Missing source file for view: {src}")

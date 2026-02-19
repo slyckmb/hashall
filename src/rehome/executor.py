@@ -399,14 +399,26 @@ class DemotionExecutor:
                     raise RuntimeError(f"Failed to fetch files for torrent {torrent_hash[:16]}")
 
                 link_start = time.monotonic()
-                result = build_torrent_view(
-                    payload_root=payload_root,
-                    target_save_path=target_save_path,
-                    files=files,
-                    root_name=root_name,
-                    compare_hint=compare_hint,
-                    progress_cb=lambda msg: self._log(f"  {msg}"),
-                )
+                try:
+                    result = build_torrent_view(
+                        payload_root=payload_root,
+                        target_save_path=target_save_path,
+                        files=files,
+                        root_name=root_name,
+                        compare_hint=compare_hint,
+                        progress_cb=lambda msg: self._log(f"  {msg}"),
+                    )
+                except Exception as exc:
+                    first_rel = files[0].name if files else ""
+                    self._log(
+                        "  build_views_error "
+                        f"done={idx}/{total} hash={torrent_hash[:16]} "
+                        f"payload_root={payload_root} target_save_path={target_save_path} "
+                        f"root_name={root_name or ''} first_rel={first_rel} "
+                        f"error_type={type(exc).__name__} error={exc}",
+                        "error",
+                    )
+                    raise
                 link_elapsed = time.monotonic() - link_start
 
                 if result.file_count != plan["file_count"] or result.total_bytes != plan["total_bytes"]:
