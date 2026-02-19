@@ -113,6 +113,49 @@ def test_set_location_retry_succeeds_when_qb_reports_conflict_but_path_is_set(tm
     assert executor.qbit_client.calls >= 1
 
 
+def test_atomic_relocation_reverify_path_after_mismatch(tmp_path, monkeypatch):
+    class NeedsReapply(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.set_calls = 0
+
+        def set_location(self, torrent_hash: str, new_location: str) -> bool:
+            self.set_calls += 1
+            self.save_paths[torrent_hash] = new_location
+            return True
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = NeedsReapply()
+
+    expected = Path("/pool/seeding")
+    old = Path("/stash/seeding")
+    calls = {"count": 0}
+
+    def fake_wait(_hash, _expected, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(save_path=str(old), auto_tmm=False), old
+        return SimpleNamespace(save_path=str(expected), auto_tmm=False), expected
+
+    monkeypatch.setattr(executor, "_wait_for_save_path", fake_wait)
+    reapply = {"count": 0}
+
+    def fake_retry(torrent_hash, target_save_path, **_kwargs):
+        if Path(target_save_path) == expected:
+            reapply["count"] += 1
+        executor.qbit_client.save_paths[torrent_hash] = target_save_path
+        return True
+
+    monkeypatch.setattr(executor, "_set_location_with_retry", fake_retry)
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+    executor._relocate_torrents_atomic(relocations)
+    assert reapply["count"] >= 1
+
+
 def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()

@@ -50,6 +50,7 @@ class DemotionExecutor:
         self.qbit_client = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
         self.tag_strict = os.getenv("HASHALL_REHOME_TAG_STRICT") == "1"
         self.disable_atm_on_rehome = os.getenv("HASHALL_REHOME_DISABLE_ATM", "1") != "0"
+        self.debug_qb = os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
 
     def _get_db_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -349,7 +350,7 @@ class DemotionExecutor:
                 for m in moved:
                     src = m.get("source_save_path")
                     if src:
-                        self._set_location_with_retry(m["torrent_hash"], src, attempts=3, delay_seconds=1.0)
+                        self._set_location_with_retry(m["torrent_hash"], src, attempts=8, delay_seconds=1.0)
                 for h in paused:
                     self.qbit_client.resume_torrent(h)
                 raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
@@ -377,10 +378,30 @@ class DemotionExecutor:
                 if not torrent_info:
                     raise RuntimeError(f"Failed to verify torrent {torrent_hash[:16]} after relocation")
                 if actual_path != expected_path:
-                    raise RuntimeError(
-                        f"Torrent {torrent_hash[:16]} location verification failed: "
-                        f"expected={expected_path}, actual={actual_path}"
+                    self._debug_qb_snapshot(torrent_hash, "verify_mismatch")
+                    self._log(
+                        f"  retry_verify_relocate hash={torrent_hash[:16]}",
+                        "warning",
                     )
+                    self.qbit_client.pause_torrent(torrent_hash)
+                    relocated = self._set_location_with_retry(
+                        torrent_hash,
+                        str(expected_path),
+                        attempts=12,
+                        delay_seconds=1.0,
+                    )
+                    self.qbit_client.resume_torrent(torrent_hash)
+                    torrent_info, actual_path = self._wait_for_save_path(
+                        torrent_hash,
+                        expected_path,
+                        timeout_seconds=120.0,
+                        interval_seconds=1.0,
+                    )
+                    if (not relocated) or (actual_path != expected_path):
+                        raise RuntimeError(
+                            f"Torrent {torrent_hash[:16]} location verification failed: "
+                            f"expected={expected_path}, actual={actual_path}"
+                        )
                 if self.disable_atm_on_rehome:
                     if bool(getattr(torrent_info, "auto_tmm", False)):
                         self._log(
@@ -407,7 +428,7 @@ class DemotionExecutor:
             for m in moved:
                 src = m.get("source_save_path")
                 if src:
-                    self._set_location_with_retry(m["torrent_hash"], src, attempts=3, delay_seconds=1.0)
+                    self._set_location_with_retry(m["torrent_hash"], src, attempts=8, delay_seconds=1.0)
             raise
 
     def _set_location_with_retry(
@@ -477,6 +498,7 @@ class DemotionExecutor:
         deadline = time.monotonic() + timeout_seconds
         last_info = None
         last_actual: Optional[Path] = None
+        last_debug_log = 0.0
         while time.monotonic() <= deadline:
             info = self.qbit_client.get_torrent_info(torrent_hash)
             if info:
@@ -487,8 +509,35 @@ class DemotionExecutor:
                     last_actual = Path(info.save_path).resolve()
                 if last_actual == expected_path:
                     return info, last_actual
+                if self.debug_qb:
+                    now = time.monotonic()
+                    if last_debug_log == 0.0 or (now - last_debug_log) >= 5.0:
+                        self._log(
+                            f"  qb_wait hash={torrent_hash[:16]} "
+                            f"state={getattr(info, 'state', 'unknown')} "
+                            f"progress={getattr(info, 'progress', 'unknown')} "
+                            f"actual={last_actual} expected={expected_path}",
+                            "warning",
+                        )
+                        last_debug_log = now
             time.sleep(interval_seconds)
         return last_info, last_actual
+
+    def _debug_qb_snapshot(self, torrent_hash: str, label: str) -> None:
+        if not self.debug_qb:
+            return
+        info = self.qbit_client.get_torrent_info(torrent_hash)
+        if not info:
+            self._log(f"  qb_debug {label} hash={torrent_hash[:16]} info=missing", "warning")
+            return
+        self._log(
+            f"  qb_debug {label} hash={torrent_hash[:16]} "
+            f"state={getattr(info, 'state', 'unknown')} "
+            f"progress={getattr(info, 'progress', 'unknown')} "
+            f"save_path={getattr(info, 'save_path', 'unknown')} "
+            f"content_path={getattr(info, 'content_path', 'unknown')}",
+            "warning",
+        )
 
     def _spot_check_payload(self, payload_root: Path, device_id: int, sample: int) -> None:
         """Spot-check a payload by verifying SHA256 on a sample of files."""

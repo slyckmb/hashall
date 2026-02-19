@@ -23,6 +23,7 @@ class QBitTorrent:
     state: str
     size: int
     progress: float
+    auto_tmm: bool = False
 
 
 @dataclass
@@ -129,7 +130,8 @@ class QBittorrentClient:
                     tags=t.get('tags', ''),
                     state=t.get('state', ''),
                     size=t.get('size', 0),
-                    progress=t.get('progress', 0.0)
+                    progress=t.get('progress', 0.0),
+                    auto_tmm=bool(t.get('auto_tmm', False)),
                 ))
 
             return torrents
@@ -303,8 +305,52 @@ class QBittorrentClient:
             )
             response.raise_for_status()
             return True
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else "?"
+            body = ""
+            if e.response is not None:
+                try:
+                    body = e.response.text.strip()
+                except Exception:
+                    body = ""
+            body = body[:200] if body else ""
+            msg = f"⚠️ Failed to set location for torrent {torrent_hash}: HTTP {status}"
+            if body:
+                msg += f" body={body}"
+            print(msg)
+            return False
         except requests.RequestException as e:
             print(f"⚠️ Failed to set location for torrent {torrent_hash}: {e}")
+            return False
+
+    def set_auto_management(self, torrent_hash: str, enabled: bool) -> bool:
+        """
+        Toggle qBittorrent Auto Torrent Management for a torrent.
+
+        Args:
+            torrent_hash: Torrent infohash
+            enabled: True to enable ATM, False to disable ATM
+
+        Returns:
+            True if successful, False otherwise
+        """
+        self._ensure_authenticated()
+
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/v2/torrents/setAutoManagement",
+                data={
+                    "hashes": torrent_hash,
+                    "enable": "true" if enabled else "false",
+                }
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            print(
+                "⚠️ Failed to set auto management for torrent "
+                f"{torrent_hash} to {enabled}: {e}"
+            )
             return False
 
     def add_tags(self, torrent_hash: str, tags: List[str]) -> bool:
@@ -378,7 +424,8 @@ class QBittorrentClient:
                 tags=t.get('tags', ''),
                 state=t.get('state', ''),
                 size=t.get('size', 0),
-                progress=t.get('progress', 0.0)
+                progress=t.get('progress', 0.0),
+                auto_tmm=bool(t.get('auto_tmm', False)),
             )
 
         except requests.RequestException as e:
