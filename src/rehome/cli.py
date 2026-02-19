@@ -4,10 +4,15 @@ Command-line interface for rehome.
 
 import click
 import json
+import sqlite3
+import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from rehome import __version__
+from rehome.followup import run_followup
+from rehome.normalize import build_pool_path_normalization_batch
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
@@ -15,11 +20,17 @@ from rehome.library_roots import collect_library_roots
 DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
 
+def _emit_banner() -> None:
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+    script = Path(sys.argv[0]).name
+    print(f"🧾 {script} v{__version__} @ {timestamp}", flush=True)
+
+
 @click.group()
 @click.version_option(__version__)
 def cli():
     """Rehome - Seed payload demotion orchestrator."""
-    pass
+    _emit_banner()
 
 
 @cli.command("plan")
@@ -230,6 +241,129 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
     click.echo(f"Next step: rehome apply {output_path} --dryrun")
 
 
+@cli.command("audit-tags")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--run-id", type=int,
+              help="Specific rehome run ID to audit (default: latest successful run)")
+@click.option("--samples", type=int, default=5,
+              help="How many non-compliant torrent samples to print")
+def audit_tags_cmd(catalog, run_id, samples):
+    """Audit rehome provenance tags for a run using catalog torrent tag snapshots."""
+
+    def _parse_tags(raw: Optional[str]) -> set[str]:
+        if not raw:
+            return set()
+        return {tag.strip() for tag in str(raw).split(',') if tag and tag.strip()}
+
+    conn = sqlite3.connect(catalog)
+    try:
+        if run_id is None:
+            run_row = conn.execute(
+                """
+                SELECT id, direction, payload_id, payload_hash, status, started_at, finished_at
+                FROM rehome_runs
+                WHERE status = 'success'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if not run_row:
+                click.echo("❌ No successful rehome_runs found", err=True)
+                raise click.Abort()
+        else:
+            run_row = conn.execute(
+                """
+                SELECT id, direction, payload_id, payload_hash, status, started_at, finished_at
+                FROM rehome_runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if not run_row:
+                click.echo(f"❌ Run not found: {run_id}", err=True)
+                raise click.Abort()
+
+        run_id_v, direction, payload_id, payload_hash, status, started_at, finished_at = run_row
+
+        if status != 'success':
+            click.echo(f"⚠ Run {run_id_v} status is '{status}' (expected success)")
+
+        if direction == 'promote':
+            expected_core = {'rehome', 'rehome_from_pool', 'rehome_to_stash'}
+        else:
+            expected_core = {'rehome', 'rehome_from_stash', 'rehome_to_pool'}
+
+        payload_ids = [payload_id]
+        torrents = conn.execute(
+            """
+            SELECT torrent_hash, tags
+            FROM torrent_instances
+            WHERE payload_id = ?
+            ORDER BY torrent_hash
+            """,
+            (payload_id,),
+        ).fetchall()
+
+        if not torrents and payload_hash:
+            payload_rows = conn.execute(
+                "SELECT payload_id FROM payloads WHERE payload_hash = ? ORDER BY payload_id",
+                (payload_hash,),
+            ).fetchall()
+            payload_ids = [int(row[0]) for row in payload_rows]
+            if payload_ids:
+                placeholders = ",".join("?" for _ in payload_ids)
+                torrents = conn.execute(
+                    f"""
+                    SELECT torrent_hash, tags
+                    FROM torrent_instances
+                    WHERE payload_id IN ({placeholders})
+                    ORDER BY torrent_hash
+                    """,
+                    payload_ids,
+                ).fetchall()
+
+        if not torrents:
+            click.echo(
+                f"⚠ No torrent_instances found for payload_id={payload_id}"
+                f" (payload_hash={str(payload_hash)[:16]}...)"
+            )
+            return
+
+        bad = []
+        for torrent_hash, tags_raw in torrents:
+            tags = _parse_tags(tags_raw)
+            missing_core = sorted(expected_core - tags)
+            has_date = any(tag.startswith('rehome_at_') for tag in tags)
+            if missing_core or not has_date:
+                bad.append((torrent_hash, missing_core, has_date, tags_raw or ''))
+
+        compliant = len(torrents) - len(bad)
+
+        click.echo("🔎 Rehome tag audit")
+        click.echo(f"   run_id: {run_id_v}")
+        click.echo(f"   direction: {direction}")
+        click.echo(f"   payload_hash: {str(payload_hash)[:16]}...")
+        click.echo(f"   payload_ids_checked: {payload_ids}")
+        click.echo(f"   torrents: {len(torrents)}")
+        click.echo(f"   compliant: {compliant}")
+        click.echo(f"   non_compliant: {len(bad)}")
+
+        if bad:
+            click.echo("   samples:")
+            for torrent_hash, missing_core, has_date, raw_tags in bad[: max(1, samples)]:
+                missing_str = ','.join(missing_core) if missing_core else '-'
+                date_str = 'yes' if has_date else 'no'
+                click.echo(
+                    f"     {torrent_hash[:16]}... missing_core={missing_str} has_rehome_at={date_str} tags={raw_tags}"
+                )
+            raise click.exceptions.Exit(1)
+
+        click.echo("✅ Rehome tags are compliant for this run")
+    finally:
+        conn.close()
+
+
 @cli.command("apply")
 @click.argument("plan_file", type=click.Path(exists=True))
 @click.option("--dryrun", is_flag=True,
@@ -347,6 +481,174 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
         click.echo(f"To execute: rehome apply {plan_file} --force")
     else:
         click.echo("✅ Plan executed successfully")
+
+
+@cli.command("followup")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--cleanup", is_flag=True,
+              help="Attempt cleanup for groups tagged rehome_cleanup_source_required")
+@click.option("--payload-hash", "payload_hashes", multiple=True,
+              help="Limit follow-up to specific payload hash(es)")
+@click.option("--limit", type=int, default=0,
+              help="Max payload groups to process (0 = all)")
+@click.option("--retry-failed", is_flag=True,
+              help="Include rehome_verify_failed groups in this pass")
+@click.option("--strict", is_flag=True,
+              help="Exit non-zero if any group remains pending or failed")
+@click.option("--output", type=click.Path(),
+              help="Write JSON report to file")
+@click.option("--print-torrents", is_flag=True,
+              help="Print per-torrent follow-up gate details")
+def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, output, print_torrents):
+    """Run rehome verification follow-up and optional deferred cleanup retry."""
+    catalog_path = Path(catalog)
+    try:
+        report = run_followup(
+            catalog_path=catalog_path,
+            cleanup=cleanup,
+            payload_hashes=set(payload_hashes) if payload_hashes else None,
+            limit=limit,
+            retry_failed=retry_failed,
+        )
+    except Exception as e:
+        click.echo(f"❌ FOLLOWUP failed: {e}", err=True)
+        raise click.Abort()
+
+    summary = report.get("summary", {})
+    click.echo("🔁 Rehome follow-up summary")
+    click.echo(f"   catalog: {catalog_path}")
+    click.echo(f"   groups: {summary.get('groups_total', 0)}")
+    click.echo(f"   ok: {summary.get('groups_ok', 0)}")
+    click.echo(f"   pending: {summary.get('groups_pending', 0)}")
+    click.echo(f"   failed: {summary.get('groups_failed', 0)}")
+    click.echo(f"   cleanup_attempted: {summary.get('cleanup_attempted', 0)}")
+    click.echo(f"   cleanup_done: {summary.get('cleanup_done', 0)}")
+    click.echo(f"   cleanup_failed: {summary.get('cleanup_failed', 0)}")
+
+    for entry in report.get("entries", []):
+        payload_hash = str(entry.get("payload_hash", ""))
+        click.echo(
+            f"payload={payload_hash[:16]} outcome={entry.get('outcome')} "
+            f"cleanup_required={str(bool(entry.get('cleanup_required'))).lower()} "
+            f"cleanup_result={entry.get('cleanup_result')}"
+        )
+        db_reasons = entry.get("db_reasons") or []
+        source_reasons = entry.get("source_reasons") or []
+        if db_reasons:
+            click.echo(f"  db_reasons={','.join(db_reasons)}")
+        if source_reasons:
+            click.echo(f"  source_reasons={','.join(source_reasons)}")
+        if print_torrents:
+            for gate in entry.get("qb_checks", []):
+                reasons = gate.get("reasons") or []
+                reason_text = ",".join(reasons) if reasons else "none"
+                click.echo(
+                    "  torrent="
+                    f"{str(gate.get('torrent_hash', ''))[:16]} "
+                    f"ok={str(bool(gate.get('ok'))).lower()} "
+                    f"progress={gate.get('progress')} "
+                    f"state={gate.get('state')} "
+                    f"auto_tmm={gate.get('auto_tmm')} "
+                    f"reasons={reason_text}"
+                )
+
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        click.echo(f"report={output_path}")
+
+    pending_or_failed = int(summary.get("groups_pending", 0)) + int(summary.get("groups_failed", 0))
+    if strict and pending_or_failed > 0:
+        raise click.exceptions.Exit(1)
+
+
+@cli.command("normalize-plan")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--pool-device", type=int, required=True,
+              help="Pool device_id in catalog")
+@click.option("--pool-seeding-root", type=click.Path(), required=True,
+              help="Pool seeding root (example: /pool/data/seeds)")
+@click.option("--stash-seeding-root", type=click.Path(),
+              help="Optional stash seeding root for source-relative mapping")
+@click.option("--payload-hash", "payload_hashes", multiple=True,
+              help="Restrict normalization planning to specific payload hash(es)")
+@click.option("--limit", type=int, default=0,
+              help="Max normalization candidates to include (0 = all)")
+@click.option("--flat-only/--all-mismatches", default=True,
+              help="Plan only payloads directly under pool root (default) or all mismatches")
+@click.option("--output", "-o", type=click.Path(),
+              help="Output batch plan JSON (default: rehome-plan-normalize-<timestamp>.json)")
+@click.option("--print-skipped", is_flag=True,
+              help="Print skipped payload reasons")
+def normalize_plan_cmd(
+    catalog,
+    pool_device,
+    pool_seeding_root,
+    stash_seeding_root,
+    payload_hashes,
+    limit,
+    flat_only,
+    output,
+    print_skipped,
+):
+    """Create batch plan(s) to normalize pool payload root paths."""
+    catalog_path = Path(catalog)
+
+    try:
+        report = build_pool_path_normalization_batch(
+            catalog_path=catalog_path,
+            pool_device=pool_device,
+            pool_seeding_root=pool_seeding_root,
+            stash_seeding_root=stash_seeding_root,
+            payload_hashes=set(payload_hashes) if payload_hashes else None,
+            limit=limit,
+            flat_only=flat_only,
+        )
+    except Exception as e:
+        click.echo(f"❌ normalize-plan failed: {e}", err=True)
+        raise click.Abort()
+
+    if not output:
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        output = f"rehome-plan-normalize-{stamp}.json"
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    summary = report.get("summary", {})
+    plans = report.get("plans", [])
+    click.echo(f"✅ Normalize plan written to: {output_path}")
+    click.echo(
+        "summary="
+        f"candidates:{summary.get('candidates', 0)} "
+        f"reuse:{summary.get('decision_reuse', 0)} "
+        f"move:{summary.get('decision_move', 0)} "
+        f"skipped:{summary.get('skipped', 0)}"
+    )
+    if plans:
+        for plan in plans[:5]:
+            click.echo(
+                f"  {str(plan.get('decision', '')):5s} "
+                f"payload={str(plan.get('payload_hash', ''))[:16]} "
+                f"source={plan.get('source_path')} "
+                f"target={plan.get('target_path')}"
+            )
+        if len(plans) > 5:
+            click.echo(f"  ... ({len(plans) - 5} more)")
+
+    if print_skipped:
+        for item in report.get("skipped", []):
+            click.echo(
+                f"  skipped payload={str(item.get('payload_hash', ''))[:16]} "
+                f"reason={item.get('reason')} source={item.get('source_path')}"
+            )
+
+    click.echo()
+    click.echo(f"Next step: rehome apply {output_path} --dryrun")
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ class ScanStats:
     bytes_hashed: int = 0
     inode_groups_hashed: int = 0  # Unique inodes hashed
     hardlinks_propagated: int = 0  # Hardlinks that got copied hashes
+    safety_guard_triggered: bool = False
 
 
 def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
@@ -544,6 +545,7 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
 def _hash_file_worker(
     work_item: dict,
     mount_point: Path,
+    alias_mounts: tuple[Path, ...],
     existing_files: Dict[str, dict],
     hash_mode: str = 'fast',
     expected_device_id: Optional[int] = None
@@ -560,6 +562,7 @@ def _hash_file_worker(
             - stat: Pre-computed stat result
             - is_hardlink_group: Boolean
         mount_point: Mount point for the filesystem (to compute relative path)
+        alias_mounts: Alternate mount points for same filesystem (fallback for relpath)
         existing_files: Dict of {rel_path: {size, mtime, quick_hash, sha1, sha256}} from database
         hash_mode: 'fast' (quick_hash only), 'full' (both), or 'upgrade' (add full hashes to existing quick_hash)
         expected_device_id: Expected device ID (for validation)
@@ -581,7 +584,7 @@ def _hash_file_worker(
             return [("__SKIP_DEVICE__", str(representative_path), stat.st_dev)]
 
         # Get representative file's catalog entry
-        rel_path_repr = str(Path(representative_path).relative_to(mount_point))
+        rel_path_repr = _relative_to_any_mount(representative_path, mount_point, alias_mounts)
         existing_repr = existing_files.get(rel_path_repr)
 
         # Determine if we need to hash the representative file
@@ -599,8 +602,10 @@ def _hash_file_worker(
             # Check if we need to hash based on mode
             if hash_mode == 'fast' and quick_hash is not None:
                 need_hash = False
-            elif hash_mode == 'full' and sha1 is not None and sha256 is not None:
-                need_hash = False
+            elif hash_mode == 'full':
+                # In full mode, unchanged metadata still needs hash upgrade when
+                # either full hash column is missing.
+                need_hash = (sha1 is None or sha256 is None)
             elif hash_mode == 'upgrade' and (sha1 is None or sha256 is None):
                 need_hash = True  # Need to compute full hashes
             else:
@@ -615,7 +620,7 @@ def _hash_file_worker(
         # Build results for ALL paths in this inode group
         results = []
         for path in all_paths:
-            rel_path = str(Path(path).relative_to(mount_point))
+            rel_path = _relative_to_any_mount(path, mount_point, alias_mounts)
             existing_file = existing_files.get(rel_path)
             is_new = existing_file is None
             is_updated = not is_new and need_hash
@@ -716,6 +721,40 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
 def _emit(quiet: bool, message: str) -> None:
     if not quiet:
         print(message)
+
+
+def _relative_to_any_mount(path: str | Path, primary_mount: Path, alias_mounts: tuple[Path, ...]) -> str:
+    """Return a relative file path using the first mount point that matches."""
+    p = Path(path)
+    try:
+        return str(p.relative_to(primary_mount))
+    except ValueError:
+        for alias in alias_mounts:
+            try:
+                return str(p.relative_to(alias))
+            except ValueError:
+                continue
+    raise ValueError(f"{p!s} is not in the subpath of '{primary_mount}'")
+
+
+def _should_skip_deletion(*, existing_count: int, discovered_count: int, seen_count: int, worker_errors: int) -> bool:
+    """
+    Guard against unsafe mass-deletes when scan processing clearly failed.
+
+    A healthy scan with discovered files should normally yield many seen paths.
+    If we discover files but process none (or very few with worker errors),
+    skip deletion to avoid flipping active catalogs to deleted.
+    """
+    if existing_count == 0:
+        return False
+    if discovered_count == 0:
+        return False
+    if seen_count == 0:
+        return True
+    if worker_errors <= 0:
+        return False
+    min_expected_seen = max(10, discovered_count // 10)
+    return seen_count < min_expected_seen
 
 
 def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: bool, file=None) -> dict:
@@ -982,9 +1021,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     stats = ScanStats()
     seen_paths: Set[str] = set()
     interrupted = False  # Track if scan was interrupted
+    scan_failed = False
+    worker_path_errors = 0
+    worker_path_error_examples: list[str] = []
+    worker_path_error_limit = 5
 
     # Get mount point for relative path calculation
     mount_point = effective_mount
+    alias_mounts = tuple(m for m in (current_mount, preferred_mount) if m != mount_point)
 
     use_two_line = show_current_path and not quiet and tqdm_position is None
     progress = TwoLineProgress(total=file_count, prefix="📦 Scanning", unit="files", enabled=use_two_line)
@@ -996,9 +1040,12 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         if progress.enabled:
             for work_item in work_items:
                 results = _hash_file_worker(
-                    work_item, mount_point, existing_files, hash_mode, expected_device_id=device_id
+                    work_item, mount_point, alias_mounts, existing_files, hash_mode, expected_device_id=device_id
                 )
                 if results is None:
+                    worker_path_errors += 1
+                    if len(worker_path_error_examples) < worker_path_error_limit:
+                        worker_path_error_examples.append(work_item['representative_path'])
                     progress.update(desc=work_item['representative_path'], advance=len(work_item['all_paths']))
                     continue
                 if results and results[0][0] == "__SKIP_DEVICE__":
@@ -1028,9 +1075,12 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             )
             for work_item in tqdm(work_items, **pbar_kwargs):
                 results = _hash_file_worker(
-                    work_item, mount_point, existing_files, hash_mode, expected_device_id=device_id
+                    work_item, mount_point, alias_mounts, existing_files, hash_mode, expected_device_id=device_id
                 )
                 if results is None:
+                    worker_path_errors += 1
+                    if len(worker_path_error_examples) < worker_path_error_limit:
+                        worker_path_error_examples.append(work_item['representative_path'])
                     continue
                 if results and results[0][0] == "__SKIP_DEVICE__":
                     stats.files_skipped_other_device += len(results)
@@ -1071,7 +1121,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     except StopIteration:
                         break
                     future = executor.submit(
-                        _hash_file_worker, work_item, mount_point, existing_files, hash_mode, device_id
+                        _hash_file_worker, work_item, mount_point, alias_mounts, existing_files, hash_mode, device_id
                     )
                     pending.add(future)
                     future_to_item[future] = work_item
@@ -1106,6 +1156,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 progress.update(desc=work_item['representative_path'] if work_item else "", advance=len(results))
                                 continue
 
+                            if results is None:
+                                worker_path_errors += 1
+                                if work_item and len(worker_path_error_examples) < worker_path_error_limit:
+                                    worker_path_error_examples.append(work_item['representative_path'])
+                                if work_item:
+                                    progress.update(desc=work_item['representative_path'], advance=len(work_item['all_paths']))
+                                continue
+
                             if results is not None:
                                 for result in results:
                                     seen_paths.add(result[0])
@@ -1129,7 +1187,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                             except StopIteration:
                                 break
                             future = executor.submit(
-                                _hash_file_worker, work_item, mount_point, existing_files, hash_mode, device_id
+                                _hash_file_worker, work_item, mount_point, alias_mounts, existing_files, hash_mode, device_id
                             )
                             pending.add(future)
                             future_to_item[future] = work_item
@@ -1168,6 +1226,14 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                     pbar.update(len(results))
                                     continue
 
+                                if results is None:
+                                    worker_path_errors += 1
+                                    if work_item and len(worker_path_error_examples) < worker_path_error_limit:
+                                        worker_path_error_examples.append(work_item['representative_path'])
+                                    if work_item:
+                                        pbar.update(len(work_item['all_paths']))
+                                    continue
+
                                 if results is not None:
                                     for result in results:
                                         seen_paths.add(result[0])
@@ -1190,7 +1256,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 except StopIteration:
                                     break
                                 future = executor.submit(
-                                    _hash_file_worker, work_item, mount_point, existing_files, hash_mode, device_id
+                                    _hash_file_worker, work_item, alias_mounts=alias_mounts, mount_point=mount_point,
+                                    existing_files=existing_files, hash_mode=hash_mode, expected_device_id=device_id
                                 )
                                 pending.add(future)
                                 future_to_item[future] = work_item
@@ -1231,15 +1298,35 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             deleted_paths.append(existing_path)
 
     if deleted_paths:
-        _emit(quiet, f"🗑️  Marking {len(deleted_paths)} deleted files...")
-        for path in deleted_paths:
-            cursor.execute(f"""
-                UPDATE {table_name}
-                SET status = 'deleted', last_seen_at = datetime('now')
-                WHERE path = ? AND status = 'active'
-            """, (path,))
-        stats.files_deleted = len(deleted_paths)
-        conn.commit()
+        skip_delete = _should_skip_deletion(
+            existing_count=len(existing_files),
+            discovered_count=file_count,
+            seen_count=len(seen_paths),
+            worker_errors=worker_path_errors,
+        )
+        if skip_delete:
+            stats.safety_guard_triggered = True
+            scan_failed = True
+            _emit(
+                quiet,
+                (
+                    "⚠️  Deletion safety guard triggered; skipping delete pass "
+                    f"(existing={len(existing_files):,}, discovered={file_count:,}, "
+                    f"seen={len(seen_paths):,}, worker_errors={worker_path_errors:,})"
+                ),
+            )
+            for example in worker_path_error_examples:
+                _emit(quiet, f"   - worker path error sample: {example}")
+        else:
+            _emit(quiet, f"🗑️  Marking {len(deleted_paths)} deleted files...")
+            for path in deleted_paths:
+                cursor.execute(f"""
+                    UPDATE {table_name}
+                    SET status = 'deleted', last_seen_at = datetime('now')
+                    WHERE path = ? AND status = 'active'
+                """, (path,))
+            stats.files_deleted = len(deleted_paths)
+            conn.commit()
 
     # 12. Update scan session stats
     duration = time.time() - started_at
@@ -1257,7 +1344,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         WHERE id = ?
     """, (
         duration,
-        'interrupted' if interrupted else 'completed',
+        'failed' if scan_failed else ('interrupted' if interrupted else 'completed'),
         stats.files_scanned,
         stats.files_added,
         stats.files_updated,

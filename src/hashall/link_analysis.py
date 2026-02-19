@@ -6,7 +6,7 @@ opportunities by finding files with identical content but different inodes.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Callable, List, Optional
 import sqlite3
 import json
 
@@ -21,7 +21,7 @@ class DuplicateGroup:
         file_count: Total number of files with this hash
         unique_inodes: Number of distinct inodes (files not yet deduplicated)
         files: List of file paths
-        inodes: List of unique inode numbers
+        inodes: Inode numbers aligned by index with `files`
         potential_savings: Bytes that could be saved by deduplication
     """
     hash: str
@@ -85,7 +85,8 @@ class CrossDeviceAnalysisResult:
 def analyze_device(
     conn: sqlite3.Connection,
     device_id: int,
-    min_size: int = 0
+    min_size: int = 0,
+    progress_callback: Optional[Callable[..., None]] = None,
 ) -> AnalysisResult:
     """
     Analyze a device for deduplication opportunities.
@@ -138,7 +139,7 @@ def analyze_device(
         size,
         COUNT(*) as file_count,
         COUNT(DISTINCT inode) as unique_inodes,
-        GROUP_CONCAT(path, '|||') as paths,
+        GROUP_CONCAT(path || char(31) || inode, '|||') as path_inode_pairs,
         (COUNT(DISTINCT inode) - 1) * size as potential_savings
     FROM {table_name}
     WHERE status = 'active'
@@ -149,27 +150,48 @@ def analyze_device(
     ORDER BY potential_savings DESC
     """
 
+    if progress_callback:
+        progress_callback(
+            stage="analysis_query",
+            device_id=device_id,
+            total_files=total_files,
+        )
+
     cursor.execute(query, (min_size,))
+    rows = cursor.fetchall()
+
+    if progress_callback:
+        progress_callback(
+            stage="analysis_rows_loaded",
+            device_id=device_id,
+            duplicate_groups=len(rows),
+        )
 
     duplicate_groups = []
-    for row in cursor.fetchall():
+    for idx, row in enumerate(rows, start=1):
         (
             hash_val,
             file_size,
             file_count,
             unique_inodes,
-            paths_str,
+            path_inode_pairs,
             potential_savings
         ) = row
 
-        files = paths_str.split('|||') if paths_str else []
-
-        # Get distinct inodes for this hash
-        cursor.execute(
-            f"SELECT DISTINCT inode FROM {table_name} WHERE sha256 = ? AND status = 'active'",
-            (hash_val,)
-        )
-        inodes = [row[0] for row in cursor.fetchall()]
+        files = []
+        inodes = []
+        if path_inode_pairs:
+            sep = chr(31)
+            for raw in str(path_inode_pairs).split("|||"):
+                if sep not in raw:
+                    continue
+                file_path, inode_raw = raw.rsplit(sep, 1)
+                try:
+                    inode = int(inode_raw)
+                except ValueError:
+                    continue
+                files.append(file_path)
+                inodes.append(inode)
 
         duplicate_groups.append(DuplicateGroup(
             hash=hash_val,
@@ -180,6 +202,14 @@ def analyze_device(
             inodes=inodes,
             potential_savings=potential_savings
         ))
+
+        if progress_callback and (idx == 1 or idx % 500 == 0 or idx == len(rows)):
+            progress_callback(
+                stage="analysis_rows_processed",
+                device_id=device_id,
+                groups_processed=idx,
+                groups_total=len(rows),
+            )
 
     return AnalysisResult(
         device_id=device_id,

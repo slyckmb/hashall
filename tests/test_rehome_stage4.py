@@ -9,6 +9,7 @@ Covers:
 """
 
 import pytest
+import requests
 import sqlite3
 import json
 import tempfile
@@ -126,6 +127,64 @@ class TestQBittorrentRelocation:
         assert client.resume_torrent("abc123") is True
         assert mock_session.post.call_count == 1
 
+    def test_pause_falls_back_to_stop_on_404(self):
+        """qB variants without pause endpoint should use stop endpoint."""
+        mock_session = Mock()
+
+        not_found = Mock()
+        not_found.status_code = 404
+        not_found.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
+
+        ok = Mock()
+        ok.raise_for_status = Mock()
+
+        mock_session.post.side_effect = [not_found, ok]
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.pause_torrent("abc123") is True
+        assert mock_session.post.call_args_list[0].args[0].endswith("/api/v2/torrents/pause")
+        assert mock_session.post.call_args_list[1].args[0].endswith("/api/v2/torrents/stop")
+
+    def test_resume_falls_back_to_start_on_404(self):
+        """qB variants without resume endpoint should use start endpoint."""
+        mock_session = Mock()
+
+        not_found = Mock()
+        not_found.status_code = 404
+        not_found.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
+
+        ok = Mock()
+        ok.raise_for_status = Mock()
+
+        mock_session.post.side_effect = [not_found, ok]
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.resume_torrent("abc123") is True
+        assert mock_session.post.call_args_list[0].args[0].endswith("/api/v2/torrents/resume")
+        assert mock_session.post.call_args_list[1].args[0].endswith("/api/v2/torrents/start")
+
+    def test_set_auto_management_calls_api(self):
+        mock_session = Mock()
+        ok = Mock()
+        ok.raise_for_status = Mock()
+        mock_session.post.return_value = ok
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.set_auto_management("abc123", False) is True
+        args, kwargs = mock_session.post.call_args
+        assert args[0].endswith("/api/v2/torrents/setAutoManagement")
+        assert kwargs["data"]["hashes"] == "abc123"
+        assert kwargs["data"]["enable"] == "false"
+
     def test_relocation_failure_handling(self, tmp_path):
         """Test that executor handles relocation failures gracefully."""
         # Create test database
@@ -154,6 +213,19 @@ class TestQBittorrentRelocation:
         mock_client.pause_torrent.return_value = True
         mock_client.set_location.return_value = False  # Fail here
         mock_client.resume_torrent.return_value = True
+        mock_client.set_auto_management.return_value = True
+        mock_client.get_torrent_info.return_value = QBitTorrent(
+            hash="torrent_fail_test",
+            name="Test",
+            save_path="/stash/torrents/seeding",
+            content_path="/stash/torrents/seeding/Movie.2024",
+            category="",
+            tags="",
+            state="uploading",
+            size=1000000,
+            progress=1.0,
+            auto_tmm=False,
+        )
 
         executor.qbit_client = mock_client
 
@@ -298,6 +370,60 @@ class TestBatchDemotionByTag:
             assert plan['batch_filter'] == '~noHL'
 
 
+    def test_batch_by_tag_still_blocks_external_consumers(self, tmp_path):
+        """~noHL is advisory; external hardlinks must still force BLOCK."""
+        db_path = TestDatabase.create_test_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+
+        conn.executescript("""
+            CREATE TABLE devices (
+                device_id INTEGER PRIMARY KEY,
+                fs_uuid TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT
+            );
+
+            INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
+            VALUES (50, 'fs-test-50', '/stash', '/stash');
+
+            CREATE TABLE files_50 (
+                path TEXT PRIMARY KEY,
+                inode INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                sha1 TEXT,
+                status TEXT DEFAULT 'active'
+            );
+
+            INSERT INTO files_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('torrents/seeding/MovieHL/video.mkv', 7001, 1000000, 1234567890, 'sha-video', 'active'),
+                ('media/library/MovieHL/video.mkv', 7001, 1000000, 1234567890, 'sha-video', 'active');
+
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (1, 'payload_hash_hl', 50, '/stash/torrents/seeding/MovieHL', 1, 1000000, 'complete');
+
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, tags)
+            VALUES ('torrent_hl_tagged', 1, 50, '/stash/torrents/seeding', 'MovieHL', '~noHL');
+        """)
+        conn.commit()
+        conn.close()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/torrents/seeding"],
+            library_roots=[],
+            stash_device=50,
+            pool_device=49,
+        )
+
+        plans = planner.plan_batch_demotion_by_tag('~noHL')
+
+        assert len(plans) == 1
+        assert plans[0]['batch_filter'] == '~noHL'
+        assert plans[0]['decision'] == 'BLOCK'
+        assert any('outside' in r.lower() or 'external' in r.lower() for r in plans[0]['reasons'])
+
+
 class TestRelocationVerification:
     """Test that relocation is verified after execution."""
 
@@ -313,6 +439,7 @@ class TestRelocationVerification:
         mock_client.pause_torrent.return_value = True
         mock_client.set_location.return_value = True
         mock_client.resume_torrent.return_value = True
+        mock_client.set_auto_management.return_value = True
 
         # Mock get_torrent_info to return WRONG location
         wrong_location_torrent = QBitTorrent(
@@ -324,7 +451,8 @@ class TestRelocationVerification:
             tags="",
             state="uploading",
             size=1000000,
-            progress=1.0
+            progress=1.0,
+            auto_tmm=False,
         )
         mock_client.get_torrent_info.return_value = wrong_location_torrent
 
@@ -333,6 +461,290 @@ class TestRelocationVerification:
         # Try to relocate - should fail verification
         with pytest.raises(RuntimeError, match="location verification failed"):
             executor._relocate_torrent('verify_test', '/pool/torrents/content')
+
+    def test_relocation_disables_auto_management_before_move(self, tmp_path):
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        mock_client = Mock()
+        mock_client.pause_torrent.return_value = True
+        mock_client.set_location.return_value = True
+        mock_client.resume_torrent.return_value = True
+        mock_client.set_auto_management.return_value = True
+        mock_client.get_torrent_info.side_effect = [
+            QBitTorrent(
+                hash="atm_test",
+                name="Test",
+                save_path="/stash/torrents/seeding",
+                content_path="/stash/torrents/seeding/Test",
+                category="tv",
+                tags="",
+                state="uploading",
+                size=100,
+                progress=1.0,
+                auto_tmm=True,
+            ),
+            QBitTorrent(
+                hash="atm_test",
+                name="Test",
+                save_path="/pool/torrents/content",
+                content_path="/pool/torrents/content/Test",
+                category="tv",
+                tags="",
+                state="uploading",
+                size=100,
+                progress=1.0,
+                auto_tmm=False,
+            ),
+        ]
+        executor.qbit_client = mock_client
+
+        executor._relocate_torrent("atm_test", "/pool/torrents/content")
+
+        mock_client.set_auto_management.assert_called_once_with("atm_test", False)
+
+
+class TestSingleFileVerification:
+    """Ensure MOVE preflight works for single-file payload roots."""
+
+    def test_verify_helpers_handle_single_file_paths(self, tmp_path):
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        file_path = tmp_path / "single-file.epub"
+        payload_bytes = b"hello-world"
+        file_path.write_bytes(payload_bytes)
+
+        assert executor._verify_file_count(file_path, 1) is True
+        assert executor._verify_total_bytes(file_path, len(payload_bytes)) is True
+        assert executor._verify_file_count(file_path, 2) is False
+        assert executor._verify_total_bytes(file_path, len(payload_bytes) + 1) is False
+
+
+class TestQBittorrentTagOps:
+    """Test qBittorrent tag helper API calls."""
+
+    def test_add_tags_calls_api(self):
+        mock_session = Mock()
+        ok = Mock()
+        ok.raise_for_status = Mock()
+        mock_session.post.return_value = ok
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.add_tags("abc123", ["rehome", "rehome_to_pool", "rehome"]) is True
+        assert mock_session.post.call_count == 1
+        args, kwargs = mock_session.post.call_args
+        assert args[0].endswith("/api/v2/torrents/addTags")
+        assert kwargs["data"]["hashes"] == "abc123"
+        assert kwargs["data"]["tags"] == "rehome,rehome_to_pool"
+
+    def test_remove_tags_calls_api(self):
+        mock_session = Mock()
+        ok = Mock()
+        ok.raise_for_status = Mock()
+        mock_session.post.return_value = ok
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        assert client.remove_tags("abc123", ["rehome_at_20260211", "rehome_from_stash"]) is True
+        assert mock_session.post.call_count == 1
+        args, kwargs = mock_session.post.call_args
+        assert args[0].endswith("/api/v2/torrents/removeTags")
+        assert kwargs["data"]["hashes"] == "abc123"
+        assert kwargs["data"]["tags"] == "rehome_at_20260211,rehome_from_stash"
+
+
+class TestRehomeTagging:
+    """Test automatic provenance tag updates after rehome."""
+
+    def test_apply_rehome_provenance_tags_demote(self, tmp_path, monkeypatch):
+        import rehome.executor as executor_module
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls):
+                from datetime import datetime as _dt
+                return _dt(2026, 2, 12, 10, 0, 0)
+
+        monkeypatch.setattr(executor_module, "datetime", FakeDateTime)
+
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        old_tags = "keep,rehome_from_pool,rehome_to_stash,rehome_at_20260210"
+        mock_info = QBitTorrent(
+            hash="torrent_tagged",
+            name="Tagged Torrent",
+            save_path="/stash/torrents/seeding",
+            content_path="/stash/torrents/seeding/Tagged Torrent",
+            category="",
+            tags=old_tags,
+            state="stalledUP",
+            size=100,
+            progress=1.0,
+        )
+
+        mock_client = Mock()
+        mock_client.get_torrent_info.return_value = mock_info
+        mock_client.remove_tags.return_value = True
+        mock_client.add_tags.return_value = True
+        executor.qbit_client = mock_client
+
+        plan = {
+            "direction": "demote",
+            "affected_torrents": ["torrent_tagged"],
+        }
+
+        executor._apply_rehome_provenance_tags(plan)
+
+        mock_client.remove_tags.assert_called_once_with(
+            "torrent_tagged",
+            ["rehome_from_pool", "rehome_to_stash", "rehome_at_20260210"],
+        )
+        mock_client.add_tags.assert_called_once_with(
+            "torrent_tagged",
+            ["rehome", "rehome_from_stash", "rehome_to_pool", "rehome_at_20260212", "rehome_verify_pending"],
+        )
+
+    def test_apply_rehome_provenance_tags_cleanup_deferred(self, tmp_path, monkeypatch):
+        import rehome.executor as executor_module
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls):
+                from datetime import datetime as _dt
+                return _dt(2026, 2, 12, 10, 0, 0)
+
+        monkeypatch.setattr(executor_module, "datetime", FakeDateTime)
+
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        old_tags = "keep,rehome_cleanup_source_required,rehome_at_20260210"
+        mock_info = QBitTorrent(
+            hash="torrent_cleanup",
+            name="Cleanup Torrent",
+            save_path="/stash/torrents/seeding",
+            content_path="/stash/torrents/seeding/Cleanup Torrent",
+            category="",
+            tags=old_tags,
+            state="stalledUP",
+            size=100,
+            progress=1.0,
+        )
+
+        mock_client = Mock()
+        mock_client.get_torrent_info.return_value = mock_info
+        mock_client.remove_tags.return_value = True
+        mock_client.add_tags.return_value = True
+        executor.qbit_client = mock_client
+
+        plan = {
+            "direction": "demote",
+            "affected_torrents": ["torrent_cleanup"],
+            "cleanup_source_deferred": True,
+        }
+
+        executor._apply_rehome_provenance_tags(plan)
+
+        mock_client.remove_tags.assert_called_once_with(
+            "torrent_cleanup",
+            ["rehome_cleanup_source_required", "rehome_at_20260210"],
+        )
+        mock_client.add_tags.assert_called_once_with(
+            "torrent_cleanup",
+            [
+                "rehome",
+                "rehome_from_stash",
+                "rehome_to_pool",
+                "rehome_at_20260212",
+                "rehome_verify_pending",
+                "rehome_cleanup_source_required",
+            ],
+        )
+
+    def test_apply_rehome_provenance_tags_promote(self, tmp_path, monkeypatch):
+        import rehome.executor as executor_module
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls):
+                from datetime import datetime as _dt
+                return _dt(2026, 2, 12, 10, 0, 0)
+
+        monkeypatch.setattr(executor_module, "datetime", FakeDateTime)
+
+        db_path = TestDatabase.create_test_db(tmp_path)
+        executor = DemotionExecutor(catalog_path=db_path)
+
+        mock_info = QBitTorrent(
+            hash="torrent_promote",
+            name="Promote Torrent",
+            save_path="/pool/data/cross-seed",
+            content_path="/pool/data/cross-seed/Promote Torrent",
+            category="",
+            tags="seed",
+            state="stalledUP",
+            size=100,
+            progress=1.0,
+        )
+
+        mock_client = Mock()
+        mock_client.get_torrent_info.return_value = mock_info
+        mock_client.remove_tags.return_value = True
+        mock_client.add_tags.return_value = True
+        executor.qbit_client = mock_client
+
+        plan = {
+            "direction": "promote",
+            "affected_torrents": ["torrent_promote"],
+        }
+
+        executor._apply_rehome_provenance_tags(plan)
+
+        mock_client.remove_tags.assert_not_called()
+        mock_client.add_tags.assert_called_once_with(
+            "torrent_promote",
+            ["rehome", "rehome_from_pool", "rehome_to_stash", "rehome_at_20260212", "rehome_verify_pending"],
+        )
+
+
+def test_apply_rehome_provenance_tags_strict_mode_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("HASHALL_REHOME_TAG_STRICT", "1")
+
+    db_path = TestDatabase.create_test_db(tmp_path)
+    executor = DemotionExecutor(catalog_path=db_path)
+
+    mock_info = QBitTorrent(
+        hash="torrent_strict",
+        name="Strict Torrent",
+        save_path="/stash/torrents/seeding",
+        content_path="/stash/torrents/seeding/Strict Torrent",
+        category="",
+        tags="seed",
+        state="stalledUP",
+        size=100,
+        progress=1.0,
+    )
+
+    mock_client = Mock()
+    mock_client.get_torrent_info.return_value = mock_info
+    mock_client.add_tags.return_value = False
+    mock_client.remove_tags.return_value = True
+    executor.qbit_client = mock_client
+
+    with pytest.raises(RuntimeError, match="strict mode"):
+        executor._apply_rehome_provenance_tags(
+            {
+                "direction": "demote",
+                "affected_torrents": ["torrent_strict"],
+            }
+        )
 
 
 if __name__ == "__main__":

@@ -21,6 +21,12 @@ from dataclasses import dataclass
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.scan import compute_full_hashes
 
+ORPHAN_GC_MIN_SEEN_RUNS = 2
+ORPHAN_GC_MIN_AGE_SECONDS = 24 * 60 * 60
+ORPHAN_GC_SPIKE_MIN_TOTAL = 1000
+ORPHAN_GC_MAX_PRUNE_COUNT = 1000
+ORPHAN_GC_MAX_PRUNE_FRACTION = 0.25
+
 
 def _get_mount_info(conn: sqlite3.Connection, device_id: int):
     mount_point = None
@@ -38,9 +44,15 @@ def _get_mount_info(conn: sqlite3.Connection, device_id: int):
     return mount_point, preferred_mount
 
 
-def _resolve_rel_root(root_path: str, mount_point: Optional[Path], preferred_mount: Optional[Path]):
+def _resolve_rel_root(
+    root_path: str,
+    mount_point: Optional[Path],
+    preferred_mount: Optional[Path],
+    *,
+    already_canonical: bool = False,
+):
     root = Path(root_path)
-    if root.is_absolute():
+    if root.is_absolute() and not already_canonical:
         root = canonicalize_path(root)
 
     if mount_point:
@@ -53,7 +65,7 @@ def _resolve_rel_root(root_path: str, mount_point: Optional[Path], preferred_mou
 
             # Handle alternate mount targets for the same filesystem, e.g.
             # /data/media/... (qBittorrent) vs /stash/media/... (preferred mount).
-            if rel_root is None:
+            if rel_root is None and not already_canonical:
                 for base in (preferred_mount, mount_point):
                     if base is None:
                         continue
@@ -184,7 +196,13 @@ def compute_payload_fast_signature(files: List[PayloadFastFile]) -> Optional[str
     return hasher.hexdigest()
 
 
-def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> List[PayloadFile]:
+def get_files_for_path(
+    conn: sqlite3.Connection,
+    device_id: int,
+    root_path: str,
+    *,
+    already_canonical: bool = False,
+) -> List[PayloadFile]:
     """
     Get all files under a given root path from the per-device table.
 
@@ -224,7 +242,12 @@ def get_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str)
     if _table_exists("devices"):
         mount_point, preferred_mount = _get_mount_info(conn, device_id)
 
-    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    rel_root, _ = _resolve_rel_root(
+        root_path,
+        mount_point,
+        preferred_mount,
+        already_canonical=already_canonical,
+    )
     if rel_root is None:
         return []
     rel_root_str = str(rel_root)
@@ -374,6 +397,272 @@ def count_missing_sha256_for_path(conn: sqlite3.Connection, device_id: int, root
     ).fetchone()[0]
 
 
+def count_active_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> int:
+    """
+    Count active files under root_path in the per-device files table.
+
+    Uses the same path resolution logic as build_payload/get_files_for_path.
+    """
+    if device_id is None:
+        return 0
+
+    table_name = f"files_{device_id}"
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if not cursor.fetchone():
+        return 0
+
+    mount_point, preferred_mount = _get_mount_info(conn, device_id)
+    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return 0
+    rel_root_str = str(rel_root)
+
+    if rel_root_str == ".":
+        return conn.execute(
+            f"SELECT COUNT(*) FROM {table_name} WHERE status='active'"
+        ).fetchone()[0]
+
+    pattern = f"{rel_root_str}/%"
+    return conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table_name}
+        WHERE status='active'
+          AND (path = ? OR path LIKE ?)
+        """,
+        (rel_root_str, pattern),
+    ).fetchone()[0]
+
+
+def _ensure_payload_orphan_gc_table(conn: sqlite3.Connection) -> None:
+    """Ensure staged orphan-GC metadata table exists."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payload_orphan_gc (
+            payload_id INTEGER PRIMARY KEY,
+            first_seen_at REAL NOT NULL,
+            last_seen_at REAL NOT NULL,
+            seen_count INTEGER NOT NULL DEFAULT 1,
+            last_root_path TEXT,
+            last_device_id INTEGER,
+            FOREIGN KEY (payload_id) REFERENCES payloads(payload_id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_payload_orphan_gc_last_seen
+        ON payload_orphan_gc(last_seen_at)
+        """
+    )
+
+
+def _is_mount_alias_ambiguous(conn: sqlite3.Connection, device_id: Optional[int], root_path: str) -> bool:
+    """
+    Return True when a root path has active catalog files only under a mount alias.
+
+    This prevents pruning when a payload path might still exist under an alternate
+    mount point (for example /data/media vs /stash/media on the same dataset).
+    """
+    if device_id is None:
+        return False
+
+    mount_point, preferred_mount = _get_mount_info(conn, device_id)
+    if not mount_point or not preferred_mount or mount_point == preferred_mount:
+        return False
+
+    root = Path(root_path)
+    remap_pairs = (
+        (mount_point, preferred_mount),
+        (preferred_mount, mount_point),
+    )
+    for source_base, target_base in remap_pairs:
+        try:
+            rel = root.relative_to(source_base)
+        except ValueError:
+            continue
+        alias_root = str(target_base / rel)
+        if alias_root == root_path:
+            continue
+        if count_active_files_for_path(conn, device_id, alias_root) > 0:
+            return True
+    return False
+
+
+def prune_orphan_payloads(
+    conn: sqlite3.Connection,
+    roots: Optional[List[str]] = None,
+    sample_limit: int = 5,
+) -> Dict[str, object]:
+    """
+    Two-phase orphan payload GC:
+    - Phase 1: mark candidate orphans
+    - Phase 2: prune only aged candidates (seen repeatedly + past grace window)
+
+    A payload is considered orphaned when:
+    - It has no torrent_instances reference, AND
+    - It has no active files in the files_{device_id} catalog.
+    """
+    _ensure_payload_orphan_gc_table(conn)
+
+    now = time.time()
+    params: List[object] = []
+    scope_sql = ""
+    if roots:
+        predicates = []
+        for root in roots:
+            root_s = str(root)
+            predicates.append("(p.root_path = ? OR p.root_path LIKE ?)")
+            params.extend([root_s, f"{root_s.rstrip('/')}/%"])
+        scope_sql = f" AND ({' OR '.join(predicates)})"
+
+    candidates = conn.execute(
+        f"""
+        SELECT p.payload_id, p.device_id, p.root_path
+        FROM payloads p
+        LEFT JOIN (
+            SELECT payload_id, COUNT(*) AS ref_count
+            FROM torrent_instances
+            GROUP BY payload_id
+        ) ti ON ti.payload_id = p.payload_id
+        WHERE COALESCE(ti.ref_count, 0) = 0
+        {scope_sql}
+        ORDER BY p.payload_id
+        """,
+        params,
+    ).fetchall()
+
+    total_payloads = conn.execute(
+        f"SELECT COUNT(*) FROM payloads p WHERE 1=1 {scope_sql}",
+        params,
+    ).fetchone()[0]
+
+    existing_gc = {
+        int(row[0]): (float(row[1]), int(row[2]))
+        for row in conn.execute(
+            "SELECT payload_id, first_seen_at, seen_count FROM payload_orphan_gc"
+        ).fetchall()
+    }
+
+    aged_prunable_ids: List[int] = []
+    pruned_samples: List[str] = []
+    candidate_samples: List[str] = []
+    new_candidates = 0
+    kept_with_files = 0
+    kept_alias_ambiguous = 0
+    tracked_candidates = 0
+
+    for row in candidates:
+        payload_id = int(row[0])
+        device_id = row[1]
+        root_path = row[2]
+        active_count = count_active_files_for_path(conn, device_id, root_path)
+        if active_count > 0:
+            kept_with_files += 1
+            conn.execute("DELETE FROM payload_orphan_gc WHERE payload_id = ?", (payload_id,))
+            continue
+
+        if _is_mount_alias_ambiguous(conn, device_id, root_path):
+            kept_alias_ambiguous += 1
+            conn.execute("DELETE FROM payload_orphan_gc WHERE payload_id = ?", (payload_id,))
+            continue
+
+        tracked_candidates += 1
+        if len(candidate_samples) < sample_limit:
+            candidate_samples.append(root_path)
+
+        prior = existing_gc.get(payload_id)
+        if prior is None:
+            new_candidates += 1
+            seen_count = 1
+            first_seen_at = now
+            conn.execute(
+                """
+                INSERT INTO payload_orphan_gc (
+                    payload_id, first_seen_at, last_seen_at, seen_count, last_root_path, last_device_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(payload_id) DO UPDATE SET
+                    first_seen_at = excluded.first_seen_at,
+                    last_seen_at = excluded.last_seen_at,
+                    seen_count = excluded.seen_count,
+                    last_root_path = excluded.last_root_path,
+                    last_device_id = excluded.last_device_id
+                """,
+                (payload_id, first_seen_at, now, seen_count, root_path, device_id),
+            )
+        else:
+            first_seen_at, previous_seen_count = prior
+            seen_count = previous_seen_count + 1
+            conn.execute(
+                """
+                UPDATE payload_orphan_gc
+                SET last_seen_at = ?, seen_count = ?, last_root_path = ?, last_device_id = ?
+                WHERE payload_id = ?
+                """,
+                (now, seen_count, root_path, device_id, payload_id),
+            )
+
+        age_seconds = now - first_seen_at
+        if seen_count >= ORPHAN_GC_MIN_SEEN_RUNS and age_seconds >= ORPHAN_GC_MIN_AGE_SECONDS:
+            aged_prunable_ids.append(payload_id)
+            if len(pruned_samples) < sample_limit:
+                pruned_samples.append(root_path)
+
+    # Drop GC markers for payloads that no longer exist.
+    conn.execute(
+        "DELETE FROM payload_orphan_gc WHERE payload_id NOT IN (SELECT payload_id FROM payloads)"
+    )
+
+    block_reason: Optional[str] = None
+    if aged_prunable_ids and total_payloads >= ORPHAN_GC_SPIKE_MIN_TOTAL:
+        prune_fraction = len(aged_prunable_ids) / total_payloads
+        if len(aged_prunable_ids) > ORPHAN_GC_MAX_PRUNE_COUNT:
+            block_reason = (
+                f"candidate_count_exceeds_limit ({len(aged_prunable_ids)}>{ORPHAN_GC_MAX_PRUNE_COUNT})"
+            )
+        elif prune_fraction > ORPHAN_GC_MAX_PRUNE_FRACTION:
+            block_reason = (
+                f"candidate_fraction_exceeds_limit ({prune_fraction:.3f}>{ORPHAN_GC_MAX_PRUNE_FRACTION:.3f})"
+            )
+
+    pruned_ids: List[int] = []
+    if aged_prunable_ids and block_reason is None:
+        pruned_ids = list(aged_prunable_ids)
+        conn.executemany(
+            "DELETE FROM payloads WHERE payload_id = ?",
+            [(pid,) for pid in pruned_ids],
+        )
+        conn.executemany(
+            "DELETE FROM payload_orphan_gc WHERE payload_id = ?",
+            [(pid,) for pid in pruned_ids],
+        )
+
+    conn.commit()
+
+    return {
+        "candidates": len(candidates),
+        "tracked_candidates": tracked_candidates,
+        "new_candidates": new_candidates,
+        "aged_candidates": len(aged_prunable_ids),
+        "pruned": len(pruned_ids),
+        "kept_with_files": kept_with_files,
+        "kept_alias_ambiguous": kept_alias_ambiguous,
+        "samples": pruned_samples,
+        "candidate_samples": candidate_samples,
+        "block_reason": block_reason,
+        "total_payloads": total_payloads,
+        "min_seen_runs": ORPHAN_GC_MIN_SEEN_RUNS,
+        "min_age_seconds": ORPHAN_GC_MIN_AGE_SECONDS,
+        "max_prune_count": ORPHAN_GC_MAX_PRUNE_COUNT,
+        "max_prune_fraction": ORPHAN_GC_MAX_PRUNE_FRACTION,
+        "spike_min_total": ORPHAN_GC_SPIKE_MIN_TOTAL,
+    }
+
+
 def get_payload_file_rows(
     conn: sqlite3.Connection,
     root_path: str,
@@ -447,8 +736,13 @@ def get_payload_file_rows(
     return results
 
 
-def build_payload(conn: sqlite3.Connection, root_path: str,
-                 device_id: Optional[int] = None) -> Payload:
+def build_payload(
+    conn: sqlite3.Connection,
+    root_path: str,
+    device_id: Optional[int] = None,
+    *,
+    already_canonical: bool = False,
+) -> Payload:
     """
     Build or update payload for a given root path.
 
@@ -462,7 +756,7 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
     """
     # Canonicalize root path for consistent device resolution
     root = Path(root_path)
-    if root.is_absolute():
+    if root.is_absolute() and not already_canonical:
         root = canonicalize_path(root)
 
     # Derive device_id from root_path if not provided
@@ -484,23 +778,24 @@ def build_payload(conn: sqlite3.Connection, root_path: str,
 
     # Normalize to preferred mount point when the same filesystem is mounted at
     # multiple targets (ZFS alternate mount points, etc).
-    try:
-        if conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
-        ).fetchone():
-            mount_point, preferred_mount = _get_mount_info(conn, device_id)
-            for base in (preferred_mount, mount_point):
-                if base is None:
-                    continue
-                remapped = remap_to_mount_alias(root, base)
-                if remapped is not None:
-                    root = remapped
-                    break
-    except Exception:
-        pass
+    if not already_canonical:
+        try:
+            if conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+            ).fetchone():
+                mount_point, preferred_mount = _get_mount_info(conn, device_id)
+                for base in (preferred_mount, mount_point):
+                    if base is None:
+                        continue
+                    remapped = remap_to_mount_alias(root, base)
+                    if remapped is not None:
+                        root = remapped
+                        break
+        except Exception:
+            pass
 
     # Get files from device-specific table
-    files = get_files_for_path(conn, device_id, str(root))
+    files = get_files_for_path(conn, device_id, str(root), already_canonical=already_canonical)
 
     if not files:
         return Payload(
@@ -664,7 +959,7 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
     return upgraded
 
 
-def upsert_payload(conn: sqlite3.Connection, payload: Payload) -> int:
+def upsert_payload(conn: sqlite3.Connection, payload: Payload, *, commit: bool = True) -> int:
     """
     Insert or update a payload in the database.
 
@@ -715,11 +1010,12 @@ def upsert_payload(conn: sqlite3.Connection, payload: Payload) -> int:
         ))
         payload_id = cursor.lastrowid
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return payload_id
 
 
-def upsert_torrent_instance(conn: sqlite3.Connection, torrent: TorrentInstance) -> None:
+def upsert_torrent_instance(conn: sqlite3.Connection, torrent: TorrentInstance, *, commit: bool = True) -> None:
     """
     Insert or update a torrent instance in the database.
 
@@ -737,7 +1033,8 @@ def upsert_torrent_instance(conn: sqlite3.Connection, torrent: TorrentInstance) 
         torrent.save_path, torrent.root_name, torrent.category,
         torrent.tags, torrent.last_seen_at
     ))
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_payload_by_id(conn: sqlite3.Connection, payload_id: int) -> Optional[Payload]:

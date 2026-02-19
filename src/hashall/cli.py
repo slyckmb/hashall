@@ -10,6 +10,7 @@ import sys
 import shutil
 import subprocess
 import grp
+import json
 from pathlib import Path
 from hashall.scan import scan_path
 from hashall.export import export_json
@@ -195,9 +196,14 @@ def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag,
         _apply_low_priority()
     # Use flag if provided, otherwise use hash_mode
     mode = hash_mode_flag if hash_mode_flag else hash_mode
-    scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
-              workers=workers, batch_size=batch_size, hash_mode=mode,
-              show_current_path=show_path, scan_nested_datasets=scan_nested_datasets)
+    stats = scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
+                      workers=workers, batch_size=batch_size, hash_mode=mode,
+                      show_current_path=show_path, scan_nested_datasets=scan_nested_datasets)
+    if getattr(stats, "safety_guard_triggered", False):
+        raise click.ClickException(
+            "Scan safety guard blocked deletion due path-resolution errors; "
+            "catalog was preserved."
+        )
 
 @cli.command("export")
 @click.argument("db_path", type=click.Path(exists=True, dir_okay=False))
@@ -279,7 +285,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     from hashall.qbittorrent import get_qbittorrent_client
     from hashall.payload import (
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
-        upgrade_payload_missing_sha256
+        upgrade_payload_missing_sha256, prune_orphan_payloads,
     )
     from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
 
@@ -372,6 +378,10 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     missing_in_catalog = 0
     skipped_prefix = 0
     processed = 0
+    prune_stats = None
+    root_path_from_content_path = 0
+    write_batch_ops = 0
+    write_batch_threshold = 400
 
     with TwoLineProgress(
         total=len(torrents),
@@ -385,6 +395,8 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
 
             # Get torrent root path
             root_path = qbit.get_torrent_root_path(torrent)
+            if torrent.content_path:
+                root_path_from_content_path += 1
             root_canon = _canonicalize_payload_root_path(root_path)
 
             if prefix_paths:
@@ -400,19 +412,18 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             if str(root_canon) != root_path:
                 print(f"   Canonical: {root_canon}")
 
-            # Build payload from database
-            payload = build_payload(conn, str(root_canon), device_id=None)
+            payload = build_payload(conn, str(root_canon), device_id=None, already_canonical=True)
             if payload.file_count == 0:
                 missing_in_catalog += 1
 
             if (not dry_run) and payload.status != 'complete' and upgrade_missing:
                 upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id, parallel=parallel, workers=workers)
                 if upgraded > 0:
-                    payload = build_payload(conn, root_path, device_id=payload.device_id)
+                    payload = build_payload(conn, str(root_canon), device_id=payload.device_id, already_canonical=True)
 
             if not dry_run:
                 # Insert/update payload
-                payload_id = upsert_payload(conn, payload)
+                payload_id = upsert_payload(conn, payload, commit=False)
 
                 # Insert/update torrent instance
                 torrent_instance = TorrentInstance(
@@ -425,7 +436,11 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                     tags=torrent.tags,
                     last_seen_at=time.time()
                 )
-                upsert_torrent_instance(conn, torrent_instance)
+                upsert_torrent_instance(conn, torrent_instance, commit=False)
+                write_batch_ops += 2
+                if write_batch_ops >= write_batch_threshold:
+                    conn.commit()
+                    write_batch_ops = 0
 
             if payload.status == 'complete':
                 print(f"   ✅ Payload complete (hash: {payload.payload_hash[:16]}...)")
@@ -437,6 +452,13 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             processed += 1
             progress.update(advance=1)
 
+    if not dry_run and write_batch_ops:
+        conn.commit()
+
+    if (not dry_run) and limit == 0:
+        prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
+        prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
+
     if dry_run:
         print(f"\n✅ DRY-RUN complete (no DB changes)")
     else:
@@ -447,6 +469,502 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     print(f"   complete payloads: {synced_count}")
     print(f"   incomplete payloads: {incomplete_count}")
     print(f"   missing in catalog: {missing_in_catalog}")
+    print(
+        "   root path source: "
+        f"content_path={root_path_from_content_path}, "
+        f"files_api_fallback={getattr(qbit, 'root_path_files_fallback_calls', 0)}"
+    )
+    if prune_stats is not None:
+        print(
+            "   orphan gc candidates: "
+            f"{prune_stats['tracked_candidates']} "
+            f"(new={prune_stats['new_candidates']}, aged={prune_stats['aged_candidates']})"
+        )
+        print(f"   orphan payloads pruned: {prune_stats['pruned']}")
+        if prune_stats["kept_alias_ambiguous"] > 0:
+            print(f"   orphan prune skipped (alias-ambiguous): {prune_stats['kept_alias_ambiguous']}")
+        if prune_stats["block_reason"]:
+            print(f"   orphan prune blocked: {prune_stats['block_reason']}")
+        if prune_stats["samples"]:
+            print(f"   pruned samples: {', '.join(prune_stats['samples'])}")
+    elif (not dry_run) and limit > 0:
+        print("   orphan payload prune: skipped (limit applied)")
+
+
+def _payload_table_has_column(conn, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(row[1] == column_name for row in rows)
+
+
+def _payload_root_relpath_for_device(root_path: str, mount_point: str | None, preferred_mount: str | None) -> str | None:
+    if not Path(root_path).is_absolute():
+        return root_path
+
+    for base in (preferred_mount, mount_point):
+        if not base:
+            continue
+        if root_path == base:
+            return "."
+        prefix = base.rstrip("/") + "/"
+        if root_path.startswith(prefix):
+            return root_path[len(prefix):]
+
+    return None
+
+
+def _batch_count_active_payload_roots(conn, keys: list[tuple[int, str]]) -> dict[tuple[int, str], int]:
+    """Batch count active files under payload roots for unmanaged inventory."""
+    if not keys:
+        return {}
+
+    out: dict[tuple[int, str], int] = {(device_id, root_path): 0 for device_id, root_path in keys}
+
+    has_devices = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    device_mounts: dict[int, tuple[str | None, str | None]] = {}
+    if has_devices:
+        for row in conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall():
+            did = int(row[0])
+            mount_point = row[1]
+            preferred_mount = row[2] or row[1]
+            device_mounts[did] = (mount_point, preferred_mount)
+
+    by_device: dict[int, list[str]] = {}
+    for device_id, root_path in keys:
+        by_device.setdefault(int(device_id), []).append(root_path)
+
+    for device_id, root_paths in by_device.items():
+        table_name = f"files_{device_id}"
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone():
+            continue
+
+        status_clause = "f.status='active' AND " if _payload_table_has_column(conn, table_name, "status") else ""
+        mount_point, preferred_mount = device_mounts.get(device_id, (None, None))
+
+        rel_to_roots: dict[str, list[str]] = {}
+        all_roots: list[str] = []
+        for root_path in root_paths:
+            rel_root = _payload_root_relpath_for_device(root_path, mount_point, preferred_mount)
+            if rel_root is None:
+                continue
+            if rel_root == ".":
+                all_roots.append(root_path)
+            else:
+                rel_to_roots.setdefault(rel_root, []).append(root_path)
+
+        if all_roots:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {table_name} f WHERE {status_clause}1=1"
+            ).fetchone()
+            count_all = int(row[0] or 0)
+            for root_path in all_roots:
+                out[(device_id, root_path)] = count_all
+
+        if rel_to_roots:
+            rel_root_counts: dict[str, int] = {rel_root: 0 for rel_root in rel_to_roots.keys()}
+            rel_root_lookup = set(rel_root_counts.keys())
+            path_rows = conn.execute(
+                f"SELECT path FROM {table_name} f WHERE {status_clause}1=1"
+            ).fetchall()
+
+            for row in path_rows:
+                file_path = row[0]
+                if not file_path:
+                    continue
+
+                if file_path in rel_root_lookup:
+                    rel_root_counts[file_path] += 1
+
+                idx = 0
+                while True:
+                    idx = file_path.find("/", idx)
+                    if idx <= 0:
+                        break
+                    prefix = file_path[:idx]
+                    if prefix in rel_root_lookup:
+                        rel_root_counts[prefix] += 1
+                    idx += 1
+
+            for rel_root, count in rel_root_counts.items():
+                for root_path in rel_to_roots.get(rel_root, []):
+                    out[(device_id, root_path)] = int(count or 0)
+
+    return out
+
+
+@payload.command("unmanaged")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--path-prefix",
+    "path_prefixes",
+    multiple=True,
+    help="Only include payload roots under this path (repeatable).",
+)
+@click.option(
+    "--samples",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Number of sample roots to print per bucket.",
+)
+def payload_unmanaged_cmd(db, path_prefixes, samples):
+    """
+    List payload rows that have no active torrent reference.
+
+    Buckets:
+    - true orphan: no torrent refs and no active catalog files under root
+    - alias artifact: no torrent refs but active catalog files still exist under root
+    """
+    from hashall.model import connect_db
+    from hashall.pathing import canonicalize_path
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+
+    def _is_under_fast(path_str: str, prefix_str: str) -> bool:
+        return path_str == prefix_str or path_str.startswith(prefix_str.rstrip("/") + "/")
+
+    def _remap_mount(path_str: str, source_mount: str | None, target_mount: str | None) -> str | None:
+        if not source_mount or not target_mount:
+            return None
+        if path_str == source_mount:
+            return target_mount
+        source_prefix = source_mount.rstrip("/") + "/"
+        if path_str.startswith(source_prefix):
+            suffix = path_str[len(source_prefix):]
+            return target_mount.rstrip("/") + "/" + suffix
+        return None
+
+    prefix_strings = []
+    prefix_paths_canon = []
+    for p in path_prefixes:
+        try:
+            canon = canonicalize_path(Path(p))
+            prefix_paths_canon.append(canon)
+            prefix_strings.append(str(canon))
+        except Exception:
+            raw = Path(p)
+            prefix_paths_canon.append(raw)
+            prefix_strings.append(str(raw))
+
+    device_mounts: dict[int, tuple[str | None, str | None]] = {}
+    has_devices = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    if has_devices:
+        for dev_row in conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall():
+            did = int(dev_row[0])
+            mount_point = dev_row[1]
+            preferred_mount = dev_row[2] or dev_row[1]
+            device_mounts[did] = (mount_point, preferred_mount)
+
+    rows = conn.execute(
+        """
+        SELECT p.payload_id, p.device_id, p.root_path, p.status, p.file_count, p.total_bytes
+        FROM payloads p
+        LEFT JOIN (
+            SELECT payload_id, COUNT(*) AS ref_count
+            FROM torrent_instances
+            GROUP BY payload_id
+        ) ti ON ti.payload_id = p.payload_id
+        WHERE COALESCE(ti.ref_count, 0) = 0
+        ORDER BY p.root_path
+        """
+    ).fetchall()
+
+    skipped_prefix = 0
+    filtered_rows = []
+    for row in rows:
+        root_path = row["root_path"]
+
+        if prefix_strings:
+            in_scope = any(_is_under_fast(root_path, pref) for pref in prefix_strings)
+
+            if not in_scope and row["device_id"] is not None:
+                mount_point, preferred_mount = device_mounts.get(int(row["device_id"]), (None, None))
+                remapped = _remap_mount(root_path, mount_point, preferred_mount)
+                if remapped is None:
+                    remapped = _remap_mount(root_path, preferred_mount, mount_point)
+                if remapped:
+                    in_scope = any(_is_under_fast(remapped, pref) for pref in prefix_strings)
+
+            if not in_scope:
+                # Last-resort canonicalization for odd path cases.
+                try:
+                    root_canon = canonicalize_path(Path(root_path))
+                    in_scope = any(
+                        _is_under_fast(str(root_canon), str(pref_path))
+                        for pref_path in prefix_paths_canon
+                    )
+                except Exception:
+                    in_scope = False
+
+            if not in_scope:
+                skipped_prefix += 1
+                continue
+
+        filtered_rows.append(row)
+
+    active_count_keys = [
+        (int(row["device_id"]), row["root_path"])
+        for row in filtered_rows
+        if row["device_id"] is not None and int(row["file_count"] or 0) == 0
+    ]
+    live_counts = _batch_count_active_payload_roots(conn, active_count_keys)
+
+    total = len(filtered_rows)
+    true_orphan = 0
+    alias_artifact = 0
+    true_samples = []
+    alias_samples = []
+
+    for row in filtered_rows:
+        root_path = row["root_path"]
+        device_id = row["device_id"]
+        live_count = int(row["file_count"] or 0)
+        if live_count == 0 and device_id is not None:
+            live_count = live_counts.get((int(device_id), root_path), 0)
+
+        if live_count > 0:
+            alias_artifact += 1
+            if len(alias_samples) < samples:
+                alias_samples.append(root_path)
+        else:
+            true_orphan += 1
+            if len(true_samples) < samples:
+                true_samples.append(root_path)
+
+    print("🔎 Unmanaged payload inventory")
+    print(f"   unmanaged payloads: {total}")
+    if prefix_strings:
+        print(f"   skipped (path-prefix): {skipped_prefix}")
+    print(f"   true orphans (no refs + no active files): {true_orphan}")
+    print(f"   alias artifacts (no refs + active files): {alias_artifact}")
+
+    if true_samples:
+        print(f"   true orphan samples: {', '.join(true_samples)}")
+    if alias_samples:
+        print(f"   alias artifact samples: {', '.join(alias_samples)}")
+
+    conn.close()
+
+
+@payload.command("orphan-audit")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--path-prefix",
+    "path_prefixes",
+    multiple=True,
+    help="Only include payload roots under this path (repeatable).",
+)
+@click.option(
+    "--samples",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Number of sample roots to print per bucket.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON summary.")
+def payload_orphan_audit_cmd(db, path_prefixes, samples, json_output):
+    """Audit orphan payload state without deleting anything."""
+    from hashall.model import connect_db
+    from hashall.pathing import canonicalize_path
+    from hashall.payload import ORPHAN_GC_MIN_SEEN_RUNS, ORPHAN_GC_MIN_AGE_SECONDS
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+
+    def _is_under_fast(path_str, prefix_str):
+        return path_str == prefix_str or path_str.startswith(prefix_str.rstrip("/") + "/")
+
+    def _remap_mount(path_str, source_mount, target_mount):
+        if not source_mount or not target_mount:
+            return None
+        if path_str == source_mount:
+            return target_mount
+        source_prefix = source_mount.rstrip("/") + "/"
+        if path_str.startswith(source_prefix):
+            suffix = path_str[len(source_prefix):]
+            return target_mount.rstrip("/") + "/" + suffix
+        return None
+
+    prefix_strings = []
+    prefix_paths_canon = []
+    for p in path_prefixes:
+        try:
+            canon = canonicalize_path(Path(p))
+            prefix_paths_canon.append(canon)
+            prefix_strings.append(str(canon))
+        except Exception:
+            raw = Path(p)
+            prefix_paths_canon.append(raw)
+            prefix_strings.append(str(raw))
+
+    device_mounts = {}
+    has_devices = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    if has_devices:
+        for dev_row in conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall():
+            did = int(dev_row[0])
+            mount_point = dev_row[1]
+            preferred_mount = dev_row[2] or dev_row[1]
+            device_mounts[did] = (mount_point, preferred_mount)
+
+    rows = conn.execute(
+        """
+        SELECT p.payload_id, p.device_id, p.root_path, p.status, p.file_count, p.total_bytes
+        FROM payloads p
+        LEFT JOIN (
+            SELECT payload_id, COUNT(*) AS ref_count
+            FROM torrent_instances
+            GROUP BY payload_id
+        ) ti ON ti.payload_id = p.payload_id
+        WHERE COALESCE(ti.ref_count, 0) = 0
+        ORDER BY p.root_path
+        """
+    ).fetchall()
+
+    skipped_prefix = 0
+    filtered_rows = []
+    for row in rows:
+        root_path = row["root_path"]
+
+        if prefix_strings:
+            in_scope = any(_is_under_fast(root_path, pref) for pref in prefix_strings)
+
+            if not in_scope and row["device_id"] is not None:
+                mount_point, preferred_mount = device_mounts.get(int(row["device_id"]), (None, None))
+                remapped = _remap_mount(root_path, mount_point, preferred_mount)
+                if remapped is None:
+                    remapped = _remap_mount(root_path, preferred_mount, mount_point)
+                if remapped:
+                    in_scope = any(_is_under_fast(remapped, pref) for pref in prefix_strings)
+
+            if not in_scope:
+                try:
+                    root_canon = canonicalize_path(Path(root_path))
+                    in_scope = any(
+                        _is_under_fast(str(root_canon), str(pref_path))
+                        for pref_path in prefix_paths_canon
+                    )
+                except Exception:
+                    in_scope = False
+
+            if not in_scope:
+                skipped_prefix += 1
+                continue
+
+        filtered_rows.append(row)
+
+    active_count_keys = [
+        (int(row["device_id"]), row["root_path"])
+        for row in filtered_rows
+        if row["device_id"] is not None and int(row["file_count"] or 0) == 0
+    ]
+    live_counts = _batch_count_active_payload_roots(conn, active_count_keys)
+
+    true_orphans = []
+    alias_artifacts = []
+    for row in filtered_rows:
+        root_path = row["root_path"]
+        payload_id = int(row["payload_id"])
+        device_id = row["device_id"]
+        live_count = int(row["file_count"] or 0)
+        if live_count == 0 and device_id is not None:
+            live_count = live_counts.get((int(device_id), root_path), 0)
+
+        if live_count > 0:
+            alias_artifacts.append((payload_id, root_path))
+        else:
+            true_orphans.append((payload_id, root_path))
+
+    gc_rows = {}
+    gc_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='payload_orphan_gc'"
+    ).fetchone()
+    if gc_table_exists and true_orphans:
+        orphan_ids = [pid for pid, _ in true_orphans]
+        placeholders = ",".join("?" for _ in orphan_ids)
+        for row in conn.execute(
+            f"""
+            SELECT payload_id, first_seen_at, last_seen_at, seen_count
+            FROM payload_orphan_gc
+            WHERE payload_id IN ({placeholders})
+            """,
+            orphan_ids,
+        ).fetchall():
+            gc_rows[int(row[0])] = {
+                "first_seen_at": float(row[1]),
+                "last_seen_at": float(row[2]),
+                "seen_count": int(row[3]),
+            }
+
+    now = time.time()
+    tracked_count = 0
+    aged_count = 0
+    for payload_id, _ in true_orphans:
+        entry = gc_rows.get(payload_id)
+        if not entry:
+            continue
+        tracked_count += 1
+        age_seconds = max(0.0, now - float(entry["first_seen_at"]))
+        if int(entry["seen_count"]) >= ORPHAN_GC_MIN_SEEN_RUNS and age_seconds >= ORPHAN_GC_MIN_AGE_SECONDS:
+            aged_count += 1
+
+    true_samples = [root for _, root in true_orphans[: max(1, samples)]]
+    alias_samples = [root for _, root in alias_artifacts[: max(1, samples)]]
+
+    if json_output:
+        payload = {
+            "scoped_unmanaged_payloads": len(filtered_rows),
+            "skipped_path_prefix": skipped_prefix,
+            "true_orphans": len(true_orphans),
+            "alias_artifacts": len(alias_artifacts),
+            "gc_table_exists": bool(gc_table_exists),
+            "gc_tracked_true_orphans": tracked_count,
+            "gc_aged_true_orphans": aged_count,
+            "gc_min_seen_runs": ORPHAN_GC_MIN_SEEN_RUNS,
+            "gc_min_age_seconds": ORPHAN_GC_MIN_AGE_SECONDS,
+            "true_orphan_samples": true_samples,
+            "alias_artifact_samples": alias_samples,
+            "path_prefixes": prefix_strings,
+        }
+        print(json.dumps(payload, sort_keys=True))
+        conn.close()
+        return
+
+    print("🔎 Payload orphan audit (non-destructive)")
+    print(f"   scoped unmanaged payloads: {len(filtered_rows)}")
+    if prefix_strings:
+        print(f"   skipped (path-prefix): {skipped_prefix}")
+    print(f"   true orphans (eligible class): {len(true_orphans)}")
+    print(f"   alias artifacts (not eligible): {len(alias_artifacts)}")
+
+    if gc_table_exists:
+        print(f"   gc tracked true orphans: {tracked_count}")
+        print(f"   gc aged true orphans: {aged_count}")
+        print(
+            "   gc thresholds: "
+            f"seen>={ORPHAN_GC_MIN_SEEN_RUNS}, age>={int(ORPHAN_GC_MIN_AGE_SECONDS/3600)}h"
+        )
+    else:
+        print("   gc staging table: missing (will initialize on payload sync)")
+
+    if true_samples:
+        print(f"   true orphan samples: {', '.join(true_samples)}")
+    if alias_samples:
+        print(f"   alias artifact samples: {', '.join(alias_samples)}")
+
+    conn.close()
 
 
 @payload.command("show")
@@ -639,7 +1157,7 @@ def payload_collisions_cmd(db, path_prefixes, limit, top):
 
     print("🔍 Payload collisions (fast signature)")
     print(f"   analyzed: {analyzed}")
-    if prefix_paths:
+    if prefix_strings:
         print(f"   skipped (path-prefix): {skipped_prefix}")
     print(f"   missing in catalog: {missing_in_catalog}")
     print(f"   missing quick_hash: {missing_quick}")
@@ -1438,6 +1956,8 @@ def link_plan_cmd(name, db, device, min_size, include_empty, dry_run, upgrade_co
         hashall link plan "Include empties" --device pool --include-empty
         hashall link plan "Test plan" --device 49 --dry-run
     """
+    import threading
+    import time
     from pathlib import Path
     from hashall.model import connect_db
     from hashall.link_planner import create_plan, save_plan, format_plan_summary
@@ -1481,7 +2001,48 @@ def link_plan_cmd(name, db, device, min_size, include_empty, dry_run, upgrade_co
         click.echo(f"   Analyzing...")
         click.echo()
 
-        plan = create_plan(conn, name, device_id, min_size=min_size)
+        progress_state = {
+            "stage": "analysis_start",
+            "groups_processed": 0,
+            "groups_total": 0,
+            "actions_generated": 0,
+        }
+        progress_lock = threading.Lock()
+        heartbeat_stop = threading.Event()
+        started = time.monotonic()
+
+        def _update_progress(**kwargs):
+            with progress_lock:
+                progress_state.update(kwargs)
+
+        def _heartbeat():
+            while not heartbeat_stop.wait(20.0):
+                with progress_lock:
+                    stage = progress_state.get("stage", "analysis")
+                    groups_processed = int(progress_state.get("groups_processed", 0) or 0)
+                    groups_total = progress_state.get("groups_total", 0) or 0
+                    actions_generated = int(progress_state.get("actions_generated", 0) or 0)
+                elapsed = int(time.monotonic() - started)
+                total_label = groups_total if groups_total else "?"
+                click.echo(
+                    f"   ⏳ still working ({elapsed}s) "
+                    f"stage={stage} groups={groups_processed}/{total_label} "
+                    f"actions={actions_generated}"
+                )
+
+        heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+        heartbeat_thread.start()
+        try:
+            plan = create_plan(
+                conn,
+                name,
+                device_id,
+                min_size=min_size,
+                progress_callback=_update_progress,
+            )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=0.2)
 
         if dry_run:
             # Dry-run mode: just show plan, don't save

@@ -319,6 +319,179 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertIn("processed: 1", result.output)
         self.assertIn("skipped (path-prefix): 1", result.output)
 
+    def test_payload_sync_stages_orphan_prune_before_deleting(self):
+        """Non-dry payload sync should mark orphan candidates before pruning them."""
+        conn = connect_db(self.db_path)
+        device_id = os.stat(self.payload_root).st_dev
+
+        orphan_root = str(self.tmp_path / "stale" / "missing.mkv")
+        keep_root = str(self.payload_root)
+
+        cur = conn.cursor()
+        orphan_id = cur.execute(
+            """
+            INSERT INTO payloads (payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (None, device_id, orphan_root, 0, 0, "incomplete"),
+        ).lastrowid
+        keep_id = cur.execute(
+            """
+            INSERT INTO payloads (payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("keep-hash", device_id, keep_root, 2, 2, "complete"),
+        ).lastrowid
+        cur.execute(
+            """
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("keep-torrent", keep_id, device_id, str(self.tmp_path), self.payload_root.name, "", "", time.time()),
+        )
+        conn.commit()
+        conn.close()
+
+        fake = _FakeQbit([])
+        runner = CliRunner()
+        with patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--path-prefix",
+                    str(self.tmp_path),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("orphan gc candidates: 1 (new=1, aged=0)", result.output)
+        self.assertIn("orphan payloads pruned: 0", result.output)
+
+        conn = connect_db(self.db_path)
+        rows = conn.execute(
+            "SELECT payload_id, root_path FROM payloads ORDER BY payload_id"
+        ).fetchall()
+        gc_rows = conn.execute("SELECT payload_id, seen_count FROM payload_orphan_gc").fetchall()
+        conn.close()
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(gc_rows), 1)
+        self.assertEqual(int(gc_rows[0][0]), int(orphan_id))
+
+        conn = connect_db(self.db_path)
+        conn.execute(
+            "UPDATE payload_orphan_gc SET first_seen_at = ?, seen_count = 1 WHERE payload_id = ?",
+            (time.time() - (24 * 60 * 60 + 60), orphan_id),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--path-prefix",
+                    str(self.tmp_path),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("orphan gc candidates: 1 (new=0, aged=1)", result.output)
+        self.assertIn("orphan payloads pruned: 1", result.output)
+
+        conn = connect_db(self.db_path)
+        rows = conn.execute(
+            "SELECT payload_id, root_path FROM payloads ORDER BY payload_id"
+        ).fetchall()
+        gc_rows = conn.execute("SELECT payload_id, seen_count FROM payload_orphan_gc").fetchall()
+        conn.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], keep_id)
+        self.assertEqual(rows[0][1], keep_root)
+        self.assertEqual(gc_rows, [])
+
+    def test_payload_sync_blocks_bulk_orphan_prune_spike(self):
+        """Bulk prune should be blocked when candidate volume trips safety thresholds."""
+        conn = connect_db(self.db_path)
+        device_id = os.stat(self.payload_root).st_dev
+
+        cur = conn.cursor()
+        orphan_ids = []
+        for idx in range(3):
+            orphan_ids.append(
+                cur.execute(
+                    """
+                    INSERT INTO payloads (payload_hash, device_id, root_path, file_count, total_bytes, status)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (None, device_id, str(self.tmp_path / "stale" / f"missing-{idx}.mkv"), 0, 0, "incomplete"),
+                ).lastrowid
+            )
+        conn.commit()
+        conn.close()
+
+        fake = _FakeQbit([])
+        runner = CliRunner()
+        with patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--path-prefix",
+                    str(self.tmp_path),
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("orphan payloads pruned: 0", result.output)
+
+        conn = connect_db(self.db_path)
+        conn.execute(
+            "UPDATE payload_orphan_gc SET first_seen_at = ?, seen_count = 1",
+            (time.time() - (24 * 60 * 60 + 60),),
+        )
+        conn.commit()
+        conn.close()
+
+        with (
+            patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake),
+            patch("hashall.payload.ORPHAN_GC_MAX_PRUNE_COUNT", 2),
+            patch("hashall.payload.ORPHAN_GC_SPIKE_MIN_TOTAL", 1),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--path-prefix",
+                    str(self.tmp_path),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("orphan gc candidates: 3 (new=0, aged=3)", result.output)
+        self.assertIn("orphan payloads pruned: 0", result.output)
+        self.assertIn("orphan prune blocked", result.output)
+
+        conn = connect_db(self.db_path)
+        remaining = conn.execute("SELECT COUNT(*) FROM payloads").fetchone()[0]
+        conn.close()
+
+        self.assertEqual(remaining, 3)
+
 
 class TestPayloadSyncQbitFailFast(unittest.TestCase):
     """Test that qBittorrent connect/auth failures raise ClickException (exit 1)."""

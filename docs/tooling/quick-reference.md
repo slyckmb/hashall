@@ -6,6 +6,12 @@ A cheat sheet for common hashall operations.
 
 ---
 
+## Automation Runbook
+
+- Payload orphan baseline automation: `docs/tooling/payload-orphan-audit-automation.md`
+
+---
+
 ## Quick Start
 
 ```bash

@@ -5,12 +5,14 @@ Tests for payload identity functionality.
 import pytest
 import sqlite3
 import tempfile
+import os
 from pathlib import Path
 from hashall.payload import (
     PayloadFile, PayloadFastFile, compute_payload_hash, compute_payload_fast_signature, build_payload,
-    upsert_payload, get_torrent_siblings, Payload
+    upsert_payload, get_torrent_siblings, Payload, upgrade_payload_missing_sha256
 )
 from hashall.model import connect_db
+from hashall.scan import scan_path
 
 
 @pytest.fixture
@@ -139,6 +141,20 @@ def test_build_payload_empty(test_db):
     assert payload.payload_hash is None
 
 
+def test_build_payload_already_canonical_skips_remap_helpers(test_db, monkeypatch):
+    import hashall.payload as payload_module
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("path remap helpers should not run when already_canonical=True")
+
+    monkeypatch.setattr(payload_module, "canonicalize_path", _unexpected)
+    monkeypatch.setattr(payload_module, "remap_to_mount_alias", _unexpected)
+
+    payload = build_payload(test_db, "/test/root", device_id=49, already_canonical=True)
+    assert payload.file_count == 3
+    assert payload.status == "complete"
+
+
 def test_upsert_payload(test_db):
     """Test inserting and updating payloads."""
     # Create payload
@@ -180,6 +196,25 @@ def test_upsert_payload(test_db):
     assert row[0] == 15
 
 
+def test_upsert_payload_commit_false_defers_commit(test_db):
+    payload = Payload(
+        payload_id=None,
+        payload_hash="batch_hash",
+        device_id=49,
+        root_path="/test/batch",
+        file_count=1,
+        total_bytes=10,
+        status='complete',
+        last_built_at=1234567890.0
+    )
+
+    assert not test_db.in_transaction
+    payload_id = upsert_payload(test_db, payload, commit=False)
+    assert payload_id > 0
+    assert test_db.in_transaction
+    test_db.rollback()
+
+
 def test_upsert_payload_device_scoped(test_db):
     """Test that payloads are scoped by device_id + root_path."""
     payload_a = Payload(
@@ -207,6 +242,39 @@ def test_upsert_payload_device_scoped(test_db):
     id_b = upsert_payload(test_db, payload_b)
 
     assert id_a != id_b
+
+
+def test_upsert_torrent_instance_commit_false_defers_commit(test_db):
+    from hashall.payload import upsert_torrent_instance, TorrentInstance
+    import time
+
+    payload = Payload(
+        payload_id=None,
+        payload_hash="shared_hash_batch",
+        device_id=49,
+        root_path="/test/shared_batch",
+        file_count=5,
+        total_bytes=500,
+        status='complete',
+        last_built_at=time.time()
+    )
+    payload_id = upsert_payload(test_db, payload)
+
+    torrent = TorrentInstance(
+        torrent_hash="batchhash1",
+        payload_id=payload_id,
+        device_id=49,
+        save_path="/test",
+        root_name="torrent_batch",
+        category="test",
+        tags="",
+        last_seen_at=time.time()
+    )
+
+    assert not test_db.in_transaction
+    upsert_torrent_instance(test_db, torrent, commit=False)
+    assert test_db.in_transaction
+    test_db.rollback()
 
 
 def test_torrent_siblings(test_db):
@@ -399,3 +467,46 @@ def test_idempotent_sync(test_db):
         ("test_hash",)
     ).fetchone()
     assert row[0] == "tag1,tag2"
+
+
+def test_upgrade_missing_sha256_with_hardlinks(tmp_path):
+    """Payload SHA256 upgrade hashes a hardlink group once and propagates results."""
+    root = tmp_path / "payload_root"
+    root.mkdir()
+
+    original = root / "base.bin"
+    original.write_bytes(b"x" * 8192)
+    link1 = root / "link1.bin"
+    link2 = root / "link2.bin"
+    os.link(original, link1)
+    os.link(original, link2)
+
+    db_path = tmp_path / "catalog.db"
+    scan_path(db_path=db_path, root_path=root, hash_mode='fast', quiet=True)
+
+    conn = connect_db(db_path)
+    device_id = os.stat(root).st_dev
+    table_name = f"files_{device_id}"
+
+    missing_before = conn.execute(
+        f"SELECT COUNT(*) FROM {table_name} WHERE status = 'active' AND sha256 IS NULL"
+    ).fetchone()[0]
+    assert missing_before == 3
+
+    upgraded = upgrade_payload_missing_sha256(conn, str(root), device_id=device_id, parallel=False)
+    assert upgraded == 1
+
+    rows = conn.execute(f"""
+        SELECT sha256
+        FROM {table_name}
+        WHERE status = 'active'
+        ORDER BY path
+    """).fetchall()
+    assert len(rows) == 3
+    assert all(row[0] is not None for row in rows)
+    assert len({row[0] for row in rows}) == 1
+
+    payload = build_payload(conn, str(root), device_id=device_id)
+    assert payload.status == 'complete'
+    assert payload.file_count == 3
+    conn.close()

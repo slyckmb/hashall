@@ -5,8 +5,15 @@ Tests for incremental scanning functionality.
 import pytest
 import sqlite3
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
-from hashall.scan import load_existing_files, _canonicalize_root
+from hashall.scan import (
+    load_existing_files,
+    _canonicalize_root,
+    _hash_file_worker,
+    _relative_to_any_mount,
+    _should_skip_deletion,
+)
 from hashall.device import ensure_files_table
 from hashall.model import connect_db
 
@@ -427,3 +434,61 @@ def test_load_existing_files_sql_injection_safe(test_db):
 
     # Should return empty (path doesn't exist) without SQL errors
     assert result == {}
+
+
+def test_relative_to_any_mount_uses_alias_fallback():
+    rel = _relative_to_any_mount(
+        "/data/media/torrents/seeding/file.mkv",
+        Path("/stash/media"),
+        (Path("/data/media"),),
+    )
+    assert rel == "torrents/seeding/file.mkv"
+
+
+def test_hash_file_worker_uses_alias_mount_for_relative_paths():
+    stat = SimpleNamespace(st_dev=49, st_size=123, st_mtime=1.0, st_ino=12345)
+    work_item = {
+        "representative_path": "/data/media/torrents/seeding/movie.mkv",
+        "all_paths": ["/data/media/torrents/seeding/movie.mkv"],
+        "inode": 12345,
+        "size": 123,
+        "stat": stat,
+        "is_hardlink_group": False,
+    }
+    existing = {
+        "torrents/seeding/movie.mkv": {
+            "size": 123,
+            "mtime": 1.0,
+            "quick_hash": "qhash",
+            "sha1": None,
+            "sha256": None,
+        }
+    }
+    results = _hash_file_worker(
+        work_item,
+        Path("/stash/media"),
+        (Path("/data/media"),),
+        existing,
+        hash_mode="fast",
+        expected_device_id=49,
+    )
+    assert results is not None
+    assert results[0][0] == "torrents/seeding/movie.mkv"
+
+
+def test_should_skip_deletion_when_discovery_seen_mismatch():
+    assert _should_skip_deletion(
+        existing_count=91364,
+        discovered_count=91680,
+        seen_count=0,
+        worker_errors=10,
+    )
+
+
+def test_should_not_skip_deletion_when_scan_healthy():
+    assert not _should_skip_deletion(
+        existing_count=100,
+        discovered_count=100,
+        seen_count=100,
+        worker_errors=0,
+    )

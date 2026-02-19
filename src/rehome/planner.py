@@ -20,7 +20,7 @@ from hashall.payload import (
     get_payloads_by_hash,
     get_torrent_siblings,
 )
-from hashall.pathing import canonicalize_path, to_relpath, is_under
+from hashall.pathing import canonicalize_path, to_relpath, is_under, remap_to_mount_alias
 
 
 @dataclass
@@ -55,15 +55,36 @@ def _build_view_targets(
     placeholders = ",".join(["?"] * len(torrent_hashes))
     rows = conn.execute(
         f"""
-        SELECT torrent_hash, save_path, root_name
+        SELECT torrent_hash, save_path, root_name, device_id
         FROM torrent_instances
         WHERE torrent_hash IN ({placeholders})
         """,
         torrent_hashes,
     ).fetchall()
 
+    device_mounts: Dict[int, List[Path]] = {}
+    try:
+        mount_rows = conn.execute(
+            "SELECT device_id, mount_point, preferred_mount_point FROM devices"
+        ).fetchall()
+    except sqlite3.Error:
+        mount_rows = []
+    for device_id, mount_point, preferred_mount in mount_rows:
+        if device_id is None:
+            continue
+        mounts: List[Path] = []
+        for candidate in (preferred_mount, mount_point):
+            if not candidate:
+                continue
+            canon = canonicalize_path(Path(candidate))
+            if canon not in mounts:
+                mounts.append(canon)
+        if mounts:
+            device_mounts[int(device_id)] = mounts
+    mount_groups: List[List[Path]] = list(device_mounts.values())
+
     view_targets = []
-    for torrent_hash, save_path, root_name in rows:
+    for torrent_hash, save_path, root_name, device_id in rows:
         if not save_path:
             raise ValueError(f"Missing save_path for torrent {torrent_hash}")
 
@@ -75,6 +96,37 @@ def _build_view_targets(
             (root for root in resolved_sources if is_under(save_path_path, root)),
             None,
         )
+
+        if source_root is None:
+            candidate_mount_groups: List[List[Path]] = []
+            if device_id is not None:
+                specific = device_mounts.get(int(device_id), [])
+                if specific:
+                    candidate_mount_groups.append(specific)
+            candidate_mount_groups.extend(mount_groups)
+
+            remapped: Optional[Path] = None
+            for mounts in candidate_mount_groups:
+                for mount in mounts:
+                    rel = to_relpath(save_path_path, mount)
+                    if rel is None:
+                        continue
+                    for alias_mount in mounts:
+                        candidate = alias_mount / rel
+                        source_root = next(
+                            (root for root in resolved_sources if is_under(candidate, root)),
+                            None,
+                        )
+                        if source_root is not None:
+                            remapped = candidate
+                            break
+                    if source_root is not None:
+                        break
+                if source_root is not None:
+                    break
+            if remapped is not None:
+                save_path_path = remapped
+
         if source_root is None:
             raise ValueError(
                 f"Torrent save_path {save_path_path} is not under any source root"
@@ -127,6 +179,37 @@ class DemotionPlanner:
         self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
         self.pool_seeding_root = canonicalize_path(Path(pool_seeding_root)) if pool_seeding_root else None
         self.pool_payload_root = canonicalize_path(Path(pool_payload_root)) if pool_payload_root else None
+
+    def _compute_pool_move_target(self, source_root_path: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Compute MOVE target path on pool while preserving seeding-relative structure.
+
+        Returns:
+            (target_path, error_reason)
+        """
+        base_root = self.pool_payload_root or self.pool_seeding_root
+        if base_root is None:
+            return None, "No pool payload root configured for MOVE"
+
+        source_path = canonicalize_path(Path(source_root_path))
+
+        # Backward compatibility: if stash mapping root is unavailable, keep legacy behavior.
+        if self.stash_seeding_root is None:
+            return str((base_root / source_path.name).resolve()), None
+
+        rel = to_relpath(source_path, self.stash_seeding_root)
+        if rel is None:
+            remapped = remap_to_mount_alias(source_path, self.stash_seeding_root)
+            if remapped is not None:
+                rel = to_relpath(remapped, self.stash_seeding_root)
+
+        if rel is None:
+            return (
+                None,
+                f"Source path {source_path} is not under stash seeding root {self.stash_seeding_root}",
+            )
+
+        return str((base_root / rel).resolve()), None
 
     def _get_db_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -360,11 +443,18 @@ class DemotionPlanner:
             return None
 
         prefixes: List[tuple[str, Path]] = []
+        aliases_by_uuid: Dict[str, List[Path]] = {}
         for fs_uuid, mount_point, preferred in device_rows:
+            alias_paths: List[Path] = []
             for candidate in (preferred, mount_point):
                 if not candidate:
                     continue
-                prefixes.append((fs_uuid, canonicalize_path(Path(candidate))))
+                canon = canonicalize_path(Path(candidate))
+                prefixes.append((fs_uuid, canon))
+                if canon not in alias_paths:
+                    alias_paths.append(canon)
+            if alias_paths:
+                aliases_by_uuid[fs_uuid] = alias_paths
         prefixes = sorted(prefixes, key=lambda item: len(str(item[1])), reverse=True)
 
         scanned_by_uuid: Dict[str, List[Path]] = {}
@@ -385,7 +475,21 @@ class DemotionPlanner:
             if not scanned_roots:
                 return False
 
-            if not any(is_under(root_canon, scanned) for scanned in scanned_roots):
+            covered = any(is_under(root_canon, scanned) for scanned in scanned_roots)
+            if not covered:
+                alias_roots = aliases_by_uuid.get(fs_uuid, [])
+                for alias_root in alias_roots:
+                    rel = to_relpath(root_canon, alias_root)
+                    if rel is None:
+                        continue
+                    for alias_target in alias_roots:
+                        remapped = alias_target / rel
+                        if any(is_under(remapped, scanned) for scanned in scanned_roots):
+                            covered = True
+                            break
+                    if covered:
+                        break
+            if not covered:
                 return False
         return True
 
@@ -633,9 +737,9 @@ class DemotionPlanner:
                 }
             else:
                 # MOVE: Need to move payload to pool
-                # Construct target path (same relative structure on pool)
-                base_root = self.pool_payload_root or self.pool_seeding_root
-                if base_root is None:
+                # Construct target path preserving stash-seeding-relative structure.
+                target_root, target_error = self._compute_pool_move_target(source_payload.root_path)
+                if target_root is None:
                     return {
                         "version": "1.0",
                         "direction": "demote",
@@ -643,7 +747,7 @@ class DemotionPlanner:
                         "torrent_hash": torrent_hash,
                         "payload_id": source_payload.payload_id,
                         "payload_hash": source_payload.payload_hash,
-                        "reasons": ["No pool payload root configured for MOVE"],
+                        "reasons": [target_error or "No pool payload root configured for MOVE"],
                         "affected_torrents": sibling_hashes,
                         "source_path": source_payload.root_path,
                         "target_path": None,
@@ -654,8 +758,6 @@ class DemotionPlanner:
                         "file_count": source_payload.file_count,
                         "total_bytes": source_payload.total_bytes
                     }
-
-                target_root = str(base_root / Path(source_payload.root_path).name)
 
                 return {
                     "version": "1.0",

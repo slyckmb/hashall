@@ -293,6 +293,26 @@ def test_create_plan_min_size_filter(test_db):
     assert plan.actions_total == 2  # 3 files in group → 2 actions
 
 
+def test_create_plan_emits_progress_callbacks(test_db):
+    """create_plan should emit structured progress updates."""
+    events = []
+
+    def _cb(**kwargs):
+        events.append(kwargs)
+
+    plan = create_plan(test_db, "Progress Plan", device_id=99, min_size=0, progress_callback=_cb)
+
+    assert plan.actions_total == 3
+    stages = [evt.get("stage") for evt in events]
+    assert "analysis_start" in stages
+    assert "analysis_query" in stages
+    assert "analysis_rows_loaded" in stages
+    assert "analysis_complete" in stages
+    assert "actions_start" in stages
+    assert "actions_progress" in stages
+    assert "plan_complete" in stages
+
+
 def test_save_plan(test_db):
     """Test saving plan to database."""
     plan = create_plan(test_db, "Save Test", device_id=99)

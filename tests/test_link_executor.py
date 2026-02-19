@@ -7,6 +7,7 @@ IMPORTANT: These tests create actual files and hardlinks to verify safety featur
 import sqlite3
 import tempfile
 import shutil
+import os
 from pathlib import Path
 import pytest
 
@@ -20,7 +21,12 @@ from hashall.link_executor import (
     verify_not_already_linked,
     create_hardlink_atomic,
     execute_action,
-    ExecutionResult
+    ExecutionResult,
+    _JdupesHistoryStats,
+    _JdupesRateTracker,
+    _summarize_unique_inode_work,
+    update_action_status,
+    update_plan_progress,
 )
 from hashall.link_query import ActionInfo
 
@@ -329,6 +335,70 @@ def test_execution_result_creation():
     assert len(result.errors) == 2
 
 
+def test_update_action_status_commit_false_defers_commit():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE link_actions (
+            id INTEGER PRIMARY KEY,
+            status TEXT,
+            bytes_saved INTEGER,
+            error_message TEXT,
+            executed_at TEXT
+        )
+    """)
+    cursor.execute(
+        "INSERT INTO link_actions (id, status, bytes_saved, error_message) VALUES (1, 'pending', 0, NULL)"
+    )
+    conn.commit()
+
+    assert not conn.in_transaction
+    update_action_status(conn, 1, "completed", bytes_saved=123, commit=False)
+    assert conn.in_transaction
+    row = conn.execute("SELECT status, bytes_saved FROM link_actions WHERE id = 1").fetchone()
+    assert row == ("completed", 123)
+    conn.rollback()
+    conn.close()
+
+
+def test_update_plan_progress_accepts_cached_counts():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE link_plans (
+            id INTEGER PRIMARY KEY,
+            status TEXT DEFAULT 'pending',
+            actions_executed INTEGER DEFAULT 0,
+            actions_failed INTEGER DEFAULT 0,
+            actions_skipped INTEGER DEFAULT 0,
+            total_bytes_saved INTEGER DEFAULT 0,
+            started_at TEXT,
+            completed_at TEXT
+        )
+    """)
+    cursor.execute("INSERT INTO link_plans (id, status) VALUES (1, 'pending')")
+    conn.commit()
+
+    update_plan_progress(
+        conn,
+        1,
+        start_execution=True,
+        executed=7,
+        failed=1,
+        skipped=2,
+        total_saved=777,
+        commit=False,
+    )
+    assert conn.in_transaction
+    row = conn.execute(
+        "SELECT status, actions_executed, actions_failed, actions_skipped, total_bytes_saved "
+        "FROM link_plans WHERE id = 1"
+    ).fetchone()
+    assert row == ("in_progress", 7, 1, 2, 777)
+    conn.rollback()
+    conn.close()
+
+
 def test_compute_fast_hash_sample():
     """Test fast hash sampling."""
     with tempfile.NamedTemporaryFile(mode='wb', delete=False) as f:
@@ -421,3 +491,55 @@ def test_verify_file_unchanged_mtime_mismatch():
         assert "modified" in error.lower()
     finally:
         temp_path.unlink()
+
+
+def test_summarize_unique_inode_work_counts_each_inode_once():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        canonical = root / "canonical.bin"
+        canonical.write_bytes(b"a" * 1024)
+
+        hardlink_copy = root / "hardlink-copy.bin"
+        os.link(canonical, hardlink_copy)
+
+        distinct = root / "distinct.bin"
+        distinct.write_bytes(b"b" * 2048)
+
+        inode_count, inode_bytes = _summarize_unique_inode_work([canonical, hardlink_copy, distinct])
+        assert inode_count == 2
+        assert inode_bytes == (1024 + 2048)
+
+
+def test_jdupes_rate_tracker_estimate_and_ema_update():
+    history = _JdupesHistoryStats(
+        baseline_rate_bps=100.0,
+        baseline_group_bytes=1000.0,
+        baseline_invoked_ratio=0.5,
+        invoked_samples=10,
+        total_samples=20,
+    )
+    tracker = _JdupesRateTracker.from_history(history)
+
+    estimate = tracker.estimate(
+        group_index=1,
+        group_total=5,
+        group_inode_bytes=500,
+        will_invoke=True,
+    )
+
+    assert estimate["rate_source"] == "history"
+    assert estimate["eta_group_sec"] == pytest.approx(5.0)
+    # remaining_groups=4, invoked_ratio=0.5, avg_group_bytes=1000, rate=100 => 20s remaining
+    assert estimate["eta_total_sec"] == pytest.approx(25.0)
+
+    tracker.observe_group(invoked=True, group_inode_bytes=500, elapsed_seconds=2.0)
+    post = tracker.estimate(
+        group_index=2,
+        group_total=5,
+        group_inode_bytes=500,
+        will_invoke=True,
+    )
+
+    assert post["rate_source"] == "rt-ema"
+    # observed rate should be > history baseline after update
+    assert post["rate_bps"] > 100.0

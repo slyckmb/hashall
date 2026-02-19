@@ -15,6 +15,7 @@ This test suite validates the complete incremental scanning workflow including:
 import pytest
 import tempfile
 import time
+import os
 from pathlib import Path
 
 from hashall.scan import scan_path
@@ -595,6 +596,48 @@ def test_nested_directory_structure(test_env):
     device_id = get_device_id_from_path(root)
     active_count = get_device_file_count(db_path, device_id, 'active')
     assert active_count == 4, "Should have 4 active files"
+
+
+def test_full_hash_scan_propagates_hardlink_hashes(test_env):
+    """
+    Integration: full-hash scan should hash once per inode group and propagate to links.
+    """
+    root = test_env['root']
+    db_path = test_env['db_path']
+
+    original = root / "original.txt"
+    original.write_text("shared content")
+    link1 = root / "link1.txt"
+    link2 = root / "link2.txt"
+    os.link(original, link1)
+    os.link(original, link2)
+    (root / "unique.txt").write_text("unique content")
+
+    stats = scan_path(db_path=db_path, root_path=root, hash_mode='full', quiet=True)
+
+    assert stats.files_scanned == 4, "Should have scanned 4 files"
+    assert stats.inode_groups_hashed == 2, "Should hash 2 inode groups (shared + unique)"
+    assert stats.hardlinks_propagated == 2, "Should propagate hash to 2 hardlinks"
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    device_id = get_device_id_from_path(root)
+    table_name = f"files_{device_id}"
+    rows = cursor.execute(f"""
+        SELECT path, sha256, hash_source, inode
+        FROM {table_name}
+        WHERE status = 'active'
+    """).fetchall()
+    conn.close()
+
+    hardlink_rows = [r for r in rows if Path(r[0]).name in {"original.txt", "link1.txt", "link2.txt"}]
+    assert len(hardlink_rows) == 3, "Should store all hardlinked paths"
+    assert len({r[1] for r in hardlink_rows}) == 1, "Hardlinked files should share sha256"
+    assert all(r[1] is not None for r in hardlink_rows), "Hardlinked files should have sha256"
+
+    inode = hardlink_rows[0][3]
+    assert sum(1 for r in hardlink_rows if r[2] == 'calculated') == 1
+    assert sum(1 for r in hardlink_rows if r[2] == f'inode:{inode}') == 2
 
 
 if __name__ == "__main__":

@@ -280,3 +280,56 @@ def test_parallel_scan_with_hardlinks(tmp_path):
     assert sha256_values[0][0] is not None
 
     conn.close()
+
+
+def test_full_scan_rehashes_unchanged_when_sha256_missing(tmp_path):
+    """Full scan should recompute missing sha256 even when metadata is unchanged."""
+    file_path = tmp_path / "sample.bin"
+    file_path.write_bytes(b"hash-me")
+
+    db_path = tmp_path.parent / f"{tmp_path.name}_catalog.db"
+    first = scan_path(db_path, tmp_path, hash_mode='full', quiet=True)
+    assert first.files_added == 1
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    rel_like = "%sample.bin"
+    table_name = None
+    sha_row = None
+    tables = cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'files_%'"
+    ).fetchall()
+    for (candidate_table,) in tables:
+        row = cursor.execute(
+            f"SELECT path, sha1, sha256 FROM {candidate_table} WHERE path LIKE ?",
+            (rel_like,),
+        ).fetchone()
+        if row is not None:
+            table_name = candidate_table
+            sha_row = row
+            break
+
+    assert table_name is not None
+    assert sha_row is not None and sha_row[1] is not None and sha_row[2] is not None
+    stored_path = sha_row[0]
+
+    # Simulate legacy/catalog gap: clear only sha256 while keeping mtime/size unchanged.
+    cursor.execute(
+        f"UPDATE {table_name} SET sha256 = NULL WHERE path = ?",
+        (stored_path,),
+    )
+    conn.commit()
+    conn.close()
+
+    second = scan_path(db_path, tmp_path, hash_mode='full', quiet=True)
+    assert second.files_updated == 1
+    assert second.files_unchanged == 0
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    repaired = cursor.execute(
+        f"SELECT sha1, sha256 FROM {table_name} WHERE path = ?",
+        (stored_path,),
+    ).fetchone()
+    conn.close()
+    assert repaired is not None and repaired[0] is not None and repaired[1] is not None

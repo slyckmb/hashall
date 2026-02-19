@@ -22,6 +22,8 @@ import tempfile
 import stat
 import pwd
 import grp
+import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Optional, Tuple
@@ -50,6 +52,263 @@ class ExecutionResult:
     actions_skipped: int
     bytes_saved: int
     errors: list
+
+
+_JDUPES_HISTORY_HEADER_RE = re.compile(
+    r"^-----\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})\s+group\s+(\d+)/(\d+)\s+sha=[0-9a-f]+\s+-----$"
+)
+_JDUPES_HISTORY_PRELIST_RE = re.compile(
+    r"^(\d+)\s+\S+\s+\d+\s+\S+\s+\S+\s+(\d+)\s+"
+)
+_JDUPES_PLAN_LOG_RE = re.compile(r"^plan-(\d+)_sha256-")
+_DEFAULT_JDUPES_RATE_BPS = 64 * 1024 * 1024
+_MAX_JDUPES_RATE_BPS = 2 * 1024 * 1024 * 1024
+_MAX_HISTORY_GROUP_DELTA_SECONDS = 3600.0
+
+
+@dataclass
+class _JdupesHistoryStats:
+    baseline_rate_bps: float
+    baseline_group_bytes: float
+    baseline_invoked_ratio: float
+    invoked_samples: int
+    total_samples: int
+
+
+@dataclass
+class _JdupesRateTracker:
+    baseline_rate_bps: float
+    baseline_group_bytes: float
+    baseline_invoked_ratio: float
+    baseline_samples: int
+    ema_alpha: float = 0.2
+    observed_groups: int = 0
+    observed_invoked_groups: int = 0
+    observed_inode_bytes: int = 0
+    observed_elapsed_seconds: float = 0.0
+    ema_rate_bps: Optional[float] = None
+
+    @classmethod
+    def from_history(cls, history: Optional[_JdupesHistoryStats]) -> "_JdupesRateTracker":
+        if history is None:
+            return cls(
+                baseline_rate_bps=_DEFAULT_JDUPES_RATE_BPS,
+                baseline_group_bytes=0.0,
+                baseline_invoked_ratio=1.0,
+                baseline_samples=0,
+            )
+        return cls(
+            baseline_rate_bps=max(1.0, history.baseline_rate_bps),
+            baseline_group_bytes=max(0.0, history.baseline_group_bytes),
+            baseline_invoked_ratio=max(0.0, min(1.0, history.baseline_invoked_ratio)),
+            baseline_samples=max(0, history.invoked_samples),
+        )
+
+    def _current_rate(self) -> tuple[float, str]:
+        if self.ema_rate_bps and self.ema_rate_bps > 0:
+            return self.ema_rate_bps, "rt-ema"
+        if self.baseline_rate_bps > 0:
+            return self.baseline_rate_bps, "history"
+        return _DEFAULT_JDUPES_RATE_BPS, "default"
+
+    def _current_invoked_ratio(self) -> float:
+        if self.observed_groups >= 3:
+            ratio = self.observed_invoked_groups / max(1, self.observed_groups)
+            return max(0.0, min(1.0, ratio))
+        return max(0.0, min(1.0, self.baseline_invoked_ratio))
+
+    def _current_group_bytes(self, fallback: int) -> float:
+        if self.observed_invoked_groups > 0 and self.observed_inode_bytes > 0:
+            return self.observed_inode_bytes / self.observed_invoked_groups
+        if self.baseline_group_bytes > 0:
+            return self.baseline_group_bytes
+        return float(max(0, fallback))
+
+    def confidence(self) -> str:
+        if self.observed_invoked_groups >= 8:
+            return "high"
+        if self.observed_invoked_groups >= 3:
+            return "medium"
+        if self.baseline_samples >= 200:
+            return "medium"
+        return "low"
+
+    def estimate(self, *, group_index: int, group_total: int, group_inode_bytes: int, will_invoke: bool) -> dict:
+        rate_bps, rate_source = self._current_rate()
+        eta_group_sec = (group_inode_bytes / rate_bps) if (will_invoke and group_inode_bytes > 0) else 0.0
+        remaining_groups = max(0, group_total - group_index)
+        expected_invoked_remaining = remaining_groups * self._current_invoked_ratio()
+        expected_group_bytes = self._current_group_bytes(group_inode_bytes)
+        eta_remaining_sec = (expected_invoked_remaining * expected_group_bytes / rate_bps) if rate_bps > 0 else 0.0
+        return {
+            "rate_bps": rate_bps,
+            "rate_source": rate_source,
+            "eta_group_sec": eta_group_sec,
+            "eta_total_sec": eta_group_sec + eta_remaining_sec,
+            "confidence": self.confidence(),
+        }
+
+    def observe_group(self, *, invoked: bool, group_inode_bytes: int = 0, elapsed_seconds: Optional[float] = None) -> None:
+        self.observed_groups += 1
+        if not invoked:
+            return
+
+        self.observed_invoked_groups += 1
+        if group_inode_bytes > 0:
+            self.observed_inode_bytes += group_inode_bytes
+
+        if elapsed_seconds is None or elapsed_seconds <= 0 or group_inode_bytes <= 0:
+            return
+
+        elapsed_seconds = max(0.001, float(elapsed_seconds))
+        self.observed_elapsed_seconds += elapsed_seconds
+        observed_rate = group_inode_bytes / elapsed_seconds
+        observed_rate = max(1.0, min(_MAX_JDUPES_RATE_BPS, observed_rate))
+
+        if self.ema_rate_bps is None:
+            self.ema_rate_bps = observed_rate
+        else:
+            self.ema_rate_bps = (self.ema_alpha * observed_rate) + ((1.0 - self.ema_alpha) * self.ema_rate_bps)
+
+
+def _format_bytes(num_bytes: int) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
+    value = float(max(0, num_bytes))
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{num_bytes}B"
+
+
+def _format_rate_bps(rate_bps: float) -> str:
+    return f"{_format_bytes(int(rate_bps))}/s"
+
+
+def _format_eta(seconds: float) -> str:
+    total = max(0, int(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
+def _summarize_unique_inode_work(paths: list[Path]) -> tuple[int, int]:
+    seen_inodes: set[tuple[int, int]] = set()
+    total_bytes = 0
+    for path in paths:
+        st = path.stat()
+        inode_key = (st.st_dev, st.st_ino)
+        if inode_key in seen_inodes:
+            continue
+        seen_inodes.add(inode_key)
+        total_bytes += st.st_size
+    return len(seen_inodes), total_bytes
+
+
+def _load_historical_jdupes_stats(
+    conn: sqlite3.Connection,
+    *,
+    device_id: int,
+    jdupes_log_dir: Optional[Path],
+) -> Optional[_JdupesHistoryStats]:
+    if jdupes_log_dir is None or not jdupes_log_dir.exists():
+        return None
+
+    rows = conn.execute(
+        """
+        SELECT id
+        FROM link_plans
+        WHERE device_id = ? AND status = 'completed'
+        """,
+        (device_id,),
+    ).fetchall()
+    completed_plan_ids = {int(r[0]) for r in rows}
+    if not completed_plan_ids:
+        return None
+
+    plan_entries: dict[int, list[dict]] = {}
+    for log_path in jdupes_log_dir.glob("plan-*_sha256-*.log"):
+        match = _JDUPES_PLAN_LOG_RE.match(log_path.name)
+        if not match:
+            continue
+        plan_id = int(match.group(1))
+        if plan_id not in completed_plan_ids:
+            continue
+
+        stamp = None
+        group_index = None
+        group_total = None
+        jdupes_invoked = False
+        inode_sizes: dict[int, int] = {}
+
+        for raw_line in log_path.read_text(errors="replace").splitlines():
+            line = raw_line.strip()
+            header_match = _JDUPES_HISTORY_HEADER_RE.match(line)
+            if header_match:
+                stamp = datetime.strptime(header_match.group(1), "%Y-%m-%dT%H:%M:%S%z")
+                group_index = int(header_match.group(2))
+                group_total = int(header_match.group(3))
+                continue
+            if line.startswith("jdupes_returncode:"):
+                jdupes_invoked = True
+                continue
+            inode_match = _JDUPES_HISTORY_PRELIST_RE.match(line)
+            if inode_match:
+                inode = int(inode_match.group(1))
+                size = int(inode_match.group(2))
+                if inode not in inode_sizes:
+                    inode_sizes[inode] = size
+
+        if stamp is None or group_index is None or group_total is None:
+            continue
+
+        plan_entries.setdefault(plan_id, []).append(
+            {
+                "stamp": stamp,
+                "group_index": group_index,
+                "group_total": group_total,
+                "invoked": jdupes_invoked,
+                "inode_bytes": sum(inode_sizes.values()),
+            }
+        )
+
+    total_groups = 0
+    invoked_groups = 0
+    invoked_for_rate = 0
+    total_seconds_for_rate = 0.0
+    total_inode_bytes_for_rate = 0.0
+
+    for entries in plan_entries.values():
+        entries.sort(key=lambda e: e["group_index"])
+        total_groups += len(entries)
+        invoked_groups += sum(1 for e in entries if e["invoked"])
+
+        for idx, entry in enumerate(entries[:-1]):
+            delta = (entries[idx + 1]["stamp"] - entry["stamp"]).total_seconds()
+            if delta <= 0 or delta > _MAX_HISTORY_GROUP_DELTA_SECONDS:
+                continue
+            if not entry["invoked"]:
+                continue
+            total_seconds_for_rate += delta
+            total_inode_bytes_for_rate += entry["inode_bytes"]
+            invoked_for_rate += 1
+
+    if invoked_for_rate == 0 or total_seconds_for_rate <= 0:
+        return None
+
+    return _JdupesHistoryStats(
+        baseline_rate_bps=total_inode_bytes_for_rate / total_seconds_for_rate,
+        baseline_group_bytes=total_inode_bytes_for_rate / invoked_for_rate,
+        baseline_invoked_ratio=(invoked_groups / total_groups) if total_groups > 0 else 1.0,
+        invoked_samples=invoked_for_rate,
+        total_samples=total_groups,
+    )
 
 
 def _resolve_path(path: str, mount_point: Optional[str]) -> Path:
@@ -699,7 +958,9 @@ def update_action_status(
     action_id: int,
     status: str,
     bytes_saved: int = 0,
-    error_message: Optional[str] = None
+    error_message: Optional[str] = None,
+    *,
+    commit: bool = True,
 ):
     """
     Update action status in database.
@@ -722,14 +983,21 @@ def update_action_status(
         WHERE id = ?
     """, (status, bytes_saved, error_message, action_id))
 
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def update_plan_progress(
     conn: sqlite3.Connection,
     plan_id: int,
     start_execution: bool = False,
-    complete_execution: bool = False
+    complete_execution: bool = False,
+    *,
+    executed: Optional[int] = None,
+    failed: Optional[int] = None,
+    skipped: Optional[int] = None,
+    total_saved: Optional[int] = None,
+    commit: bool = True,
 ):
     """
     Update plan execution progress.
@@ -742,19 +1010,20 @@ def update_plan_progress(
     """
     cursor = conn.cursor()
 
-    # Count action statuses
-    cursor.execute("""
-        SELECT
-            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as executed,
-            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-            SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped,
-            SUM(CASE WHEN status = 'completed' THEN bytes_saved ELSE 0 END) as total_saved
-        FROM link_actions
-        WHERE plan_id = ?
-    """, (plan_id,))
+    if executed is None or failed is None or skipped is None or total_saved is None:
+        # Count action statuses
+        cursor.execute("""
+            SELECT
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as executed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped,
+                SUM(CASE WHEN status = 'completed' THEN bytes_saved ELSE 0 END) as total_saved
+            FROM link_actions
+            WHERE plan_id = ?
+        """, (plan_id,))
 
-    row = cursor.fetchone()
-    executed, failed, skipped, total_saved = row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0
+        row = cursor.fetchone()
+        executed, failed, skipped, total_saved = row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0
 
     # Determine new status
     if complete_execution:
@@ -787,7 +1056,8 @@ def update_plan_progress(
             WHERE id = ?
         """, (executed, failed, skipped, total_saved, plan_id))
 
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def execute_plan(
@@ -863,10 +1133,6 @@ def execute_plan(
     if limit > 0:
         actions = actions[:limit]
 
-    # Mark plan as in_progress (unless dry-run)
-    if not dry_run:
-        update_plan_progress(conn, plan_id, start_execution=True)
-
     # Execute actions
     executed = 0
     failed = 0
@@ -875,6 +1141,8 @@ def execute_plan(
     errors = []
     total_actions = len(actions)
     processed = 0
+    status_updates: list[tuple[str, int, Optional[str], int]] = []
+    status_flush_threshold = 200
 
     jdupes_cmd = None
     if use_jdupes:
@@ -888,6 +1156,19 @@ def execute_plan(
         zfs_expected_dataset = meta.get("dataset_name") if meta else None
     zfs_dataset_cache: dict[int, Optional[str]] = {}
     zfs_mismatch_paths: list[str] = []
+    history_stats = _load_historical_jdupes_stats(
+        conn,
+        device_id=plan.device_id,
+        jdupes_log_dir=jdupes_log_dir,
+    ) if use_jdupes else None
+    rate_tracker = _JdupesRateTracker.from_history(history_stats) if use_jdupes else None
+    if use_jdupes and history_stats is not None:
+        print(
+            "📈 jdupes baseline: "
+            f"rate={_format_rate_bps(history_stats.baseline_rate_bps)} "
+            f"invoked_ratio={history_stats.baseline_invoked_ratio:.2f} "
+            f"samples={history_stats.invoked_samples}/{history_stats.total_samples}"
+        )
 
     def record(action: ActionInfo, status: str, bytes_saved: int = 0, error_message: Optional[str] = None) -> None:
         nonlocal executed, failed, skipped, total_bytes_saved, processed
@@ -911,14 +1192,45 @@ def execute_plan(
             ):
                 _maybe_refresh_files_for_action(conn, action, plan.mount_point)
             if status == 'completed':
-                update_action_status(conn, action.id, 'completed', bytes_saved=bytes_saved)
+                status_updates.append(('completed', bytes_saved, None, action.id))
             elif status == 'failed':
-                update_action_status(conn, action.id, 'failed', error_message=error_message)
+                status_updates.append(('failed', 0, error_message, action.id))
             else:
-                update_action_status(conn, action.id, 'skipped')
+                status_updates.append(('skipped', 0, None, action.id))
 
-            if processed % 10 == 0:
-                update_plan_progress(conn, plan_id)
+            if len(status_updates) >= status_flush_threshold:
+                conn.executemany("""
+                    UPDATE link_actions
+                    SET status = ?,
+                        bytes_saved = ?,
+                        error_message = ?,
+                        executed_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, status_updates)
+                status_updates.clear()
+                update_plan_progress(
+                    conn,
+                    plan_id,
+                    start_execution=True,
+                    executed=executed,
+                    failed=failed,
+                    skipped=skipped,
+                    total_saved=total_bytes_saved,
+                    commit=False,
+                )
+                conn.commit()
+
+    if not dry_run:
+        update_plan_progress(
+            conn,
+            plan_id,
+            start_execution=True,
+            executed=0,
+            failed=0,
+            skipped=0,
+            total_saved=0,
+            commit=True,
+        )
 
     if use_jdupes:
         groups = {}
@@ -946,6 +1258,40 @@ def execute_plan(
             log_lines.append(f"sha256: {hash_val}")
             log_lines.append(f"actions: {len(group_actions)}")
             log_lines.append(f"jdupes_cmd: {jdupes_cmd} -L -1 -O -H -P fullhash -q")
+
+            def _emit_group_estimate(*, kept_count: int, unique_paths: int, unique_inodes: int, inode_bytes: int, will_invoke: bool) -> None:
+                if rate_tracker is None:
+                    return
+                estimate = rate_tracker.estimate(
+                    group_index=group_index,
+                    group_total=group_total,
+                    group_inode_bytes=inode_bytes,
+                    will_invoke=will_invoke,
+                )
+                skipped_actions = max(0, len(group_actions) - kept_count)
+                estimate_line = (
+                    "⏱️  jdupes estimate: "
+                    f"kept={kept_count}/{len(group_actions)} "
+                    f"skipped={skipped_actions} "
+                    f"paths={unique_paths} inodes={unique_inodes} "
+                    f"inode_bytes={_format_bytes(inode_bytes)} "
+                    f"rate={_format_rate_bps(estimate['rate_bps'])}({estimate['rate_source']}) "
+                    f"eta_group={_format_eta(estimate['eta_group_sec'])} "
+                    f"eta_total={_format_eta(estimate['eta_total_sec'])} "
+                    f"conf={estimate['confidence']}"
+                )
+                print(estimate_line)
+                log_lines.append(f"estimate_kept: {kept_count}/{len(group_actions)}")
+                log_lines.append(f"estimate_skipped_actions: {skipped_actions}")
+                log_lines.append(f"estimate_unique_paths: {unique_paths}")
+                log_lines.append(f"estimate_unique_inodes: {unique_inodes}")
+                log_lines.append(f"estimate_inode_bytes: {inode_bytes}")
+                log_lines.append(f"estimate_rate_bps: {int(estimate['rate_bps'])}")
+                log_lines.append(f"estimate_rate_source: {estimate['rate_source']}")
+                log_lines.append(f"estimate_eta_group_sec: {estimate['eta_group_sec']:.2f}")
+                log_lines.append(f"estimate_eta_total_sec: {estimate['eta_total_sec']:.2f}")
+                log_lines.append(f"estimate_confidence: {estimate['confidence']}")
+
             for action in group_actions:
                 status, error, canonical_path, duplicate_path = _precheck_jdupes_action(
                     conn, action, plan.mount_point, verify_mode
@@ -960,6 +1306,9 @@ def execute_plan(
 
             log_lines.append(f"valid_actions: {len(valid)}")
             if not valid:
+                _emit_group_estimate(kept_count=0, unique_paths=0, unique_inodes=0, inode_bytes=0, will_invoke=False)
+                if rate_tracker is not None:
+                    rate_tracker.observe_group(invoked=False)
                 log_lines.append("group_status: no_valid_actions")
                 print(
                     f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
@@ -981,6 +1330,9 @@ def execute_plan(
                     kept.append((action, canonical_path, duplicate_path))
 
             if not kept:
+                _emit_group_estimate(kept_count=0, unique_paths=0, unique_inodes=0, inode_bytes=0, will_invoke=False)
+                if rate_tracker is not None:
+                    rate_tracker.observe_group(invoked=False)
                 log_lines.append("group_status: no_kept_actions")
                 print(
                     f"🧪 jdupes group {group_index}/{group_total} sha={hash_val[:12]} "
@@ -1020,8 +1372,22 @@ def execute_plan(
                 paths.append(path)
             unique_paths = len(paths)
             log_lines.append(f"unique_paths: {unique_paths}")
+            try:
+                unique_inodes, unique_inode_bytes = _summarize_unique_inode_work(paths) if paths else (0, 0)
+            except OSError as e:
+                unique_inodes, unique_inode_bytes = 0, 0
+                log_lines.append(f"estimate_warning: failed to stat paths for inode summary ({e})")
+            _emit_group_estimate(
+                kept_count=len(kept),
+                unique_paths=unique_paths,
+                unique_inodes=unique_inodes,
+                inode_bytes=unique_inode_bytes,
+                will_invoke=(not dry_run and unique_paths >= 2),
+            )
 
             if len(paths) < 2:
+                if rate_tracker is not None:
+                    rate_tracker.observe_group(invoked=False)
                 for action, _, _ in kept:
                     record(action, 'skipped', error_message="Insufficient unique paths for linking")
                 log_lines.append("group_status: insufficient_unique_paths")
@@ -1035,6 +1401,8 @@ def execute_plan(
                 continue
 
             if dry_run:
+                if rate_tracker is not None:
+                    rate_tracker.observe_group(invoked=False)
                 log_lines.append("dry_run: true")
                 log_lines.append(f"planned_list_count: {unique_paths}")
                 log_lines.append("jdupes_invoked: false")
@@ -1076,16 +1444,26 @@ def execute_plan(
                 print(f"   {line}")
             if list_count < 2:
                 list_path.unlink(missing_ok=True)
+                if rate_tracker is not None:
+                    rate_tracker.observe_group(invoked=False)
                 for action, _, _ in kept:
                     record(action, 'skipped', error_message="Insufficient unique paths for linking")
                 log_lines.append("group_status: insufficient_unique_paths")
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
                 continue
+            run_started = time.monotonic()
             try:
                 result = _run_jdupes(jdupes_cmd, list_path, low_priority=low_priority)
             finally:
                 list_path.unlink(missing_ok=True)
+            run_elapsed = time.monotonic() - run_started
+            if rate_tracker is not None:
+                rate_tracker.observe_group(
+                    invoked=True,
+                    group_inode_bytes=unique_inode_bytes,
+                    elapsed_seconds=run_elapsed,
+                )
 
             group_error = None
             if result.returncode != 0:
@@ -1155,6 +1533,18 @@ def execute_plan(
 
     # Final progress update
     if not dry_run:
+        if status_updates:
+            conn.executemany("""
+                UPDATE link_actions
+                SET status = ?,
+                    bytes_saved = ?,
+                    error_message = ?,
+                    executed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, status_updates)
+            status_updates.clear()
+            conn.commit()
+
         # Check if all actions are done
         cursor.execute("""
             SELECT COUNT(*) FROM link_actions
@@ -1163,10 +1553,16 @@ def execute_plan(
 
         remaining = cursor.fetchone()[0]
 
-        if remaining == 0:
-            update_plan_progress(conn, plan_id, complete_execution=True)
-        else:
-            update_plan_progress(conn, plan_id)
+        update_plan_progress(
+            conn,
+            plan_id,
+            complete_execution=(remaining == 0),
+            executed=executed,
+            failed=failed,
+            skipped=skipped,
+            total_saved=total_bytes_saved,
+            commit=True,
+        )
 
     if zfs_mismatch_paths:
         unique_paths = list(dict.fromkeys(zfs_mismatch_paths))

@@ -6,7 +6,7 @@ duplicate files and generating hardlink actions.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 import sqlite3
 from pathlib import Path
 
@@ -112,7 +112,8 @@ def create_plan(
     conn: sqlite3.Connection,
     name: str,
     device_id: int,
-    min_size: int = 0
+    min_size: int = 0,
+    progress_callback: Optional[Callable[..., None]] = None,
 ) -> LinkPlan:
     """
     Generate a deduplication plan.
@@ -136,8 +137,23 @@ def create_plan(
     Raises:
         ValueError: If device not found or invalid parameters
     """
+    if progress_callback:
+        progress_callback(stage="analysis_start", device_id=device_id)
+
     # Run analysis
-    analysis_result = analyze_device(conn, device_id, min_size=min_size)
+    analysis_result = analyze_device(
+        conn,
+        device_id,
+        min_size=min_size,
+        progress_callback=progress_callback,
+    )
+
+    if progress_callback:
+        progress_callback(
+            stage="analysis_complete",
+            device_id=device_id,
+            duplicate_groups=len(analysis_result.duplicate_groups),
+        )
 
     if not analysis_result.duplicate_groups:
         # No duplicates found, return empty plan
@@ -155,8 +171,16 @@ def create_plan(
 
     # Generate actions for each duplicate group
     all_actions = []
+    total_groups = len(analysis_result.duplicate_groups)
+    if progress_callback and total_groups:
+        progress_callback(
+            stage="actions_start",
+            device_id=device_id,
+            groups_total=total_groups,
+            actions_generated=0,
+        )
 
-    for group in analysis_result.duplicate_groups:
+    for idx, group in enumerate(analysis_result.duplicate_groups, start=1):
         # Pick canonical file
         canonical_path, canonical_inode = pick_canonical_file(
             group.files,
@@ -165,24 +189,18 @@ def create_plan(
             device_id
         )
 
+        inode_by_path: dict[str, int] = {}
+        for file_path, inode in zip(group.files, group.inodes):
+            inode_by_path.setdefault(file_path, inode)
+
         # Generate HARDLINK actions for all non-canonical files
         for file_path in group.files:
             if file_path == canonical_path:
                 continue  # Skip canonical file
 
-            # Get inode for this file
-            cursor = conn.cursor()
-            table_name = f"files_{device_id}"
-            cursor.execute(
-                f"SELECT inode FROM {table_name} WHERE path = ? AND status = 'active'",
-                (file_path,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                # File not found or inactive, skip
+            duplicate_inode = inode_by_path.get(file_path)
+            if duplicate_inode is None:
                 continue
-
-            duplicate_inode = row[0]
 
             # Create action
             action = LinkAction(
@@ -198,6 +216,15 @@ def create_plan(
             )
             all_actions.append(action)
 
+        if progress_callback and (idx == 1 or idx % 200 == 0 or idx == total_groups):
+            progress_callback(
+                stage="actions_progress",
+                device_id=device_id,
+                groups_processed=idx,
+                groups_total=total_groups,
+                actions_generated=len(all_actions),
+            )
+
     # Build plan
     plan = LinkPlan(
         id=None,
@@ -210,6 +237,14 @@ def create_plan(
         actions_total=len(all_actions),
         actions=all_actions
     )
+
+    if progress_callback:
+        progress_callback(
+            stage="plan_complete",
+            device_id=device_id,
+            groups_total=total_groups,
+            actions_generated=len(all_actions),
+        )
 
     return plan
 

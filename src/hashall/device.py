@@ -354,37 +354,70 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
             """, (mount_point, mount_point, fs_uuid))
 
     else:
-        # New device - register it
-        alias = suggest_device_alias(Path(mount_point), cursor)
+        # Handle legacy/placeholder fs_uuid rows that already own this device_id.
+        # This avoids UNIQUE(device_id) failures when fs_uuid identity is corrected.
+        existing_device = cursor.execute("""
+            SELECT fs_uuid FROM devices WHERE device_id = ?
+        """, (device_id,)).fetchone()
 
-        # Try to get ZFS metadata
-        zfs_meta = get_zfs_metadata(mount_point)
+        if existing_device:
+            old_fs_uuid = existing_device[0]
+            if old_fs_uuid != fs_uuid:
+                print(f"⚠️  Filesystem UUID updated for device_id {device_id}:")
+                print(f"   Old fs_uuid: {old_fs_uuid} → New fs_uuid: {fs_uuid}")
 
-        # Get filesystem type
-        fs_type = kwargs.get('fs_type')
-        if not fs_type:
-            fs_type = _get_fs_type(mount_point)
+                cursor.execute("""
+                    UPDATE devices SET
+                        fs_uuid = ?,
+                        mount_point = ?,
+                        preferred_mount_point = COALESCE(preferred_mount_point, ?),
+                        last_scanned_at = datetime('now'),
+                        scan_count = scan_count + 1,
+                        updated_at = datetime('now')
+                    WHERE device_id = ?
+                """, (fs_uuid, mount_point, mount_point, device_id))
 
-        # Insert new device record
-        cursor.execute("""
-            INSERT INTO devices
-            (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, fs_type,
-             zfs_pool_name, zfs_dataset_name, zfs_pool_guid,
-             first_scanned_at, last_scanned_at, scan_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1)
-        """, (
-            fs_uuid,
-            device_id,
-            alias,
-            mount_point,
-            mount_point,
-            fs_type,
-            zfs_meta.get('pool_name'),
-            zfs_meta.get('dataset_name'),
-            zfs_meta.get('pool_guid')
-        ))
+                for table_name in ("scan_roots", "scan_sessions"):
+                    table_exists = cursor.execute("""
+                        SELECT 1 FROM sqlite_master WHERE type='table' AND name=?
+                    """, (table_name,)).fetchone()
+                    if table_exists:
+                        cursor.execute(
+                            f"UPDATE {table_name} SET fs_uuid = ? WHERE fs_uuid = ?",
+                            (fs_uuid, old_fs_uuid)
+                        )
+        else:
+            # New device - register it
+            alias = suggest_device_alias(Path(mount_point), cursor)
 
-        print(f"✅ Registered new device: {alias} (fs_uuid={fs_uuid}, device_id={device_id})")
+            # Try to get ZFS metadata
+            zfs_meta = get_zfs_metadata(mount_point)
+
+            # Get filesystem type
+            fs_type = kwargs.get('fs_type')
+            if not fs_type:
+                fs_type = _get_fs_type(mount_point)
+
+            # Insert new device record
+            cursor.execute("""
+                INSERT INTO devices
+                (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, fs_type,
+                 zfs_pool_name, zfs_dataset_name, zfs_pool_guid,
+                 first_scanned_at, last_scanned_at, scan_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1)
+            """, (
+                fs_uuid,
+                device_id,
+                alias,
+                mount_point,
+                mount_point,
+                fs_type,
+                zfs_meta.get('pool_name'),
+                zfs_meta.get('dataset_name'),
+                zfs_meta.get('pool_guid')
+            ))
+
+            print(f"✅ Registered new device: {alias} (fs_uuid={fs_uuid}, device_id={device_id})")
 
     # Fetch and return complete device info
     device_info = cursor.execute("""
