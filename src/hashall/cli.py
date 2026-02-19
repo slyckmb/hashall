@@ -392,6 +392,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     missing_in_catalog = 0
     skipped_prefix = 0
     processed = 0
+    checked = 0
     prune_stats = None
     root_path_from_content_path = 0
     write_batch_ops = 0
@@ -416,6 +417,17 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             if prefix_paths:
                 if not any(is_under(root_canon, pref) for pref in prefix_paths):
                     skipped_prefix += 1
+                    checked += 1
+                    if checked % 500 == 0:
+                        print(
+                            f"\n   ⏳ Prefix filter progress: checked={checked}/{len(torrents)} "
+                            f"processed={processed} skipped={skipped_prefix}"
+                        )
+                    progress.update(
+                        desc=f"filtering checked={checked}/{len(torrents)} "
+                             f"processed={processed} skipped={skipped_prefix}",
+                        advance=1,
+                    )
                     continue
 
             progress.update(desc=f"{torrent.name[:60]}", advance=0)
@@ -488,6 +500,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                 print(f"   ⚠️  Payload incomplete (missing SHA256s)")
                 incomplete_count += 1
             processed += 1
+            checked += 1
             progress.update(advance=1)
 
     if not dry_run and write_batch_ops:
