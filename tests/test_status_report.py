@@ -136,6 +136,7 @@ def test_collect_payload_groups_emits_rehome_signals():
         payload_rows,
         media_root="/data/media",
         top_n=10,
+        completion_filter_active=False,
     )
 
     assert groups["confirmed_groups"] == 2

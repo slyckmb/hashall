@@ -464,6 +464,7 @@ def _collect_payload_groups(
     *,
     media_root: str,
     top_n: int,
+    completion_filter_active: bool,
 ) -> dict:
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in payload_rows:
@@ -484,6 +485,8 @@ def _collect_payload_groups(
     stash_to_pool_no_growth_groups = 0
     stash_to_pool_no_growth_bytes = 0
     no_growth_group_summaries: list[dict] = []
+    impact_summaries: list[dict] = []
+    recommendation_counts = {"MOVE": 0, "PARTIAL_REVIEW": 0, "SKIP": 0}
 
     for payload_hash, rows in groups.items():
         if len(rows) < 2:
@@ -518,6 +521,75 @@ def _collect_payload_groups(
                 }
             )
 
+        if has_stash:
+            stash_rows: list[dict] = []
+            for row in rows:
+                owner = _root_for_payload(row["root_path"], contexts)
+                if owner and owner.root_kind == "stash":
+                    stash_rows.append(row)
+            stash_files = sum(int(row.get("file_count", 0)) for row in stash_rows)
+            stash_bytes = sum(int(row.get("total_bytes", 0)) for row in stash_rows)
+            movable_files = 0
+            movable_bytes = 0
+            blocked_files = 0
+            blocked_bytes = 0
+            block_reason_counts: dict[str, int] = defaultdict(int)
+
+            for row in stash_rows:
+                row_files = int(row.get("file_count", 0))
+                row_bytes = int(row.get("total_bytes", 0))
+                ref_count = int(row.get("ref_count", 0))
+                has_complete_ref = bool(row.get("has_complete_ref", True))
+
+                block_reason: Optional[str] = None
+                if has_media:
+                    block_reason = "external_media_copy"
+                elif not has_pool:
+                    block_reason = "pool_copy_missing"
+                elif ref_count == 0:
+                    block_reason = "no_torrent_refs"
+                elif completion_filter_active and not has_complete_ref:
+                    block_reason = "noncomplete_refs"
+
+                if block_reason is None:
+                    movable_files += row_files
+                    movable_bytes += row_bytes
+                else:
+                    blocked_files += row_files
+                    blocked_bytes += row_bytes
+                    block_reason_counts[block_reason] += 1
+
+            movable_pct_files = (movable_files / stash_files) if stash_files else 0.0
+            movable_pct_bytes = (movable_bytes / stash_bytes) if stash_bytes else 0.0
+
+            if movable_bytes <= 0:
+                recommendation = "SKIP"
+            elif movable_pct_bytes >= 0.90:
+                recommendation = "MOVE"
+            elif movable_pct_bytes >= 0.40:
+                recommendation = "PARTIAL_REVIEW"
+            else:
+                recommendation = "SKIP"
+            recommendation_counts[recommendation] += 1
+
+            impact_summaries.append(
+                {
+                    "payload_hash": payload_hash,
+                    "copies": len(rows),
+                    "stash_total_files": stash_files,
+                    "stash_total_bytes": stash_bytes,
+                    "movable_files": movable_files,
+                    "movable_bytes": movable_bytes,
+                    "blocked_files": blocked_files,
+                    "blocked_bytes": blocked_bytes,
+                    "movable_pct_files": movable_pct_files,
+                    "movable_pct_bytes": movable_pct_bytes,
+                    "recommendation": recommendation,
+                    "block_reason_counts": dict(sorted(block_reason_counts.items())),
+                    "sample_paths": sorted(row["root_path"] for row in rows)[:4],
+                }
+            )
+
         group_summaries.append(
             {
                 "payload_hash": payload_hash,
@@ -533,11 +605,22 @@ def _collect_payload_groups(
     top_groups = group_summaries[:top_n]
     no_growth_group_summaries.sort(key=lambda item: (item["total_bytes"], item["copies"]), reverse=True)
     top_no_growth_groups = no_growth_group_summaries[:top_n]
+    impact_summaries.sort(
+        key=lambda item: (item["movable_bytes"], item["movable_pct_bytes"], item["copies"]),
+        reverse=True,
+    )
+    top_impact_groups = impact_summaries[:top_n]
 
     return {
         "confirmed_groups": len(group_summaries),
         "top_groups": top_groups,
         "top_no_growth_groups": top_no_growth_groups,
+        "top_impact_groups": top_impact_groups,
+        "impact_summary": {
+            "move": int(recommendation_counts["MOVE"]),
+            "partial_review": int(recommendation_counts["PARTIAL_REVIEW"]),
+            "skip": int(recommendation_counts["SKIP"]),
+        },
         "rehome_opportunities": {
             "stash_to_pool_groups": stash_to_pool_groups,
             "stash_to_pool_estimated_bytes": stash_to_pool_bytes,
@@ -940,6 +1023,14 @@ def _build_actions(report: dict) -> list[dict]:
                 "command": "make rehome-checklist",
             }
         )
+    if int(report.get("rehome_impact_summary", {}).get("partial_review", 0)) > 0:
+        actions.append(
+            {
+                "priority": "P2",
+                "reason": "some payload groups are mostly movable but partially blocked",
+                "command": "make rehome-checklist",
+            }
+        )
 
     return actions
 
@@ -1029,6 +1120,7 @@ def build_status_report(
         payload_rows,
         media_root=media_root,
         top_n=top_n,
+        completion_filter_active=completion_filter_active,
     )
     recovery_no_growth = _collect_recovery_no_growth(
         conn,
@@ -1101,6 +1193,8 @@ def build_status_report(
         "duplicate_pockets": top_pockets,
         "payload_groups": payload_groups["top_groups"],
         "payload_groups_no_growth": payload_groups["top_no_growth_groups"],
+        "rehome_impact_groups": payload_groups["top_impact_groups"],
+        "rehome_impact_summary": payload_groups["impact_summary"],
         "payload_group_count": payload_groups["confirmed_groups"],
         "rehome": payload_groups["rehome_opportunities"],
         "recovery_no_growth": recovery_no_growth,
@@ -1253,6 +1347,43 @@ def _render_markdown(report: dict, db_path: str) -> str:
         lines.append("| _none_ | 0 B | 0 | - |")
     lines.append("")
 
+    lines.append("## Rehome Move Impact (Stash -> Pool)")
+    lines.append("")
+    impact_summary = report.get("rehome_impact_summary", {})
+    lines.append(
+        "- Recommendation counts "
+        f"(MOVE/PARTIAL_REVIEW/SKIP): **{int(impact_summary.get('move', 0)):,} / "
+        f"{int(impact_summary.get('partial_review', 0)):,} / "
+        f"{int(impact_summary.get('skip', 0)):,}**"
+    )
+    lines.append("")
+    lines.append(
+        "| Payload hash | Movable files | Movable bytes | Blocked files | Blocked bytes | Move impact (files/bytes) | Recommendation | Top block reasons |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---|---|---|")
+    for group in report.get("rehome_impact_groups", []):
+        reasons = ", ".join(
+            f"{k}:{v}" for k, v in sorted(group.get("block_reason_counts", {}).items())
+        ) or "-"
+        lines.append(
+            "| `{h}` | {mf:,}/{tf:,} | {mb}/{tb} | {bf:,} | {bb} | {pf:.0%}/{pb:.0%} | {rec} | {reasons} |".format(
+                h=str(group["payload_hash"])[:16],
+                mf=int(group.get("movable_files", 0)),
+                tf=int(group.get("stash_total_files", 0)),
+                mb=_fmt_bytes(int(group.get("movable_bytes", 0))),
+                tb=_fmt_bytes(int(group.get("stash_total_bytes", 0))),
+                bf=int(group.get("blocked_files", 0)),
+                bb=_fmt_bytes(int(group.get("blocked_bytes", 0))),
+                pf=float(group.get("movable_pct_files", 0.0)),
+                pb=float(group.get("movable_pct_bytes", 0.0)),
+                rec=str(group.get("recommendation", "SKIP")),
+                reasons=reasons,
+            )
+        )
+    if not report.get("rehome_impact_groups"):
+        lines.append("| _none_ | 0/0 | 0 B/0 B | 0 | 0 B | 0%/0% | SKIP | - |")
+    lines.append("")
+
     lines.append("## Recovery Dataset (Non-qB)")
     lines.append("")
     rec = report["recovery_no_growth"]
@@ -1313,6 +1444,10 @@ def _render_phone(report: dict, *, width: int, top: int) -> str:
     rehome_stash_to_pool_bytes = int(report.get("rehome", {}).get("stash_to_pool_estimated_bytes", 0))
     rehome_no_growth = int(report.get("rehome", {}).get("stash_to_pool_no_growth_groups", 0))
     rehome_no_growth_bytes = int(report.get("rehome", {}).get("stash_to_pool_no_growth_estimated_bytes", 0))
+    rehome_impact = report.get("rehome_impact_summary", {})
+    rehome_move = int(rehome_impact.get("move", 0))
+    rehome_partial = int(rehome_impact.get("partial_review", 0))
+    rehome_skip = int(rehome_impact.get("skip", 0))
     recovery_no_growth = report.get("recovery_no_growth", {})
 
     if not db_ok:
@@ -1354,6 +1489,10 @@ def _render_phone(report: dict, *, width: int, top: int) -> str:
         f"stash_to_pool={rehome_stash_to_pool:,} "
         f"({ _fmt_bytes(rehome_stash_to_pool_bytes) }) "
         f"no_growth={rehome_no_growth:,} ({_fmt_bytes(rehome_no_growth_bytes)})"
+    )
+    lines.append(
+        "rehome_impact: "
+        f"move={rehome_move:,} partial={rehome_partial:,} skip={rehome_skip:,}"
     )
     if recovery_no_growth.get("available"):
         lines.append(
