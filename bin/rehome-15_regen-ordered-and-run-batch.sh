@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  bin/rehome-15_regen-ordered-and-run-batch.sh [--regen-only] [batch-script args...]
+  bin/rehome-15_regen-ordered-and-run-batch.sh [--regen-only] [--debug] [batch-script args...]
 
 What it does:
   1) Rebuild eligible rehome hash list from current DB status report groups.
@@ -20,18 +20,35 @@ What it does:
 Notes:
   - Any args are forwarded to bin/rehome-10_apply-batch-with-guards.sh
   - Defaults (db/devices/space guard) come from the guarded batch script.
+  - --debug enables extra regen diagnostics and qB debug logs in apply step.
 USAGE
 }
 
 regen_only=0
-if [[ "${1:-}" == "--regen-only" ]]; then
-  regen_only=1
-  shift
-fi
+debug_mode=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --regen-only)
+      regen_only=1
+      shift
+      ;;
+    --debug)
+      debug_mode=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  usage
-  exit 0
+if [[ "$debug_mode" -eq 1 ]]; then
+  export HASHALL_REHOME_QB_DEBUG=1
+  export REHOME_REGEN_DEBUG=1
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,7 +65,9 @@ echo "phase=regenerate status=loading_db"
 
 PYTHONPATH=src python -u - <<'PY' "$hashes_file" "$report_file"
 import sys
+import os
 from pathlib import Path
+from collections import Counter
 
 from hashall.model import connect_db
 from hashall.status_report import build_status_report
@@ -72,6 +91,7 @@ print(f"phase=regenerate status=loaded_impact_groups total={len(groups)}", flush
 
 eligible = []
 blocked = []
+reason_counter = Counter()
 for idx, g in enumerate(groups, 1):
     payload_hash = str(g.get("payload_hash") or "").strip()
     if not payload_hash:
@@ -89,6 +109,7 @@ for idx, g in enumerate(groups, 1):
     elif reasons and set(reasons.keys()) == {"pool_copy_missing"}:
         decision = "MOVE_COPY_FIRST"
     else:
+        reason_counter.update(reasons.keys())
         blocked.append(
             {
                 "payload_hash": payload_hash,
@@ -137,6 +158,23 @@ print(f"hash_file={hashes_path}")
 print(f"report_file={report_path}")
 print(f"eligible_total={len(eligible)}")
 print(f"blocked_total={len(blocked)}")
+if os.getenv("REHOME_REGEN_DEBUG", "0") == "1":
+    top_reasons = ",".join(
+        f"{k}:{v}" for k, v in reason_counter.most_common(8)
+    ) or "none"
+    print(f"debug_top_block_reasons={top_reasons}")
+    if eligible:
+        head = eligible[:5]
+        print(
+            "debug_top_eligible="
+            + ",".join(f\"{x['payload_hash'][:12]}:{x['group_items']}:{x['payload_bytes']}\" for x in head)
+        )
+    if blocked:
+        head_b = blocked[:5]
+        print(
+            "debug_top_blocked="
+            + ",".join(f\"{x['payload_hash'][:12]}:{x['reason']}\" for x in head_b)
+        )
 PY
 echo "phase=regenerate done=$(TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)"
 
@@ -157,6 +195,9 @@ if [[ "$regen_only" -eq 1 ]]; then
 fi
 
 {
+  if [[ "$debug_mode" -eq 1 ]]; then
+    echo "debug_mode=1 HASHALL_REHOME_QB_DEBUG=${HASHALL_REHOME_QB_DEBUG:-0} REHOME_REGEN_DEBUG=${REHOME_REGEN_DEBUG:-0}"
+  fi
   echo "cmd=bin/rehome-10_apply-batch-with-guards.sh --hashes-file '$hash_file' $*"
   bin/rehome-10_apply-batch-with-guards.sh --hashes-file "$hash_file" "$@"
 } 2>&1 | tee "$run_log"
