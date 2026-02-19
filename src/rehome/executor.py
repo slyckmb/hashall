@@ -1119,20 +1119,48 @@ class DemotionExecutor:
 
             if plan.get("decision") == "REUSE":
                 # Reassign torrents to payload on target device
+                target_path = plan.get("target_path")
                 target_payload_row = conn.execute(
                     """
                     SELECT payload_id
                     FROM payloads
                     WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
+                      AND (? IS NULL OR root_path = ?)
+                    ORDER BY CASE WHEN root_path = ? THEN 0 ELSE 1 END, payload_id
                     LIMIT 1
                     """,
-                    (plan.get("payload_hash"), plan.get("target_device_id")),
+                    (
+                        plan.get("payload_hash"),
+                        plan.get("target_device_id"),
+                        target_path,
+                        target_path,
+                        target_path,
+                    ),
                 ).fetchone()
 
                 if not target_payload_row:
                     raise RuntimeError("Target payload not found for catalog sync")
 
                 target_payload_id = target_payload_row[0]
+                target_device_id = plan.get("target_device_id")
+                source_device_id = plan.get("source_device_id")
+
+                # Same-device REUSE may intentionally "re-point" the canonical payload
+                # root to an existing target view path (normalization flow).
+                if (
+                    target_path
+                    and target_device_id is not None
+                    and source_device_id is not None
+                    and int(target_device_id) == int(source_device_id)
+                ):
+                    conn.execute(
+                        """
+                        UPDATE payloads
+                        SET root_path = ?, updated_at = julianday('now')
+                        WHERE payload_id = ?
+                        """,
+                        (target_path, target_payload_id),
+                    )
 
                 for r in relocations:
                     conn.execute(

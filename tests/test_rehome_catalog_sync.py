@@ -355,3 +355,157 @@ def test_reuse_cleanup_reconciles_source_files_table_without_rescan(tmp_path):
     assert torrent_row == (2, 44, str(target_file.parent))
     assert src_row == ("deleted",)
     assert dst_row == ("active",)
+
+
+def test_reuse_same_device_prefers_target_root_path_row(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    pool_mount = tmp_path / "pool" / "data"
+    source_file = pool_mount / "flat" / "Movie.2024.mkv"
+    target_file = pool_mount / "cross-seed" / "FearNoPeer" / "Movie.2024.mkv"
+
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    payload_bytes = b"movie-bytes"
+    source_file.write_bytes(payload_bytes)
+    target_file.write_bytes(payload_bytes)
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            mount_point TEXT,
+            preferred_mount_point TEXT
+        );
+
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT NOT NULL,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'incomplete',
+            last_built_at REAL,
+            updated_at REAL
+        );
+
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            device_id INTEGER,
+            save_path TEXT,
+            root_name TEXT,
+            category TEXT,
+            tags TEXT,
+            last_seen_at REAL,
+            FOREIGN KEY (payload_id) REFERENCES payloads(payload_id)
+        );
+        """
+    )
+
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-44", 44, str(pool_mount), str(pool_mount)),
+    )
+
+    cur = conn.cursor()
+    ensure_files_table(cur, 44)
+
+    source_rel = str(source_file.relative_to(pool_mount))
+    target_rel = str(target_file.relative_to(pool_mount))
+    conn.execute(
+        """
+        INSERT INTO files_44
+            (path, size, mtime, quick_hash, sha1, sha256, hash_source, inode, status, discovered_under)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        """,
+        (
+            source_rel,
+            len(payload_bytes),
+            111.0,
+            "qh-flat",
+            "sha1-flat",
+            "sha256-same",
+            "calculated",
+            3001,
+            str(source_file.parent),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO files_44
+            (path, size, mtime, quick_hash, sha1, sha256, hash_source, inode, status, discovered_under)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        """,
+        (
+            target_rel,
+            len(payload_bytes),
+            222.0,
+            "qh-target",
+            "sha1-target",
+            "sha256-same",
+            "calculated",
+            3002,
+            str(target_file.parent),
+        ),
+    )
+
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (10, 'payload_hash_norm', 44, ?, 1, ?, 'complete')
+        """,
+        (str(source_file), len(payload_bytes)),
+    )
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (20, 'payload_hash_norm', 44, ?, 1, ?, 'complete')
+        """,
+        (str(target_file), len(payload_bytes)),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+        VALUES ('normhash', 10, 44, ?, ?)
+        """,
+        (str(target_file.parent), target_file.name),
+    )
+    conn.commit()
+    conn.close()
+
+    plan = {
+        "version": "1.0",
+        "direction": "demote",
+        "decision": "REUSE",
+        "torrent_hash": "normhash",
+        "payload_id": 10,
+        "payload_hash": "payload_hash_norm",
+        "affected_torrents": ["normhash"],
+        "source_path": str(source_file),
+        "target_path": str(target_file),
+        "source_device_id": 44,
+        "target_device_id": 44,
+        "file_count": 1,
+        "total_bytes": len(payload_bytes),
+    }
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.qbit_client = FakeQbitClient(default_path=str(target_file.parent))
+    executor.execute(plan, cleanup_duplicate_payload=False)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        payload20 = conn.execute(
+            "SELECT root_path FROM payloads WHERE payload_id = 20"
+        ).fetchone()
+        torrent_row = conn.execute(
+            "SELECT payload_id, device_id, save_path FROM torrent_instances WHERE torrent_hash = 'normhash'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert payload20 == (str(target_file),)
+    assert torrent_row == (20, 44, str(target_file.parent))

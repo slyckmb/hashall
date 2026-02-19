@@ -20,7 +20,7 @@ from hashall.payload import (
     get_payloads_by_hash,
     get_torrent_siblings,
 )
-from hashall.pathing import canonicalize_path, to_relpath, is_under
+from hashall.pathing import canonicalize_path, to_relpath, is_under, remap_to_mount_alias
 
 
 @dataclass
@@ -179,6 +179,37 @@ class DemotionPlanner:
         self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
         self.pool_seeding_root = canonicalize_path(Path(pool_seeding_root)) if pool_seeding_root else None
         self.pool_payload_root = canonicalize_path(Path(pool_payload_root)) if pool_payload_root else None
+
+    def _compute_pool_move_target(self, source_root_path: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Compute MOVE target path on pool while preserving seeding-relative structure.
+
+        Returns:
+            (target_path, error_reason)
+        """
+        base_root = self.pool_payload_root or self.pool_seeding_root
+        if base_root is None:
+            return None, "No pool payload root configured for MOVE"
+
+        source_path = canonicalize_path(Path(source_root_path))
+
+        # Backward compatibility: if stash mapping root is unavailable, keep legacy behavior.
+        if self.stash_seeding_root is None:
+            return str((base_root / source_path.name).resolve()), None
+
+        rel = to_relpath(source_path, self.stash_seeding_root)
+        if rel is None:
+            remapped = remap_to_mount_alias(source_path, self.stash_seeding_root)
+            if remapped is not None:
+                rel = to_relpath(remapped, self.stash_seeding_root)
+
+        if rel is None:
+            return (
+                None,
+                f"Source path {source_path} is not under stash seeding root {self.stash_seeding_root}",
+            )
+
+        return str((base_root / rel).resolve()), None
 
     def _get_db_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -706,9 +737,9 @@ class DemotionPlanner:
                 }
             else:
                 # MOVE: Need to move payload to pool
-                # Construct target path (same relative structure on pool)
-                base_root = self.pool_payload_root or self.pool_seeding_root
-                if base_root is None:
+                # Construct target path preserving stash-seeding-relative structure.
+                target_root, target_error = self._compute_pool_move_target(source_payload.root_path)
+                if target_root is None:
                     return {
                         "version": "1.0",
                         "direction": "demote",
@@ -716,7 +747,7 @@ class DemotionPlanner:
                         "torrent_hash": torrent_hash,
                         "payload_id": source_payload.payload_id,
                         "payload_hash": source_payload.payload_hash,
-                        "reasons": ["No pool payload root configured for MOVE"],
+                        "reasons": [target_error or "No pool payload root configured for MOVE"],
                         "affected_torrents": sibling_hashes,
                         "source_path": source_payload.root_path,
                         "target_path": None,
@@ -727,8 +758,6 @@ class DemotionPlanner:
                         "file_count": source_payload.file_count,
                         "total_bytes": source_payload.total_bytes
                     }
-
-                target_root = str(base_root / Path(source_payload.root_path).name)
 
                 return {
                     "version": "1.0",
