@@ -8,8 +8,9 @@ without duplicating data.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 import os
+import time
 
 from hashall.qbittorrent import QBitFile
 
@@ -51,7 +52,13 @@ def _normalize_rel_path(
     return path
 
 
-def _ensure_hardlink(src: Path, dst: Path) -> None:
+def _ensure_hardlink(
+    src: Path,
+    dst: Path,
+    *,
+    compare_hint: Optional[Callable[[Path, Path], Optional[bool]]] = None,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> None:
     def _same_content(a: Path, b: Path) -> bool:
         a_stat = os.stat(a)
         b_stat = os.stat(b)
@@ -68,6 +75,11 @@ def _ensure_hardlink(src: Path, dst: Path) -> None:
         cached = _CONTENT_EQ_CACHE.get(cache_key)
         if cached is not None:
             return cached
+        bytes_total = int(a_stat.st_size)
+        bytes_done = 0
+        start = time.monotonic()
+        last_log = start
+
         with a.open("rb") as fa, b.open("rb") as fb:
             while True:
                 ba = fa.read(1024 * 1024)
@@ -78,12 +90,30 @@ def _ensure_hardlink(src: Path, dst: Path) -> None:
                 if not ba:
                     _CONTENT_EQ_CACHE[cache_key] = True
                     return True
+                bytes_done += len(ba)
+                now = time.monotonic()
+                if progress_cb and (now - last_log) >= 5.0 and bytes_total > 0:
+                    pct = (bytes_done / bytes_total) * 100.0
+                    elapsed = max(now - start, 0.001)
+                    rate_mib = (bytes_done / (1024 * 1024)) / elapsed
+                    progress_cb(
+                        "build_views_progress phase=compare "
+                        f"bytes_done={bytes_done} bytes_total={bytes_total} "
+                        f"pct={pct:.1f} rate_mib_s={rate_mib:.1f} src={a} dst={b}"
+                    )
+                    last_log = now
 
     if dst.exists():
         src_stat = os.stat(src)
         dst_stat = os.stat(dst)
         if src_stat.st_ino == dst_stat.st_ino and src_stat.st_dev == dst_stat.st_dev:
             return
+        if compare_hint is not None:
+            hinted = compare_hint(src, dst)
+            if hinted is True:
+                return
+            if hinted is False:
+                raise RuntimeError(f"Destination exists and differs: {dst}")
         if _same_content(src, dst):
             # Accept an existing identical file (already materialized by previous runs/manual copy).
             return
@@ -103,7 +133,9 @@ def build_torrent_view(
     payload_root: Path,
     target_save_path: Path,
     files: List[QBitFile],
-    root_name: Optional[str] = None
+    root_name: Optional[str] = None,
+    compare_hint: Optional[Callable[[Path, Path], Optional[bool]]] = None,
+    progress_cb: Optional[Callable[[str], None]] = None,
 ) -> ViewBuildResult:
     """
     Build a hardlink view for a torrent at target_save_path.
@@ -146,7 +178,7 @@ def build_torrent_view(
             total_bytes += f.size
             continue
 
-        _ensure_hardlink(src, dst)
+        _ensure_hardlink(src, dst, compare_hint=compare_hint, progress_cb=progress_cb)
         total_bytes += f.size
 
     return ViewBuildResult(view_root=view_root, file_count=len(files), total_bytes=total_bytes)

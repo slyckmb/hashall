@@ -285,6 +285,49 @@ class DemotionExecutor:
             return None
         return Path(row[0])
 
+    def _get_device_table_name(self, conn: sqlite3.Connection, device_id: Optional[int]) -> Optional[str]:
+        """Return per-device file table name when it exists."""
+        if device_id is None:
+            return None
+        table_name = f"files_{device_id}"
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        return table_name if exists else None
+
+    def _get_known_sha256_for_abs_path(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        abs_path: Path,
+        mount_point: Optional[Path],
+        preferred_mount: Optional[Path],
+        cache: Dict[str, Optional[str]],
+    ) -> Optional[str]:
+        """Resolve SHA256 for an absolute path from files_<device_id>, cached by path."""
+        key = str(abs_path.resolve())
+        if key in cache:
+            return cache[key]
+
+        rel_path = self._to_device_relpath(abs_path, mount_point, preferred_mount)
+        if rel_path is None:
+            cache[key] = None
+            return None
+
+        try:
+            row = conn.execute(
+                f"SELECT sha256 FROM {table_name} WHERE path = ? AND status = 'active' LIMIT 1",
+                (rel_path,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Older test schemas may not yet have sha256.
+            cache[key] = None
+            return None
+        value = str(row[0]) if row and row[0] else None
+        cache[key] = value
+        return value
+
     def _build_views(self, payload_root: Path, view_targets: List[Dict], plan: Dict) -> None:
         """Build torrent views using hardlinks to the payload root."""
         if not view_targets:
@@ -294,45 +337,73 @@ class DemotionExecutor:
 
         total = len(view_targets)
         progress_every = 5 if total <= 50 else 25
+        files_cache: Dict[str, List] = {}
 
-        for idx, target in enumerate(view_targets, start=1):
-            torrent_hash = target["torrent_hash"]
-            target_save_path = Path(target["target_save_path"])
-            root_name = target.get("root_name")
+        conn = self._get_db_connection()
+        table_name = self._get_device_table_name(conn, plan.get("target_device_id"))
+        mount_point, preferred_mount = self._get_device_mount_info(conn, plan.get("target_device_id"))
+        path_sha_cache: Dict[str, Optional[str]] = {}
 
-            if idx == 1 or idx == total or idx % progress_every == 0:
+        def compare_hint(src: Path, dst: Path) -> Optional[bool]:
+            if not table_name:
+                return None
+            src_sha = self._get_known_sha256_for_abs_path(
+                conn, table_name, src, mount_point, preferred_mount, path_sha_cache
+            )
+            dst_sha = self._get_known_sha256_for_abs_path(
+                conn, table_name, dst, mount_point, preferred_mount, path_sha_cache
+            )
+            if src_sha and dst_sha:
+                return src_sha == dst_sha
+            return None
+
+        try:
+            for idx, target in enumerate(view_targets, start=1):
+                torrent_hash = target["torrent_hash"]
+                target_save_path = Path(target["target_save_path"])
+                root_name = target.get("root_name")
+
+                if idx == 1 or idx == total or idx % progress_every == 0:
+                    self._log(
+                        f"  build_views_progress phase=fetch_files done={idx}/{total} hash={torrent_hash[:16]}"
+                    )
+                fetch_start = time.monotonic()
+                if torrent_hash in files_cache:
+                    files = files_cache[torrent_hash]
+                else:
+                    files = self.qbit_client.get_torrent_files(torrent_hash)
+                    files_cache[torrent_hash] = files
+                fetch_elapsed = time.monotonic() - fetch_start
                 self._log(
-                    f"  build_views_progress phase=fetch_files done={idx}/{total} hash={torrent_hash[:16]}"
+                    f"  build_views_progress phase=fetch_files_done done={idx}/{total} "
+                    f"hash={torrent_hash[:16]} files={len(files)} elapsed_s={fetch_elapsed:.1f}"
                 )
-            fetch_start = time.monotonic()
-            files = self.qbit_client.get_torrent_files(torrent_hash)
-            fetch_elapsed = time.monotonic() - fetch_start
-            self._log(
-                f"  build_views_progress phase=fetch_files_done done={idx}/{total} "
-                f"hash={torrent_hash[:16]} files={len(files)} elapsed_s={fetch_elapsed:.1f}"
-            )
-            if not files:
-                raise RuntimeError(f"Failed to fetch files for torrent {torrent_hash[:16]}")
+                if not files:
+                    raise RuntimeError(f"Failed to fetch files for torrent {torrent_hash[:16]}")
 
-            link_start = time.monotonic()
-            result = build_torrent_view(
-                payload_root=payload_root,
-                target_save_path=target_save_path,
-                files=files,
-                root_name=root_name,
-            )
-            link_elapsed = time.monotonic() - link_start
-
-            if result.file_count != plan["file_count"] or result.total_bytes != plan["total_bytes"]:
-                raise RuntimeError(
-                    f"View build mismatch for {torrent_hash[:16]}: "
-                    f"files={result.file_count}/{plan['file_count']} "
-                    f"bytes={result.total_bytes}/{plan['total_bytes']}"
+                link_start = time.monotonic()
+                result = build_torrent_view(
+                    payload_root=payload_root,
+                    target_save_path=target_save_path,
+                    files=files,
+                    root_name=root_name,
+                    compare_hint=compare_hint,
+                    progress_cb=lambda msg: self._log(f"  {msg}"),
                 )
-            self._log(
-                f"  build_views_progress phase=link done={idx}/{total} "
-                f"hash={torrent_hash[:16]} elapsed_s={link_elapsed:.1f}"
-            )
+                link_elapsed = time.monotonic() - link_start
+
+                if result.file_count != plan["file_count"] or result.total_bytes != plan["total_bytes"]:
+                    raise RuntimeError(
+                        f"View build mismatch for {torrent_hash[:16]}: "
+                        f"files={result.file_count}/{plan['file_count']} "
+                        f"bytes={result.total_bytes}/{plan['total_bytes']}"
+                    )
+                self._log(
+                    f"  build_views_progress phase=link done={idx}/{total} "
+                    f"hash={torrent_hash[:16]} elapsed_s={link_elapsed:.1f}"
+                )
+        finally:
+            conn.close()
 
     def _build_relocations(self, conn: sqlite3.Connection, plan: Dict) -> List[Dict]:
         """Build relocation targets for all torrents in plan."""
@@ -1291,9 +1362,14 @@ class DemotionExecutor:
            b. Relocate torrent in qBittorrent
            c. Verify torrent can access files
         """
+        import time
+
+        t_start = time.monotonic()
+        phase_times: Dict[str, float] = {}
         target_path = Path(plan['target_path'])
 
         # 1. Verify existing payload on stash
+        t0 = time.monotonic()
         self._log(f"step=verify_stash_payload path={target_path}")
         if not self._verify_file_count(target_path, plan['file_count']):
             raise RuntimeError(f"Stash payload file count mismatch at {target_path}")
@@ -1302,21 +1378,33 @@ class DemotionExecutor:
 
         # Spot-check (optional)
         self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
+        phase_times["verify"] = time.monotonic() - t0
 
+        t0 = time.monotonic()
         conn = self._get_db_connection()
         try:
             relocations = self._build_relocations(conn, plan)
         finally:
             conn.close()
+        phase_times["build_relocations"] = time.monotonic() - t0
 
         # Build views (if mapping provided)
+        t0 = time.monotonic()
         self._log("step=build_views")
         self._build_views(target_path, plan.get("view_targets") or [], plan)
+        phase_times["build_views"] = time.monotonic() - t0
 
         # Relocate all torrents atomically
+        t0 = time.monotonic()
         self._log("step=relocate_siblings")
         self._relocate_torrents_atomic(relocations)
+        phase_times["relocate"] = time.monotonic() - t0
 
+        phase_times["total"] = time.monotonic() - t_start
+        self._log(
+            "phase_timing_s "
+            + " ".join(f"{k}={v:.1f}" for k, v in phase_times.items())
+        )
         self._log("PROMOTE_REUSE execution complete", "success")
 
     def _execute_reuse(self, plan: Dict, spot_check: int = 0) -> None:
@@ -1331,10 +1419,15 @@ class DemotionExecutor:
            c. Verify torrent can access files
         3. Remove stash-side torrent views (after all relocations succeed)
         """
+        import time
+
+        t_start = time.monotonic()
+        phase_times: Dict[str, float] = {}
         target_path = Path(plan['target_path'])
         source_path = Path(plan['source_path'])
 
         # 1. Verify existing payload on pool
+        t0 = time.monotonic()
         self._log(f"step=verify_pool_payload path={target_path}")
         if not self._verify_file_count(target_path, plan['file_count']):
             raise RuntimeError(f"Pool payload file count mismatch at {target_path}")
@@ -1343,25 +1436,39 @@ class DemotionExecutor:
 
         # Spot-check (optional)
         self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
+        phase_times["verify"] = time.monotonic() - t0
 
+        t0 = time.monotonic()
         conn = self._get_db_connection()
         try:
             relocations = self._build_relocations(conn, plan)
         finally:
             conn.close()
+        phase_times["build_relocations"] = time.monotonic() - t0
 
         # Build views (if mapping provided)
+        t0 = time.monotonic()
         self._log("step=build_views")
         self._build_views(target_path, plan.get("view_targets") or [], plan)
+        phase_times["build_views"] = time.monotonic() - t0
 
         # Relocate all torrents atomically
+        t0 = time.monotonic()
         self._log("step=relocate_siblings")
         self._relocate_torrents_atomic(relocations)
+        phase_times["relocate"] = time.monotonic() - t0
 
         # 3. Cleanup stash-side views
+        t0 = time.monotonic()
         self._log(f"step=cleanup_stash path={source_path} relocated={len(relocations)}")
         self._log(f"  MANUAL_ACTION_REQUIRED: Verify torrents work, then delete {source_path}", "warning")
+        phase_times["cleanup_notice"] = time.monotonic() - t0
 
+        phase_times["total"] = time.monotonic() - t_start
+        self._log(
+            "phase_timing_s "
+            + " ".join(f"{k}={v:.1f}" for k, v in phase_times.items())
+        )
         self._log("REUSE execution complete", "success")
 
     def _execute_move(self, plan: Dict, spot_check: int = 0) -> None:
@@ -1378,6 +1485,10 @@ class DemotionExecutor:
            c. Verify torrent can access files
         5. Verify source is removed
         """
+        import time
+
+        t_start = time.monotonic()
+        phase_times: Dict[str, float] = {}
         source_path = Path(plan['source_path'])
         target_path = Path(plan['target_path'])
 
@@ -1385,6 +1496,7 @@ class DemotionExecutor:
         move_strategy = "rename"
 
         # 1. Verify source / idempotent target
+        t0 = time.monotonic()
         self._log(f"step=verify_source path={source_path}")
         if source_path.exists():
             if not self._verify_file_count(source_path, plan['file_count']):
@@ -1412,8 +1524,10 @@ class DemotionExecutor:
             if not target_path.exists():
                 raise RuntimeError(f"Source path does not exist: {source_path}")
             self._log("step=verify_source source_missing=true mode=idempotent_reconcile", "warning")
+        phase_times["verify_and_move"] = time.monotonic() - t0
 
         # 3. Verify target
+        t0 = time.monotonic()
         self._log(f"step=verify_target path={target_path}")
         if not self._verify_file_count(target_path, plan['file_count']):
             raise RuntimeError("Target file count mismatch after move")
@@ -1422,20 +1536,27 @@ class DemotionExecutor:
 
         # Spot-check (optional)
         self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
+        phase_times["verify_target_and_spotcheck"] = time.monotonic() - t0
 
+        t0 = time.monotonic()
         conn = self._get_db_connection()
         try:
             relocations = self._build_relocations(conn, plan)
         finally:
             conn.close()
+        phase_times["build_relocations"] = time.monotonic() - t0
 
         # 4. Build views and relocate atomically
         try:
+            t0 = time.monotonic()
             self._log("step=build_views")
             self._build_views(target_path, plan.get("view_targets") or [], plan)
+            phase_times["build_views"] = time.monotonic() - t0
 
+            t0 = time.monotonic()
             self._log("step=relocate_siblings")
             self._relocate_torrents_atomic(relocations)
+            phase_times["relocate"] = time.monotonic() - t0
         except Exception as e:
             # Rollback: restore source state if sibling relocation fails
             self._log("relocation_failed rolling_back_payload", "error")
@@ -1465,6 +1586,7 @@ class DemotionExecutor:
         cleanup_source_status = "deleted"
         plan["cleanup_source_deferred"] = False
         plan.pop("cleanup_source_deferred_path", None)
+        t0 = time.monotonic()
         if move_strategy == "rsync_copy" and source_path.exists():
             self._log(f"step=cleanup_source_after_rsync path={source_path}")
             try:
@@ -1502,8 +1624,10 @@ class DemotionExecutor:
                         )
                 else:
                     raise RuntimeError(f"Failed to remove source after rsync move: {e}") from e
+        phase_times["cleanup"] = time.monotonic() - t0
 
         # 5. Verify source is removed
+        t0 = time.monotonic()
         self._log(f"step=verify_source_removed path={source_path}")
         if source_path.exists():
             if cleanup_source_status == "deferred":
@@ -1514,6 +1638,12 @@ class DemotionExecutor:
             else:
                 raise RuntimeError(f"Source still exists after move: {source_path}")
         self._log(f"cleanup_source_status={cleanup_source_status}")
+        phase_times["verify_source_removed"] = time.monotonic() - t0
+        phase_times["total"] = time.monotonic() - t_start
+        self._log(
+            "phase_timing_s "
+            + " ".join(f"{k}={v:.1f}" for k, v in phase_times.items())
+        )
 
         self._log("MOVE execution complete", "success")
 

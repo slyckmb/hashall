@@ -5,6 +5,8 @@ Tests for torrent view builder.
 import os
 from pathlib import Path
 
+import pytest
+
 from hashall.qbittorrent import QBitFile
 from rehome.view_builder import build_torrent_view
 
@@ -71,3 +73,47 @@ def test_build_view_accepts_existing_identical_file(tmp_path):
     assert result.view_root == target_save
     assert preexisting.exists()
     assert preexisting.read_bytes() == payload_root.read_bytes()
+
+
+def test_build_view_compare_hint_accepts_existing(tmp_path):
+    payload_root = tmp_path / "payload" / "sample.mkv"
+    payload_root.parent.mkdir(parents=True)
+    payload_root.write_bytes(b"ABCDEF")
+
+    files = [QBitFile(name="sample.mkv", size=payload_root.stat().st_size)]
+    target_save = tmp_path / "views"
+    target_save.mkdir()
+    preexisting = target_save / "sample.mkv"
+    preexisting.write_bytes(b"XXXXXX")  # different content
+
+    result = build_torrent_view(
+        payload_root,
+        target_save,
+        files,
+        root_name=None,
+        compare_hint=lambda _src, _dst: True,
+    )
+
+    assert result.view_root == target_save
+    assert preexisting.exists()
+
+
+def test_build_view_compare_hint_rejects_existing(tmp_path):
+    payload_root = tmp_path / "payload" / "sample.mkv"
+    payload_root.parent.mkdir(parents=True)
+    payload_root.write_bytes(b"ABCDEF")
+
+    files = [QBitFile(name="sample.mkv", size=payload_root.stat().st_size)]
+    target_save = tmp_path / "views"
+    target_save.mkdir()
+    preexisting = target_save / "sample.mkv"
+    preexisting.write_bytes(b"XXXXXX")
+
+    with pytest.raises(RuntimeError, match="Destination exists and differs"):
+        build_torrent_view(
+            payload_root,
+            target_save,
+            files,
+            root_name=None,
+            compare_hint=lambda _src, _dst: False,
+        )
