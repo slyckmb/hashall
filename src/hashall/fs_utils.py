@@ -4,7 +4,7 @@ import os
 import subprocess
 import shutil
 from functools import lru_cache
-from typing import Optional, Sequence
+from typing import Dict, Optional, Sequence
 from pathlib import Path
 
 
@@ -67,6 +67,27 @@ def get_filesystem_uuid(path: str) -> str:
 
 _FINDMNT_FALLBACKS = ("/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt")
 _ZFS_FALLBACKS = ("/sbin/zfs", "/usr/sbin/zfs")
+_MOUNT_POINT_PREFIX_CACHE: Dict[str, str] = {}
+
+
+def _prefix_cache_lookup(path: str) -> Optional[str]:
+    best_prefix = ""
+    best_mount: Optional[str] = None
+    for prefix, mount_point in _MOUNT_POINT_PREFIX_CACHE.items():
+        if path == prefix or path.startswith(prefix + os.sep):
+            if len(prefix) > len(best_prefix):
+                best_prefix = prefix
+                best_mount = mount_point
+    return best_mount
+
+
+def _find_deeper_mount_between(path: Path, stop_before: Path) -> Optional[str]:
+    for parent in [path, *path.parents]:
+        if parent == stop_before:
+            break
+        if os.path.ismount(parent):
+            return str(parent)
+    return None
 
 
 def _resolve_cmd(cmd: str, fallbacks: Sequence[str]) -> str:
@@ -175,6 +196,7 @@ def clear_mount_lookup_caches() -> None:
     """Clear mount lookup caches (used by tests)."""
     _get_mount_point_cached.cache_clear()
     _get_mount_source_cached.cache_clear()
+    _MOUNT_POINT_PREFIX_CACHE.clear()
 
 
 def get_mount_point(path: str) -> Optional[str]:
@@ -187,7 +209,19 @@ def get_mount_point(path: str) -> Optional[str]:
         normalized = str(Path(path).resolve())
     except Exception:
         normalized = str(path)
-    return _get_mount_point_cached(normalized)
+
+    cached_mount = _prefix_cache_lookup(normalized)
+    if cached_mount:
+        deeper = _find_deeper_mount_between(Path(normalized), Path(cached_mount))
+        if deeper:
+            _MOUNT_POINT_PREFIX_CACHE[deeper] = deeper
+            return deeper
+        return cached_mount
+
+    mount_point = _get_mount_point_cached(normalized)
+    if mount_point:
+        _MOUNT_POINT_PREFIX_CACHE[mount_point] = mount_point
+    return mount_point
 
 
 def get_mount_source(path: str) -> Optional[str]:

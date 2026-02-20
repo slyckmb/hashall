@@ -266,6 +266,19 @@ def test_get_mount_source_uses_findmnt_target():
         assert "/some/file/under/mount" in args
 
 
+def test_get_mount_point_reuses_prefix_cache_for_sibling_paths():
+    with patch("os.path.ismount", return_value=False):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="/mnt/data\n", returncode=0)
+
+            first = get_mount_point("/mnt/data/a/file.mkv")
+            second = get_mount_point("/mnt/data/b/file.mkv")
+
+            assert first == "/mnt/data"
+            assert second == "/mnt/data"
+            assert mock_run.call_count == 1
+
+
 class TestTryZfsGuid:
     """Test suite for _try_zfs_guid() helper function."""
 
