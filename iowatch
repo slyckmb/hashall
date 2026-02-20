@@ -4,7 +4,7 @@ iowatch - Real-time I/O and system monitoring dashboard
 Monitors disk I/O, CPU usage, and hashall scan processes with colors!
 """
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 import sys
 import time
