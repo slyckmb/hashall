@@ -271,6 +271,70 @@ run_with_heartbeat() {
   return "$rc"
 }
 
+run_nohl_restart_lane() {
+  local min_free_pct="${REHOME_NOHL_MIN_FREE_PCT:-20}"
+  local limit="${REHOME_NOHL_LIMIT:-0}"
+  local do_apply="${REHOME_NOHL_APPLY:-0}"
+  local cleanup="${REHOME_NOHL_FOLLOWUP_CLEANUP:-1}"
+  local print_torrents="${REHOME_NOHL_FOLLOWUP_PRINT_TORRENTS:-0}"
+  local execute="${REHOME_NOHL_EXECUTE:-0}"
+  local output_prefix="${REHOME_NOHL_OUTPUT_PREFIX:-nohl}"
+
+  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply}"
+  echo "recommended_commands_begin"
+  echo "bin/rehome-30_nohl-discover-and-rank.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit}"
+  echo "bin/rehome-40_nohl-build-group-plan.sh --output-prefix ${output_prefix} --limit ${limit}"
+  echo "bin/rehome-50_nohl-dryrun-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit}"
+  echo "bin/rehome-60_nohl-apply-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit}"
+  echo "bin/rehome-70_nohl-followup-and-reconcile.sh --output-prefix ${output_prefix} --cleanup ${cleanup} --print-torrents ${print_torrents}"
+  echo "bin/rehome-80_nohl-report-and-next-batch.sh --output-prefix ${output_prefix}"
+  echo "recommended_commands_end"
+
+  if [[ "$execute" != "1" ]]; then
+    echo "nohl_restart execute=0 status=printed_only"
+    return 0
+  fi
+
+  run_with_heartbeat "30 nohl-discover-rank" \
+    bin/rehome-30_nohl-discover-and-rank.sh \
+    --output-prefix "$output_prefix" \
+    --min-free-pct "$min_free_pct" \
+    --limit "$limit"
+
+  run_with_heartbeat "40 nohl-build-group-plan" \
+    bin/rehome-40_nohl-build-group-plan.sh \
+    --output-prefix "$output_prefix" \
+    --limit "$limit"
+
+  run_with_heartbeat "50 nohl-dryrun-group-batch" \
+    bin/rehome-50_nohl-dryrun-group-batch.sh \
+    --output-prefix "$output_prefix" \
+    --min-free-pct "$min_free_pct" \
+    --limit "$limit"
+
+  if [[ "$do_apply" == "1" ]]; then
+    run_with_heartbeat "60 nohl-apply-group-batch" \
+      bin/rehome-60_nohl-apply-group-batch.sh \
+      --output-prefix "$output_prefix" \
+      --min-free-pct "$min_free_pct" \
+      --limit "$limit"
+  else
+    echo "step=60 nohl-apply-group-batch status=skipped reason=apply_disabled"
+  fi
+
+  run_with_heartbeat "70 nohl-followup-reconcile" \
+    bin/rehome-70_nohl-followup-and-reconcile.sh \
+    --output-prefix "$output_prefix" \
+    --cleanup "$cleanup" \
+    --print-torrents "$print_torrents"
+
+  run_with_heartbeat "80 nohl-report-next-batch" \
+    bin/rehome-80_nohl-report-and-next-batch.sh \
+    --output-prefix "$output_prefix"
+
+  echo "nohl_restart done=1"
+}
+
 stage0_relocate_pool_to_seeds_via_qb() {
   local scope_root="$1"
   local source_root="$2"
@@ -492,6 +556,13 @@ PY
 }
 
 echo "run_log=$run_log"
+
+PROCESS_MODE="${REHOME_PROCESS_MODE:-frozen-one-pass}"
+if [[ "$PROCESS_MODE" == "nohl-restart" ]]; then
+  run_nohl_restart_lane
+  echo "done=1 mode=nohl-restart run_log=$run_log"
+  exit 0
+fi
 
 LEGACY_CROSS_SEED_ROOT="/pool/data/cross-seed"
 
