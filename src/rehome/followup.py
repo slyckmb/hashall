@@ -231,7 +231,9 @@ def run_followup(
                         SELECT COUNT(*)
                         FROM torrent_instances ti
                         JOIN payloads p ON p.payload_id = ti.payload_id
-                        WHERE p.payload_hash = ? AND p.device_id = ?
+                        WHERE p.payload_hash = ?
+                          AND p.device_id = ?
+                          AND COALESCE(ti.save_path, '') LIKE '/stash/%'
                         """,
                         (payload_hash, source_device),
                     ).fetchone()[0]
