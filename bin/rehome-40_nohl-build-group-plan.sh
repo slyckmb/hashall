@@ -79,6 +79,7 @@ report_tsv="${log_dir}/${OUTPUT_PREFIX}-plan-report-${stamp}.tsv"
   PYTHONPATH=src python -u - <<'PY' \
     "$HASHES_FILE" "$DB_PATH" "$STASH_DEVICE_ID" "$POOL_DEVICE_ID" "$LIMIT" "$plan_dir" "$manifest_json" "$plannable_hashes" "$blocked_hashes" "$report_tsv" "$FAST_MODE" "$DEBUG_MODE"
 import json
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -101,6 +102,8 @@ from pathlib import Path
 limit = max(0, int(limit_raw))
 fast_mode = str(fast_mode_raw).strip() == "1"
 debug_mode = str(debug_mode_raw).strip() == "1"
+heartbeat_seconds = max(2.0, float(__import__("os").environ.get("REHOME_NOHL_STEP40_HEARTBEAT_SECONDS", "5")))
+plan_timeout_seconds = max(30.0, float(__import__("os").environ.get("REHOME_NOHL_STEP40_PLAN_TIMEOUT_SECONDS", "300")))
 hashes = []
 for line in Path(hashes_file).read_text(encoding="utf-8").splitlines():
     line = line.strip()
@@ -116,6 +119,7 @@ blocked = []
 with Path(report_tsv).open("w", encoding="utf-8") as tsv:
     tsv.write("idx\tpayload_hash\tdecision\tsource_path\ttarget_path\tstatus\tplan_path\terror\n")
     total = len(hashes)
+    start_all = time.monotonic()
     for idx, payload_hash in enumerate(hashes, start=1):
         prefix = payload_hash[:12]
         plan_path = Path(plan_dir) / f"nohl-plan-{idx:04d}-{prefix}.json"
@@ -157,10 +161,46 @@ with Path(report_tsv).open("w", encoding="utf-8") as tsv:
         decision = ""
         source_path = ""
         target_path = ""
+        item_start = time.monotonic()
         try:
             if debug_mode:
                 print(f"debug idx={idx}/{total} cmd={' '.join(cmd)}", flush=True)
-            subprocess.run(cmd, check=True, text=True, capture_output=True, env={"PYTHONPATH": "src", **__import__("os").environ})
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={"PYTHONPATH": "src", **__import__("os").environ},
+            )
+            last_heartbeat = item_start
+            while proc.poll() is None:
+                now = time.monotonic()
+                elapsed = now - item_start
+                if elapsed >= plan_timeout_seconds:
+                    proc.kill()
+                    raise RuntimeError(f"plan_timeout_s={int(elapsed)}")
+                if now - last_heartbeat >= heartbeat_seconds:
+                    overall_elapsed = now - start_all
+                    avg = overall_elapsed / idx
+                    eta = max(0.0, (total - idx) * avg)
+                    print(
+                        f"plan_wait idx={idx}/{total} payload={payload_hash[:16]} "
+                        f"elapsed_s={int(elapsed)} eta_s={int(eta)}",
+                        flush=True,
+                    )
+                    last_heartbeat = now
+                time.sleep(0.5)
+
+            out, err = proc.communicate()
+            if proc.returncode != 0:
+                if debug_mode and out.strip():
+                    print(f"debug_stdout idx={idx}/{total} lines={len(out.splitlines())}", flush=True)
+                if err.strip():
+                    preview = "\\n".join(err.splitlines()[:6])
+                    raise RuntimeError(f"plan_failed_rc={proc.returncode} stderr_preview={preview}")
+                raise RuntimeError(f"plan_failed_rc={proc.returncode}")
+
             data = json.loads(plan_path.read_text(encoding="utf-8"))
             decision = str(data.get("decision") or "").upper()
             source_path = str(data.get("source_path") or "")
@@ -172,9 +212,6 @@ with Path(report_tsv).open("w", encoding="utf-8") as tsv:
             else:
                 status = "error"
                 error = f"unexpected_decision:{decision}"
-        except subprocess.CalledProcessError as exc:
-            status = "error"
-            error = f"plan_failed_rc={exc.returncode}"
         except Exception as exc:  # pragma: no cover - defensive
             status = "error"
             error = str(exc)
@@ -195,13 +232,29 @@ with Path(report_tsv).open("w", encoding="utf-8") as tsv:
         tsv.write(
             f"{idx}\t{payload_hash}\t{decision}\t{source_path}\t{target_path}\t{status}\t{plan_path}\t{error}\n"
         )
+        elapsed_item = int(time.monotonic() - item_start)
         if fast_mode and status == "ok":
-            print(f"plan idx={idx}/{total} payload={payload_hash[:16]} decision={decision} status=ok", flush=True)
+            print(
+                f"plan idx={idx}/{total} payload={payload_hash[:16]} decision={decision} status=ok elapsed_s={elapsed_item}",
+                flush=True,
+            )
         else:
             print(
-            f"plan idx={idx}/{total} payload={payload_hash[:16]} decision={decision or '-'} "
-            f"status={status} from={source_path or '-'} to={target_path or '-'} error={error or 'none'}",
-            flush=True,
+                f"plan idx={idx}/{total} payload={payload_hash[:16]} decision={decision or '-'} "
+                f"status={status} from={source_path or '-'} to={target_path or '-'} error={error or 'none'} "
+                f"elapsed_s={elapsed_item}",
+                flush=True,
+            )
+
+        if idx == 1 or idx % 25 == 0 or idx == total:
+            elapsed_all = time.monotonic() - start_all
+            avg = elapsed_all / idx
+            eta = max(0.0, (total - idx) * avg)
+            print(
+                f"progress idx={idx}/{total} ok={len(plannable)} blocked={len(blocked)} "
+                f"errors={len([m for m in manifest if m['status'] == 'error'])} "
+                f"avg_s={avg:.2f} eta_s={int(eta)}",
+                flush=True,
             )
 
 Path(plannable_hashes).write_text("\n".join(plannable) + ("\n" if plannable else ""), encoding="utf-8")
