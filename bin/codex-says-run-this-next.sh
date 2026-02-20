@@ -279,6 +279,8 @@ stage0_relocate_pool_to_seeds_via_qb() {
   local min_progress="$5"
   local wait_seconds="$6"
   local heartbeat_seconds="$7"
+  local poll_seconds="$8"
+  local stuck_seconds="$9"
 
   PYTHONPATH=src \
     STAGE0_SCOPE_ROOT="$scope_root" \
@@ -288,7 +290,9 @@ stage0_relocate_pool_to_seeds_via_qb() {
     STAGE0_MIN_PROGRESS="$min_progress" \
     STAGE0_WAIT_SECONDS="$wait_seconds" \
     STAGE0_HEARTBEAT_SECONDS="$heartbeat_seconds" \
-    python - <<'PY'
+    STAGE0_POLL_SECONDS="$poll_seconds" \
+    STAGE0_STUCK_SECONDS="$stuck_seconds" \
+    python -u - <<'PY'
 import os
 import time
 from pathlib import Path
@@ -314,6 +318,8 @@ apply_mode = str(os.environ.get("STAGE0_APPLY_MODE", "1")).strip().lower() in {"
 min_progress = float(os.environ.get("STAGE0_MIN_PROGRESS", "1.0"))
 wait_seconds = max(10, int(float(os.environ.get("STAGE0_WAIT_SECONDS", "1800"))))
 heartbeat_seconds = max(5, int(float(os.environ.get("STAGE0_HEARTBEAT_SECONDS", "15"))))
+poll_seconds = max(1, int(float(os.environ.get("STAGE0_POLL_SECONDS", "2"))))
+stuck_seconds = max(30, int(float(os.environ.get("STAGE0_STUCK_SECONDS", "120"))))
 
 qb = QBittorrentClient(
     base_url=os.getenv("QBIT_URL", "http://localhost:9003"),
@@ -329,7 +335,9 @@ print(
     "step=0 legacy-qb-relocate "
     f"mode={'apply' if apply_mode else 'dryrun'} "
     f"scope={scope_root} source={source_root} target={seeds_root} "
-    f"min_progress={min_progress:.3f} torrents_total={total}"
+    f"min_progress={min_progress:.3f} torrents_total={total} "
+    f"wait_seconds={wait_seconds} heartbeat_seconds={heartbeat_seconds} "
+    f"poll_seconds={poll_seconds} stuck_seconds={stuck_seconds}"
 )
 
 candidates = []
@@ -421,25 +429,39 @@ for idx, c in enumerate(candidates, start=1):
 
         deadline = time.monotonic() + wait_seconds
         last_beat = 0.0
+        start_wait = time.monotonic()
+        stuck_start = start_wait
         moved_ok = False
         while time.monotonic() < deadline:
             info = qb.get_torrent_info(h)
+            now = time.monotonic()
+            state = getattr(info, "state", "unknown") if info else "missing"
+            progress = getattr(info, "progress", 0.0) if info else 0.0
+            save_path = getattr(info, "save_path", "") if info else ""
             if info and str(info.save_path or "").strip():
                 actual = _canonical(str(info.save_path))
                 if actual == dst:
                     moved_ok = True
                     break
-            now = time.monotonic()
+                if actual != src:
+                    stuck_start = now
+            state_l = str(state).lower()
+            if "moving" in state_l:
+                stuck_start = now
+            if now - stuck_start >= stuck_seconds:
+                raise RuntimeError(
+                    f"save_path_stuck state={state} save_path={save_path} "
+                    f"stuck_s={int(now - stuck_start)}"
+                )
             if now - last_beat >= heartbeat_seconds:
-                state = getattr(info, "state", "unknown") if info else "missing"
-                progress = getattr(info, "progress", 0.0) if info else 0.0
-                save_path = getattr(info, "save_path", "") if info else ""
                 print(
                     f"    stage0_wait hash={h[:16]} state={state} "
-                    f"progress={float(progress):.3f} save_path={save_path}"
+                    f"progress={float(progress):.3f} save_path={save_path} "
+                    f"waited_s={int(now - start_wait)}/{wait_seconds} "
+                    f"stuck_s={int(now - stuck_start)}/{stuck_seconds}"
                 )
                 last_beat = now
-            time.sleep(2)
+            time.sleep(poll_seconds)
 
         if not moved_ok:
             raise RuntimeError("wait_for_save_path_timeout")
@@ -483,7 +505,9 @@ STAGE0_SOURCE_ROOT="${REHOME_STAGE0_SOURCE_ROOT:-/pool/data}"
 STAGE0_APPLY_MODE="${REHOME_STAGE0_APPLY:-1}"
 STAGE0_MIN_PROGRESS="${REHOME_STAGE0_MIN_PROGRESS:-1.0}"
 STAGE0_WAIT_SECONDS="${REHOME_STAGE0_WAIT_SECONDS:-1800}"
-STAGE0_HEARTBEAT_SECONDS="${REHOME_STAGE0_HEARTBEAT_SECONDS:-15}"
+STAGE0_HEARTBEAT_SECONDS="${REHOME_STAGE0_HEARTBEAT_SECONDS:-5}"
+STAGE0_POLL_SECONDS="${REHOME_STAGE0_POLL_SECONDS:-2}"
+STAGE0_STUCK_SECONDS="${REHOME_STAGE0_STUCK_SECONDS:-120}"
 HASH_PROGRESS="${PAYLOAD_HASH_PROGRESS:-auto}"
 case "${HASH_PROGRESS}" in
   auto|minimal|full) ;;
@@ -498,6 +522,7 @@ CLEANUP_DUPLICATE="${REHOME_CLEANUP_DUPLICATE_PAYLOAD:-1}"
 echo "mode=frozen-one-pass limit=${LIMIT} pool_root=${POOL_ROOT} pool_device=${POOL_DEVICE}"
 echo "sanitize_live_filter=${REHOME_SANITIZE_LIVE:-0} recovery_steps=${RUN_RECOVERY_STEPS} cleanup_duplicate=${CLEANUP_DUPLICATE} stage0_legacy_migrate=${LEGACY_MIGRATE}"
 echo "progress_heartbeat_s=${REHOME_PROGRESS_HEARTBEAT_SECONDS:-15}"
+echo "stage0_wait_seconds=${STAGE0_WAIT_SECONDS} stage0_heartbeat_seconds=${STAGE0_HEARTBEAT_SECONDS} stage0_poll_seconds=${STAGE0_POLL_SECONDS} stage0_stuck_seconds=${STAGE0_STUCK_SECONDS}"
 
 if [[ "$LEGACY_MIGRATE" == "1" ]]; then
   run_with_heartbeat "0 legacy-qb-relocate" \
@@ -508,7 +533,9 @@ if [[ "$LEGACY_MIGRATE" == "1" ]]; then
     "$STAGE0_APPLY_MODE" \
     "$STAGE0_MIN_PROGRESS" \
     "$STAGE0_WAIT_SECONDS" \
-    "$STAGE0_HEARTBEAT_SECONDS"
+    "$STAGE0_HEARTBEAT_SECONDS" \
+    "$STAGE0_POLL_SECONDS" \
+    "$STAGE0_STUCK_SECONDS"
 else
   legacy_bytes="$(du -sb "$LEGACY_CROSS_SEED_ROOT" 2>/dev/null | awk '{print $1}')"
   if [[ "${legacy_bytes:-0}" -gt 0 ]]; then
