@@ -88,6 +88,15 @@ def _collect_candidate_hashes(qbit_client, include_failed: bool) -> dict[str, se
     return by_hash
 
 
+def _collect_torrent_snapshot(qbit_client) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    for torrent in qbit_client.get_torrents():
+        torrent_hash = str(getattr(torrent, "hash", "") or "").strip().lower()
+        if torrent_hash:
+            snapshot[torrent_hash] = torrent
+    return snapshot
+
+
 def _delete_path(path: Path) -> None:
     if path.is_dir():
         shutil.rmtree(path)
@@ -145,22 +154,37 @@ def run_followup(
 
         payload_candidates: dict[str, dict[str, Any]] = {}
         missing_payload = 0
+        candidate_hashes = sorted(candidate_map.keys())
+        payload_hash_by_torrent: dict[str, str] = {}
+        if candidate_hashes:
+            chunk_size = 500
+            for i in range(0, len(candidate_hashes), chunk_size):
+                chunk = candidate_hashes[i : i + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT lower(ti.torrent_hash) AS torrent_hash, p.payload_hash
+                    FROM torrent_instances ti
+                    JOIN payloads p ON p.payload_id = ti.payload_id
+                    WHERE lower(ti.torrent_hash) IN ({placeholders})
+                    """,
+                    [item.lower() for item in chunk],
+                ).fetchall()
+                for row in rows:
+                    torrent_hash = str(row["torrent_hash"] or "").strip().lower()
+                    payload_hash = str(row["payload_hash"] or "").strip()
+                    if torrent_hash and payload_hash:
+                        payload_hash_by_torrent[torrent_hash] = payload_hash
+
+        torrent_snapshot = _collect_torrent_snapshot(qbit)
+        tag_updates = []
+
         for torrent_hash, initial_tags in candidate_map.items():
-            row = conn.execute(
-                """
-                SELECT p.payload_hash
-                FROM torrent_instances ti
-                JOIN payloads p ON p.payload_id = ti.payload_id
-                WHERE ti.torrent_hash = ?
-                LIMIT 1
-                """,
-                (torrent_hash,),
-            ).fetchone()
-            if not row or not row["payload_hash"]:
+            payload_hash = payload_hash_by_torrent.get(str(torrent_hash).lower(), "")
+            if not payload_hash:
                 missing_payload += 1
                 continue
 
-            payload_hash = str(row["payload_hash"])
             if payload_hashes and payload_hash not in payload_hashes:
                 continue
             payload_candidates.setdefault(payload_hash, {"torrent_hashes": set(), "tags": set()})
@@ -271,7 +295,9 @@ def run_followup(
                     db_reasons.append(f"payload_device_not_target:{torrent_hash[:12]}")
 
                 expected_save = _normalize_path(str(row["ti_save_path"] or ""))
-                info = qbit.get_torrent_info(torrent_hash)
+                info = torrent_snapshot.get(str(torrent_hash).lower())
+                if not info:
+                    info = qbit.get_torrent_info(torrent_hash)
                 if not info:
                     reasons = ["missing_in_qbit"]
                     qb_reasons.extend(reasons)
@@ -290,14 +316,7 @@ def run_followup(
                     continue
 
                 # Keep DB tags reasonably fresh after follow-up reads.
-                conn.execute(
-                    """
-                    UPDATE torrent_instances
-                    SET tags = ?, last_seen_at = CURRENT_TIMESTAMP
-                    WHERE torrent_hash = ?
-                    """,
-                    (str(getattr(info, "tags", "") or ""), torrent_hash),
-                )
+                tag_updates.append((str(getattr(info, "tags", "") or ""), torrent_hash))
 
                 progress = float(getattr(info, "progress", 0.0))
                 state = str(getattr(info, "state", ""))
@@ -397,6 +416,15 @@ def run_followup(
                 }
             )
 
+        if tag_updates:
+            conn.executemany(
+                """
+                UPDATE torrent_instances
+                SET tags = ?, last_seen_at = CURRENT_TIMESTAMP
+                WHERE torrent_hash = ?
+                """,
+                tag_updates,
+            )
         conn.commit()
         return {
             "checked_at": datetime.now().astimezone().isoformat(),

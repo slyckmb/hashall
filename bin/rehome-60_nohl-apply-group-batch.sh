@@ -11,31 +11,40 @@ Usage:
   bin/rehome-60_nohl-apply-group-batch.sh [options]
 
 Options:
-  --hashes-file PATH        Dryrun-ready payload hash file (default: latest nohl-payload-hashes-dryrun-ready-*.txt)
+  --plans-file PATH         Dryrun-ready plans TSV (default: latest nohl-payload-plans-dryrun-ready-*.tsv)
+  --hashes-file PATH        Dryrun-ready payload hash file (fallback if plans TSV missing)
+  --manifest PATH           Plan manifest JSON for hash->plan lookup (fallback mode)
   --db PATH                 Catalog DB path (default: /home/michael/.hashall/catalog.db)
   --pool-name NAME          ZFS pool name to guard (default: pool)
   --min-free-pct N          Minimum required free percent on pool (default: 20)
-  --pool-device ID          Pool device id (default: 44)
-  --stash-device ID         Stash device id (default: 49)
   --spot-check N            Spot-check files during apply (default: 0)
   --debug                   Enable HASHALL_REHOME_QB_DEBUG=1
-  --limit N                 Limit hashes to process (default: 0 = all)
-  --fast                    Fast mode (no additional behavior change; explicit run profile)
+  --limit N                 Limit plan rows to process (default: 0 = all)
+  --fast                    Fast mode annotation in logs
   --output-prefix NAME      Output prefix (default: nohl)
   -h, --help                Show help
 USAGE
+}
+
+latest_ready_plans() {
+  ls -1t out/reports/rehome-normalize/nohl-payload-plans-dryrun-ready-*.tsv 2>/dev/null | head -n1
 }
 
 latest_ready_hashes() {
   ls -1t out/reports/rehome-normalize/nohl-payload-hashes-dryrun-ready-*.txt 2>/dev/null | head -n1
 }
 
+latest_manifest() {
+  local prefix="$1"
+  ls -1t "out/reports/rehome-normalize/${prefix}-plan-manifest-"*.json 2>/dev/null | head -n1
+}
+
+PLANS_FILE=""
 HASHES_FILE=""
+MANIFEST_JSON=""
 DB_PATH="/home/michael/.hashall/catalog.db"
 POOL_NAME="pool"
 MIN_FREE_PCT="20"
-POOL_DEVICE_ID="44"
-STASH_DEVICE_ID="49"
 SPOT_CHECK="0"
 DEBUG_MODE=0
 LIMIT="0"
@@ -44,12 +53,12 @@ FAST_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --plans-file) PLANS_FILE="${2:-}"; shift 2 ;;
     --hashes-file) HASHES_FILE="${2:-}"; shift 2 ;;
+    --manifest) MANIFEST_JSON="${2:-}"; shift 2 ;;
     --db) DB_PATH="${2:-}"; shift 2 ;;
     --pool-name) POOL_NAME="${2:-}"; shift 2 ;;
     --min-free-pct) MIN_FREE_PCT="${2:-}"; shift 2 ;;
-    --pool-device) POOL_DEVICE_ID="${2:-}"; shift 2 ;;
-    --stash-device) STASH_DEVICE_ID="${2:-}"; shift 2 ;;
     --spot-check) SPOT_CHECK="${2:-}"; shift 2 ;;
     --debug) DEBUG_MODE=1; shift ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
@@ -67,20 +76,66 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+if [[ -z "$PLANS_FILE" ]]; then
+  PLANS_FILE="$(latest_ready_plans)"
+fi
 if [[ -z "$HASHES_FILE" ]]; then
   HASHES_FILE="$(latest_ready_hashes)"
 fi
-if [[ -z "$HASHES_FILE" || ! -f "$HASHES_FILE" ]]; then
-  echo "Missing ready hashes file; run rehome-50 first or pass --hashes-file" >&2
+if [[ -z "$MANIFEST_JSON" ]]; then
+  MANIFEST_JSON="$(latest_manifest "$OUTPUT_PREFIX")"
+fi
+
+log_dir="out/reports/rehome-normalize"
+mkdir -p "$log_dir"
+stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
+run_log="${log_dir}/${OUTPUT_PREFIX}-apply-group-batch-${stamp}.log"
+queue_tsv="${log_dir}/${OUTPUT_PREFIX}-apply-queue-${stamp}.tsv"
+ok_hashes="${log_dir}/${OUTPUT_PREFIX}-payload-hashes-apply-ok-${stamp}.txt"
+failed_hashes="${log_dir}/${OUTPUT_PREFIX}-payload-hashes-apply-failed-${stamp}.txt"
+> "$ok_hashes"
+> "$failed_hashes"
+
+if [[ -n "$PLANS_FILE" && -f "$PLANS_FILE" ]]; then
+  awk -F'\t' 'NF >= 2 {print $1 "\t" $2}' "$PLANS_FILE" > "$queue_tsv"
+elif [[ -n "$HASHES_FILE" && -f "$HASHES_FILE" && -n "$MANIFEST_JSON" && -f "$MANIFEST_JSON" ]]; then
+  HASHES_FILE_REAL="$HASHES_FILE" MANIFEST_JSON_REAL="$MANIFEST_JSON" QUEUE_TSV="$queue_tsv" python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+hashes = [
+    line.strip().lower()
+    for line in Path(os.environ["HASHES_FILE_REAL"]).read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.strip().startswith("#")
+]
+manifest = json.loads(Path(os.environ["MANIFEST_JSON_REAL"]).read_text(encoding="utf-8"))
+entries = {}
+for item in manifest.get("entries", []):
+    payload_hash = str(item.get("payload_hash") or "").strip().lower()
+    if payload_hash and str(item.get("status") or "") == "ok" and str(item.get("plan_path") or ""):
+        entries[payload_hash] = str(item.get("plan_path"))
+
+out = Path(os.environ["QUEUE_TSV"])
+out.parent.mkdir(parents=True, exist_ok=True)
+with out.open("w", encoding="utf-8") as handle:
+    for payload_hash in hashes:
+        plan_path = entries.get(payload_hash, "")
+        if plan_path:
+            handle.write(f"{payload_hash}\t{plan_path}\n")
+PY
+else
+  echo "Missing plans file; run rehome-50 first or pass --plans-file" >&2
   exit 3
 fi
 
-mapfile -t HASHES < <(sed -e 's/#.*$//' -e 's/[[:space:]]//g' "$HASHES_FILE" | awk 'NF > 0')
-if [[ "$LIMIT" -gt 0 && "${#HASHES[@]}" -gt "$LIMIT" ]]; then
-  HASHES=("${HASHES[@]:0:$LIMIT}")
+if [[ "$LIMIT" -gt 0 ]]; then
+  head -n "$LIMIT" "$queue_tsv" > "${queue_tsv}.tmp"
+  mv "${queue_tsv}.tmp" "$queue_tsv"
 fi
-if [[ "${#HASHES[@]}" -eq 0 ]]; then
-  echo "No hashes to apply" >&2
+
+if [[ ! -s "$queue_tsv" ]]; then
+  echo "No plans to apply" >&2
   exit 4
 fi
 
@@ -88,41 +143,55 @@ if [[ "$DEBUG_MODE" -eq 1 ]]; then
   export HASHALL_REHOME_QB_DEBUG=1
 fi
 
-log_dir="out/reports/rehome-normalize"
-mkdir -p "$log_dir"
-stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
-run_log="${log_dir}/${OUTPUT_PREFIX}-apply-group-batch-${stamp}.log"
-ok_hashes="${log_dir}/${OUTPUT_PREFIX}-payload-hashes-apply-ok-${stamp}.txt"
-failed_hashes="${log_dir}/${OUTPUT_PREFIX}-payload-hashes-apply-failed-${stamp}.txt"
-> "$ok_hashes"
-> "$failed_hashes"
+pool_free_pct() {
+  local used_pct free_pct
+  used_pct="$(zpool list -H -o cap "$POOL_NAME" | tr -d ' %')"
+  free_pct=$((100 - used_pct))
+  echo "$free_pct"
+}
+
+assert_pool_space() {
+  local free_pct
+  free_pct="$(pool_free_pct)"
+  if (( free_pct < MIN_FREE_PCT )); then
+    echo "ERROR: pool $POOL_NAME free ${free_pct}% < required ${MIN_FREE_PCT}%" >&2
+    return 1
+  fi
+  echo "pool_free_pct=${free_pct} required_min=${MIN_FREE_PCT}"
+}
 
 ok=0
 failed=0
+
 {
   hr
   echo "Phase 60: Live apply for dryrun-approved groups"
-  echo "What this does: perform actual rehome moves and qB location updates."
+  echo "What this does: execute existing dryrun-approved plan files."
   hr
   echo "run_id=${stamp} step=nohl-apply-group-batch"
-  echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} spot_check=${SPOT_CHECK} fast=${FAST_MODE} debug=${DEBUG_MODE}"
-  total="${#HASHES[@]}"
-  for i in "${!HASHES[@]}"; do
-    idx=$((i + 1))
-    hash="${HASHES[$i]}"
-    echo "apply idx=${idx}/${total} payload=${hash:0:16} status=start"
-    if [[ "$DEBUG_MODE" -eq 1 ]]; then
-      echo "debug idx=${idx}/${total} payload=${hash} min_free_pct=${MIN_FREE_PCT} pool_name=${POOL_NAME}"
+  echo "config queue=${queue_tsv} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} spot_check=${SPOT_CHECK} fast=${FAST_MODE} debug=${DEBUG_MODE}"
+
+  total="$(wc -l < "$queue_tsv" | tr -d ' ')"
+  idx=0
+  while IFS=$'\t' read -r hash plan_path; do
+    [[ -z "$hash" ]] && continue
+    idx=$((idx + 1))
+
+    if [[ -z "$plan_path" || ! -f "$plan_path" ]]; then
+      echo "apply idx=${idx}/${total} payload=${hash:0:16} status=missing_plan"
+      echo "$hash" >> "$failed_hashes"
+      failed=$((failed + 1))
+      continue
     fi
-    if bin/rehome-10_apply-batch-with-guards.sh \
-      --db "$DB_PATH" \
-      --pool-name "$POOL_NAME" \
-      --min-free-pct "$MIN_FREE_PCT" \
-      --pool-device "$POOL_DEVICE_ID" \
-      --stash-device "$STASH_DEVICE_ID" \
-      --spot-check "$SPOT_CHECK" \
-      --followup 0 \
-      --hash "$hash"; then
+
+    echo "apply idx=${idx}/${total} payload=${hash:0:16} status=start plan=${plan_path}"
+    if ! assert_pool_space; then
+      echo "$hash" >> "$failed_hashes"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    if PYTHONPATH=src python -u -m rehome.cli apply "$plan_path" --force --catalog "$DB_PATH" --spot-check "$SPOT_CHECK"; then
       echo "apply idx=${idx}/${total} payload=${hash:0:16} status=ok"
       echo "$hash" >> "$ok_hashes"
       ok=$((ok + 1))
@@ -131,7 +200,8 @@ failed=0
       echo "$hash" >> "$failed_hashes"
       failed=$((failed + 1))
     fi
-  done
+  done < "$queue_tsv"
+
   echo "summary total=${total} ok=${ok} failed=${failed}"
   echo "ok_hashes=${ok_hashes}"
   echo "failed_hashes=${failed_hashes}"

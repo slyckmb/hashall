@@ -98,7 +98,7 @@ count_lines() {
     [[ "$DEBUG_MODE" == "1" ]] && debug_arg=" --debug"
     echo "next_commands_begin"
     echo "bin/rehome-30_nohl-discover-and-rank.sh --min-free-pct 20 --limit 0${fast_arg}${debug_arg}"
-    echo "bin/rehome-40_nohl-build-group-plan.sh${fast_arg}${debug_arg}"
+    echo "bin/rehome-40_nohl-build-group-plan.sh --resume 1${fast_arg}${debug_arg}"
     echo "bin/rehome-50_nohl-dryrun-group-batch.sh --min-free-pct 20${fast_arg}${debug_arg}"
     echo "bin/rehome-60_nohl-apply-group-batch.sh --min-free-pct 20${fast_arg}${debug_arg}"
     echo "bin/rehome-70_nohl-followup-and-reconcile.sh --cleanup 1${fast_arg}${debug_arg}"

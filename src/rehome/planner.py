@@ -518,7 +518,11 @@ class DemotionPlanner:
 
         return row[0] if row else None
 
-    def plan_demotion(self, torrent_hash: str) -> Dict:
+    def plan_demotion(
+        self,
+        torrent_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict:
         """
         Create a demotion plan for a torrent.
 
@@ -528,7 +532,9 @@ class DemotionPlanner:
         Returns:
             Plan dictionary with decision and actions
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             # 1. Resolve torrent → payload
@@ -781,9 +787,14 @@ class DemotionPlanner:
                 }
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
-    def plan_batch_demotion_by_payload_hash(self, payload_hash: str) -> Dict:
+    def plan_batch_demotion_by_payload_hash(
+        self,
+        payload_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict:
         """
         Create a batch demotion plan for all torrents with a specific payload hash.
 
@@ -793,7 +804,9 @@ class DemotionPlanner:
         Returns:
             Batch plan dictionary with payload-level decision
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             row = conn.execute("""
@@ -810,7 +823,7 @@ class DemotionPlanner:
 
             # Use first torrent to generate plan (all siblings share same decision)
             first_torrent = row[0]
-            plan = self.plan_demotion(first_torrent)
+            plan = self.plan_demotion(first_torrent, conn=conn)
 
             # Mark as batch plan
             plan['batch_mode'] = 'payload_hash'
@@ -819,9 +832,14 @@ class DemotionPlanner:
             return plan
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
-    def plan_batch_demotion_by_tag(self, tag: str) -> List[Dict]:
+    def plan_batch_demotion_by_tag(
+        self,
+        tag: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> List[Dict]:
         """
         Create batch demotion plans for all torrents with a specific tag.
 
@@ -831,7 +849,9 @@ class DemotionPlanner:
         Returns:
             List of plans (one per unique payload)
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             torrent_rows = conn.execute("""
@@ -867,7 +887,7 @@ class DemotionPlanner:
                 payloads_seen.add(group_key)
 
                 # Generate plan for this payload
-                plan = self.plan_demotion(torrent_hash)
+                plan = self.plan_demotion(torrent_hash, conn=conn)
                 plan['batch_mode'] = 'tag'
                 plan['batch_filter'] = tag
 
@@ -876,7 +896,8 @@ class DemotionPlanner:
             return plans
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
 
 class PromotionPlanner:
@@ -940,7 +961,11 @@ class PromotionPlanner:
 
         return row[0] if row else None
 
-    def plan_promotion(self, torrent_hash: str) -> Dict:
+    def plan_promotion(
+        self,
+        torrent_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict:
         """
         Create a promotion plan for a torrent.
 
@@ -950,7 +975,9 @@ class PromotionPlanner:
         Returns:
             Plan dictionary with decision and actions
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             # 1. Resolve torrent → payload
@@ -1108,9 +1135,14 @@ class PromotionPlanner:
             }
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
-    def plan_batch_promotion_by_payload_hash(self, payload_hash: str) -> Dict:
+    def plan_batch_promotion_by_payload_hash(
+        self,
+        payload_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict:
         """
         Create a batch promotion plan for all torrents with a specific payload hash.
 
@@ -1120,7 +1152,9 @@ class PromotionPlanner:
         Returns:
             Batch plan dictionary with payload-level decision
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             row = conn.execute("""
@@ -1137,7 +1171,7 @@ class PromotionPlanner:
 
             # Use first torrent to generate plan (all siblings share same decision)
             first_torrent = row[0]
-            plan = self.plan_promotion(first_torrent)
+            plan = self.plan_promotion(first_torrent, conn=conn)
 
             # Mark as batch plan
             plan['batch_mode'] = 'payload_hash'
@@ -1146,9 +1180,14 @@ class PromotionPlanner:
             return plan
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
-    def plan_batch_promotion_by_tag(self, tag: str) -> List[Dict]:
+    def plan_batch_promotion_by_tag(
+        self,
+        tag: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> List[Dict]:
         """
         Create batch promotion plans for all torrents with a specific tag.
 
@@ -1158,7 +1197,9 @@ class PromotionPlanner:
         Returns:
             List of plans (one per unique payload)
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             torrent_rows = conn.execute("""
@@ -1192,7 +1233,7 @@ class PromotionPlanner:
                     continue
 
                 payloads_seen.add(group_key)
-                plan = self.plan_promotion(torrent_hash)
+                plan = self.plan_promotion(torrent_hash, conn=conn)
                 plan['batch_mode'] = 'tag'
                 plan['batch_filter'] = tag
                 plans.append(plan)
@@ -1200,4 +1241,5 @@ class PromotionPlanner:
             return plans
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()

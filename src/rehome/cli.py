@@ -303,6 +303,273 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
     click.echo(f"Next step: rehome apply {output_path} --dryrun")
 
 
+@cli.command("plan-batch")
+@click.option("--demote", is_flag=True,
+              help="Plan demotion from stash to pool")
+@click.option("--promote", is_flag=True,
+              help="Plan promotion from pool to stash (reuse only)")
+@click.option("--payload-hashes-file", type=click.Path(exists=True), required=True,
+              help="Input file with payload hashes (one per line)")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--seeding-root", multiple=True, required=True,
+              help="Seeding domain root(s) - paths outside these are external consumers")
+@click.option("--library-root", multiple=True,
+              help="Library roots that must be scanned to detect external consumers")
+@click.option("--cross-seed-config", type=click.Path(),
+              help="Path to cross-seed config.js to import dataDirs")
+@click.option("--tracker-registry", type=click.Path(),
+              help="Path to tracker-registry.yml to import qbittorrent.save_path")
+@click.option("--stash-device", type=int, required=True,
+              help="Device ID for stash storage")
+@click.option("--pool-device", type=int, required=True,
+              help="Device ID for pool storage")
+@click.option("--stash-seeding-root", type=click.Path(),
+              help="Base seeding root on stash (for save_path mapping)")
+@click.option("--pool-seeding-root", type=click.Path(),
+              help="Base seeding root on pool (for save_path mapping)")
+@click.option("--pool-payload-root", type=click.Path(),
+              help="Base payload root on pool (for MOVE target paths)")
+@click.option("--output-dir", type=click.Path(), required=True,
+              help="Directory to write per-payload plan files")
+@click.option("--manifest", type=click.Path(), required=True,
+              help="Manifest JSON path for checkpoint/resume")
+@click.option("--report-tsv", type=click.Path(),
+              help="Optional TSV report output path")
+@click.option("--plannable-hashes-out", type=click.Path(),
+              help="Optional output file of plannable payload hashes")
+@click.option("--blocked-hashes-out", type=click.Path(),
+              help="Optional output file of blocked payload hashes")
+@click.option("--limit", type=int, default=0,
+              help="Max payload hashes to process (0 = all)")
+@click.option("--resume/--no-resume", default=True,
+              help="Resume from existing manifest entries when available")
+@click.option("--output-prefix", type=str, default="nohl",
+              help="Per-plan filename prefix")
+def plan_batch_cmd(
+    demote,
+    promote,
+    payload_hashes_file,
+    catalog,
+    seeding_root,
+    library_root,
+    cross_seed_config,
+    tracker_registry,
+    stash_device,
+    pool_device,
+    stash_seeding_root,
+    pool_seeding_root,
+    pool_payload_root,
+    output_dir,
+    manifest,
+    report_tsv,
+    plannable_hashes_out,
+    blocked_hashes_out,
+    limit,
+    resume,
+    output_prefix,
+):
+    """Plan many payload hashes in one process with checkpoint/resume support."""
+    if demote == promote:
+        click.echo("❌ Must specify exactly one of: --demote or --promote", err=True)
+        raise click.Abort()
+
+    catalog_path = Path(catalog)
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    manifest_path = Path(manifest)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hashes = []
+    for raw_line in Path(payload_hashes_file).read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        hashes.append(line.lower())
+    if limit and int(limit) > 0:
+        hashes = hashes[:int(limit)]
+    if not hashes:
+        click.echo("❌ No payload hashes found to plan", err=True)
+        raise click.Abort()
+
+    try:
+        library_roots, library_root_sources = collect_library_roots(
+            explicit_roots=list(library_root),
+            cross_seed_config=cross_seed_config,
+            tracker_registry=tracker_registry,
+        )
+    except FileNotFoundError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+
+    planner = (
+        DemotionPlanner(
+            catalog_path=catalog_path,
+            seeding_roots=list(seeding_root),
+            library_roots=library_roots,
+            stash_device=stash_device,
+            pool_device=pool_device,
+            stash_seeding_root=stash_seeding_root,
+            pool_seeding_root=pool_seeding_root,
+            pool_payload_root=pool_payload_root,
+        ) if demote else PromotionPlanner(
+            catalog_path=catalog_path,
+            seeding_roots=list(seeding_root),
+            library_roots=library_roots,
+            stash_device=stash_device,
+            pool_device=pool_device,
+            stash_seeding_root=stash_seeding_root,
+            pool_seeding_root=pool_seeding_root,
+        )
+    )
+
+    prior_entries_by_hash = {}
+    if resume and manifest_path.exists():
+        try:
+            prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for entry in prior.get("entries", []):
+                payload_hash = str(entry.get("payload_hash") or "").strip().lower()
+                if payload_hash:
+                    prior_entries_by_hash[payload_hash] = dict(entry)
+            click.echo(
+                f"checkpoint loaded={manifest_path} entries={len(prior_entries_by_hash)}"
+            )
+        except Exception as e:
+            click.echo(f"checkpoint_load_failed path={manifest_path} error={e}")
+
+    entries = []
+    plannable_hashes = []
+    blocked_hashes = []
+    errors = 0
+    start_all = datetime.now().timestamp()
+    total = len(hashes)
+    db_conn = planner._get_db_connection()
+    try:
+        for idx, payload_hash in enumerate(hashes, start=1):
+            plan_path = output_dir_path / f"{output_prefix}-plan-{idx:04d}-{payload_hash[:12]}.json"
+            prior_entry = prior_entries_by_hash.get(payload_hash)
+
+            if (
+                prior_entry
+                and str(prior_entry.get("status", "")).lower() == "ok"
+                and Path(str(prior_entry.get("plan_path", ""))).exists()
+            ):
+                reused = dict(prior_entry)
+                reused["idx"] = idx
+                reused["total"] = total
+                reused["resumed"] = True
+                entries.append(reused)
+                decision = str(reused.get("decision") or "").upper()
+                if decision in {"MOVE", "REUSE"}:
+                    plannable_hashes.append(payload_hash)
+                elif decision == "BLOCK":
+                    blocked_hashes.append(payload_hash)
+                click.echo(
+                    f"plan idx={idx}/{total} payload={payload_hash[:16]} status=resume decision={decision or '-'}"
+                )
+                continue
+
+            status = "ok"
+            error = ""
+            decision = ""
+            source_path = ""
+            target_path = ""
+            item_started = datetime.now().timestamp()
+            try:
+                if demote:
+                    plan = planner.plan_batch_demotion_by_payload_hash(payload_hash, conn=db_conn)
+                else:
+                    plan = planner.plan_batch_promotion_by_payload_hash(payload_hash, conn=db_conn)
+                if library_root_sources:
+                    plan["library_roots_sources"] = library_root_sources
+                decision = str(plan.get("decision") or "").upper()
+                source_path = str(plan.get("source_path") or "")
+                target_path = str(plan.get("target_path") or "")
+                plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+                if decision in {"MOVE", "REUSE"}:
+                    plannable_hashes.append(payload_hash)
+                elif decision == "BLOCK":
+                    blocked_hashes.append(payload_hash)
+            except Exception as e:
+                status = "error"
+                error = str(e)
+                errors += 1
+
+            elapsed_s = max(0, int(datetime.now().timestamp() - item_started))
+            entries.append(
+                {
+                    "idx": idx,
+                    "total": total,
+                    "payload_hash": payload_hash,
+                    "plan_path": str(plan_path),
+                    "status": status,
+                    "decision": decision,
+                    "source_path": source_path,
+                    "target_path": target_path,
+                    "error": error,
+                    "elapsed_s": elapsed_s,
+                    "resumed": False,
+                }
+            )
+            click.echo(
+                f"plan idx={idx}/{total} payload={payload_hash[:16]} "
+                f"decision={decision or '-'} status={status} elapsed_s={elapsed_s}"
+            )
+    finally:
+        db_conn.close()
+
+    payload = {
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "catalog": str(catalog_path),
+        "direction": "demote" if demote else "promote",
+        "hashes_input_file": str(payload_hashes_file),
+        "output_dir": str(output_dir_path),
+        "summary": {
+            "input_hashes": total,
+            "plannable": len(plannable_hashes),
+            "blocked": len(blocked_hashes),
+            "errors": errors,
+            "elapsed_s": max(0, int(datetime.now().timestamp() - start_all)),
+        },
+        "entries": entries,
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    if report_tsv:
+        report_path = Path(report_tsv)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as out:
+            out.write("idx\tpayload_hash\tdecision\tsource_path\ttarget_path\tstatus\tplan_path\terror\n")
+            for entry in entries:
+                out.write(
+                    f"{entry.get('idx')}\t{entry.get('payload_hash')}\t{entry.get('decision')}\t"
+                    f"{entry.get('source_path')}\t{entry.get('target_path')}\t{entry.get('status')}\t"
+                    f"{entry.get('plan_path')}\t{entry.get('error')}\n"
+                )
+        click.echo(f"report_tsv={report_path}")
+
+    if plannable_hashes_out:
+        out_path = Path(plannable_hashes_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(plannable_hashes) + ("\n" if plannable_hashes else ""), encoding="utf-8")
+        click.echo(f"plannable_hashes={out_path}")
+    if blocked_hashes_out:
+        out_path = Path(blocked_hashes_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(blocked_hashes) + ("\n" if blocked_hashes else ""), encoding="utf-8")
+        click.echo(f"blocked_hashes={out_path}")
+
+    click.echo(
+        "summary "
+        f"input_hashes={payload['summary']['input_hashes']} "
+        f"plannable={payload['summary']['plannable']} "
+        f"blocked={payload['summary']['blocked']} "
+        f"errors={payload['summary']['errors']} "
+        f"elapsed_s={payload['summary']['elapsed_s']}"
+    )
+    click.echo(f"manifest_json={manifest_path}")
+
+
 @cli.command("audit-tags")
 @click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
               help="Path to hashall catalog database")

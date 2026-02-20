@@ -294,6 +294,7 @@ run_nohl_restart_lane() {
   local cleanup="${REHOME_NOHL_FOLLOWUP_CLEANUP:-1}"
   local print_torrents="${REHOME_NOHL_FOLLOWUP_PRINT_TORRENTS:-0}"
   local execute="${REHOME_NOHL_EXECUTE:-0}"
+  local resume="${REHOME_NOHL_RESUME:-1}"
   local output_prefix="${REHOME_NOHL_OUTPUT_PREFIX:-nohl}"
   local fast_mode="${REHOME_NOHL_FAST:-1}"
   local debug_mode="${REHOME_NOHL_DEBUG:-0}"
@@ -309,10 +310,10 @@ run_nohl_restart_lane() {
   echo "Live apply: ${do_apply} | Execute phases: ${execute} | Fast: ${fast_mode} | Debug: ${debug_mode} | Heartbeat: ${hb_seconds}s"
   echo "Safety guard: minimum pool free space ${min_free_pct}%"
   hr
-  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} fast=${fast_mode} debug=${debug_mode} heartbeat_s=${hb_seconds}"
+  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} resume=${resume} fast=${fast_mode} debug=${debug_mode} heartbeat_s=${hb_seconds}"
   echo "recommended_commands_begin"
   echo "bin/rehome-30_nohl-discover-and-rank.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
-  echo "bin/rehome-40_nohl-build-group-plan.sh --output-prefix ${output_prefix} --limit ${limit} ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-40_nohl-build-group-plan.sh --output-prefix ${output_prefix} --limit ${limit} --resume ${resume} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-50_nohl-dryrun-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-60_nohl-apply-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-70_nohl-followup-and-reconcile.sh --output-prefix ${output_prefix} --cleanup ${cleanup} --print-torrents ${print_torrents} ${fast_arg} ${debug_arg}"
@@ -336,6 +337,7 @@ run_nohl_restart_lane() {
     bin/rehome-40_nohl-build-group-plan.sh \
     --output-prefix "$output_prefix" \
     --limit "$limit" \
+    --resume "$resume" \
     ${fast_arg:+$fast_arg} \
     ${debug_arg:+$debug_arg}
 
