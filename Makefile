@@ -568,6 +568,7 @@ payload-sync:  ## Sync qBittorrent payloads into catalog
 	if [ "$(PAYLOAD_UPGRADE_MISSING)" = "1" ]; then set -- "$$@" --upgrade-missing; fi; \
 	if [ "$(PAYLOAD_PARALLEL)" = "1" ]; then set -- "$$@" --parallel; fi; \
 	if [ -n "$(PAYLOAD_WORKERS)" ]; then set -- "$$@" --workers $(PAYLOAD_WORKERS); fi; \
+	if [ -n "$(PAYLOAD_HASH_PROGRESS)" ]; then set -- "$$@" --hash-progress "$(PAYLOAD_HASH_PROGRESS)"; fi; \
 	if [ "$(PAYLOAD_LOW_PRIORITY)" = "1" ]; then set -- "$$@" --low-priority; fi; \
 	$(HASHALL_CLI) payload sync --db "$(DB_FILE)" "$$@"
 
@@ -584,6 +585,7 @@ payload-upgrade-collisions:  ## Upgrade candidate duplicate payloads under PATH 
 	if [ "$(PAYLOAD_MAX_GROUPS)" != "" ] && [ "$(PAYLOAD_MAX_GROUPS)" != "0" ]; then set -- "$$@" --max-groups $(PAYLOAD_MAX_GROUPS); fi; \
 	if [ "$(PAYLOAD_PARALLEL)" = "1" ]; then set -- "$$@" --parallel; fi; \
 	if [ -n "$(PAYLOAD_WORKERS)" ]; then set -- "$$@" --workers $(PAYLOAD_WORKERS); fi; \
+	if [ -n "$(PAYLOAD_HASH_PROGRESS)" ]; then set -- "$$@" --hash-progress "$(PAYLOAD_HASH_PROGRESS)"; fi; \
 	if [ "$(PAYLOAD_LOW_PRIORITY)" = "1" ]; then set -- "$$@" --low-priority; fi; \
 	$(HASHALL_CLI) payload upgrade-collisions --db "$(DB_FILE)" "$$@"
 
@@ -724,6 +726,10 @@ rehome-normalize-plan:  ## Build batch plan to normalize misplaced pool payload 
 		--limit "$(REHOME_NORMALIZE_LIMIT)"; \
 	if [ "$(REHOME_NORMALIZE_FLAT_ONLY)" = "0" ]; then set -- "$$@" --all-mismatches; fi; \
 	if [ "$(REHOME_NORMALIZE_PRINT_SKIPPED)" = "1" ]; then set -- "$$@" --print-skipped; fi; \
+	if [ "$(REHOME_NORMALIZE_REFRESH)" = "1" ]; then set -- "$$@" --refresh-before-plan; fi; \
+	if [ -n "$(REHOME_NORMALIZE_REFRESH_CATEGORY)" ]; then set -- "$$@" --refresh-category "$(REHOME_NORMALIZE_REFRESH_CATEGORY)"; fi; \
+	if [ -n "$(REHOME_NORMALIZE_REFRESH_TAG)" ]; then set -- "$$@" --refresh-tag "$(REHOME_NORMALIZE_REFRESH_TAG)"; fi; \
+	if [ "$(REHOME_NORMALIZE_REFRESH_LIMIT)" != "0" ] && [ -n "$(REHOME_NORMALIZE_REFRESH_LIMIT)" ]; then set -- "$$@" --refresh-limit "$(REHOME_NORMALIZE_REFRESH_LIMIT)"; fi; \
 	if [ -n "$(REHOME_NORMALIZE_PAYLOAD_HASH)" ]; then set -- "$$@" --payload-hash "$(REHOME_NORMALIZE_PAYLOAD_HASH)"; fi; \
 	if [ -n "$(REHOME_NORMALIZE_OUTPUT)" ]; then set -- "$$@" --output "$(REHOME_NORMALIZE_OUTPUT)"; fi; \
 	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) "$$@"

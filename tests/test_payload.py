@@ -497,16 +497,80 @@ def test_upgrade_missing_sha256_with_hardlinks(tmp_path):
     assert upgraded == 1
 
     rows = conn.execute(f"""
-        SELECT sha256
+        SELECT sha256, hash_source
         FROM {table_name}
         WHERE status = 'active'
         ORDER BY path
     """).fetchall()
     assert len(rows) == 3
     assert all(row[0] is not None for row in rows)
+    assert all(row[1] == "calculated" for row in rows)
     assert len({row[0] for row in rows}) == 1
 
     payload = build_payload(conn, str(root), device_id=device_id)
     assert payload.status == 'complete'
     assert payload.file_count == 3
+    conn.close()
+
+
+def test_upgrade_missing_sha256_progress_callback_emits_bytes(tmp_path):
+    root = tmp_path / "payload_root"
+    root.mkdir()
+    (root / "single.bin").write_bytes(b"x" * 65536)
+
+    db_path = tmp_path / "catalog.db"
+    scan_path(db_path=db_path, root_path=root, hash_mode='fast', quiet=True)
+
+    conn = connect_db(db_path)
+    device_id = os.stat(root).st_dev
+
+    events = []
+
+    def _progress(event, done, total, path, **meta):
+        events.append((event, done, total, path, dict(meta)))
+
+    upgraded = upgrade_payload_missing_sha256(
+        conn,
+        str(root),
+        device_id=device_id,
+        parallel=False,
+        progress_cb=_progress,
+    )
+    assert upgraded == 1
+
+    kinds = [e[0] for e in events]
+    assert "start" in kinds
+    assert "chunk" in kinds
+    assert "progress" in kinds
+    assert "done" in kinds
+    assert any((e[4].get("total_bytes") or 0) > 0 for e in events)
+    assert any((e[4].get("hashed_bytes") or 0) > 0 for e in events)
+
+    conn.close()
+
+
+def test_upgrade_missing_sha256_progress_callback_legacy_signature(tmp_path):
+    root = tmp_path / "payload_root"
+    root.mkdir()
+    (root / "single.bin").write_bytes(b"x" * 4096)
+
+    db_path = tmp_path / "catalog.db"
+    scan_path(db_path=db_path, root_path=root, hash_mode='fast', quiet=True)
+
+    conn = connect_db(db_path)
+    device_id = os.stat(root).st_dev
+    seen = []
+
+    def _legacy(event, done, total, path):
+        seen.append((event, done, total, path))
+
+    upgraded = upgrade_payload_missing_sha256(
+        conn,
+        str(root),
+        device_id=device_id,
+        parallel=False,
+        progress_cb=_legacy,
+    )
+    assert upgraded == 1
+    assert any(event == "done" for event, *_ in seen)
     conn.close()

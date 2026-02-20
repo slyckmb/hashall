@@ -7,6 +7,7 @@ import time
 import os
 import re
 import sys
+import threading
 import shutil
 import subprocess
 import grp
@@ -15,6 +16,7 @@ from pathlib import Path
 from hashall.scan import scan_path
 from hashall.export import export_json
 from hashall.verify_trees import verify_trees
+from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 from hashall import __version__
 
@@ -189,8 +191,15 @@ def cli():
 @click.option("--show-path", is_flag=True, help="Show current file path above progress bar.")
 @click.option("--scan-nested-datasets", is_flag=True,
               help="Detect nested mountpoints/datasets and scan them separately.")
+@click.option(
+    "--hash-progress",
+    type=click.Choice(["auto", "minimal", "full"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Hash progress detail level for full/upgrade hashing.",
+)
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, low_priority):
+def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, hash_progress, low_priority):
     """Scan a directory and store file metadata in SQLite."""
     if low_priority:
         _apply_low_priority()
@@ -198,7 +207,8 @@ def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag,
     mode = hash_mode_flag if hash_mode_flag else hash_mode
     stats = scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
                       workers=workers, batch_size=batch_size, hash_mode=mode,
-                      show_current_path=show_path, scan_nested_datasets=scan_nested_datasets)
+                      show_current_path=show_path, scan_nested_datasets=scan_nested_datasets,
+                      hash_progress=hash_progress.lower())
     if getattr(stats, "safety_guard_triggered", False):
         raise click.ClickException(
             "Scan safety guard blocked deletion due path-resolution errors; "
@@ -259,6 +269,12 @@ def payload():
     help="Only process torrents whose payload root is under this path (repeatable).",
 )
 @click.option(
+    "--path-prefix-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Read additional --path-prefix entries from a newline-delimited file.",
+)
+@click.option(
     "--limit",
     type=int,
     default=0,
@@ -271,8 +287,15 @@ def payload():
 @click.option("--parallel", is_flag=True, help="Parallel SHA256 hashing for --upgrade-missing.")
 @click.option("--workers", type=int, default=None,
               help="Worker threads for --parallel (default: CPU count).")
+@click.option(
+    "--hash-progress",
+    type=click.Choice(["auto", "minimal", "full"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Hash progress detail level for --upgrade-missing.",
+)
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, limit, dry_run, upgrade_missing, parallel, workers, low_priority):
+def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, path_prefix_file, limit, dry_run, upgrade_missing, parallel, workers, hash_progress, low_priority):
     """
     Sync torrent instances from qBittorrent and map to payloads.
 
@@ -321,8 +344,16 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
         print("⚠️  DRY-RUN: ignoring --upgrade-missing (would modify DB)")
         upgrade_missing = False
 
+    prefix_inputs = list(path_prefixes)
+    if path_prefix_file:
+        for raw in Path(path_prefix_file).read_text(encoding="utf-8").splitlines():
+            cleaned = raw.strip()
+            if not cleaned or cleaned.startswith("#"):
+                continue
+            prefix_inputs.append(cleaned)
+
     prefix_paths = []
-    for p in path_prefixes:
+    for p in prefix_inputs:
         try:
             prefix_paths.append(canonicalize_path(Path(p)))
         except Exception:
@@ -378,6 +409,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     missing_in_catalog = 0
     skipped_prefix = 0
     processed = 0
+    checked = 0
     prune_stats = None
     root_path_from_content_path = 0
     write_batch_ops = 0
@@ -402,6 +434,17 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
             if prefix_paths:
                 if not any(is_under(root_canon, pref) for pref in prefix_paths):
                     skipped_prefix += 1
+                    checked += 1
+                    if checked % 500 == 0:
+                        print(
+                            f"\n   ⏳ Prefix filter progress: checked={checked}/{len(torrents)} "
+                            f"processed={processed} skipped={skipped_prefix}"
+                        )
+                    progress.update(
+                        desc=f"filtering checked={checked}/{len(torrents)} "
+                             f"processed={processed} skipped={skipped_prefix}",
+                        advance=1,
+                    )
                     continue
 
             progress.update(desc=f"{torrent.name[:60]}", advance=0)
@@ -417,7 +460,107 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                 missing_in_catalog += 1
 
             if (not dry_run) and payload.status != 'complete' and upgrade_missing:
-                upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=payload.device_id, parallel=parallel, workers=workers)
+                hash_log_state = {
+                    "last_done": 0,
+                    "last_total": 0,
+                    "last_bytes_done": 0,
+                    "last_bytes_total": 0,
+                    "last_path": "",
+                    "done_event_seen": False,
+                }
+                hash_reporter = HashProgressReporter(label=torrent.name, mode=hash_progress.lower())
+                heartbeat_stop = threading.Event()
+                heartbeat_thread = None
+
+                def _hash_progress(event, done, total, abs_path, **meta):
+                    hash_log_state["last_done"] = max(0, int(done or 0))
+                    hash_log_state["last_total"] = max(0, int(total or 0))
+                    hash_log_state["last_path"] = str(abs_path or hash_log_state["last_path"])
+                    hash_log_state["last_bytes_done"] = max(
+                        0,
+                        int(meta.get("hashed_bytes") or hash_log_state["last_bytes_done"]),
+                    )
+                    hash_log_state["last_bytes_total"] = max(
+                        0,
+                        int(meta.get("total_bytes") or hash_log_state["last_bytes_total"]),
+                    )
+                    if event == "done":
+                        hash_log_state["done_event_seen"] = True
+                    if event == "start":
+                        hash_reporter.start(
+                            total_groups=hash_log_state["last_total"],
+                            total_bytes=hash_log_state["last_bytes_total"],
+                        )
+                    else:
+                        hash_reporter.update(
+                            event=event,
+                            done_groups=hash_log_state["last_done"],
+                            total_groups=hash_log_state["last_total"],
+                            path=abs_path,
+                            file_bytes_done=meta.get("group_bytes_done"),
+                            file_bytes_total=meta.get("group_bytes_total"),
+                            batch_bytes_done=hash_log_state["last_bytes_done"],
+                            batch_bytes_total=hash_log_state["last_bytes_total"],
+                        )
+                    if hash_log_state["last_total"] > 0:
+                        progress.update(
+                            desc=hash_reporter.status_desc(
+                                done_groups=hash_log_state["last_done"],
+                                total_groups=hash_log_state["last_total"],
+                                path=torrent.name,
+                            ),
+                            advance=0,
+                        )
+
+                if hash_progress.lower() == "full":
+                    def _heartbeat_loop():
+                        while not heartbeat_stop.wait(5.0):
+                            if hash_log_state["last_total"] <= 0:
+                                continue
+                            hash_reporter.update(
+                                event="heartbeat",
+                                done_groups=hash_log_state["last_done"],
+                                total_groups=hash_log_state["last_total"],
+                                path=hash_log_state["last_path"] or torrent.name,
+                                batch_bytes_done=hash_log_state["last_bytes_done"],
+                                batch_bytes_total=hash_log_state["last_bytes_total"],
+                                force=True,
+                            )
+                            progress.update(
+                                desc=hash_reporter.status_desc(
+                                    done_groups=hash_log_state["last_done"],
+                                    total_groups=hash_log_state["last_total"],
+                                    path=torrent.name,
+                                ),
+                                advance=0,
+                            )
+
+                    heartbeat_thread = threading.Thread(
+                        target=_heartbeat_loop,
+                        daemon=True,
+                    )
+                    heartbeat_thread.start()
+
+                try:
+                    upgraded = upgrade_payload_missing_sha256(
+                        conn,
+                        root_path,
+                        device_id=payload.device_id,
+                        parallel=parallel,
+                        workers=workers,
+                        progress_cb=_hash_progress,
+                    )
+                finally:
+                    heartbeat_stop.set()
+                    if heartbeat_thread is not None:
+                        heartbeat_thread.join(timeout=0.2)
+                if hash_log_state["last_total"] > 0 and not hash_log_state["done_event_seen"]:
+                    hash_reporter.finish(
+                        done_groups=hash_log_state["last_done"],
+                        total_groups=hash_log_state["last_total"],
+                        batch_bytes_done=hash_log_state["last_bytes_done"],
+                        batch_bytes_total=hash_log_state["last_bytes_total"],
+                    )
                 if upgraded > 0:
                     payload = build_payload(conn, str(root_canon), device_id=payload.device_id, already_canonical=True)
 
@@ -450,6 +593,7 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                 print(f"   ⚠️  Payload incomplete (missing SHA256s)")
                 incomplete_count += 1
             processed += 1
+            checked += 1
             progress.update(advance=1)
 
     if not dry_run and write_batch_ops:
@@ -466,6 +610,11 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     print(f"   processed: {processed}")
     if prefix_paths:
         print(f"   skipped (path-prefix): {skipped_prefix}")
+        if processed == 0 and len(torrents) > 0:
+            sample_prefixes = ", ".join(str(p) for p in prefix_paths[:3])
+            print("   ⚠️  no torrents matched current path-prefix filters")
+            print(f"      prefixes(sample): {sample_prefixes}")
+            print("      hint: verify canonical roots from qB content_path/save_path")
     print(f"   complete payloads: {synced_count}")
     print(f"   incomplete payloads: {incomplete_count}")
     print(f"   missing in catalog: {missing_in_catalog}")
@@ -1209,8 +1358,15 @@ def payload_collisions_cmd(db, path_prefixes, limit, top):
 @click.option("--dry-run", is_flag=True, help="Report what would be upgraded (no hashing/DB writes).")
 @click.option("--parallel", is_flag=True, help="Parallel SHA256 hashing for missing hashes.")
 @click.option("--workers", type=int, default=None, help="Worker threads for --parallel (default: CPU count).")
+@click.option(
+    "--hash-progress",
+    type=click.Choice(["auto", "minimal", "full"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Hash progress detail level during SHA256 upgrades.",
+)
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run, parallel, workers, low_priority):
+def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run, parallel, workers, hash_progress, low_priority):
     """
     Upgrade candidate duplicate payloads by backfilling missing SHA256, then computing payload_hash.
 
@@ -1322,7 +1478,60 @@ def payload_upgrade_collisions_cmd(db, path_prefixes, order, max_groups, dry_run
             missing_before = count_missing_sha256_for_path(conn, device_id, root_path)
             print(f"   - #{payload_id} dev={device_id} missing_sha256={missing_before} root={root_path}")
 
-            upgraded = upgrade_payload_missing_sha256(conn, root_path, device_id=device_id, parallel=parallel, workers=workers)
+            hash_state = {
+                "last_done": 0,
+                "last_total": 0,
+                "last_bytes_done": 0,
+                "last_bytes_total": 0,
+                "done_event_seen": False,
+            }
+            root_reporter = HashProgressReporter(label=root_path, mode=hash_progress.lower())
+
+            def _upgrade_progress(event, done, total, abs_path, **meta):
+                hash_state["last_done"] = max(0, int(done or 0))
+                hash_state["last_total"] = max(0, int(total or 0))
+                hash_state["last_bytes_done"] = max(
+                    0,
+                    int(meta.get("hashed_bytes") or hash_state["last_bytes_done"]),
+                )
+                hash_state["last_bytes_total"] = max(
+                    0,
+                    int(meta.get("total_bytes") or hash_state["last_bytes_total"]),
+                )
+                if event == "done":
+                    hash_state["done_event_seen"] = True
+                if event == "start":
+                    root_reporter.start(
+                        total_groups=hash_state["last_total"],
+                        total_bytes=hash_state["last_bytes_total"],
+                    )
+                    return
+                root_reporter.update(
+                    event=event,
+                    done_groups=hash_state["last_done"],
+                    total_groups=hash_state["last_total"],
+                    path=abs_path,
+                    file_bytes_done=meta.get("group_bytes_done"),
+                    file_bytes_total=meta.get("group_bytes_total"),
+                    batch_bytes_done=hash_state["last_bytes_done"],
+                    batch_bytes_total=hash_state["last_bytes_total"],
+                )
+
+            upgraded = upgrade_payload_missing_sha256(
+                conn,
+                root_path,
+                device_id=device_id,
+                parallel=parallel,
+                workers=workers,
+                progress_cb=_upgrade_progress,
+            )
+            if hash_state["last_total"] > 0 and not hash_state["done_event_seen"]:
+                root_reporter.finish(
+                    done_groups=hash_state["last_done"],
+                    total_groups=hash_state["last_total"],
+                    batch_bytes_done=hash_state["last_bytes_done"],
+                    batch_bytes_total=hash_state["last_bytes_total"],
+                )
             inode_groups_hashed += upgraded
 
             payload = build_payload(conn, root_path, device_id=device_id)

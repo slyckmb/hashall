@@ -59,6 +59,46 @@ def test_build_view_single_file(tmp_path):
     assert os.stat(view_file).st_ino == os.stat(payload_root).st_ino
 
 
+def test_build_view_single_file_when_target_save_path_is_file_path(tmp_path):
+    payload_root = tmp_path / "payload" / "audio.flac"
+    payload_root.parent.mkdir(parents=True)
+    payload_root.write_text("audio")
+
+    files = [
+        QBitFile(name="audio.flac", size=payload_root.stat().st_size),
+    ]
+
+    target_file = tmp_path / "views" / "audio.flac"
+    target_file.parent.mkdir()
+
+    result = build_torrent_view(payload_root, target_file, files, root_name="Audio")
+
+    assert result.view_root == target_file.parent
+    assert target_file.exists()
+    assert os.stat(target_file).st_ino == os.stat(payload_root).st_ino
+
+
+def test_build_view_single_entry_directory_payload_with_file_root_name(tmp_path):
+    payload_root = tmp_path / "payload" / "Bullet.Train.2022.mkv"
+    payload_root.mkdir(parents=True)
+    source_file = payload_root / "Bullet.Train.2022.mkv"
+    source_file.write_text("video")
+
+    files = [
+        QBitFile(name="Bullet.Train.2022.mkv", size=source_file.stat().st_size),
+    ]
+
+    target_save = tmp_path / "views" / "YOiNKED"
+    target_save.mkdir(parents=True)
+
+    result = build_torrent_view(payload_root, target_save, files, root_name="Bullet.Train.2022.mkv")
+
+    view_file = target_save / "Bullet.Train.2022.mkv"
+    assert result.view_root == view_file
+    assert view_file.exists()
+    assert os.stat(view_file).st_ino == os.stat(source_file).st_ino
+
+
 def test_build_view_accepts_existing_identical_file(tmp_path):
     payload_root = tmp_path / "payload" / "Longlegs.2024.mkv"
     payload_root.parent.mkdir(parents=True)
