@@ -4,7 +4,7 @@ iowatch - Real-time I/O and system monitoring dashboard
 Monitors disk I/O, CPU usage, and hashall scan processes with colors!
 """
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 import sys
 import time
@@ -372,8 +372,8 @@ def main():
                     wait_pct = ((c['iowait'] - p['iowait']) / total_diff) * 100
                     busy_pct = ((total_diff - (c['idle'] - p['idle']) - (c['iowait'] - p['iowait'])) / total_diff) * 100
                     wait_color = get_color_for_percentage(wait_pct, low=10, mid=30)
-                    print(f"  CPU Processing: {format_bar(busy_pct, 16, Colors.GREEN)}   {busy_pct:5.1f}%")
-                    print(f"  Disk I/O Wait:  {format_bar(wait_pct, 16, wait_color)}   {wait_pct:5.1f}%")
+                    print(f"  CPU Processing: {format_bar(busy_pct, 16, Colors.GREEN)}  {busy_pct:5.1f}%")
+                    print(f"  Disk I/O Wait:  {format_bar(wait_pct, 16, wait_color)}  {wait_pct:5.1f}%")
             if pressure_stats:
                 io_some = pressure_stats.get("io", {}).get("some")
                 io_full = pressure_stats.get("io", {}).get("full")
@@ -382,20 +382,20 @@ def main():
                     io_color = get_color_for_percentage(io_some["avg10"], low=10, mid=30)
                     line = (
                         f"  PSI IO avg10:   {format_bar(io_some['avg10'], 16, io_color)}"
-                        f"   {io_some['avg10']:5.1f}%"
+                        f"  {io_some['avg10']:5.1f}%"
                     )
                     if io_full:
-                        line += f"  full: {io_full['avg10']:5.1f}%"
+                        line += f" full: {io_full['avg10']:5.1f}%"
                     print(line)
                 if cpu_some:
                     cpu_color = get_color_for_percentage(cpu_some["avg10"], low=5, mid=15)
                     print(
                         f"  PSI CPU avg10:  {format_bar(cpu_some['avg10'], 16, cpu_color)}"
-                        f"   {cpu_some['avg10']:5.1f}%"
+                        f"  {cpu_some['avg10']:5.1f}%"
                     )
 
             if arc_stats:
-                print(f"  ZFS ARC Hits:   {format_bar(arc_stats['hit_rate'], 16, Colors.BRIGHT_CYAN)}   {arc_stats['hit_rate']:5.1f}%  ({arc_stats['size_gb']:.1f}G)")
+                print(f"  ZFS ARC Hits:   {format_bar(arc_stats['hit_rate'], 16, Colors.BRIGHT_CYAN)}  {arc_stats['hit_rate']:5.1f}% ({arc_stats['size_gb']:.1f}G)")
 
             # ZFS KPCs Section
             if zfs_stats and prev_zfs_stats:
