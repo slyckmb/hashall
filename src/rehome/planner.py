@@ -286,6 +286,11 @@ class DemotionPlanner:
         if not use_device_table and not use_legacy_table:
             return []
 
+        def _prefix_bounds(prefix: str) -> tuple[str, str]:
+            low = f"{prefix}/"
+            high = f"{low}\U0010FFFF"
+            return low, high
+
         if use_device_table:
             # Resolve root_path relative to preferred mount when available.
             mount_point = None
@@ -313,7 +318,7 @@ class DemotionPlanner:
                     path = Path(p)
                     if path.is_absolute():
                         return str(canonicalize_path(path))
-                    return str((base_mount / path).resolve())
+                    return str(canonicalize_path(base_mount / path))
             else:
                 # No device metadata; expect absolute paths in table
                 if not root.is_absolute():
@@ -322,37 +327,44 @@ class DemotionPlanner:
                 def _to_abs(p: str) -> str:
                     return str(canonicalize_path(Path(p)))
 
-            pattern = f"{rel_root_str}/%"
+            low, high = _prefix_bounds(rel_root_str)
             query = f"""
-                SELECT DISTINCT path, inode
-                FROM {table_name}
-                WHERE status = 'active' AND (path = ? OR path LIKE ?)
+                SELECT path, inode
+                FROM {table_name} INDEXED BY sqlite_autoindex_{table_name}_1
+                WHERE status = 'active' AND path = ?
+                UNION ALL
+                SELECT path, inode
+                FROM {table_name} INDEXED BY sqlite_autoindex_{table_name}_1
+                WHERE status = 'active' AND path >= ? AND path < ?
                 ORDER BY path
             """
-            file_rows = conn.execute(query, (rel_root_str, pattern)).fetchall()
+            file_rows = conn.execute(query, (rel_root_str, low, high)).fetchall()
 
         else:
             # Legacy table stores absolute paths
             if not root.is_absolute():
                 raise ValueError("Relative payload root with legacy files table")
-            pattern = f"{str(root)}/%"
+            root_str = str(root)
+            low, high = _prefix_bounds(root_str)
             legacy_has_status = _table_has_column("files", "status")
             if legacy_has_status:
                 query = """
                     SELECT DISTINCT path, inode
                     FROM files
-                    WHERE status = 'active' AND (path = ? OR path LIKE ?)
+                    WHERE status = 'active' AND (
+                        path = ? OR (path >= ? AND path < ?)
+                    )
                     ORDER BY path
                 """
-                file_rows = conn.execute(query, (str(root), pattern)).fetchall()
+                file_rows = conn.execute(query, (root_str, low, high)).fetchall()
             else:
                 query = """
                     SELECT DISTINCT path, inode
                     FROM files
-                    WHERE path = ? OR path LIKE ?
+                    WHERE path = ? OR (path >= ? AND path < ?)
                     ORDER BY path
                 """
-                file_rows = conn.execute(query, (str(root), pattern)).fetchall()
+                file_rows = conn.execute(query, (root_str, low, high)).fetchall()
 
             def _to_abs(p: str) -> str:
                 return str(canonicalize_path(Path(p)))
@@ -361,43 +373,67 @@ class DemotionPlanner:
             raise ValueError("No files found under payload root in catalog; rescan required")
 
         external_consumers = []
+        external_cache: Dict[str, bool] = {}
+
+        def _is_external_cached(path_text: str) -> bool:
+            cached = external_cache.get(path_text)
+            if cached is not None:
+                return cached
+            path_obj = Path(path_text)
+            is_external = True
+            for seed_root in self.seeding_roots:
+                try:
+                    path_obj.relative_to(seed_root)
+                    is_external = False
+                    break
+                except ValueError:
+                    continue
+            external_cache[path_text] = is_external
+            return is_external
+
+        unique_inodes = sorted({int(inode) for _, inode in file_rows if inode is not None})
+        inode_paths: Dict[int, List[str]] = {}
+        inode_chunk_size = 500
+        if unique_inodes:
+            for offset in range(0, len(unique_inodes), inode_chunk_size):
+                chunk = unique_inodes[offset: offset + inode_chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                if use_device_table:
+                    rows = conn.execute(
+                        f"""
+                        SELECT inode, path
+                        FROM {table_name}
+                        WHERE status = 'active' AND inode IN ({placeholders})
+                        ORDER BY inode, path
+                        """,
+                        chunk,
+                    ).fetchall()
+                else:
+                    where_clause = "inode IN ({placeholders})".format(placeholders=placeholders)
+                    if legacy_has_status:
+                        where_clause = f"status = 'active' AND {where_clause}"
+                    rows = conn.execute(
+                        f"""
+                        SELECT inode, path
+                        FROM files
+                        WHERE {where_clause}
+                        ORDER BY inode, path
+                        """,
+                        chunk,
+                    ).fetchall()
+
+                for inode, hardlink_path in rows:
+                    inode_int = int(inode)
+                    inode_paths.setdefault(inode_int, []).append(_to_abs(str(hardlink_path)))
 
         # For each file, check if its inode has any paths outside seeding domain
         for file_path, inode in file_rows:
-            # Find all paths with same inode (hardlinks)
-            if use_device_table:
-                hardlink_query = f"""
-                    SELECT DISTINCT path
-                    FROM {table_name}
-                    WHERE inode = ? AND status = 'active'
-                    ORDER BY path
-                """
-                hardlink_paths = [
-                    _to_abs(row[0]) for row in conn.execute(hardlink_query, (inode,)).fetchall()
-                ]
-                file_path_abs = _to_abs(file_path)
-            else:
-                if legacy_has_status:
-                    hardlink_query = """
-                        SELECT DISTINCT path
-                        FROM files
-                        WHERE inode = ? AND status = 'active'
-                        ORDER BY path
-                    """
-                else:
-                    hardlink_query = """
-                        SELECT DISTINCT path
-                        FROM files
-                        WHERE inode = ?
-                        ORDER BY path
-                    """
-                hardlink_paths = [
-                    _to_abs(row[0]) for row in conn.execute(hardlink_query, (inode,)).fetchall()
-                ]
-                file_path_abs = _to_abs(file_path)
+            inode_int = int(inode)
+            hardlink_paths = inode_paths.get(inode_int, [])
+            file_path_abs = _to_abs(str(file_path))
 
             # Filter for external paths
-            external_paths = [p for p in hardlink_paths if self._is_external_path(p)]
+            external_paths = [p for p in hardlink_paths if _is_external_cached(p)]
 
             if external_paths:
                 external_consumers.append(ExternalConsumer(

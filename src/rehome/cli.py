@@ -344,6 +344,8 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
               help="Max payload hashes to process (0 = all)")
 @click.option("--resume/--no-resume", default=True,
               help="Resume from existing manifest entries when available")
+@click.option("--checkpoint-every", type=int, default=25,
+              help="Write checkpoint manifest every N items (0 = final only)")
 @click.option("--output-prefix", type=str, default="nohl",
               help="Per-plan filename prefix")
 def plan_batch_cmd(
@@ -367,6 +369,7 @@ def plan_batch_cmd(
     blocked_hashes_out,
     limit,
     resume,
+    checkpoint_every,
     output_prefix,
 ):
     """Plan many payload hashes in one process with checkpoint/resume support."""
@@ -443,6 +446,32 @@ def plan_batch_cmd(
     errors = 0
     start_all = datetime.now().timestamp()
     total = len(hashes)
+    checkpoint_every = max(0, int(checkpoint_every))
+
+    def _build_manifest_payload() -> dict:
+        return {
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "catalog": str(catalog_path),
+            "direction": "demote" if demote else "promote",
+            "hashes_input_file": str(payload_hashes_file),
+            "output_dir": str(output_dir_path),
+            "summary": {
+                "input_hashes": total,
+                "plannable": len(plannable_hashes),
+                "blocked": len(blocked_hashes),
+                "errors": errors,
+                "elapsed_s": max(0, int(datetime.now().timestamp() - start_all)),
+            },
+            "entries": entries,
+        }
+
+    def _write_manifest_atomic() -> dict:
+        payload = _build_manifest_payload()
+        tmp_path = manifest_path.with_suffix(f"{manifest_path.suffix}.tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        tmp_path.replace(manifest_path)
+        return payload
+
     db_conn = planner._get_db_connection()
     try:
         for idx, payload_hash in enumerate(hashes, start=1):
@@ -467,6 +496,8 @@ def plan_batch_cmd(
                 click.echo(
                     f"plan idx={idx}/{total} payload={payload_hash[:16]} status=resume decision={decision or '-'}"
                 )
+                if checkpoint_every and (idx == 1 or idx % checkpoint_every == 0 or idx == total):
+                    _write_manifest_atomic()
                 continue
 
             status = "ok"
@@ -515,25 +546,12 @@ def plan_batch_cmd(
                 f"plan idx={idx}/{total} payload={payload_hash[:16]} "
                 f"decision={decision or '-'} status={status} elapsed_s={elapsed_s}"
             )
+            if checkpoint_every and (idx == 1 or idx % checkpoint_every == 0 or idx == total):
+                _write_manifest_atomic()
     finally:
         db_conn.close()
 
-    payload = {
-        "generated_at": datetime.now().astimezone().isoformat(),
-        "catalog": str(catalog_path),
-        "direction": "demote" if demote else "promote",
-        "hashes_input_file": str(payload_hashes_file),
-        "output_dir": str(output_dir_path),
-        "summary": {
-            "input_hashes": total,
-            "plannable": len(plannable_hashes),
-            "blocked": len(blocked_hashes),
-            "errors": errors,
-            "elapsed_s": max(0, int(datetime.now().timestamp() - start_all)),
-        },
-        "entries": entries,
-    }
-    manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    payload = _write_manifest_atomic()
 
     if report_tsv:
         report_path = Path(report_tsv)
