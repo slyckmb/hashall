@@ -240,90 +240,200 @@ print(
 PY
 }
 
-stage0_migrate_legacy_cross_seed() {
-  local src_root="$1"
-  local dst_root="$2"
+stage0_relocate_pool_to_seeds_via_qb() {
+  local scope_root="$1"
+  local source_root="$2"
+  local seeds_root="$3"
+  local apply_mode="$4"
+  local min_progress="$5"
+  local wait_seconds="$6"
+  local heartbeat_seconds="$7"
 
-  if [[ ! -d "$src_root" ]]; then
-    echo "step=0 legacy-migrate status=skip reason=missing_source root=$src_root"
-    return 0
-  fi
+  PYTHONPATH=src \
+    STAGE0_SCOPE_ROOT="$scope_root" \
+    STAGE0_SOURCE_ROOT="$source_root" \
+    STAGE0_SEEDS_ROOT="$seeds_root" \
+    STAGE0_APPLY_MODE="$apply_mode" \
+    STAGE0_MIN_PROGRESS="$min_progress" \
+    STAGE0_WAIT_SECONDS="$wait_seconds" \
+    STAGE0_HEARTBEAT_SECONDS="$heartbeat_seconds" \
+    python - <<'PY'
+import os
+import time
+from pathlib import Path
+from hashall.qbittorrent import QBittorrentClient
 
-  local src_bytes_before
-  src_bytes_before="$(du -sb "$src_root" 2>/dev/null | awk '{print $1}')"
-  if [[ "${src_bytes_before:-0}" -eq 0 ]]; then
-    echo "step=0 legacy-migrate status=skip reason=empty_source root=$src_root"
-    return 0
-  fi
 
-  mkdir -p "$dst_root"
+def _canonical(path: str | Path) -> Path:
+    return Path(path).expanduser().resolve()
 
-  local rsync_bin
-  rsync_bin="$(command -v rsync || true)"
-  if [[ -z "$rsync_bin" ]]; then
-    echo "step=0 legacy-migrate status=error reason=rsync_missing"
-    return 1
-  fi
 
-  echo "step=0 legacy-migrate source=$src_root target=$dst_root mode=real"
-  local moved_trackers=0
-  local merged_trackers=0
-  local conflict_trackers=0
-  local failed_trackers=0
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
-  shopt -s nullglob dotglob
-  for src_tracker in "$src_root"/*; do
-    [[ -e "$src_tracker" ]] || continue
-    local tracker_name
-    tracker_name="$(basename "$src_tracker")"
-    local dst_tracker="$dst_root/$tracker_name"
 
-    if [[ ! -e "$dst_tracker" ]]; then
-      if mv "$src_tracker" "$dst_tracker"; then
-        moved_trackers=$((moved_trackers + 1))
-        echo "  stage0_tracker tracker=$tracker_name action=mv status=ok"
-      else
-        failed_trackers=$((failed_trackers + 1))
-        echo "  stage0_tracker tracker=$tracker_name action=mv status=error"
-      fi
-      continue
-    fi
+scope_root = _canonical(os.environ.get("STAGE0_SCOPE_ROOT", "/pool"))
+source_root = _canonical(os.environ.get("STAGE0_SOURCE_ROOT", "/pool/data"))
+seeds_root = _canonical(os.environ.get("STAGE0_SEEDS_ROOT", "/pool/data/seeds"))
+apply_mode = str(os.environ.get("STAGE0_APPLY_MODE", "1")).strip().lower() in {"1", "true", "yes", "on"}
+min_progress = float(os.environ.get("STAGE0_MIN_PROGRESS", "1.0"))
+wait_seconds = max(10, int(float(os.environ.get("STAGE0_WAIT_SECONDS", "1800"))))
+heartbeat_seconds = max(5, int(float(os.environ.get("STAGE0_HEARTBEAT_SECONDS", "15"))))
 
-    if [[ -d "$src_tracker" && -d "$dst_tracker" ]]; then
-      echo "  stage0_tracker tracker=$tracker_name action=merge status=running"
-      if "$rsync_bin" -a --ignore-existing --remove-source-files "$src_tracker"/ "$dst_tracker"/; then
-        merged_trackers=$((merged_trackers + 1))
-        find "$src_tracker" -type d -empty -delete 2>/dev/null || true
-        rmdir "$src_tracker" 2>/dev/null || true
-        if [[ -d "$src_tracker" ]]; then
-          local remaining_files
-          remaining_files="$(find "$src_tracker" -type f 2>/dev/null | wc -l | tr -d '[:space:]')"
-          if [[ "${remaining_files:-0}" -gt 0 ]]; then
-            conflict_trackers=$((conflict_trackers + 1))
-            echo "  stage0_tracker tracker=$tracker_name action=merge status=conflict remaining_files=$remaining_files path=$src_tracker"
-          else
-            rmdir "$src_tracker" 2>/dev/null || true
-            echo "  stage0_tracker tracker=$tracker_name action=merge status=ok"
-          fi
-        else
-          echo "  stage0_tracker tracker=$tracker_name action=merge status=ok"
-        fi
-      else
-        failed_trackers=$((failed_trackers + 1))
-        echo "  stage0_tracker tracker=$tracker_name action=merge status=error"
-      fi
-      continue
-    fi
+qb = QBittorrentClient(
+    base_url=os.getenv("QBIT_URL", "http://localhost:9003"),
+    username=os.getenv("QBIT_USER", "admin"),
+    password=os.getenv("QBIT_PASS", "adminpass"),
+)
 
-    failed_trackers=$((failed_trackers + 1))
-    echo "  stage0_tracker tracker=$tracker_name action=type_conflict status=error source=$src_tracker target=$dst_tracker"
-  done
-  shopt -u nullglob dotglob
+torrents = qb.get_torrents()
+total = len(torrents)
+print(
+    "step=0 legacy-qb-relocate "
+    f"mode={'apply' if apply_mode else 'dryrun'} "
+    f"scope={scope_root} source={source_root} target={seeds_root} "
+    f"min_progress={min_progress:.3f} torrents_total={total}"
+)
 
-  local src_bytes_after dst_bytes_after
-  src_bytes_after="$(du -sb "$src_root" 2>/dev/null | awk '{print $1}')"
-  dst_bytes_after="$(du -sb "$dst_root" 2>/dev/null | awk '{print $1}')"
-  echo "step=0 legacy-migrate-summary moved_trackers=$moved_trackers merged_trackers=$merged_trackers conflict_trackers=$conflict_trackers failed_trackers=$failed_trackers src_bytes_before=${src_bytes_before:-0} src_bytes_after=${src_bytes_after:-0} dst_bytes_after=${dst_bytes_after:-0}"
+candidates = []
+checked = 0
+skipped_not_pool = 0
+skipped_in_seeds = 0
+skipped_not_complete = 0
+skipped_out_of_source = 0
+for t in torrents:
+    checked += 1
+    if checked % 500 == 0 or checked == total:
+        print(
+            f"  stage0_scan checked={checked}/{total} "
+            f"candidates={len(candidates)} skipped_not_pool={skipped_not_pool} "
+            f"skipped_in_seeds={skipped_in_seeds} skipped_not_complete={skipped_not_complete}"
+        )
+
+    save_path_raw = str(getattr(t, "save_path", "") or "").strip()
+    if not save_path_raw:
+        continue
+    save_path = _canonical(save_path_raw)
+    if not _is_under(save_path, scope_root):
+        skipped_not_pool += 1
+        continue
+    if _is_under(save_path, seeds_root):
+        skipped_in_seeds += 1
+        continue
+    if float(getattr(t, "progress", 0.0) or 0.0) < min_progress:
+        skipped_not_complete += 1
+        continue
+    if not _is_under(save_path, source_root):
+        skipped_out_of_source += 1
+        continue
+
+    rel = save_path.relative_to(source_root)
+    target_save = seeds_root / rel
+    if save_path == target_save:
+        continue
+    candidates.append(
+        {
+            "hash": str(getattr(t, "hash", "")).lower(),
+            "name": str(getattr(t, "name", "") or ""),
+            "save_path": save_path,
+            "target_save": target_save,
+            "auto_tmm": bool(getattr(t, "auto_tmm", False)),
+            "state": str(getattr(t, "state", "") or ""),
+            "progress": float(getattr(t, "progress", 0.0) or 0.0),
+        }
+    )
+
+print(
+    "step=0 legacy-qb-relocate-plan "
+    f"candidates={len(candidates)} skipped_not_pool={skipped_not_pool} "
+    f"skipped_in_seeds={skipped_in_seeds} skipped_not_complete={skipped_not_complete} "
+    f"skipped_out_of_source={skipped_out_of_source}"
+)
+
+if not candidates:
+    raise SystemExit(0)
+
+for idx, c in enumerate(candidates[:20], start=1):
+    print(
+        f"  stage0_plan idx={idx}/{len(candidates)} "
+        f"hash={c['hash'][:16]} state={c['state']} progress={c['progress']:.3f} "
+        f"from={c['save_path']} to={c['target_save']}"
+    )
+if len(candidates) > 20:
+    print(f"  stage0_plan_more count={len(candidates) - 20}")
+
+if not apply_mode:
+    raise SystemExit(0)
+
+moved = 0
+failed = 0
+for idx, c in enumerate(candidates, start=1):
+    h = c["hash"]
+    src = c["save_path"]
+    dst = c["target_save"]
+    dst.mkdir(parents=True, exist_ok=True)
+    auto_tmm = bool(c["auto_tmm"])
+    print(f"  stage0_move idx={idx}/{len(candidates)} hash={h[:16]} from={src} to={dst}")
+    try:
+        if auto_tmm:
+            qb.set_auto_management(h, False)
+        if not qb.pause_torrent(h):
+            raise RuntimeError("pause_failed")
+        if not qb.set_location(h, str(dst)):
+            raise RuntimeError("set_location_failed")
+
+        deadline = time.monotonic() + wait_seconds
+        last_beat = 0.0
+        moved_ok = False
+        while time.monotonic() < deadline:
+            info = qb.get_torrent_info(h)
+            if info and str(info.save_path or "").strip():
+                actual = _canonical(str(info.save_path))
+                if actual == dst:
+                    moved_ok = True
+                    break
+            now = time.monotonic()
+            if now - last_beat >= heartbeat_seconds:
+                state = getattr(info, "state", "unknown") if info else "missing"
+                progress = getattr(info, "progress", 0.0) if info else 0.0
+                save_path = getattr(info, "save_path", "") if info else ""
+                print(
+                    f"    stage0_wait hash={h[:16]} state={state} "
+                    f"progress={float(progress):.3f} save_path={save_path}"
+                )
+                last_beat = now
+            time.sleep(2)
+
+        if not moved_ok:
+            raise RuntimeError("wait_for_save_path_timeout")
+
+        if not qb.resume_torrent(h):
+            raise RuntimeError("resume_failed")
+        if auto_tmm:
+            qb.set_auto_management(h, True)
+        moved += 1
+        print(f"  stage0_move_ok idx={idx}/{len(candidates)} hash={h[:16]}")
+    except Exception as exc:
+        failed += 1
+        print(f"  stage0_move_error idx={idx}/{len(candidates)} hash={h[:16]} error={exc}")
+        try:
+            qb.resume_torrent(h)
+        except Exception:
+            pass
+        if auto_tmm:
+            try:
+                qb.set_auto_management(h, True)
+            except Exception:
+                pass
+
+print(f"step=0 legacy-qb-relocate-summary moved={moved} failed={failed} candidates={len(candidates)}")
+if failed:
+    raise SystemExit(2)
+PY
 }
 
 echo "run_log=$run_log"
@@ -335,6 +445,12 @@ POOL_ROOT="${REHOME_NORMALIZE_POOL_ROOT:-/pool/data/seeds}"
 STASH_ROOT="${REHOME_NORMALIZE_STASH_ROOT:-/stash/media/torrents/seeding}"
 POOL_DEVICE="${REHOME_POOL_DEVICE:-44}"
 LEGACY_MIGRATE="${REHOME_STAGE0_MIGRATE_LEGACY:-1}"
+STAGE0_SCOPE_ROOT="${REHOME_STAGE0_SCOPE_ROOT:-/pool}"
+STAGE0_SOURCE_ROOT="${REHOME_STAGE0_SOURCE_ROOT:-/pool/data}"
+STAGE0_APPLY_MODE="${REHOME_STAGE0_APPLY:-1}"
+STAGE0_MIN_PROGRESS="${REHOME_STAGE0_MIN_PROGRESS:-1.0}"
+STAGE0_WAIT_SECONDS="${REHOME_STAGE0_WAIT_SECONDS:-1800}"
+STAGE0_HEARTBEAT_SECONDS="${REHOME_STAGE0_HEARTBEAT_SECONDS:-15}"
 HASH_PROGRESS="${PAYLOAD_HASH_PROGRESS:-auto}"
 case "${HASH_PROGRESS}" in
   auto|minimal|full) ;;
@@ -350,7 +466,14 @@ echo "mode=frozen-one-pass limit=${LIMIT} pool_root=${POOL_ROOT} pool_device=${P
 echo "sanitize_live_filter=${REHOME_SANITIZE_LIVE:-0} recovery_steps=${RUN_RECOVERY_STEPS} cleanup_duplicate=${CLEANUP_DUPLICATE} stage0_legacy_migrate=${LEGACY_MIGRATE}"
 
 if [[ "$LEGACY_MIGRATE" == "1" ]]; then
-  stage0_migrate_legacy_cross_seed "$LEGACY_CROSS_SEED_ROOT" "${POOL_ROOT%/}/cross-seed"
+  stage0_relocate_pool_to_seeds_via_qb \
+    "$STAGE0_SCOPE_ROOT" \
+    "$STAGE0_SOURCE_ROOT" \
+    "$POOL_ROOT" \
+    "$STAGE0_APPLY_MODE" \
+    "$STAGE0_MIN_PROGRESS" \
+    "$STAGE0_WAIT_SECONDS" \
+    "$STAGE0_HEARTBEAT_SECONDS"
 else
   legacy_bytes="$(du -sb "$LEGACY_CROSS_SEED_ROOT" 2>/dev/null | awk '{print $1}')"
   if [[ "${legacy_bytes:-0}" -gt 0 ]]; then
