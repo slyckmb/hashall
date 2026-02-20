@@ -440,35 +440,54 @@ class QBittorrentClient:
         """
         self._ensure_authenticated()
 
-        try:
-            response = self.session.get(
-                f"{self.base_url}/api/v2/torrents/info",
-                params={"hashes": torrent_hash},
-                timeout=self.request_timeout,
-            )
-            response.raise_for_status()
-            torrents_data = response.json()
+        for attempt in range(1, self.request_retries + 1):
+            try:
+                response = self.session.get(
+                    f"{self.base_url}/api/v2/torrents/info",
+                    params={"hashes": torrent_hash},
+                    timeout=self.request_timeout,
+                )
+                response.raise_for_status()
+                torrents_data = response.json()
 
-            if not torrents_data:
-                return None
+                if not torrents_data:
+                    self.last_error = f"not_found:{torrent_hash.lower()}"
+                    return None
 
-            t = torrents_data[0]
-            return QBitTorrent(
-                hash=t.get('hash', ''),
-                name=t.get('name', ''),
-                save_path=t.get('save_path', ''),
-                content_path=t.get('content_path', ''),
-                category=t.get('category', ''),
-                tags=t.get('tags', ''),
-                state=t.get('state', ''),
-                size=t.get('size', 0),
-                progress=t.get('progress', 0.0),
-                auto_tmm=bool(t.get('auto_tmm', False)),
-            )
+                t = torrents_data[0]
+                self.last_error = None
+                return QBitTorrent(
+                    hash=t.get('hash', ''),
+                    name=t.get('name', ''),
+                    save_path=t.get('save_path', ''),
+                    content_path=t.get('content_path', ''),
+                    category=t.get('category', ''),
+                    tags=t.get('tags', ''),
+                    state=t.get('state', ''),
+                    size=t.get('size', 0),
+                    progress=t.get('progress', 0.0),
+                    auto_tmm=bool(t.get('auto_tmm', False)),
+                )
 
-        except requests.RequestException as e:
-            print(f"⚠️ Failed to get info for torrent {torrent_hash}: {e}")
-            return None
+            except requests.Timeout as e:
+                self.last_error = str(e)
+                print(
+                    f"⚠️ qB info timeout hash={torrent_hash[:16]} "
+                    f"attempt={attempt}/{self.request_retries} timeout_s={self.request_timeout}: {e}"
+                )
+            except requests.RequestException as e:
+                self.last_error = str(e)
+                if attempt == self.request_retries:
+                    print(f"⚠️ Failed to get info for torrent {torrent_hash}: {e}")
+                    break
+                if self.debug_http:
+                    print(
+                        f"⚠️ qB info retry hash={torrent_hash[:16]} "
+                        f"attempt={attempt}/{self.request_retries} error={e}"
+                    )
+            if attempt < self.request_retries:
+                time.sleep(min(0.5 * attempt, 2.0))
+        return None
 
     def test_connection(self) -> bool:
         """

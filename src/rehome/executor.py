@@ -118,10 +118,25 @@ class DemotionExecutor:
 
     def _is_cross_filesystem(self, source_path: Path, target_parent: Path) -> bool:
         """Return True when source and target parent are on different filesystems."""
+        def _existing_probe(path: Path) -> Optional[Path]:
+            probe = Path(path)
+            if probe.exists():
+                return probe
+            for parent in probe.parents:
+                if parent.exists():
+                    return parent
+            return None
+
         try:
-            return source_path.stat().st_dev != target_parent.stat().st_dev
+            source_probe = _existing_probe(source_path)
+            target_probe = _existing_probe(target_parent)
+            if source_probe is None or target_probe is None:
+                # Be conservative: force copy strategy when mount cannot be determined.
+                return True
+            return source_probe.stat().st_dev != target_probe.stat().st_dev
         except FileNotFoundError:
-            return False
+            # Be conservative if either side disappears mid-check.
+            return True
 
     @staticmethod
     def _is_permission_error(exc: BaseException) -> bool:
@@ -502,6 +517,29 @@ class DemotionExecutor:
             })
         return relocations
 
+    def _get_torrent_info_with_retry(
+        self,
+        torrent_hash: str,
+        *,
+        attempts: int = 3,
+        delay_seconds: float = 1.0,
+    ) -> Optional[object]:
+        """Fetch torrent info with retries for transient qB timeouts."""
+        import time
+
+        for attempt in range(1, attempts + 1):
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if info:
+                return info
+            if attempt < attempts:
+                self._log(
+                    f"  retry_get_torrent_info hash={torrent_hash[:16]} "
+                    f"attempt={attempt + 1}/{attempts}",
+                    "warning",
+                )
+                time.sleep(min(delay_seconds * attempt, 3.0))
+        return None
+
     def _relocate_torrents_atomic(self, relocations: List[Dict]) -> None:
         """
         Atomically relocate multiple torrents.
@@ -523,8 +561,14 @@ class DemotionExecutor:
             # Capture runtime qB save_path as rollback source-of-truth.
             for r in relocations:
                 torrent_hash = r["torrent_hash"]
-                info = self.qbit_client.get_torrent_info(torrent_hash)
-                if not info or not getattr(info, "save_path", None):
+                info = self._get_torrent_info_with_retry(torrent_hash, attempts=3, delay_seconds=1.0)
+                if not info:
+                    last_error = str(getattr(self.qbit_client, "last_error", "") or "unknown")
+                    raise RuntimeError(
+                        f"qB info unavailable for torrent {torrent_hash[:16]} "
+                        f"error={last_error}"
+                    )
+                if not getattr(info, "save_path", None):
                     raise RuntimeError(f"Missing qB save_path for torrent {torrent_hash[:16]}")
                 original_qb_path = str(getattr(info, "save_path")).strip()
                 original_qb_paths[torrent_hash] = original_qb_path
@@ -635,6 +679,66 @@ class DemotionExecutor:
             for h in paused:
                 self.qbit_client.resume_torrent(h)
             raise
+
+    def _rollback_partial_target_views(self, plan: Dict) -> None:
+        """
+        Remove pool-side views created before relocation failure.
+
+        This keeps rollback idempotent when payload move is restored but view links
+        were already materialized for sibling save paths.
+        """
+        view_targets = plan.get("view_targets") or []
+        if not view_targets:
+            return
+
+        source_path = Path(plan.get("source_path", "")).resolve() if plan.get("source_path") else None
+        target_path = Path(plan.get("target_path", "")).resolve() if plan.get("target_path") else None
+        seeding_roots = [Path(r).resolve() for r in plan.get("seeding_roots", [])]
+        seen: set[str] = set()
+        removed = 0
+        skipped = 0
+
+        for target in view_targets:
+            target_save = str(target.get("target_save_path") or "").strip()
+            root_name = str(target.get("root_name") or "").strip()
+            if not target_save or not root_name:
+                skipped += 1
+                continue
+
+            view_path = (Path(target_save) / root_name).resolve()
+            key = str(view_path)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if source_path is not None and view_path == source_path:
+                skipped += 1
+                continue
+            if target_path is not None and view_path == target_path:
+                skipped += 1
+                continue
+            if seeding_roots and not self._is_under_roots(view_path, seeding_roots):
+                skipped += 1
+                continue
+            if not view_path.exists():
+                skipped += 1
+                continue
+
+            try:
+                if view_path.is_dir():
+                    shutil.rmtree(view_path)
+                else:
+                    view_path.unlink()
+                removed += 1
+                self._log(f"  rollback_cleanup_view path={view_path}", "warning")
+            except Exception as exc:
+                skipped += 1
+                self._log(
+                    f"  rollback_cleanup_view_failed path={view_path} error={exc}",
+                    "warning",
+                )
+
+        self._log(f"  rollback_cleanup_summary removed={removed} skipped={skipped}")
 
     def _set_location_with_retry(
         self,
@@ -1909,6 +2013,7 @@ class DemotionExecutor:
                             self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
             else:
                 self._log("  rollback skipped reason=idempotent_mode_no_move", "warning")
+            self._rollback_partial_target_views(plan)
             raise
 
         # For rsync-based cross-filesystem moves, remove source only after relocation succeeded.
