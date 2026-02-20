@@ -8,7 +8,7 @@ and what actions are needed.
 import sqlite3
 import os
 from pathlib import Path
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass
 
 # Import hashall modules
@@ -179,6 +179,7 @@ class DemotionPlanner:
         self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
         self.pool_seeding_root = canonicalize_path(Path(pool_seeding_root)) if pool_seeding_root else None
         self.pool_payload_root = canonicalize_path(Path(pool_payload_root)) if pool_payload_root else None
+        self._scan_roots_cover_cache: Dict[Tuple[str, ...], Optional[bool]] = {}
 
     def _compute_pool_move_target(self, source_root_path: str) -> tuple[Optional[str], Optional[str]]:
         """
@@ -493,6 +494,14 @@ class DemotionPlanner:
                 return False
         return True
 
+    def _scan_roots_cover_cached(self, conn: sqlite3.Connection,
+                                 roots: List[Path]) -> Optional[bool]:
+        """Memoize scan_roots coverage checks per planner run."""
+        key = tuple(str(root) for root in roots)
+        if key not in self._scan_roots_cover_cache:
+            self._scan_roots_cover_cache[key] = self._scan_roots_cover(conn, roots)
+        return self._scan_roots_cover_cache[key]
+
 
     def _payload_exists_on_pool(self, conn: sqlite3.Connection,
                                 payload_hash: str) -> Optional[str]:
@@ -602,7 +611,7 @@ class DemotionPlanner:
 
             # 4a. Ensure scan roots cover seeding + library domains (if available)
             required_roots = self.seeding_roots + self.library_roots
-            coverage = self._scan_roots_cover(conn, required_roots)
+            coverage = self._scan_roots_cover_cached(conn, required_roots)
             if coverage is False:
                 return {
                     "version": "1.0",

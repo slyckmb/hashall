@@ -3,7 +3,8 @@
 import os
 import subprocess
 import shutil
-from typing import Optional
+from functools import lru_cache
+from typing import Optional, Sequence
 from pathlib import Path
 
 
@@ -64,7 +65,11 @@ def get_filesystem_uuid(path: str) -> str:
         return "dev-unknown"
 
 
-def _resolve_cmd(cmd: str, fallbacks: list[str]) -> str:
+_FINDMNT_FALLBACKS = ("/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt")
+_ZFS_FALLBACKS = ("/sbin/zfs", "/usr/sbin/zfs")
+
+
+def _resolve_cmd(cmd: str, fallbacks: Sequence[str]) -> str:
     found = shutil.which(cmd)
     if found:
         return found
@@ -72,6 +77,16 @@ def _resolve_cmd(cmd: str, fallbacks: list[str]) -> str:
         if Path(candidate).exists():
             return candidate
     return cmd
+
+
+@lru_cache(maxsize=1)
+def _findmnt_cmd() -> str:
+    return _resolve_cmd("findmnt", _FINDMNT_FALLBACKS)
+
+
+@lru_cache(maxsize=1)
+def _zfs_cmd() -> str:
+    return _resolve_cmd("zfs", _ZFS_FALLBACKS)
 
 
 def _try_findmnt(path: str) -> Optional[str]:
@@ -88,9 +103,8 @@ def _try_findmnt(path: str) -> Optional[str]:
         UUID string if successful, None otherwise
     """
     try:
-        findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            [findmnt_cmd, '-no', 'UUID', '-T', path],
+            [_findmnt_cmd(), '-no', 'UUID', '-T', path],
             capture_output=True,
             text=True,
             check=True,
@@ -110,16 +124,11 @@ def _try_findmnt(path: str) -> Optional[str]:
     return None
 
 
-def get_mount_point(path: str) -> Optional[str]:
-    """
-    Return the mount point (TARGET) for a path using findmnt.
-
-    Returns None if findmnt is unavailable or fails.
-    """
+@lru_cache(maxsize=65536)
+def _get_mount_point_cached(path: str) -> Optional[str]:
     try:
-        findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            [findmnt_cmd, '-no', 'TARGET', '-T', path],
+            [_findmnt_cmd(), '-no', 'TARGET', '-T', path],
             capture_output=True,
             text=True,
             check=True,
@@ -131,7 +140,7 @@ def get_mount_point(path: str) -> Optional[str]:
         pass
     except Exception:
         pass
-    # Fallback: walk up to nearest mount point using os.path.ismount
+
     try:
         candidate = Path(path).resolve()
     except Exception:
@@ -140,20 +149,14 @@ def get_mount_point(path: str) -> Optional[str]:
     for parent in [candidate, *candidate.parents]:
         if os.path.ismount(parent):
             return str(parent)
-
     return None
 
 
-def get_mount_source(path: str) -> Optional[str]:
-    """
-    Return the mount source (SOURCE) for a path using findmnt.
-
-    Useful for detecting bind mounts when SOURCE is an absolute path.
-    """
+@lru_cache(maxsize=65536)
+def _get_mount_source_cached(path: str) -> Optional[str]:
     try:
-        findmnt_cmd = _resolve_cmd("findmnt", ["/bin/findmnt", "/usr/bin/findmnt", "/sbin/findmnt", "/usr/sbin/findmnt"])
         result = subprocess.run(
-            [findmnt_cmd, '-no', 'SOURCE', '-T', path],
+            [_findmnt_cmd(), '-no', 'SOURCE', '-T', path],
             capture_output=True,
             text=True,
             check=True,
@@ -166,6 +169,38 @@ def get_mount_source(path: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def clear_mount_lookup_caches() -> None:
+    """Clear mount lookup caches (used by tests)."""
+    _get_mount_point_cached.cache_clear()
+    _get_mount_source_cached.cache_clear()
+
+
+def get_mount_point(path: str) -> Optional[str]:
+    """
+    Return the mount point (TARGET) for a path using findmnt.
+
+    Returns None if findmnt is unavailable or fails.
+    """
+    try:
+        normalized = str(Path(path).resolve())
+    except Exception:
+        normalized = str(path)
+    return _get_mount_point_cached(normalized)
+
+
+def get_mount_source(path: str) -> Optional[str]:
+    """
+    Return the mount source (SOURCE) for a path using findmnt.
+
+    Useful for detecting bind mounts when SOURCE is an absolute path.
+    """
+    try:
+        normalized = str(Path(path).resolve())
+    except Exception:
+        normalized = str(path)
+    return _get_mount_source_cached(normalized)
 
 
 def _try_zfs_guid(path: str) -> Optional[str]:
@@ -182,8 +217,9 @@ def _try_zfs_guid(path: str) -> Optional[str]:
         ZFS GUID string if successful, None otherwise
     """
     try:
+        zfs_cmd = _zfs_cmd()
         result = subprocess.run(
-            ['zfs', 'get', '-H', '-o', 'value', 'guid', path],
+            [zfs_cmd, 'get', '-H', '-o', 'value', 'guid', path],
             capture_output=True,
             text=True,
             check=True,
@@ -242,7 +278,7 @@ def get_zfs_metadata(path: str) -> dict:
     """
     try:
         # Get dataset name using zfs list
-        zfs_cmd = _resolve_cmd("zfs", ["/sbin/zfs", "/usr/sbin/zfs"])
+        zfs_cmd = _zfs_cmd()
         result = subprocess.run(
             [zfs_cmd, 'list', '-H', '-o', 'name', path],
             capture_output=True,

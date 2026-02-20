@@ -561,6 +561,54 @@ class TestReusePlan:
 class TestMovePlan:
     """Test MOVE decision when payload doesn't exist on pool."""
 
+    def test_scan_roots_coverage_cached_per_planner(self, tmp_path, monkeypatch):
+        """Scan-roots coverage check should run once per planner instance."""
+        db_path = TestDatabase.create_test_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        stash_root = "/stash/torrents/seeding/Movie.2024"
+        payload_hash = "scan_cache_payload_hash"
+
+        conn.executescript(f"""
+            INSERT INTO files_50 (path, inode, size, mtime, sha1, status)
+            VALUES ('{stash_root}/video.mkv', 7101, 1000000, 1234567890, 'abc123', 'active');
+
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (1, '{payload_hash}', 50, '{stash_root}', 1, 1000000, 'complete');
+
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+            VALUES ('torrent_scan_cache', 1, 50, '/stash/torrents/seeding', 'Movie.2024');
+        """)
+        conn.commit()
+        conn.close()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/torrents/seeding"],
+            library_roots=["/stash/torrents/seeding"],
+            stash_device=50,
+            pool_device=49,
+            stash_seeding_root="/stash/torrents/seeding",
+            pool_seeding_root="/pool/torrents/seeding",
+            pool_payload_root="/pool/torrents/content",
+        )
+
+        calls = {"count": 0}
+        original = planner._scan_roots_cover
+
+        def tracked_scan(conn, roots):
+            calls["count"] += 1
+            _ = original(conn, roots)
+            return True
+
+        monkeypatch.setattr(planner, "_scan_roots_cover", tracked_scan)
+
+        plan1 = planner.plan_demotion("torrent_scan_cache")
+        plan2 = planner.plan_demotion("torrent_scan_cache")
+
+        assert plan1["decision"] == "MOVE"
+        assert plan2["decision"] == "MOVE"
+        assert calls["count"] == 1
+
     def test_move_when_payload_not_on_pool(self, tmp_path):
         """Test that plan is MOVE when payload doesn't exist on pool."""
         # Setup database

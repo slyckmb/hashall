@@ -38,8 +38,7 @@ def canonicalize_path(path: Path) -> Path:
 
     This ensures that bind-mounted aliases resolve to their real source paths.
     """
-    resolved = Path(path).resolve()
-    return resolve_bind_source(resolved)
+    return resolve_bind_source(Path(path))
 
 
 def remap_to_mount_alias(path: Path, preferred_mount: Path) -> Optional[Path]:

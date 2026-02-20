@@ -13,9 +13,17 @@ from hashall.fs_utils import (
     get_mount_point,
     get_mount_source,
     get_zfs_metadata,
+    clear_mount_lookup_caches,
     _try_findmnt,
     _try_zfs_guid,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_mount_lookup_caches():
+    clear_mount_lookup_caches()
+    yield
+    clear_mount_lookup_caches()
 
 
 class TestGetFilesystemUuid:
@@ -332,7 +340,8 @@ class TestTryZfsGuid:
             # Verify command arguments
             mock_run.assert_called_once()
             args = mock_run.call_args[0][0]
-            assert args == ['zfs', 'get', '-H', '-o', 'value', 'guid', '/pool/dataset']
+            assert Path(args[0]).name == 'zfs'
+            assert args[1:] == ['get', '-H', '-o', 'value', 'guid', '/pool/dataset']
 
 
 class TestEdgeCases:
