@@ -240,6 +240,37 @@ print(
 PY
 }
 
+run_with_heartbeat() {
+  local step_label="$1"
+  shift
+
+  local interval="${REHOME_PROGRESS_HEARTBEAT_SECONDS:-15}"
+  if ! [[ "$interval" =~ ^[0-9]+$ ]] || [[ "$interval" -lt 5 ]]; then
+    interval=15
+  fi
+
+  local elapsed=0
+  local rc=0
+  local cmd_str
+  printf -v cmd_str '%q ' "$@"
+  echo "dispatch step=${step_label} heartbeat_s=${interval} cmd=${cmd_str% }"
+
+  "$@" &
+  local pid=$!
+
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "heartbeat step=${step_label} elapsed_s=${elapsed}"
+    fi
+  done
+
+  wait "$pid" || rc=$?
+  echo "dispatch step=${step_label} rc=${rc} elapsed_s=${elapsed}"
+  return "$rc"
+}
+
 stage0_relocate_pool_to_seeds_via_qb() {
   local scope_root="$1"
   local source_root="$2"
@@ -290,7 +321,9 @@ qb = QBittorrentClient(
     password=os.getenv("QBIT_PASS", "adminpass"),
 )
 
+print("step=0 legacy-qb-relocate-fetch status=start", flush=True)
 torrents = qb.get_torrents()
+print(f"step=0 legacy-qb-relocate-fetch status=done torrents_total={len(torrents)}", flush=True)
 total = len(torrents)
 print(
     "step=0 legacy-qb-relocate "
@@ -464,9 +497,11 @@ CLEANUP_DUPLICATE="${REHOME_CLEANUP_DUPLICATE_PAYLOAD:-1}"
 
 echo "mode=frozen-one-pass limit=${LIMIT} pool_root=${POOL_ROOT} pool_device=${POOL_DEVICE}"
 echo "sanitize_live_filter=${REHOME_SANITIZE_LIVE:-0} recovery_steps=${RUN_RECOVERY_STEPS} cleanup_duplicate=${CLEANUP_DUPLICATE} stage0_legacy_migrate=${LEGACY_MIGRATE}"
+echo "progress_heartbeat_s=${REHOME_PROGRESS_HEARTBEAT_SECONDS:-15}"
 
 if [[ "$LEGACY_MIGRATE" == "1" ]]; then
-  stage0_relocate_pool_to_seeds_via_qb \
+  run_with_heartbeat "0 legacy-qb-relocate" \
+    stage0_relocate_pool_to_seeds_via_qb \
     "$STAGE0_SCOPE_ROOT" \
     "$STAGE0_SOURCE_ROOT" \
     "$POOL_ROOT" \
@@ -483,7 +518,8 @@ else
 fi
 
 echo "step=sync-snapshot"
-make payload-sync \
+run_with_heartbeat "sync-snapshot payload-sync" \
+  make payload-sync \
   PAYLOAD_PATH_PREFIXES="${POOL_ROOT}" \
   PAYLOAD_UPGRADE_MISSING=1 \
   PAYLOAD_PARALLEL=1 \
@@ -492,7 +528,8 @@ make payload-sync \
 
 PLAN="out/reports/rehome-normalize/rehome-plan-normalize-frozen-${stamp}.json"
 echo "step=plan-from-db"
-make rehome-normalize-plan \
+run_with_heartbeat "plan-from-db normalize-plan" \
+  make rehome-normalize-plan \
   REHOME_POOL_DEVICE="${POOL_DEVICE}" \
   REHOME_NORMALIZE_POOL_ROOT="${POOL_ROOT}" \
   REHOME_NORMALIZE_STASH_ROOT="${STASH_ROOT}" \
@@ -506,14 +543,16 @@ print_plan_summary "$PLAN"
 skipped="$(jq -r '.summary.skipped // 0' "$PLAN")"
 if [[ "$skipped" -gt 0 && "$RUN_RECOVERY_STEPS" == "1" ]]; then
   echo "step=21 recover-skipped-and-replan"
-  bin/rehome-21_normalize-recover-skipped-and-replan_with-logs.sh --plan "$PLAN" --limit "$LIMIT" --all-mismatches
+  run_with_heartbeat "21 recover-skipped-and-replan" \
+    bin/rehome-21_normalize-recover-skipped-and-replan_with-logs.sh --plan "$PLAN" --limit "$LIMIT" --all-mismatches
   PLAN="$(resolve_latest_plan)"
   print_plan_summary "$PLAN"
 
   skipped="$(jq -r '.summary.skipped // 0' "$PLAN")"
   if [[ "$skipped" -gt 0 ]]; then
     echo "step=22 scan-sync-replan"
-    bin/rehome-22_normalize-scan-sync-replan_with-logs.sh --plan "$PLAN" --scan-hash-mode upgrade --limit "$LIMIT" --all-mismatches
+    run_with_heartbeat "22 scan-sync-replan" \
+      bin/rehome-22_normalize-scan-sync-replan_with-logs.sh --plan "$PLAN" --scan-hash-mode upgrade --limit "$LIMIT" --all-mismatches
     PLAN="$(resolve_latest_plan)"
     print_plan_summary "$PLAN"
   fi
@@ -521,7 +560,8 @@ if [[ "$skipped" -gt 0 && "$RUN_RECOVERY_STEPS" == "1" ]]; then
   skipped="$(jq -r '.summary.skipped // 0' "$PLAN")"
   if [[ "$skipped" -gt 0 ]]; then
     echo "step=23 live-prefix-hash-sync-replan"
-    bin/rehome-23_normalize-live-prefix-hash-sync-replan_with-logs.sh --plan "$PLAN" --hash-progress full --limit "$LIMIT" --all-mismatches
+    run_with_heartbeat "23 live-prefix-hash-sync-replan" \
+      bin/rehome-23_normalize-live-prefix-hash-sync-replan_with-logs.sh --plan "$PLAN" --hash-progress full --limit "$LIMIT" --all-mismatches
     PLAN="$(resolve_latest_plan)"
     print_plan_summary "$PLAN"
   fi
@@ -537,11 +577,14 @@ if [[ "$(jq -r '.plans | length' "$PLAN_READY")" -eq 0 ]]; then
   echo "No live plan entries remain after sanitization; aborting."
   exit 1
 fi
-make rehome-apply-dry REHOME_PLAN="$PLAN_READY" REHOME_CLEANUP_DUPLICATE_PAYLOAD="$CLEANUP_DUPLICATE"
+run_with_heartbeat "apply-dry rehome-apply-dry" \
+  make rehome-apply-dry REHOME_PLAN="$PLAN_READY" REHOME_CLEANUP_DUPLICATE_PAYLOAD="$CLEANUP_DUPLICATE"
 echo "step=apply-live"
-make rehome-apply REHOME_PLAN="$PLAN_READY" REHOME_CLEANUP_DUPLICATE_PAYLOAD="$CLEANUP_DUPLICATE"
+run_with_heartbeat "apply-live rehome-apply" \
+  make rehome-apply REHOME_PLAN="$PLAN_READY" REHOME_CLEANUP_DUPLICATE_PAYLOAD="$CLEANUP_DUPLICATE"
 echo "step=followup"
-make rehome-followup REHOME_RECHECK_PATH=/pool/data/seeds
+run_with_heartbeat "followup rehome-followup" \
+  make rehome-followup REHOME_RECHECK_PATH=/pool/data/seeds
 missing_source_skips="$(rg -c 'cleanup_duplicate skip reason=missing_source' "$run_log" || true)"
 manual_actions="$(rg -c 'MANUAL_ACTION_REQUIRED' "$run_log" || true)"
 echo "post_summary missing_source_skips=${missing_source_skips:-0} manual_actions=${manual_actions:-0}"
