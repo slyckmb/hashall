@@ -15,6 +15,8 @@ Options:
   --pool-device ID          Pool device id (default: 44)
   --spot-check N            Spot-check files in dryrun (default: 0)
   --limit N                 Limit hashes to process (default: 0 = all)
+  --fast                    Fast mode (force spot-check 0)
+  --debug                   Debug mode (enable qB debug env and verbose lines)
   --output-prefix NAME      Output prefix (default: nohl)
   -h, --help                Show help
 USAGE
@@ -33,6 +35,8 @@ POOL_DEVICE_ID="44"
 SPOT_CHECK="0"
 LIMIT="0"
 OUTPUT_PREFIX="nohl"
+FAST_MODE=0
+DEBUG_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,6 +48,8 @@ while [[ $# -gt 0 ]]; do
     --pool-device) POOL_DEVICE_ID="${2:-}"; shift 2 ;;
     --spot-check) SPOT_CHECK="${2:-}"; shift 2 ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
+    --fast) FAST_MODE=1; shift ;;
+    --debug) DEBUG_MODE=1; shift ;;
     --output-prefix) OUTPUT_PREFIX="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -72,6 +78,12 @@ fi
 if [[ "${#HASHES[@]}" -eq 0 ]]; then
   echo "No hashes to dryrun" >&2
   exit 4
+fi
+if [[ "$FAST_MODE" -eq 1 ]]; then
+  SPOT_CHECK="0"
+fi
+if [[ "$DEBUG_MODE" -eq 1 ]]; then
+  export HASHALL_REHOME_QB_DEBUG=1
 fi
 
 pool_free_pct() {
@@ -108,12 +120,15 @@ blocked=0
 
 {
   echo "run_id=${stamp} step=nohl-dryrun-group-batch"
-  echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} spot_check=${SPOT_CHECK}"
+  echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} spot_check=${SPOT_CHECK} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   total="${#HASHES[@]}"
   for i in "${!HASHES[@]}"; do
     idx=$((i + 1))
     hash="${HASHES[$i]}"
     echo "dryrun idx=${idx}/${total} payload=${hash:0:16} status=start"
+    if [[ "$DEBUG_MODE" -eq 1 ]]; then
+      echo "debug idx=${idx}/${total} payload=${hash} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT}"
+    fi
     if ! assert_pool_space; then
       echo "$hash" >> "$failed_hashes"
       failed=$((failed + 1))

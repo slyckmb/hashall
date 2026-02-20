@@ -279,15 +279,21 @@ run_nohl_restart_lane() {
   local print_torrents="${REHOME_NOHL_FOLLOWUP_PRINT_TORRENTS:-0}"
   local execute="${REHOME_NOHL_EXECUTE:-0}"
   local output_prefix="${REHOME_NOHL_OUTPUT_PREFIX:-nohl}"
+  local fast_mode="${REHOME_NOHL_FAST:-1}"
+  local debug_mode="${REHOME_NOHL_DEBUG:-1}"
+  local fast_arg=""
+  local debug_arg=""
+  [[ "$fast_mode" == "1" ]] && fast_arg="--fast"
+  [[ "$debug_mode" == "1" ]] && debug_arg="--debug"
 
-  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply}"
+  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} fast=${fast_mode} debug=${debug_mode}"
   echo "recommended_commands_begin"
-  echo "bin/rehome-30_nohl-discover-and-rank.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit}"
-  echo "bin/rehome-40_nohl-build-group-plan.sh --output-prefix ${output_prefix} --limit ${limit}"
-  echo "bin/rehome-50_nohl-dryrun-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit}"
-  echo "bin/rehome-60_nohl-apply-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit}"
-  echo "bin/rehome-70_nohl-followup-and-reconcile.sh --output-prefix ${output_prefix} --cleanup ${cleanup} --print-torrents ${print_torrents}"
-  echo "bin/rehome-80_nohl-report-and-next-batch.sh --output-prefix ${output_prefix}"
+  echo "bin/rehome-30_nohl-discover-and-rank.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-40_nohl-build-group-plan.sh --output-prefix ${output_prefix} --limit ${limit} ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-50_nohl-dryrun-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-60_nohl-apply-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-70_nohl-followup-and-reconcile.sh --output-prefix ${output_prefix} --cleanup ${cleanup} --print-torrents ${print_torrents} ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-80_nohl-report-and-next-batch.sh --output-prefix ${output_prefix} ${fast_arg} ${debug_arg}"
   echo "recommended_commands_end"
 
   if [[ "$execute" != "1" ]]; then
@@ -299,25 +305,33 @@ run_nohl_restart_lane() {
     bin/rehome-30_nohl-discover-and-rank.sh \
     --output-prefix "$output_prefix" \
     --min-free-pct "$min_free_pct" \
-    --limit "$limit"
+    --limit "$limit" \
+    ${fast_arg:+$fast_arg} \
+    ${debug_arg:+$debug_arg}
 
   run_with_heartbeat "40 nohl-build-group-plan" \
     bin/rehome-40_nohl-build-group-plan.sh \
     --output-prefix "$output_prefix" \
-    --limit "$limit"
+    --limit "$limit" \
+    ${fast_arg:+$fast_arg} \
+    ${debug_arg:+$debug_arg}
 
   run_with_heartbeat "50 nohl-dryrun-group-batch" \
     bin/rehome-50_nohl-dryrun-group-batch.sh \
     --output-prefix "$output_prefix" \
     --min-free-pct "$min_free_pct" \
-    --limit "$limit"
+    --limit "$limit" \
+    ${fast_arg:+$fast_arg} \
+    ${debug_arg:+$debug_arg}
 
   if [[ "$do_apply" == "1" ]]; then
     run_with_heartbeat "60 nohl-apply-group-batch" \
       bin/rehome-60_nohl-apply-group-batch.sh \
       --output-prefix "$output_prefix" \
       --min-free-pct "$min_free_pct" \
-      --limit "$limit"
+      --limit "$limit" \
+      ${fast_arg:+$fast_arg} \
+      ${debug_arg:+$debug_arg}
   else
     echo "step=60 nohl-apply-group-batch status=skipped reason=apply_disabled"
   fi
@@ -326,11 +340,15 @@ run_nohl_restart_lane() {
     bin/rehome-70_nohl-followup-and-reconcile.sh \
     --output-prefix "$output_prefix" \
     --cleanup "$cleanup" \
-    --print-torrents "$print_torrents"
+    --print-torrents "$print_torrents" \
+    ${fast_arg:+$fast_arg} \
+    ${debug_arg:+$debug_arg}
 
   run_with_heartbeat "80 nohl-report-next-batch" \
     bin/rehome-80_nohl-report-and-next-batch.sh \
-    --output-prefix "$output_prefix"
+    --output-prefix "$output_prefix" \
+    ${fast_arg:+$fast_arg} \
+    ${debug_arg:+$debug_arg}
 
   echo "nohl_restart done=1"
 }

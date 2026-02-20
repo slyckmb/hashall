@@ -12,6 +12,8 @@ Options:
   --retry-failed 0|1        Include rehome_verify_failed tags (default: 0)
   --limit N                 Followup candidate limit (default: 0 = all)
   --print-torrents 0|1      Print per-torrent followup checks (default: 0)
+  --fast                    Fast mode (skip torrent-level print unless explicitly set)
+  --debug                   Debug mode (force torrent-level print)
   --output-prefix NAME      Output prefix (default: nohl)
   -h, --help                Show help
 USAGE
@@ -23,6 +25,8 @@ RETRY_FAILED="0"
 LIMIT="0"
 PRINT_TORRENTS="0"
 OUTPUT_PREFIX="nohl"
+FAST_MODE=0
+DEBUG_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +35,8 @@ while [[ $# -gt 0 ]]; do
     --retry-failed) RETRY_FAILED="${2:-}"; shift 2 ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
     --print-torrents) PRINT_TORRENTS="${2:-}"; shift 2 ;;
+    --fast) FAST_MODE=1; shift ;;
+    --debug) DEBUG_MODE=1; shift ;;
     --output-prefix) OUTPUT_PREFIX="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -52,9 +58,16 @@ followup_json="${log_dir}/${OUTPUT_PREFIX}-followup-${stamp}.json"
 pending_hashes="${log_dir}/${OUTPUT_PREFIX}-payload-hashes-followup-pending-${stamp}.txt"
 failed_hashes="${log_dir}/${OUTPUT_PREFIX}-payload-hashes-followup-failed-${stamp}.txt"
 
+if [[ "$FAST_MODE" -eq 1 && "$PRINT_TORRENTS" == "1" ]]; then
+  PRINT_TORRENTS="0"
+fi
+if [[ "$DEBUG_MODE" -eq 1 ]]; then
+  PRINT_TORRENTS="1"
+fi
+
 {
   echo "run_id=${stamp} step=nohl-followup-and-reconcile"
-  echo "config db=${DB_PATH} cleanup=${CLEANUP} retry_failed=${RETRY_FAILED} limit=${LIMIT} print_torrents=${PRINT_TORRENTS}"
+  echo "config db=${DB_PATH} cleanup=${CLEANUP} retry_failed=${RETRY_FAILED} limit=${LIMIT} print_torrents=${PRINT_TORRENTS} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   make rehome-followup \
     REHOME_CATALOG="$DB_PATH" \
     REHOME_FOLLOWUP_CLEANUP="$CLEANUP" \

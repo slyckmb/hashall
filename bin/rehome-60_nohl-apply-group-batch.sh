@@ -16,6 +16,7 @@ Options:
   --spot-check N            Spot-check files during apply (default: 0)
   --debug                   Enable HASHALL_REHOME_QB_DEBUG=1
   --limit N                 Limit hashes to process (default: 0 = all)
+  --fast                    Fast mode (no additional behavior change; explicit run profile)
   --output-prefix NAME      Output prefix (default: nohl)
   -h, --help                Show help
 USAGE
@@ -35,6 +36,7 @@ SPOT_CHECK="0"
 DEBUG_MODE=0
 LIMIT="0"
 OUTPUT_PREFIX="nohl"
+FAST_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --spot-check) SPOT_CHECK="${2:-}"; shift 2 ;;
     --debug) DEBUG_MODE=1; shift ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
+    --fast) FAST_MODE=1; shift ;;
     --output-prefix) OUTPUT_PREFIX="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -94,12 +97,15 @@ ok=0
 failed=0
 {
   echo "run_id=${stamp} step=nohl-apply-group-batch"
-  echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} spot_check=${SPOT_CHECK} debug=${DEBUG_MODE}"
+  echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} spot_check=${SPOT_CHECK} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   total="${#HASHES[@]}"
   for i in "${!HASHES[@]}"; do
     idx=$((i + 1))
     hash="${HASHES[$i]}"
     echo "apply idx=${idx}/${total} payload=${hash:0:16} status=start"
+    if [[ "$DEBUG_MODE" -eq 1 ]]; then
+      echo "debug idx=${idx}/${total} payload=${hash} min_free_pct=${MIN_FREE_PCT} pool_name=${POOL_NAME}"
+    fi
     if bin/rehome-10_apply-batch-with-guards.sh \
       --db "$DB_PATH" \
       --pool-name "$POOL_NAME" \

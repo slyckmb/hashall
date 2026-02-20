@@ -12,6 +12,8 @@ Options:
   --stash-device ID         Stash device id (default: 49)
   --pool-device ID          Pool device id (default: 44)
   --limit N                 Limit payload groups from hashes file (default: 0 = all)
+  --fast                    Fast mode (minimal per-item diagnostics)
+  --debug                   Debug mode (verbose command tracing)
   --output-prefix NAME      Output prefix (default: nohl)
   -h, --help                Show help
 USAGE
@@ -27,6 +29,8 @@ STASH_DEVICE_ID="49"
 POOL_DEVICE_ID="44"
 LIMIT="0"
 OUTPUT_PREFIX="nohl"
+FAST_MODE=0
+DEBUG_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +39,8 @@ while [[ $# -gt 0 ]]; do
     --stash-device) STASH_DEVICE_ID="${2:-}"; shift 2 ;;
     --pool-device) POOL_DEVICE_ID="${2:-}"; shift 2 ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
+    --fast) FAST_MODE=1; shift ;;
+    --debug) DEBUG_MODE=1; shift ;;
     --output-prefix) OUTPUT_PREFIX="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -69,9 +75,9 @@ report_tsv="${log_dir}/${OUTPUT_PREFIX}-plan-report-${stamp}.tsv"
 
 {
   echo "run_id=${stamp} step=nohl-build-group-plan"
-  echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} limit=${LIMIT}"
+  echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} limit=${LIMIT} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   PYTHONPATH=src python -u - <<'PY' \
-    "$HASHES_FILE" "$DB_PATH" "$STASH_DEVICE_ID" "$POOL_DEVICE_ID" "$LIMIT" "$plan_dir" "$manifest_json" "$plannable_hashes" "$blocked_hashes" "$report_tsv"
+    "$HASHES_FILE" "$DB_PATH" "$STASH_DEVICE_ID" "$POOL_DEVICE_ID" "$LIMIT" "$plan_dir" "$manifest_json" "$plannable_hashes" "$blocked_hashes" "$report_tsv" "$FAST_MODE" "$DEBUG_MODE"
 import json
 import subprocess
 import sys
@@ -88,9 +94,13 @@ from pathlib import Path
     plannable_hashes,
     blocked_hashes,
     report_tsv,
-) = sys.argv[1:11]
+    fast_mode_raw,
+    debug_mode_raw,
+) = sys.argv[1:13]
 
 limit = max(0, int(limit_raw))
+fast_mode = str(fast_mode_raw).strip() == "1"
+debug_mode = str(debug_mode_raw).strip() == "1"
 hashes = []
 for line in Path(hashes_file).read_text(encoding="utf-8").splitlines():
     line = line.strip()
@@ -148,6 +158,8 @@ with Path(report_tsv).open("w", encoding="utf-8") as tsv:
         source_path = ""
         target_path = ""
         try:
+            if debug_mode:
+                print(f"debug idx={idx}/{total} cmd={' '.join(cmd)}", flush=True)
             subprocess.run(cmd, check=True, text=True, capture_output=True, env={"PYTHONPATH": "src", **__import__("os").environ})
             data = json.loads(plan_path.read_text(encoding="utf-8"))
             decision = str(data.get("decision") or "").upper()
@@ -183,11 +195,14 @@ with Path(report_tsv).open("w", encoding="utf-8") as tsv:
         tsv.write(
             f"{idx}\t{payload_hash}\t{decision}\t{source_path}\t{target_path}\t{status}\t{plan_path}\t{error}\n"
         )
-        print(
+        if fast_mode and status == "ok":
+            print(f"plan idx={idx}/{total} payload={payload_hash[:16]} decision={decision} status=ok", flush=True)
+        else:
+            print(
             f"plan idx={idx}/{total} payload={payload_hash[:16]} decision={decision or '-'} "
             f"status={status} from={source_path or '-'} to={target_path or '-'} error={error or 'none'}",
             flush=True,
-        )
+            )
 
 Path(plannable_hashes).write_text("\n".join(plannable) + ("\n" if plannable else ""), encoding="utf-8")
 Path(blocked_hashes).write_text("\n".join(blocked) + ("\n" if blocked else ""), encoding="utf-8")

@@ -9,17 +9,23 @@ Usage:
 Options:
   --output-prefix NAME      Artifact prefix (default: nohl)
   --show-commands 0|1       Print next command sequence (default: 1)
+  --fast                    Fast mode annotation in report
+  --debug                   Debug mode annotation in report
   -h, --help                Show help
 USAGE
 }
 
 OUTPUT_PREFIX="nohl"
 SHOW_COMMANDS="1"
+FAST_MODE=0
+DEBUG_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-prefix) OUTPUT_PREFIX="${2:-}"; shift 2 ;;
     --show-commands) SHOW_COMMANDS="${2:-}"; shift 2 ;;
+    --fast) FAST_MODE=1; shift ;;
+    --debug) DEBUG_MODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown arg: $1" >&2
@@ -56,6 +62,7 @@ count_lines() {
 
 {
   echo "run_id=${stamp} step=nohl-report-and-next-batch"
+  echo "mode fast=${FAST_MODE} debug=${DEBUG_MODE}"
   echo "latest_discover=${latest_discover:-none}"
   echo "latest_manifest=${latest_manifest:-none}"
   echo "latest_dryrun_ready=${latest_dryrun_ready:-none}"
@@ -77,13 +84,17 @@ count_lines() {
   echo "counts dryrun_ready=$(count_lines "$latest_dryrun_ready") apply_failed=$(count_lines "$latest_apply_fail") followup_pending=$(count_lines "$latest_pending") followup_failed=$(count_lines "$latest_failed")"
 
   if [[ "$SHOW_COMMANDS" == "1" ]]; then
+    fast_arg=""
+    debug_arg=""
+    [[ "$FAST_MODE" == "1" ]] && fast_arg=" --fast"
+    [[ "$DEBUG_MODE" == "1" ]] && debug_arg=" --debug"
     echo "next_commands_begin"
-    echo "bin/rehome-30_nohl-discover-and-rank.sh --min-free-pct 20 --limit 0"
-    echo "bin/rehome-40_nohl-build-group-plan.sh"
-    echo "bin/rehome-50_nohl-dryrun-group-batch.sh --min-free-pct 20"
-    echo "bin/rehome-60_nohl-apply-group-batch.sh --min-free-pct 20"
-    echo "bin/rehome-70_nohl-followup-and-reconcile.sh --cleanup 1"
-    echo "bin/rehome-80_nohl-report-and-next-batch.sh"
+    echo "bin/rehome-30_nohl-discover-and-rank.sh --min-free-pct 20 --limit 0${fast_arg}${debug_arg}"
+    echo "bin/rehome-40_nohl-build-group-plan.sh${fast_arg}${debug_arg}"
+    echo "bin/rehome-50_nohl-dryrun-group-batch.sh --min-free-pct 20${fast_arg}${debug_arg}"
+    echo "bin/rehome-60_nohl-apply-group-batch.sh --min-free-pct 20${fast_arg}${debug_arg}"
+    echo "bin/rehome-70_nohl-followup-and-reconcile.sh --cleanup 1${fast_arg}${debug_arg}"
+    echo "bin/rehome-80_nohl-report-and-next-batch.sh${fast_arg}${debug_arg}"
     echo "next_commands_end"
   fi
 } 2>&1 | tee "$run_log"

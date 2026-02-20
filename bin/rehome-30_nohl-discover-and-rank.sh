@@ -17,6 +17,8 @@ Options:
   --pool-name NAME          ZFS pool name for free-space snapshot (default: pool)
   --min-free-pct N          Advisory free-space floor in report (default: 20)
   --limit N                 Limit ranked eligible groups (default: 0 = all)
+  --fast                    Fast mode (skip heavy status-report enrichment)
+  --debug                   Debug mode (verbose config + qB debug env)
   --output-prefix NAME      Output file prefix (default: nohl)
   -h, --help                Show help
 USAGE
@@ -32,6 +34,8 @@ POOL_NAME="pool"
 MIN_FREE_PCT="20"
 LIMIT="0"
 OUTPUT_PREFIX="nohl"
+FAST_MODE=0
+DEBUG_MODE=0
 declare -a STASH_PREFIXES=()
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +50,8 @@ while [[ $# -gt 0 ]]; do
     --pool-name) POOL_NAME="${2:-}"; shift 2 ;;
     --min-free-pct) MIN_FREE_PCT="${2:-}"; shift 2 ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
+    --fast) FAST_MODE=1; shift ;;
+    --debug) DEBUG_MODE=1; shift ;;
     --output-prefix) OUTPUT_PREFIX="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -58,6 +64,9 @@ done
 
 if [[ ${#STASH_PREFIXES[@]} -eq 0 ]]; then
   STASH_PREFIXES=("/stash/media" "/data/media")
+fi
+if [[ "$DEBUG_MODE" -eq 1 ]]; then
+  export HASHALL_REHOME_QB_DEBUG=1
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -86,10 +95,10 @@ GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 {
   echo "tool_semver_hashall=${HASHALL_SEMVER} tool_semver_rehome=${REHOME_SEMVER} git_sha=${GIT_SHA}"
   echo "run_id=${stamp} step=nohl-discover-and-rank"
-  echo "config db=${DB_PATH} qbit_url=${QBIT_URL} tag=${TAG_NAME} pool_seeds_root=${POOL_SEEDS_ROOT} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} limit=${LIMIT}"
+  echo "config db=${DB_PATH} qbit_url=${QBIT_URL} tag=${TAG_NAME} pool_seeds_root=${POOL_SEEDS_ROOT} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} limit=${LIMIT} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   echo "config stash_prefixes=$(IFS=,; echo "${STASH_PREFIXES[*]}")"
   STASH_PREFIXES_CSV="$(IFS=,; echo "${STASH_PREFIXES[*]}")" \
-  PYTHONPATH=src python -u - <<'PY' "$DB_PATH" "$QBIT_URL" "$QBIT_USER" "$QBIT_PASS" "$TAG_NAME" "$POOL_SEEDS_ROOT" "$LIMIT" "$MIN_FREE_PCT" "$POOL_NAME" "$json_out" "$hashes_out" "$tsv_out"
+  PYTHONPATH=src python -u - <<'PY' "$DB_PATH" "$QBIT_URL" "$QBIT_USER" "$QBIT_PASS" "$TAG_NAME" "$POOL_SEEDS_ROOT" "$LIMIT" "$MIN_FREE_PCT" "$POOL_NAME" "$json_out" "$hashes_out" "$tsv_out" "$FAST_MODE" "$DEBUG_MODE"
 import json
 import sqlite3
 import subprocess
@@ -114,15 +123,19 @@ from rehome.nohl_restart import filter_nohl_candidates, sort_payload_groups
     json_out,
     hashes_out,
     tsv_out,
-) = sys.argv[1:13]
+    fast_mode_raw,
+    debug_mode_raw,
+) = sys.argv[1:15]
 
 stash_prefixes = [p for p in str(__import__("os").environ.get("STASH_PREFIXES_CSV", "")).split(",") if p]
 limit = max(0, int(limit_raw))
 min_free_pct = int(min_free_pct_raw)
+fast_mode = str(fast_mode_raw).strip() == "1"
+debug_mode = str(debug_mode_raw).strip() == "1"
 db = Path(db_path)
 
 qb = QBittorrentClient(base_url=qbit_url, username=qbit_user, password=qbit_pass)
-torrents = qb.get_torrents()
+torrents = qb.get_torrents(tag=tag_name)
 rows = [{"hash": t.hash, "save_path": t.save_path, "tags": t.tags} for t in torrents]
 selected = filter_nohl_candidates(
     rows,
@@ -156,19 +169,21 @@ if selected_hashes:
             if payload_hash and torrent_hash:
                 payload_to_torrents[payload_hash].add(torrent_hash)
 
-report = build_status_report(
-    conn,
-    roots_arg="/pool/data,/stash/media,/data/media",
-    media_root="/data/media",
-    pocket_depth=2,
-    top_n=50000,
-    recovery_prefix="/data/media/torrents/seeding/recovery_20260211",
-)
-impact_index = {
-    str(item.get("payload_hash") or "").strip(): item
-    for item in (report.get("rehome_impact_groups") or [])
-    if str(item.get("payload_hash") or "").strip()
-}
+impact_index = {}
+if not fast_mode:
+    report = build_status_report(
+        conn,
+        roots_arg="/pool/data,/stash/media,/data/media",
+        media_root="/data/media",
+        pocket_depth=2,
+        top_n=50000,
+        recovery_prefix="/data/media/torrents/seeding/recovery_20260211",
+    )
+    impact_index = {
+        str(item.get("payload_hash") or "").strip(): item
+        for item in (report.get("rehome_impact_groups") or [])
+        if str(item.get("payload_hash") or "").strip()
+    }
 
 rank_rows: list[dict] = []
 for payload_hash, torrent_set in payload_to_torrents.items():
@@ -256,6 +271,8 @@ summary = {
     "eligible_after_limit": len(ranked_eligible),
     "pool_free_pct": pool_free_pct,
     "min_free_pct": min_free_pct,
+    "fast_mode": fast_mode,
+    "debug_mode": debug_mode,
 }
 payload = {
     "generated_at": __import__("datetime").datetime.now().astimezone().isoformat(),
@@ -276,6 +293,8 @@ print(
     f"selected_payload_groups={summary['selected_payload_groups']} eligible_payload_groups={summary['eligible_payload_groups']} "
     f"eligible_after_limit={summary['eligible_after_limit']} pool_free_pct={summary['pool_free_pct']} min_free_pct={summary['min_free_pct']}"
 )
+if debug_mode:
+    print(f"debug selected_hashes_sample={selected_hashes[:10]}")
 print(f"json_output={json_out}")
 print(f"hashes_output={hashes_out}")
 print(f"tsv_output={tsv_out}")
