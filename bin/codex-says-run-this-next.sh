@@ -5,6 +5,45 @@ hr() {
   printf '%s\n' "------------------------------------------------------------"
 }
 
+usage() {
+  cat <<'USAGE'
+Usage:
+  bin/codex-says-run-this-next.sh [options]
+
+Options:
+  --min-free-pct N         Override pool minimum free percent for nohl-restart mode
+                           (sets REHOME_NOHL_MIN_FREE_PCT for this invocation).
+  -h, --help               Show this help.
+USAGE
+}
+
+CLI_NOHL_MIN_FREE_PCT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --min-free-pct|--pool-min-free-pct)
+      CLI_NOHL_MIN_FREE_PCT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -n "$CLI_NOHL_MIN_FREE_PCT" ]]; then
+  if ! [[ "$CLI_NOHL_MIN_FREE_PCT" =~ ^[0-9]+$ ]]; then
+    echo "Invalid --min-free-pct value: $CLI_NOHL_MIN_FREE_PCT" >&2
+    exit 2
+  fi
+  export REHOME_NOHL_MIN_FREE_PCT="$CLI_NOHL_MIN_FREE_PCT"
+fi
+
 stamp="$(date +%Y%m%d-%H%M%S)"
 run_log="out/reports/rehome-normalize/codex-says-run-this-next-${stamp}.log"
 mkdir -p out/reports/rehome-normalize
