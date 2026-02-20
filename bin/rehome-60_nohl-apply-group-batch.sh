@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+hr() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -96,6 +100,10 @@ failed_hashes="${log_dir}/${OUTPUT_PREFIX}-payload-hashes-apply-failed-${stamp}.
 ok=0
 failed=0
 {
+  hr
+  echo "Phase 60: Live apply for dryrun-approved groups"
+  echo "What this does: perform actual rehome moves and qB location updates."
+  hr
   echo "run_id=${stamp} step=nohl-apply-group-batch"
   echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} spot_check=${SPOT_CHECK} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   total="${#HASHES[@]}"
@@ -127,6 +135,9 @@ failed=0
   echo "summary total=${total} ok=${ok} failed=${failed}"
   echo "ok_hashes=${ok_hashes}"
   echo "failed_hashes=${failed_hashes}"
+  hr
+  echo "Phase 60 complete: applied ok=${ok}, failed=${failed}."
+  hr
 } 2>&1 | tee "$run_log"
 
 echo "run_log=${run_log}"

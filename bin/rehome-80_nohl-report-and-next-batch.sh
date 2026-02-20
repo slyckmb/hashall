@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+hr() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -61,6 +65,10 @@ count_lines() {
 }
 
 {
+  hr
+  echo "Phase 80: Final report and next commands"
+  echo "What this does: summarize latest run results and print the next batch commands."
+  hr
   echo "run_id=${stamp} step=nohl-report-and-next-batch"
   echo "mode fast=${FAST_MODE} debug=${DEBUG_MODE}"
   echo "latest_discover=${latest_discover:-none}"
@@ -97,6 +105,9 @@ count_lines() {
     echo "bin/rehome-80_nohl-report-and-next-batch.sh${fast_arg}${debug_arg}"
     echo "next_commands_end"
   fi
+  hr
+  echo "Phase 80 complete: report generated and next commands listed."
+  hr
 } 2>&1 | tee "$run_log"
 
 echo "run_log=${run_log}"

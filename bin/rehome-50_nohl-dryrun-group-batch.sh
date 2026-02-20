@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+hr() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -119,6 +123,10 @@ blocked=0
 > "$blocked_hashes"
 
 {
+  hr
+  echo "Phase 50: Dry-run candidate groups"
+  echo "What this does: validate each plan without moving data."
+  hr
   echo "run_id=${stamp} step=nohl-dryrun-group-batch"
   echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} spot_check=${SPOT_CHECK} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   total="${#HASHES[@]}"
@@ -181,6 +189,9 @@ blocked=0
   echo "ready_hashes=${ready_hashes}"
   echo "failed_hashes=${failed_hashes}"
   echo "blocked_hashes=${blocked_hashes}"
+  hr
+  echo "Phase 50 complete: dryrun ok=${ok}, failed=${failed}, blocked=${blocked}."
+  hr
 } 2>&1 | tee "$run_log"
 
 echo "run_log=${run_log}"

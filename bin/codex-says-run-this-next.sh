@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+hr() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
 stamp="$(date +%Y%m%d-%H%M%S)"
 run_log="out/reports/rehome-normalize/codex-says-run-this-next-${stamp}.log"
 mkdir -p out/reports/rehome-normalize
@@ -253,6 +257,11 @@ run_with_heartbeat() {
   local rc=0
   local cmd_str
   printf -v cmd_str '%q ' "$@"
+  hr
+  echo "Phase start: ${step_label}"
+  echo "Command: ${cmd_str% }"
+  echo "Heartbeat: every ${interval}s"
+  hr
   echo "dispatch step=${step_label} heartbeat_s=${interval} cmd=${cmd_str% }"
 
   "$@" &
@@ -268,6 +277,13 @@ run_with_heartbeat() {
 
   wait "$pid" || rc=$?
   echo "dispatch step=${step_label} rc=${rc} elapsed_s=${elapsed}"
+  hr
+  if [[ "$rc" -eq 0 ]]; then
+    echo "Phase result: ${step_label} completed successfully in ${elapsed}s."
+  else
+    echo "Phase result: ${step_label} failed with rc=${rc} after ${elapsed}s."
+  fi
+  hr
   return "$rc"
 }
 
@@ -280,7 +296,7 @@ run_nohl_restart_lane() {
   local execute="${REHOME_NOHL_EXECUTE:-0}"
   local output_prefix="${REHOME_NOHL_OUTPUT_PREFIX:-nohl}"
   local fast_mode="${REHOME_NOHL_FAST:-1}"
-  local debug_mode="${REHOME_NOHL_DEBUG:-1}"
+  local debug_mode="${REHOME_NOHL_DEBUG:-0}"
   local hb_seconds="${REHOME_NOHL_HEARTBEAT_SECONDS:-5}"
   local fast_arg=""
   local debug_arg=""
@@ -288,6 +304,11 @@ run_nohl_restart_lane() {
   [[ "$debug_mode" == "1" ]] && debug_arg="--debug"
   export REHOME_PROGRESS_HEARTBEAT_SECONDS="$hb_seconds"
 
+  hr
+  echo "Run mode: nohl restart"
+  echo "Live apply: ${do_apply} | Execute phases: ${execute} | Fast: ${fast_mode} | Debug: ${debug_mode} | Heartbeat: ${hb_seconds}s"
+  echo "Safety guard: minimum pool free space ${min_free_pct}%"
+  hr
   echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} fast=${fast_mode} debug=${debug_mode} heartbeat_s=${hb_seconds}"
   echo "recommended_commands_begin"
   echo "bin/rehome-30_nohl-discover-and-rank.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+hr() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -74,6 +78,10 @@ blocked_hashes="${log_dir}/${OUTPUT_PREFIX}-payload-hashes-blocked-${stamp}.txt"
 report_tsv="${log_dir}/${OUTPUT_PREFIX}-plan-report-${stamp}.tsv"
 
 {
+  hr
+  echo "Phase 40: Build per-group rehome plans"
+  echo "What this does: generate one actionable rehome plan per payload group."
+  hr
   echo "run_id=${stamp} step=nohl-build-group-plan"
   echo "config hashes_file=${HASHES_FILE} db=${DB_PATH} stash_device=${STASH_DEVICE_ID} pool_device=${POOL_DEVICE_ID} limit=${LIMIT} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   PYTHONPATH=src python -u - <<'PY' \
@@ -280,6 +288,15 @@ print(f"plannable_hashes={plannable_hashes}")
 print(f"blocked_hashes={blocked_hashes}")
 print(f"report_tsv={report_tsv}")
 PY
+  if [[ -f "$manifest_json" ]]; then
+    input_hashes="$(jq -r '.summary.input_hashes // 0' "$manifest_json")"
+    plannable_count="$(jq -r '.summary.plannable // 0' "$manifest_json")"
+    blocked_count="$(jq -r '.summary.blocked // 0' "$manifest_json")"
+    error_count="$(jq -r '.summary.errors // 0' "$manifest_json")"
+    hr
+    echo "Phase 40 complete: planned ${plannable_count}/${input_hashes}, blocked ${blocked_count}, errors ${error_count}."
+    hr
+  fi
 } 2>&1 | tee "$run_log"
 
 echo "run_log=${run_log}"

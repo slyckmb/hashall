@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+hr() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -93,6 +97,10 @@ PY
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 {
+  hr
+  echo "Phase 30: Discover and rank noHL payload groups"
+  echo "What this does: find ~noHL torrents on stash paths, map to payload groups, rank largest impact first."
+  hr
   echo "tool_semver_hashall=${HASHALL_SEMVER} tool_semver_rehome=${REHOME_SEMVER} git_sha=${GIT_SHA}"
   echo "run_id=${stamp} step=nohl-discover-and-rank"
   echo "config db=${DB_PATH} qbit_url=${QBIT_URL} tag=${TAG_NAME} pool_seeds_root=${POOL_SEEDS_ROOT} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} limit=${LIMIT} fast=${FAST_MODE} debug=${DEBUG_MODE}"
@@ -299,6 +307,16 @@ print(f"json_output={json_out}")
 print(f"hashes_output={hashes_out}")
 print(f"tsv_output={tsv_out}")
 PY
+  if [[ -f "$json_out" ]]; then
+    total_torrents="$(jq -r '.summary.total_torrents // 0' "$json_out")"
+    selected_torrents="$(jq -r '.summary.selected_nohl_torrents // 0' "$json_out")"
+    payload_groups="$(jq -r '.summary.selected_payload_groups // 0' "$json_out")"
+    eligible_groups="$(jq -r '.summary.eligible_after_limit // 0' "$json_out")"
+    pool_free="$(jq -r '.summary.pool_free_pct // "unknown"' "$json_out")"
+    hr
+    echo "Phase 30 complete: scanned ${total_torrents} tagged torrents, selected ${selected_torrents}, grouped into ${payload_groups}, queued ${eligible_groups}. pool_free_pct=${pool_free}"
+    hr
+  fi
 } 2>&1 | tee "$run_log"
 
 echo "run_log=${run_log}"

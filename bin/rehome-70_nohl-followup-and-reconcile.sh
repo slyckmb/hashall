@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+hr() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -66,6 +70,10 @@ if [[ "$DEBUG_MODE" -eq 1 ]]; then
 fi
 
 {
+  hr
+  echo "Phase 70: Follow-up verification and reconcile"
+  echo "What this does: verify moved groups, retry cleanup, and list pending/failed groups."
+  hr
   echo "run_id=${stamp} step=nohl-followup-and-reconcile"
   echo "config db=${DB_PATH} cleanup=${CLEANUP} retry_failed=${RETRY_FAILED} limit=${LIMIT} print_torrents=${PRINT_TORRENTS} fast=${FAST_MODE} debug=${DEBUG_MODE}"
   make rehome-followup \
@@ -82,6 +90,13 @@ fi
   echo "followup_json=${followup_json}"
   echo "pending_hashes=${pending_hashes}"
   echo "failed_hashes=${failed_hashes}"
+  total_groups="$(jq -r '.summary.groups_total // 0' "$followup_json")"
+  groups_ok="$(jq -r '.summary.groups_ok // 0' "$followup_json")"
+  groups_pending="$(jq -r '.summary.groups_pending // 0' "$followup_json")"
+  groups_failed="$(jq -r '.summary.groups_failed // 0' "$followup_json")"
+  hr
+  echo "Phase 70 complete: groups_total=${total_groups}, ok=${groups_ok}, pending=${groups_pending}, failed=${groups_failed}."
+  hr
 } 2>&1 | tee "$run_log"
 
 echo "run_log=${run_log}"
