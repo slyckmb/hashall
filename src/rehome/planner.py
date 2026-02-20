@@ -286,6 +286,13 @@ class DemotionPlanner:
         if not use_device_table and not use_legacy_table:
             return []
 
+        def _normalize_abs_path(path: Path) -> str:
+            # Local filesystem normalization is sufficient for seeding-domain checks.
+            try:
+                return str(path.resolve())
+            except Exception:
+                return str(path)
+
         def _prefix_bounds(prefix: str) -> tuple[str, str]:
             low = f"{prefix}/"
             high = f"{low}\U0010FFFF"
@@ -317,15 +324,15 @@ class DemotionPlanner:
                 def _to_abs(p: str) -> str:
                     path = Path(p)
                     if path.is_absolute():
-                        return str(canonicalize_path(path))
-                    return str(canonicalize_path(base_mount / path))
+                        return _normalize_abs_path(path)
+                    return _normalize_abs_path(base_mount / path)
             else:
                 # No device metadata; expect absolute paths in table
                 if not root.is_absolute():
                     raise ValueError("Relative payload root without device mount metadata")
                 rel_root_str = str(root)
                 def _to_abs(p: str) -> str:
-                    return str(canonicalize_path(Path(p)))
+                    return _normalize_abs_path(Path(p))
 
             low, high = _prefix_bounds(rel_root_str)
             query = f"""
@@ -367,7 +374,7 @@ class DemotionPlanner:
                 file_rows = conn.execute(query, (root_str, low, high)).fetchall()
 
             def _to_abs(p: str) -> str:
-                return str(canonicalize_path(Path(p)))
+                return _normalize_abs_path(Path(p))
 
         if not file_rows:
             raise ValueError("No files found under payload root in catalog; rescan required")
@@ -479,6 +486,14 @@ class DemotionPlanner:
         if not device_rows:
             return None
 
+        def _normalize(path_text: str) -> Path:
+            # scan_roots/devices data are absolute catalog paths; lexical resolution
+            # avoids repeated mount/source subprocess calls.
+            try:
+                return Path(path_text).resolve()
+            except Exception:
+                return Path(path_text)
+
         prefixes: List[tuple[str, Path]] = []
         aliases_by_uuid: Dict[str, List[Path]] = {}
         for fs_uuid, mount_point, preferred in device_rows:
@@ -486,7 +501,7 @@ class DemotionPlanner:
             for candidate in (preferred, mount_point):
                 if not candidate:
                     continue
-                canon = canonicalize_path(Path(candidate))
+                canon = _normalize(str(candidate))
                 prefixes.append((fs_uuid, canon))
                 if canon not in alias_paths:
                     alias_paths.append(canon)
@@ -496,10 +511,10 @@ class DemotionPlanner:
 
         scanned_by_uuid: Dict[str, List[Path]] = {}
         for fs_uuid, root_path in scan_rows:
-            scanned_by_uuid.setdefault(fs_uuid, []).append(canonicalize_path(Path(root_path)))
+            scanned_by_uuid.setdefault(fs_uuid, []).append(_normalize(str(root_path)))
 
         for root in roots:
-            root_canon = canonicalize_path(root)
+            root_canon = _normalize(str(root))
             fs_uuid = None
             for candidate_uuid, candidate_root in prefixes:
                 if is_under(root_canon, candidate_root):
