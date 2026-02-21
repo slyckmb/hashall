@@ -353,6 +353,7 @@ run_nohl_restart_lane() {
   hr
   echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} resume=${resume} fast=${fast_mode} debug=${debug_mode} heartbeat_s=${hb_seconds}"
   echo "recommended_commands_begin"
+  echo "REHOME_PROCESS_MODE=nohl-restart REHOME_NOHL_EXECUTE=1 REHOME_NOHL_APPLY=1 REHOME_NOHL_RESUME=${resume} REHOME_NOHL_FAST=${fast_mode} REHOME_NOHL_DEBUG=${debug_mode} REHOME_NOHL_HEARTBEAT_SECONDS=${hb_seconds} bin/codex-says-run-this-next.sh --min-free-pct ${min_free_pct}"
   echo "bin/rehome-30_nohl-discover-and-rank.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-40_nohl-build-group-plan.sh --output-prefix ${output_prefix} --limit ${limit} --resume ${resume} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-50_nohl-dryrun-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
