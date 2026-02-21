@@ -13,6 +13,8 @@ Usage:
 Options:
   --min-free-pct N         Override pool minimum free percent for nohl-restart mode
                            (sets REHOME_NOHL_MIN_FREE_PCT for this invocation).
+  REHOME_PROCESS_MODE=nohl-missing-recheck
+                           Print/run missing-torrent recheck workflow commands.
   -h, --help               Show this help.
 USAGE
 }
@@ -417,6 +419,83 @@ run_nohl_restart_lane() {
   echo "nohl_restart done=1"
 }
 
+run_nohl_missing_recheck_lane() {
+  local output_prefix="${REHOME_NOHL_OUTPUT_PREFIX:-nohl}"
+  local execute="${REHOME_MISSING_RECHECK_EXECUTE:-0}"
+  local fast_mode="${REHOME_NOHL_FAST:-1}"
+  local debug_mode="${REHOME_NOHL_DEBUG:-1}"
+  local recheck_sleep_s="${REHOME_MISSING_RECHECK_SLEEP_SECONDS:-120}"
+  local qbit_url="${QBIT_URL:-http://localhost:9003}"
+  local qbit_user="${QBIT_USER:-admin}"
+  local qbit_pass="${QBIT_PASS:-adminpass}"
+  local fast_arg=""
+  local debug_arg=""
+  [[ "$fast_mode" == "1" ]] && fast_arg="--fast"
+  [[ "$debug_mode" == "1" ]] && debug_arg="--debug"
+
+  hr
+  echo "Run mode: nohl missing recheck"
+  echo "Execute phases: ${execute} | Fast: ${fast_mode} | Debug: ${debug_mode} | Sleep after recheck: ${recheck_sleep_s}s"
+  hr
+  echo "mode=nohl-missing-recheck execute=${execute} output_prefix=${output_prefix} fast=${fast_mode} debug=${debug_mode} sleep_s=${recheck_sleep_s}"
+  echo "recommended_commands_begin"
+  echo "bin/rehome-95_nohl-basics-qb-missing-audit.sh ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-96_nohl-basics-qb-missing-remediate-dryrun.sh ${fast_arg} ${debug_arg}"
+  echo "AUDIT=\$(ls -1t out/reports/rehome-normalize/${output_prefix}-qb-missing-audit-*.json | head -n1)"
+  echo "HASH_FILE=out/reports/rehome-normalize/${output_prefix}-qb-missing-hashes-\$(TZ=America/New_York date +%Y%m%d-%H%M%S).txt"
+  echo "jq -r '.entries[].torrent_hash' \"\$AUDIT\" | sort -u > \"\$HASH_FILE\""
+  echo "source /mnt/config/secrets/qbittorrent/api.env 2>/dev/null || true"
+  echo "QBIT_URL=\"${qbit_url}\" QBIT_USER=\"${qbit_user}\" QBIT_PASS=\"${qbit_pass}\" HASH_FILE=\"\$HASH_FILE\" bash -lc 'curl -fsS -c /tmp/qb.cookie --data-urlencode \"username=\$QBIT_USER\" --data-urlencode \"password=\$QBIT_PASS\" \"\$QBIT_URL/api/v2/auth/login\" && HASHES=\$(paste -sd\"|\" \"\$HASH_FILE\") && curl -fsS -b /tmp/qb.cookie --data-urlencode \"hashes=\$HASHES\" \"\$QBIT_URL/api/v2/torrents/recheck\"'"
+  echo "sleep ${recheck_sleep_s}"
+  echo "bin/rehome-95_nohl-basics-qb-missing-audit.sh ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-96_nohl-basics-qb-missing-remediate-dryrun.sh ${fast_arg} ${debug_arg}"
+  echo "recommended_commands_end"
+
+  if [[ "$execute" != "1" ]]; then
+    echo "nohl_missing_recheck execute=0 status=printed_only"
+    return 0
+  fi
+
+  bin/rehome-95_nohl-basics-qb-missing-audit.sh ${fast_arg:+$fast_arg} ${debug_arg:+$debug_arg}
+  bin/rehome-96_nohl-basics-qb-missing-remediate-dryrun.sh ${fast_arg:+$fast_arg} ${debug_arg:+$debug_arg}
+
+  local audit_file
+  audit_file="$(ls -1t "out/reports/rehome-normalize/${output_prefix}-qb-missing-audit-"*.json 2>/dev/null | head -n1 || true)"
+  if [[ -z "$audit_file" || ! -f "$audit_file" ]]; then
+    echo "missing_audit_json_for_recheck output_prefix=${output_prefix}" >&2
+    return 2
+  fi
+  local hash_file="out/reports/rehome-normalize/${output_prefix}-qb-missing-hashes-${stamp}.txt"
+  jq -r '.entries[].torrent_hash' "$audit_file" | sort -u > "$hash_file"
+  echo "recheck_hash_file=${hash_file}"
+  local hash_count
+  hash_count="$(wc -l < "$hash_file" | tr -d ' ')"
+  if [[ "${hash_count:-0}" -eq 0 ]]; then
+    echo "nohl_missing_recheck status=skip reason=no_missing_hashes"
+    return 0
+  fi
+
+  source /mnt/config/secrets/qbittorrent/api.env 2>/dev/null || true
+  : "${QBIT_URL:=${qbit_url}}" "${QBIT_USER:=${qbit_user}}" "${QBIT_PASS:=${qbit_pass}}"
+
+  curl -fsS -c /tmp/qb.cookie \
+    --data-urlencode "username=${QBIT_USER}" \
+    --data-urlencode "password=${QBIT_PASS}" \
+    "${QBIT_URL}/api/v2/auth/login" >/dev/null
+  local hashes
+  hashes="$(paste -sd'|' "$hash_file")"
+  curl -fsS -b /tmp/qb.cookie \
+    --data-urlencode "hashes=${hashes}" \
+    "${QBIT_URL}/api/v2/torrents/recheck" >/dev/null
+  echo "recheck_requested hashes=${hash_count} qbit_url=${QBIT_URL}"
+  sleep "$recheck_sleep_s"
+
+  bin/rehome-95_nohl-basics-qb-missing-audit.sh ${fast_arg:+$fast_arg} ${debug_arg:+$debug_arg}
+  bin/rehome-96_nohl-basics-qb-missing-remediate-dryrun.sh ${fast_arg:+$fast_arg} ${debug_arg:+$debug_arg}
+
+  echo "nohl_missing_recheck done=1"
+}
+
 stage0_relocate_pool_to_seeds_via_qb() {
   local scope_root="$1"
   local source_root="$2"
@@ -643,6 +722,11 @@ PROCESS_MODE="${REHOME_PROCESS_MODE:-frozen-one-pass}"
 if [[ "$PROCESS_MODE" == "nohl-restart" ]]; then
   run_nohl_restart_lane
   echo "done=1 mode=nohl-restart run_log=$run_log"
+  exit 0
+fi
+if [[ "$PROCESS_MODE" == "nohl-missing-recheck" ]]; then
+  run_nohl_missing_recheck_lane
+  echo "done=1 mode=nohl-missing-recheck run_log=$run_log"
   exit 0
 fi
 
