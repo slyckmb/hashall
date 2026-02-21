@@ -781,7 +781,8 @@ class DemotionExecutor:
                     f"attempt={attempt + 1}/{attempts}",
                     "warning",
                 )
-                time.sleep(min(delay_seconds * attempt, 3.0))
+                backoff = min(delay_seconds * (2 ** (attempt - 1)), 8.0)
+                time.sleep(backoff)
         # Final check in case qB committed late.
         info, actual = self._wait_for_save_path(
             torrent_hash,

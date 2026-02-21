@@ -51,6 +51,7 @@ latest_discover="$(ls -1t "${log_dir}/${OUTPUT_PREFIX}-discover-"*.json 2>/dev/n
 latest_manifest="$(ls -1t "${log_dir}/${OUTPUT_PREFIX}-plan-manifest-"*.json 2>/dev/null | head -n1 || true)"
 latest_dryrun_ready="$(ls -1t "${log_dir}/${OUTPUT_PREFIX}-payload-hashes-dryrun-ready-"*.txt 2>/dev/null | head -n1 || true)"
 latest_apply_fail="$(ls -1t "${log_dir}/${OUTPUT_PREFIX}-payload-hashes-apply-failed-"*.txt 2>/dev/null | head -n1 || true)"
+latest_apply_deferred="$(ls -1t "${log_dir}/${OUTPUT_PREFIX}-payload-hashes-apply-deferred-"*.txt 2>/dev/null | head -n1 || true)"
 latest_followup="$(ls -1t "${log_dir}/${OUTPUT_PREFIX}-followup-"*.json 2>/dev/null | head -n1 || true)"
 latest_pending="$(ls -1t "${log_dir}/${OUTPUT_PREFIX}-payload-hashes-followup-pending-"*.txt 2>/dev/null | head -n1 || true)"
 latest_failed="$(ls -1t "${log_dir}/${OUTPUT_PREFIX}-payload-hashes-followup-failed-"*.txt 2>/dev/null | head -n1 || true)"
@@ -75,6 +76,7 @@ count_lines() {
   echo "latest_manifest=${latest_manifest:-none}"
   echo "latest_dryrun_ready=${latest_dryrun_ready:-none}"
   echo "latest_apply_fail=${latest_apply_fail:-none}"
+  echo "latest_apply_deferred=${latest_apply_deferred:-none}"
   echo "latest_followup=${latest_followup:-none}"
   echo "latest_pending=${latest_pending:-none}"
   echo "latest_failed=${latest_failed:-none}"
@@ -89,7 +91,7 @@ count_lines() {
     jq -r '.summary' "$latest_followup"
   fi
 
-  echo "counts dryrun_ready=$(count_lines "$latest_dryrun_ready") apply_failed=$(count_lines "$latest_apply_fail") followup_pending=$(count_lines "$latest_pending") followup_failed=$(count_lines "$latest_failed")"
+  echo "counts dryrun_ready=$(count_lines "$latest_dryrun_ready") apply_failed=$(count_lines "$latest_apply_fail") apply_deferred=$(count_lines "$latest_apply_deferred") followup_pending=$(count_lines "$latest_pending") followup_failed=$(count_lines "$latest_failed")"
 
   if [[ "$SHOW_COMMANDS" == "1" ]]; then
     fast_arg=""

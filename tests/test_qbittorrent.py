@@ -113,3 +113,34 @@ def test_get_torrent_info_sets_last_error_after_retry_exhaustion(monkeypatch):
     assert info is None
     assert client.last_error is not None
     assert "timed out" in client.last_error
+
+
+def test_set_location_retries_transient_connection_with_exponential_backoff(monkeypatch):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.request_retries = 3
+    client.retry_backoff_base = 0.25
+    client.retry_backoff_cap = 8.0
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    calls = {"count": 0}
+
+    def fake_post(_url, data=None, timeout=None):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise requests.ConnectionError("temporary overload")
+        assert data and data.get("hashes") == "abc123"
+        assert data.get("location") == "/pool/data/seeds/site"
+        return FakeResponse()
+
+    monkeypatch.setattr(client.session, "post", fake_post)
+    ok = client.set_location("abc123", "/pool/data/seeds/site")
+    assert ok is True
+    assert calls["count"] == 3
+    assert sleeps == [0.25, 0.5]
