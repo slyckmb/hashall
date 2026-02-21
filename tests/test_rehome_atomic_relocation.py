@@ -58,6 +58,59 @@ def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
     assert executor.qbit_client.save_paths["t1"] == "/stash/seeding"
 
 
+def test_copy_with_rsync_progress_applies_bwlimit_env(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    commands = []
+
+    def fake_run(cmd, check=True):
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("REHOME_RSYNC_BWLIMIT_KBPS", "51200")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"x")
+    target = tmp_path / "target.bin"
+
+    executor._copy_with_rsync_progress(source, target)
+
+    assert commands
+    cmd = commands[0]
+    assert "--bwlimit=51200" in cmd
+    assert str(source) in cmd
+    assert str(target) in cmd
+
+
+def test_copy_with_rsync_progress_ignores_invalid_bwlimit_env(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    commands = []
+    messages = []
+
+    def fake_run(cmd, check=True):
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("REHOME_RSYNC_BWLIMIT_KBPS", "abc")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(executor, "_log", lambda message, prefix="info": messages.append((prefix, message)))
+
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"x")
+    target = tmp_path / "target.bin"
+
+    executor._copy_with_rsync_progress(source, target)
+
+    assert commands
+    cmd = commands[0]
+    assert not any(part.startswith("--bwlimit=") for part in cmd)
+    assert any(prefix == "warning" and "REHOME_RSYNC_BWLIMIT_KBPS" in msg for prefix, msg in messages)
+
+
 def test_atomic_relocation_rollback_uses_qb_runtime_source_path(tmp_path, monkeypatch):
     class AliasQbitClient(FakeQbitClient):
         def __init__(self):

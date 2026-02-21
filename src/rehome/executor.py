@@ -182,6 +182,7 @@ class DemotionExecutor:
 
     def _copy_with_rsync_progress(self, source_path: Path, target_path: Path) -> None:
         """Copy payload with rsync progress output, preserving metadata and hardlinks."""
+        bwlimit_kbps_raw = os.getenv("REHOME_RSYNC_BWLIMIT_KBPS", "").strip()
         rsync_cmd = [
             "rsync",
             "-aHAX",
@@ -189,6 +190,16 @@ class DemotionExecutor:
             "--human-readable",
             "--info=progress2",
         ]
+        if bwlimit_kbps_raw:
+            try:
+                bwlimit_kbps = int(bwlimit_kbps_raw)
+                if bwlimit_kbps > 0:
+                    rsync_cmd.append(f"--bwlimit={bwlimit_kbps}")
+            except ValueError:
+                self._log(
+                    f"invalid REHOME_RSYNC_BWLIMIT_KBPS={bwlimit_kbps_raw}; ignoring",
+                    "warning",
+                )
         if source_path.is_dir():
             rsync_cmd.extend([f"{source_path}/", f"{target_path}/"])
         else:
