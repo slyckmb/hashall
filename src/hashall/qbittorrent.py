@@ -25,6 +25,10 @@ class QBitTorrent:
     size: int
     progress: float
     auto_tmm: bool = False
+    amount_left: int = 0
+    completed: int = 0
+    downloaded: int = 0
+    completion_on: int = 0
 
 
 @dataclass
@@ -187,6 +191,10 @@ class QBittorrentClient:
                         size=t.get('size', 0),
                         progress=t.get('progress', 0.0),
                         auto_tmm=bool(t.get('auto_tmm', False)),
+                        amount_left=t.get('amount_left', 0),
+                        completed=t.get('completed', 0),
+                        downloaded=t.get('downloaded', 0),
+                        completion_on=t.get('completion_on', 0),
                     ))
                 self.last_error = None
                 return torrents
@@ -582,6 +590,79 @@ class QBittorrentClient:
                 return False
         return False
 
+    def recheck_torrent(self, torrent_hash: str) -> bool:
+        """
+        Trigger a force recheck for a torrent.
+
+        Args:
+            torrent_hash: Torrent infohash
+
+        Returns:
+            True if request accepted, False otherwise
+        """
+        self._ensure_authenticated()
+
+        response: Optional[requests.Response] = None
+        for attempt in range(1, self.request_retries + 1):
+            try:
+                response = self.session.post(
+                    f"{self.base_url}/api/v2/torrents/recheck",
+                    data={"hashes": torrent_hash},
+                    timeout=self.request_timeout,
+                )
+                response.raise_for_status()
+                self.last_error = None
+                return True
+            except requests.Timeout as e:
+                self.last_error = str(e)
+                if attempt < self.request_retries:
+                    delay = self._retry_delay_seconds(attempt)
+                    print(
+                        f"⚠️ qB recheck timeout hash={torrent_hash[:16]} "
+                        f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f}"
+                    )
+                    time.sleep(delay)
+                    continue
+                print(f"⚠️ Failed to recheck torrent {torrent_hash}: {e}")
+                return False
+            except requests.HTTPError as e:
+                status = self._status_from_error(e, response)
+                body = self._response_body_snippet(
+                    e.response if e.response is not None else response
+                )
+                self.last_error = f"HTTP {status}" if status is not None else str(e)
+                if (
+                    status in self.retryable_http_statuses
+                    and attempt < self.request_retries
+                ):
+                    delay = self._retry_delay_seconds(attempt)
+                    print(
+                        f"⚠️ qB recheck retry hash={torrent_hash[:16]} "
+                        f"attempt={attempt + 1}/{self.request_retries} "
+                        f"status={status} retry_in_s={delay:.1f}"
+                    )
+                    time.sleep(delay)
+                    continue
+                msg = f"⚠️ Failed to recheck torrent {torrent_hash}: HTTP {status if status is not None else '?'}"
+                if body:
+                    msg += f" body={body}"
+                print(msg)
+                return False
+            except requests.RequestException as e:
+                self.last_error = str(e)
+                if attempt < self.request_retries:
+                    delay = self._retry_delay_seconds(attempt)
+                    if self.debug_http:
+                        print(
+                            f"⚠️ qB recheck retry hash={torrent_hash[:16]} "
+                            f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f} error={e}"
+                        )
+                    time.sleep(delay)
+                    continue
+                print(f"⚠️ Failed to recheck torrent {torrent_hash}: {e}")
+                return False
+        return False
+
     def set_auto_management(self, torrent_hash: str, enabled: bool) -> bool:
         """
         Toggle qBittorrent Auto Torrent Management for a torrent.
@@ -777,6 +858,10 @@ class QBittorrentClient:
                     size=t.get('size', 0),
                     progress=t.get('progress', 0.0),
                     auto_tmm=bool(t.get('auto_tmm', False)),
+                    amount_left=t.get('amount_left', 0),
+                    completed=t.get('completed', 0),
+                    downloaded=t.get('downloaded', 0),
+                    completion_on=t.get('completion_on', 0),
                 )
 
             except requests.Timeout as e:

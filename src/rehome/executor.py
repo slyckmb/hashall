@@ -53,6 +53,35 @@ class DemotionExecutor:
         self.tag_strict = os.getenv("HASHALL_REHOME_TAG_STRICT") == "1"
         self.disable_atm_on_rehome = os.getenv("HASHALL_REHOME_DISABLE_ATM", "1") != "0"
         self.debug_qb = os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self.force_recheck_after_relocate = (
+            os.getenv("HASHALL_REHOME_QB_FORCE_RECHECK", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        try:
+            self.recheck_base_seconds = max(
+                60.0, float(os.getenv("HASHALL_REHOME_QB_RECHECK_BASE_SECONDS", "120"))
+            )
+        except ValueError:
+            self.recheck_base_seconds = 120.0
+        try:
+            self.recheck_seconds_per_gib = max(
+                1.0, float(os.getenv("HASHALL_REHOME_QB_RECHECK_S_PER_GIB", "20"))
+            )
+        except ValueError:
+            self.recheck_seconds_per_gib = 20.0
+        try:
+            self.recheck_safety_margin = max(
+                1.0, float(os.getenv("HASHALL_REHOME_QB_RECHECK_MARGIN", "2.0"))
+            )
+        except ValueError:
+            self.recheck_safety_margin = 2.0
+        try:
+            self.recheck_max_seconds = max(
+                self.recheck_base_seconds,
+                float(os.getenv("HASHALL_REHOME_QB_RECHECK_MAX_SECONDS", "7200")),
+            )
+        except ValueError:
+            self.recheck_max_seconds = 7200.0
 
     def _get_db_connection(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Get database connection."""
@@ -574,6 +603,145 @@ class DemotionExecutor:
         timeout = 180.0 + (size_gib * 25.0)
         return max(180.0, min(timeout, 3600.0))
 
+    def _qb_recheck_timeout_seconds(self, info: Optional[object]) -> float:
+        """Estimate timeout window for post-relocation qB recheck/validation."""
+        if not info:
+            return max(self.recheck_base_seconds, 300.0)
+
+        size_bytes = 0
+        for attr in ("size", "total_size", "completed"):
+            value = getattr(info, attr, None)
+            try:
+                if value is not None:
+                    size_bytes = max(size_bytes, int(value))
+            except (TypeError, ValueError):
+                continue
+
+        size_gib = float(size_bytes) / float(1024 ** 3) if size_bytes > 0 else 0.0
+        raw = (self.recheck_base_seconds + (size_gib * self.recheck_seconds_per_gib))
+        timeout = raw * self.recheck_safety_margin
+        return max(300.0, min(timeout, self.recheck_max_seconds))
+
+    def _is_qb_seed_ready(self, info: object) -> tuple[bool, str]:
+        """Gate that torrent is complete and in a seeding-safe state."""
+        state = str(getattr(info, "state", "") or "").strip().lower()
+        progress_raw = getattr(info, "progress", 1.0)
+        try:
+            progress = float(progress_raw)
+        except (TypeError, ValueError):
+            progress = 0.0
+        amount_left_raw = getattr(info, "amount_left", 0)
+        try:
+            amount_left = int(amount_left_raw or 0)
+        except (TypeError, ValueError):
+            amount_left = 0
+
+        if "checking" in state or "moving" in state or "allocating" in state:
+            return False, "state_transient"
+        if state in {"error", "missingfiles"}:
+            return False, "state_error"
+        if state in {"downloading", "stalleddl", "queueddl", "forceddl", "metadl", "pauseddl"}:
+            return False, "state_downloading"
+        if progress < 0.9999:
+            return False, "progress_below_100"
+        if amount_left > 0:
+            return False, "amount_left_nonzero"
+        if not state:
+            return True, "ok_no_state"
+        if state not in {"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}:
+            return False, f"state_not_seed_ready:{state or 'unknown'}"
+        return True, "ok"
+
+    def _ensure_qb_seed_ready_after_relocate(
+        self,
+        torrent_hash: str,
+        *,
+        min_timeout_seconds: float = 300.0,
+        interval_seconds: float = 2.0,
+    ) -> None:
+        """Force recheck (optional) and block resume until qB reports seed-ready."""
+        import time
+
+        info = self._get_torrent_info_with_retry(torrent_hash, attempts=3, delay_seconds=1.0)
+        timeout_seconds = max(min_timeout_seconds, self._qb_recheck_timeout_seconds(info))
+
+        if self.force_recheck_after_relocate:
+            if not hasattr(self.qbit_client, "recheck_torrent"):
+                self._log(
+                    f"  recheck_guard hash={torrent_hash[:16]} status=skipped reason=client_missing_recheck_api",
+                    "warning",
+                )
+            else:
+                self._log(
+                    f"  recheck_guard hash={torrent_hash[:16]} status=requested timeout_s={int(timeout_seconds)}"
+                )
+                if not self.qbit_client.recheck_torrent(torrent_hash):
+                    last_error = str(getattr(self.qbit_client, "last_error", "") or "unknown")
+                    raise RuntimeError(
+                        f"Failed qB recheck request for torrent {torrent_hash[:16]} error={last_error}"
+                    )
+
+        deadline = time.monotonic() + timeout_seconds
+        last_debug = 0.0
+        last_state = "unknown"
+        last_progress = -1.0
+        last_amount_left = -1
+
+        while time.monotonic() <= deadline:
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if not info:
+                time.sleep(interval_seconds)
+                continue
+
+            state = str(getattr(info, "state", "") or "").strip().lower()
+            progress_raw = getattr(info, "progress", 1.0)
+            try:
+                progress = float(progress_raw)
+            except (TypeError, ValueError):
+                progress = 0.0
+            amount_left_raw = getattr(info, "amount_left", 0)
+            try:
+                amount_left = int(amount_left_raw or 0)
+            except (TypeError, ValueError):
+                amount_left = 0
+
+            last_state = state or "unknown"
+            last_progress = progress
+            last_amount_left = amount_left
+
+            ready, reason = self._is_qb_seed_ready(info)
+            if ready:
+                self._log(
+                    f"  recheck_guard hash={torrent_hash[:16]} status=ready "
+                    f"state={state} progress={progress:.4f} amount_left={amount_left}"
+                )
+                return
+
+            # Hard failures: do not resume torrents that would redownload.
+            if reason in {"state_error", "state_downloading", "progress_below_100", "amount_left_nonzero"}:
+                raise RuntimeError(
+                    f"qB seed-readiness guard failed for torrent {torrent_hash[:16]} "
+                    f"reason={reason} state={state} progress={progress:.4f} amount_left={amount_left}"
+                )
+
+            now = time.monotonic()
+            if (now - last_debug) >= 5.0:
+                self._log(
+                    f"  recheck_wait hash={torrent_hash[:16]} "
+                    f"state={state or 'unknown'} progress={progress:.4f} "
+                    f"amount_left={amount_left} reason={reason}",
+                    "warning",
+                )
+                last_debug = now
+
+            time.sleep(interval_seconds)
+
+        raise RuntimeError(
+            f"qB seed-readiness guard timeout for torrent {torrent_hash[:16]} "
+            f"state={last_state} progress={last_progress:.4f} amount_left={last_amount_left} "
+            f"timeout_s={int(timeout_seconds)}"
+        )
+
     def _relocate_torrents_atomic(self, relocations: List[Dict]) -> None:
         """
         Atomically relocate multiple torrents.
@@ -704,6 +872,11 @@ class DemotionExecutor:
                     torrent_hash,
                     attempts=5,
                     delay_seconds=1.0,
+                )
+                self._ensure_qb_seed_ready_after_relocate(
+                    torrent_hash,
+                    min_timeout_seconds=max(verify_timeout, 300.0),
+                    interval_seconds=2.0,
                 )
                 if idx == 1 or idx == total or idx % progress_every == 0:
                     self._log(f"  relocate_progress phase=verify done={idx}/{total}")

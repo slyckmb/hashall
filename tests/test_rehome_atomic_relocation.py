@@ -20,6 +20,7 @@ class FakeQbitClient:
         self.fail_on = set(fail_on or [])
         self.save_paths = {}
         self.default_path = default_path
+        self.recheck_calls = []
 
     def pause_torrent(self, torrent_hash: str) -> bool:
         self.save_paths.setdefault(torrent_hash, self.default_path)
@@ -34,8 +35,20 @@ class FakeQbitClient:
     def resume_torrent(self, torrent_hash: str) -> bool:
         return True
 
+    def recheck_torrent(self, torrent_hash: str) -> bool:
+        self.recheck_calls.append(torrent_hash)
+        return True
+
     def get_torrent_info(self, torrent_hash: str):
-        return SimpleNamespace(save_path=self.save_paths.get(torrent_hash, self.default_path))
+        return SimpleNamespace(
+            save_path=self.save_paths.get(torrent_hash, self.default_path),
+            auto_tmm=False,
+            state="pausedUP",
+            progress=1.0,
+            amount_left=0,
+            size=1024,
+            completed=1024,
+        )
 
     def get_torrent_files(self, torrent_hash: str):
         return []
@@ -191,6 +204,44 @@ def test_atomic_relocation_retries_and_waits_for_qb_save_path(tmp_path, monkeypa
     executor._relocate_torrents_atomic(relocations)
     assert executor.qbit_client.set_calls["t1"] >= 2
     assert executor.qbit_client.save_paths["t1"] == "/pool/seeding"
+
+
+def test_atomic_relocation_guard_blocks_resume_when_qb_reports_incomplete(tmp_path, monkeypatch):
+    class IncompleteQbitClient(FakeQbitClient):
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state="pausedDL",
+                progress=0.92,
+                amount_left=12345,
+                size=1024,
+                completed=512,
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = IncompleteQbitClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+
+    with pytest.raises(RuntimeError, match="seed-readiness guard failed"):
+        executor._relocate_torrents_atomic(relocations)
+
+
+def test_atomic_relocation_requests_recheck_before_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+
+    executor._relocate_torrents_atomic(relocations)
+    assert executor.qbit_client.recheck_calls == ["t1"]
 
 
 def test_atomic_relocation_retries_torrent_info_before_failing(tmp_path, monkeypatch):
