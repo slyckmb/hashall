@@ -205,6 +205,39 @@ def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
     assert executor.qbit_client.resume_calls == 1
 
 
+def test_atomic_relocation_uses_size_aware_verify_timeout(tmp_path, monkeypatch):
+    class LargeMoveQbitClient(FakeQbitClient):
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state="pausedUP",
+                size=25 * 1024**3,
+                total_size=25 * 1024**3,
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = LargeMoveQbitClient()
+
+    waits = []
+
+    def fake_wait(_hash, expected, **kwargs):
+        waits.append(kwargs.get("timeout_seconds"))
+        return SimpleNamespace(save_path=str(expected), auto_tmm=False), expected
+
+    monkeypatch.setattr(executor, "_wait_for_save_path", fake_wait)
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+    executor._relocate_torrents_atomic(relocations)
+
+    # Verify waits should include a materially larger timeout than the legacy fixed value.
+    assert waits
+    assert max(waits) >= 700.0
+
+
 def test_set_location_retry_succeeds_when_qb_reports_conflict_but_path_is_set(tmp_path, monkeypatch):
     class ConflictButMoved(FakeQbitClient):
         def __init__(self):

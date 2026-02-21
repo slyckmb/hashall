@@ -540,6 +540,29 @@ class DemotionExecutor:
                 time.sleep(min(delay_seconds * attempt, 3.0))
         return None
 
+    def _relocation_verify_timeout_seconds(self, info: Optional[object]) -> float:
+        """
+        Estimate qB setLocation settle timeout using payload size.
+
+        Large payloads can keep qB in `moving` state for several minutes before
+        save_path flips. Use a size-aware window to avoid false failures.
+        """
+        if not info:
+            return 180.0
+
+        size_bytes = 0
+        for attr in ("size", "total_size", "completed"):
+            value = getattr(info, attr, None)
+            try:
+                if value is not None:
+                    size_bytes = max(size_bytes, int(value))
+            except (TypeError, ValueError):
+                continue
+
+        size_gib = float(size_bytes) / float(1024 ** 3) if size_bytes > 0 else 0.0
+        timeout = 180.0 + (size_gib * 25.0)
+        return max(180.0, min(timeout, 3600.0))
+
     def _relocate_torrents_atomic(self, relocations: List[Dict]) -> None:
         """
         Atomically relocate multiple torrents.
@@ -554,6 +577,7 @@ class DemotionExecutor:
         paused = []
         moved = []
         original_qb_paths: Dict[str, str] = {}
+        verify_timeout_by_hash: Dict[str, float] = {}
         total = len(relocations)
         progress_every = 5 if total <= 50 else 25
 
@@ -573,6 +597,8 @@ class DemotionExecutor:
                 original_qb_path = str(getattr(info, "save_path")).strip()
                 original_qb_paths[torrent_hash] = original_qb_path
                 r["original_save_path_qb"] = original_qb_path
+                verify_timeout = self._relocation_verify_timeout_seconds(info)
+                verify_timeout_by_hash[torrent_hash] = verify_timeout
 
                 auto_enabled = bool(getattr(info, "auto_tmm", False)) if info else False
                 if self.disable_atm_on_rehome:
@@ -611,10 +637,11 @@ class DemotionExecutor:
             for idx, r in enumerate(relocations, start=1):
                 torrent_hash = r["torrent_hash"]
                 expected_path = canonicalize_path(Path(r["target_save_path"]).resolve())
+                verify_timeout = verify_timeout_by_hash.get(torrent_hash, 180.0)
                 torrent_info, actual_path = self._wait_for_save_path(
                     torrent_hash,
                     expected_path,
-                    timeout_seconds=90.0,
+                    timeout_seconds=verify_timeout,
                     interval_seconds=1.0,
                 )
                 if not torrent_info:
@@ -635,7 +662,7 @@ class DemotionExecutor:
                     torrent_info, actual_path = self._wait_for_save_path(
                         torrent_hash,
                         expected_path,
-                        timeout_seconds=120.0,
+                        timeout_seconds=max(verify_timeout, 300.0),
                         interval_seconds=1.0,
                     )
                     if (not relocated) or (actual_path != expected_path):
