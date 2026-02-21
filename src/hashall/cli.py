@@ -545,8 +545,10 @@ def payload_sync(
 
     if (not dry_run) and upgrade_missing and upgrade_queue:
         print("------------------------------------------------------------")
-        print("Upgrade Stage: Missing SHA256 backfill")
+        print("Phase: upgrade-hash-backfill")
+        print("What this does: fill missing payload hashes after sync mapping is complete.")
         print("------------------------------------------------------------")
+        upgrade_stage_start = time.monotonic()
         queue_items = list(upgrade_queue.values())
         order_mode = (upgrade_order or "small-first").lower()
         if order_mode == "small-first":
@@ -584,13 +586,6 @@ def payload_sync(
             torrent_hash = str(item.get("first_hash") or "")
             root_bytes = max(0, int(item.get("total_bytes") or 0))
             root_files = max(0, int(item.get("file_count") or 0))
-            progress.update(
-                desc=(
-                    f"upgrade root {root_idx}/{total_upgrade_roots} "
-                    f"files={root_files} bytes={root_bytes}"
-                ),
-                advance=0,
-            )
             print(
                 f"\n🔧 Upgrading root {root_idx}/{total_upgrade_roots}: "
                 f"{Path(root_path).name or root_path}"
@@ -598,6 +593,10 @@ def payload_sync(
             print(
                 f"   root={root_path} files={root_files} bytes={root_bytes:,} "
                 f"seed_torrent={torrent_hash[:16]}"
+            )
+            print(
+                f"   upgrade_progress roots_done={root_idx - 1}/{total_upgrade_roots} "
+                f"completed={upgrade_completed} failed={upgrade_failed}"
             )
             upgrade_started += 1
 
@@ -643,16 +642,6 @@ def payload_sync(
                         batch_bytes_done=hash_log_state["last_bytes_done"],
                         batch_bytes_total=hash_log_state["last_bytes_total"],
                     )
-                if hash_log_state["last_total"] > 0:
-                    progress.update(
-                        desc=hash_reporter.status_desc(
-                            done_groups=hash_log_state["last_done"],
-                            total_groups=hash_log_state["last_total"],
-                            path=Path(root_path).name,
-                        ),
-                        advance=0,
-                    )
-
             if hash_progress.lower() == "full":
                 def _heartbeat_loop():
                     while not heartbeat_stop.wait(5.0):
@@ -666,14 +655,6 @@ def payload_sync(
                             batch_bytes_done=hash_log_state["last_bytes_done"],
                             batch_bytes_total=hash_log_state["last_bytes_total"],
                             force=True,
-                        )
-                        progress.update(
-                            desc=hash_reporter.status_desc(
-                                done_groups=hash_log_state["last_done"],
-                                total_groups=hash_log_state["last_total"],
-                                path=Path(root_path).name,
-                            ),
-                            advance=0,
                         )
 
                 heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
@@ -720,6 +701,12 @@ def payload_sync(
                 )
             else:
                 print(f"   ⚠️  Upgrade ended incomplete: groups={upgraded_groups}")
+        upgrade_elapsed = int(time.monotonic() - upgrade_stage_start)
+        print(
+            "upgrade_summary "
+            f"queued={total_upgrade_roots} started={upgrade_started} "
+            f"completed={upgrade_completed} failed={upgrade_failed} elapsed_s={upgrade_elapsed}"
+        )
         print("------------------------------------------------------------")
 
     if not dry_run and write_batch_ops:
