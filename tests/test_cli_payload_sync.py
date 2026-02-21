@@ -563,6 +563,62 @@ class TestPayloadSyncCLI(unittest.TestCase):
 
         self.assertEqual(remaining, 3)
 
+    def test_payload_sync_upgrade_queues_unique_root_once(self):
+        """When multiple torrents share one incomplete root, upgrade runs once for that root."""
+        device_id = os.stat(self.payload_root).st_dev
+        conn = connect_db(self.db_path)
+        conn.execute(f"UPDATE files_{device_id} SET sha256 = NULL, sha1 = NULL")
+        conn.commit()
+        conn.close()
+
+        torrents = [
+            QBitTorrent(
+                hash="t1",
+                name="torrent-1",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+            QBitTorrent(
+                hash="t2",
+                name="torrent-2",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+
+        runner = CliRunner()
+        with (
+            patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake),
+            patch("hashall.payload.upgrade_payload_missing_sha256", return_value=0) as mock_upgrade,
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--upgrade-missing",
+                    "--path-prefix",
+                    str(self.tmp_path),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_upgrade.call_count, 1)
+        self.assertIn("upgrade stage: queued=1 started=1", result.output)
+
 
 class TestPayloadSyncQbitFailFast(unittest.TestCase):
     """Test that qBittorrent connect/auth failures raise ClickException (exit 1)."""

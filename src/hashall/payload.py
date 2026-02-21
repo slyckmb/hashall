@@ -397,6 +397,64 @@ def count_missing_sha256_for_path(conn: sqlite3.Connection, device_id: int, root
     ).fetchone()[0]
 
 
+def summarize_missing_sha256_for_path(
+    conn: sqlite3.Connection,
+    root_path: str,
+    device_id: Optional[int] = None,
+) -> Dict[str, int]:
+    """
+    Return missing SHA256 summary under a root path.
+
+    Output keys:
+      - files: count of active files with sha256 IS NULL under root
+      - bytes: sum(size) for those files
+    """
+    if device_id is None:
+        try:
+            device_id = os.stat(root_path).st_dev
+        except (OSError, IOError):
+            return {"files": 0, "bytes": 0}
+
+    table_name = f"files_{device_id}"
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if not cursor.fetchone():
+        return {"files": 0, "bytes": 0}
+
+    mount_point, preferred_mount = _get_mount_info(conn, device_id)
+    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return {"files": 0, "bytes": 0}
+    rel_root_str = str(rel_root)
+
+    if rel_root_str == ".":
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS files, COALESCE(SUM(size), 0) AS bytes
+            FROM {table_name}
+            WHERE status='active' AND sha256 IS NULL
+            """
+        ).fetchone()
+    else:
+        pattern = f"{rel_root_str}/%"
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS files, COALESCE(SUM(size), 0) AS bytes
+            FROM {table_name}
+            WHERE status='active' AND sha256 IS NULL
+              AND (path = ? OR path LIKE ?)
+            """,
+            (rel_root_str, pattern),
+        ).fetchone()
+    return {
+        "files": int((row[0] if row else 0) or 0),
+        "bytes": int((row[1] if row else 0) or 0),
+    }
+
+
 def count_active_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> int:
     """
     Count active files under root_path in the per-device files table.
