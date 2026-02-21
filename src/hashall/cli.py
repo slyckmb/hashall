@@ -727,7 +727,11 @@ def payload_sync(
 
     if (not dry_run) and limit == 0:
         prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
-        prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
+        try:
+            prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
+        except Exception as exc:
+            print(f"   ⚠️  orphan prune failed (non-fatal): {exc}")
+            prune_stats = None
 
     if dry_run:
         print(f"\n✅ DRY-RUN complete (no DB changes)")

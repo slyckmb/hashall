@@ -568,15 +568,49 @@ def prune_orphan_payloads(
     _ensure_payload_orphan_gc_table(conn)
 
     now = time.time()
-    params: List[object] = []
     scope_sql = ""
     if roots:
-        predicates = []
+        normalized_roots: List[str] = []
+        seen_roots = set()
         for root in roots:
-            root_s = str(root)
-            predicates.append("(p.root_path = ? OR p.root_path LIKE ?)")
-            params.extend([root_s, f"{root_s.rstrip('/')}/%"])
-        scope_sql = f" AND ({' OR '.join(predicates)})"
+            root_s = str(root).strip()
+            if not root_s:
+                continue
+            if root_s != "/":
+                root_s = root_s.rstrip("/")
+            if not root_s:
+                root_s = "/"
+            if root_s in seen_roots:
+                continue
+            seen_roots.add(root_s)
+            normalized_roots.append(root_s)
+
+        if normalized_roots:
+            # Avoid deep OR expression trees for large root scopes by using
+            # a temp table + EXISTS predicate.
+            conn.execute(
+                """
+                CREATE TEMP TABLE IF NOT EXISTS tmp_payload_scope_roots (
+                    root_path TEXT PRIMARY KEY
+                )
+                """
+            )
+            conn.execute("DELETE FROM tmp_payload_scope_roots")
+            conn.executemany(
+                "INSERT OR IGNORE INTO tmp_payload_scope_roots (root_path) VALUES (?)",
+                [(root_s,) for root_s in normalized_roots],
+            )
+            scope_sql = """
+            AND EXISTS (
+                SELECT 1
+                FROM tmp_payload_scope_roots sr
+                WHERE p.root_path = sr.root_path
+                   OR (
+                       length(p.root_path) > length(sr.root_path)
+                       AND substr(p.root_path, 1, length(sr.root_path) + 1) = sr.root_path || '/'
+                   )
+            )
+            """
 
     candidates = conn.execute(
         f"""
@@ -590,13 +624,11 @@ def prune_orphan_payloads(
         WHERE COALESCE(ti.ref_count, 0) = 0
         {scope_sql}
         ORDER BY p.payload_id
-        """,
-        params,
+        """
     ).fetchall()
 
     total_payloads = conn.execute(
         f"SELECT COUNT(*) FROM payloads p WHERE 1=1 {scope_sql}",
-        params,
     ).fetchone()[0]
 
     existing_gc = {
