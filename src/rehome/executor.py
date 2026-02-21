@@ -662,6 +662,11 @@ class DemotionExecutor:
                         f"  auto_tmm_after hash={torrent_hash[:16]} "
                         f"enabled={str(bool(getattr(torrent_info, 'auto_tmm', False))).lower()}"
                     )
+                self._validate_qb_content_path(
+                    torrent_hash,
+                    attempts=5,
+                    delay_seconds=1.0,
+                )
                 if idx == 1 or idx == total or idx % progress_every == 0:
                     self._log(f"  relocate_progress phase=verify done={idx}/{total}")
 
@@ -739,6 +744,47 @@ class DemotionExecutor:
                 )
 
         self._log(f"  rollback_cleanup_summary removed={removed} skipped={skipped}")
+
+    def _filter_move_view_targets(self, plan: Dict, source_path: Path) -> List[Dict]:
+        """
+        For MOVE plans, drop view targets that resolve to the old source path.
+
+        Without this filter, a MOVE can rename source->target, then rebuild a view
+        back at the source location, which trips verify_source_removed.
+        """
+        view_targets = plan.get("view_targets") or []
+        if not view_targets:
+            return []
+
+        source_resolved = canonicalize_path(source_path.resolve())
+        filtered: List[Dict] = []
+        skipped = 0
+
+        for target in view_targets:
+            target_save = str(target.get("target_save_path") or "").strip()
+            root_name = str(target.get("root_name") or "").strip()
+            if not target_save or not root_name:
+                filtered.append(target)
+                continue
+            try:
+                view_path = canonicalize_path((Path(target_save) / root_name).resolve())
+            except Exception:
+                filtered.append(target)
+                continue
+            if view_path == source_resolved:
+                skipped += 1
+                continue
+            filtered.append(target)
+
+        if skipped:
+            self._log(
+                "move_view_target_filter "
+                f"removed_source_equivalent={skipped} "
+                f"before={len(view_targets)} after={len(filtered)}",
+                "warning",
+            )
+
+        return filtered
 
     def _set_location_with_retry(
         self,
@@ -858,6 +904,63 @@ class DemotionExecutor:
                         last_debug_log = now
             time.sleep(interval_seconds)
         return last_info, last_actual
+
+    def _validate_qb_content_path(
+        self,
+        torrent_hash: str,
+        *,
+        attempts: int = 5,
+        delay_seconds: float = 1.0,
+    ) -> None:
+        """Best-effort qB content-path validation after relocation."""
+        import time
+
+        warned_missing_field = False
+        last_content = ""
+        for attempt in range(1, attempts + 1):
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if not info:
+                if attempt < attempts:
+                    self._log(
+                        f"  retry_validate_content hash={torrent_hash[:16]} "
+                        f"attempt={attempt + 1}/{attempts} reason=no_info",
+                        "warning",
+                    )
+                    backoff = min(delay_seconds * (2 ** (attempt - 1)), 8.0)
+                    time.sleep(backoff)
+                    continue
+                raise RuntimeError(
+                    f"qB info unavailable during content validation for torrent {torrent_hash[:16]}"
+                )
+
+            raw = str(getattr(info, "content_path", "") or "").strip()
+            if not raw:
+                if self.debug_qb and not warned_missing_field:
+                    self._log(
+                        f"  validate_content_skipped hash={torrent_hash[:16]} reason=no_content_path_field",
+                        "warning",
+                    )
+                    warned_missing_field = True
+                return
+
+            last_content = raw
+            content_path = Path(raw).resolve()
+            if content_path.exists():
+                return
+
+            if attempt < attempts:
+                self._log(
+                    f"  retry_validate_content hash={torrent_hash[:16]} "
+                    f"attempt={attempt + 1}/{attempts} path_missing={content_path}",
+                    "warning",
+                )
+                backoff = min(delay_seconds * (2 ** (attempt - 1)), 8.0)
+                time.sleep(backoff)
+
+        raise RuntimeError(
+            f"qB content path missing after relocation for torrent {torrent_hash[:16]} "
+            f"path={last_content or 'unknown'}"
+        )
 
     def _debug_qb_snapshot(self, torrent_hash: str, label: str) -> None:
         if not self.debug_qb:
@@ -1920,6 +2023,8 @@ class DemotionExecutor:
         phase_times: Dict[str, float] = {}
         source_path = Path(plan['source_path'])
         target_path = Path(plan['target_path'])
+        execute_plan = dict(plan)
+        execute_plan["view_targets"] = self._filter_move_view_targets(plan, source_path)
 
         moved_payload = False
         move_strategy = "rename"
@@ -1973,8 +2078,8 @@ class DemotionExecutor:
             self._log("step=build_views")
             self._build_views(
                 target_path,
-                plan.get("view_targets") or [],
-                plan,
+                execute_plan.get("view_targets") or [],
+                execute_plan,
                 preloaded_files=preloaded_files,
             )
             phase_times["build_views"] = time.monotonic() - t0
@@ -1982,7 +2087,7 @@ class DemotionExecutor:
             t0 = time.monotonic()
             conn = self._get_db_connection()
             try:
-                relocations = self._build_relocations(conn, plan)
+                relocations = self._build_relocations(conn, execute_plan)
             finally:
                 conn.close()
             phase_times["build_relocations"] = time.monotonic() - t0
@@ -2014,7 +2119,7 @@ class DemotionExecutor:
                             self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
             else:
                 self._log("  rollback skipped reason=idempotent_mode_no_move", "warning")
-            self._rollback_partial_target_views(plan)
+            self._rollback_partial_target_views(execute_plan)
             raise
 
         # For rsync-based cross-filesystem moves, remove source only after relocation succeeded.

@@ -441,6 +441,78 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
     assert not source_path.exists()
 
 
+def test_execute_move_filters_view_target_that_recreates_source(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    source_path = tmp_path / "pool" / "data" / "seeds" / "cross-seed" / "thegeeks" / "book.epub"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"x")
+    target_path = tmp_path / "pool" / "data" / "seeds" / "thegeeks" / "book.epub"
+
+    monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: False)
+    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+
+    captured = {}
+
+    def fake_build_relocations(_conn, exec_plan):
+        captured["view_targets"] = list(exec_plan.get("view_targets") or [])
+        return []
+
+    monkeypatch.setattr(executor, "_build_relocations", fake_build_relocations)
+
+    plan = {
+        "source_path": str(source_path),
+        "target_path": str(target_path),
+        "file_count": 1,
+        "total_bytes": 1,
+        "target_device_id": 44,
+        "view_targets": [
+            {
+                "torrent_hash": "t1",
+                "source_save_path": str(source_path.parent),
+                "target_save_path": str(source_path.parent),
+                "root_name": source_path.name,
+            }
+        ],
+    }
+
+    executor._execute_move(plan, spot_check=0)
+    assert captured["view_targets"] == []
+    assert target_path.exists()
+    assert not source_path.exists()
+
+
+def test_atomic_relocation_fails_when_qb_content_path_stays_missing(tmp_path, monkeypatch):
+    class MissingContentQbitClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__(default_path="/stash/seeding")
+            self.missing_content = tmp_path / "does-not-exist" / "payload.mkv"
+
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                content_path=str(self.missing_content),
+                auto_tmm=False,
+                state="pausedUP",
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = MissingContentQbitClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+
+    with pytest.raises(RuntimeError, match="qB content path missing after relocation"):
+        executor._relocate_torrents_atomic(relocations)
+
+    # Rollback should restore qB save_path authority after failed validation.
+    assert executor.qbit_client.save_paths["t1"] == "/stash/seeding"
+
+
 def test_is_cross_filesystem_checks_existing_ancestor_when_target_missing(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     source_path = tmp_path / "stash" / "payload.mkv"
