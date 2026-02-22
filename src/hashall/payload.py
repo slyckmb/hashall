@@ -397,6 +397,64 @@ def count_missing_sha256_for_path(conn: sqlite3.Connection, device_id: int, root
     ).fetchone()[0]
 
 
+def summarize_missing_sha256_for_path(
+    conn: sqlite3.Connection,
+    root_path: str,
+    device_id: Optional[int] = None,
+) -> Dict[str, int]:
+    """
+    Return missing SHA256 summary under a root path.
+
+    Output keys:
+      - files: count of active files with sha256 IS NULL under root
+      - bytes: sum(size) for those files
+    """
+    if device_id is None:
+        try:
+            device_id = os.stat(root_path).st_dev
+        except (OSError, IOError):
+            return {"files": 0, "bytes": 0}
+
+    table_name = f"files_{device_id}"
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if not cursor.fetchone():
+        return {"files": 0, "bytes": 0}
+
+    mount_point, preferred_mount = _get_mount_info(conn, device_id)
+    rel_root, _ = _resolve_rel_root(root_path, mount_point, preferred_mount)
+    if rel_root is None:
+        return {"files": 0, "bytes": 0}
+    rel_root_str = str(rel_root)
+
+    if rel_root_str == ".":
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS files, COALESCE(SUM(size), 0) AS bytes
+            FROM {table_name}
+            WHERE status='active' AND sha256 IS NULL
+            """
+        ).fetchone()
+    else:
+        pattern = f"{rel_root_str}/%"
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS files, COALESCE(SUM(size), 0) AS bytes
+            FROM {table_name}
+            WHERE status='active' AND sha256 IS NULL
+              AND (path = ? OR path LIKE ?)
+            """,
+            (rel_root_str, pattern),
+        ).fetchone()
+    return {
+        "files": int((row[0] if row else 0) or 0),
+        "bytes": int((row[1] if row else 0) or 0),
+    }
+
+
 def count_active_files_for_path(conn: sqlite3.Connection, device_id: int, root_path: str) -> int:
     """
     Count active files under root_path in the per-device files table.
@@ -510,15 +568,49 @@ def prune_orphan_payloads(
     _ensure_payload_orphan_gc_table(conn)
 
     now = time.time()
-    params: List[object] = []
     scope_sql = ""
     if roots:
-        predicates = []
+        normalized_roots: List[str] = []
+        seen_roots = set()
         for root in roots:
-            root_s = str(root)
-            predicates.append("(p.root_path = ? OR p.root_path LIKE ?)")
-            params.extend([root_s, f"{root_s.rstrip('/')}/%"])
-        scope_sql = f" AND ({' OR '.join(predicates)})"
+            root_s = str(root).strip()
+            if not root_s:
+                continue
+            if root_s != "/":
+                root_s = root_s.rstrip("/")
+            if not root_s:
+                root_s = "/"
+            if root_s in seen_roots:
+                continue
+            seen_roots.add(root_s)
+            normalized_roots.append(root_s)
+
+        if normalized_roots:
+            # Avoid deep OR expression trees for large root scopes by using
+            # a temp table + EXISTS predicate.
+            conn.execute(
+                """
+                CREATE TEMP TABLE IF NOT EXISTS tmp_payload_scope_roots (
+                    root_path TEXT PRIMARY KEY
+                )
+                """
+            )
+            conn.execute("DELETE FROM tmp_payload_scope_roots")
+            conn.executemany(
+                "INSERT OR IGNORE INTO tmp_payload_scope_roots (root_path) VALUES (?)",
+                [(root_s,) for root_s in normalized_roots],
+            )
+            scope_sql = """
+            AND EXISTS (
+                SELECT 1
+                FROM tmp_payload_scope_roots sr
+                WHERE p.root_path = sr.root_path
+                   OR (
+                       length(p.root_path) > length(sr.root_path)
+                       AND substr(p.root_path, 1, length(sr.root_path) + 1) = sr.root_path || '/'
+                   )
+            )
+            """
 
     candidates = conn.execute(
         f"""
@@ -532,13 +624,11 @@ def prune_orphan_payloads(
         WHERE COALESCE(ti.ref_count, 0) = 0
         {scope_sql}
         ORDER BY p.payload_id
-        """,
-        params,
+        """
     ).fetchall()
 
     total_payloads = conn.execute(
         f"SELECT COUNT(*) FROM payloads p WHERE 1=1 {scope_sql}",
-        params,
     ).fetchone()[0]
 
     existing_gc = {

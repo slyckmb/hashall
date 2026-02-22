@@ -13,9 +13,17 @@ from hashall.fs_utils import (
     get_mount_point,
     get_mount_source,
     get_zfs_metadata,
+    clear_mount_lookup_caches,
     _try_findmnt,
     _try_zfs_guid,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_mount_lookup_caches():
+    clear_mount_lookup_caches()
+    yield
+    clear_mount_lookup_caches()
 
 
 class TestGetFilesystemUuid:
@@ -258,6 +266,19 @@ def test_get_mount_source_uses_findmnt_target():
         assert "/some/file/under/mount" in args
 
 
+def test_get_mount_point_reuses_prefix_cache_for_sibling_paths():
+    with patch("os.path.ismount", return_value=False):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="/mnt/data\n", returncode=0)
+
+            first = get_mount_point("/mnt/data/a/file.mkv")
+            second = get_mount_point("/mnt/data/b/file.mkv")
+
+            assert first == "/mnt/data"
+            assert second == "/mnt/data"
+            assert mock_run.call_count == 1
+
+
 class TestTryZfsGuid:
     """Test suite for _try_zfs_guid() helper function."""
 
@@ -332,7 +353,8 @@ class TestTryZfsGuid:
             # Verify command arguments
             mock_run.assert_called_once()
             args = mock_run.call_args[0][0]
-            assert args == ['zfs', 'get', '-H', '-o', 'value', 'guid', '/pool/dataset']
+            assert Path(args[0]).name == 'zfs'
+            assert args[1:] == ['get', '-H', '-o', 'value', 'guid', '/pool/dataset']
 
 
 class TestEdgeCases:

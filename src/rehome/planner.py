@@ -8,7 +8,7 @@ and what actions are needed.
 import sqlite3
 import os
 from pathlib import Path
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass
 
 # Import hashall modules
@@ -179,6 +179,7 @@ class DemotionPlanner:
         self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
         self.pool_seeding_root = canonicalize_path(Path(pool_seeding_root)) if pool_seeding_root else None
         self.pool_payload_root = canonicalize_path(Path(pool_payload_root)) if pool_payload_root else None
+        self._scan_roots_cover_cache: Dict[Tuple[str, ...], Optional[bool]] = {}
 
     def _compute_pool_move_target(self, source_root_path: str) -> tuple[Optional[str], Optional[str]]:
         """
@@ -285,6 +286,18 @@ class DemotionPlanner:
         if not use_device_table and not use_legacy_table:
             return []
 
+        def _normalize_abs_path(path: Path) -> str:
+            # Local filesystem normalization is sufficient for seeding-domain checks.
+            try:
+                return str(path.resolve())
+            except Exception:
+                return str(path)
+
+        def _prefix_bounds(prefix: str) -> tuple[str, str]:
+            low = f"{prefix}/"
+            high = f"{low}\U0010FFFF"
+            return low, high
+
         if use_device_table:
             # Resolve root_path relative to preferred mount when available.
             mount_point = None
@@ -311,92 +324,123 @@ class DemotionPlanner:
                 def _to_abs(p: str) -> str:
                     path = Path(p)
                     if path.is_absolute():
-                        return str(canonicalize_path(path))
-                    return str((base_mount / path).resolve())
+                        return _normalize_abs_path(path)
+                    return _normalize_abs_path(base_mount / path)
             else:
                 # No device metadata; expect absolute paths in table
                 if not root.is_absolute():
                     raise ValueError("Relative payload root without device mount metadata")
                 rel_root_str = str(root)
                 def _to_abs(p: str) -> str:
-                    return str(canonicalize_path(Path(p)))
+                    return _normalize_abs_path(Path(p))
 
-            pattern = f"{rel_root_str}/%"
+            low, high = _prefix_bounds(rel_root_str)
             query = f"""
-                SELECT DISTINCT path, inode
-                FROM {table_name}
-                WHERE status = 'active' AND (path = ? OR path LIKE ?)
+                SELECT path, inode
+                FROM {table_name} INDEXED BY sqlite_autoindex_{table_name}_1
+                WHERE status = 'active' AND path = ?
+                UNION ALL
+                SELECT path, inode
+                FROM {table_name} INDEXED BY sqlite_autoindex_{table_name}_1
+                WHERE status = 'active' AND path >= ? AND path < ?
                 ORDER BY path
             """
-            file_rows = conn.execute(query, (rel_root_str, pattern)).fetchall()
+            file_rows = conn.execute(query, (rel_root_str, low, high)).fetchall()
 
         else:
             # Legacy table stores absolute paths
             if not root.is_absolute():
                 raise ValueError("Relative payload root with legacy files table")
-            pattern = f"{str(root)}/%"
+            root_str = str(root)
+            low, high = _prefix_bounds(root_str)
             legacy_has_status = _table_has_column("files", "status")
             if legacy_has_status:
                 query = """
                     SELECT DISTINCT path, inode
                     FROM files
-                    WHERE status = 'active' AND (path = ? OR path LIKE ?)
+                    WHERE status = 'active' AND (
+                        path = ? OR (path >= ? AND path < ?)
+                    )
                     ORDER BY path
                 """
-                file_rows = conn.execute(query, (str(root), pattern)).fetchall()
+                file_rows = conn.execute(query, (root_str, low, high)).fetchall()
             else:
                 query = """
                     SELECT DISTINCT path, inode
                     FROM files
-                    WHERE path = ? OR path LIKE ?
+                    WHERE path = ? OR (path >= ? AND path < ?)
                     ORDER BY path
                 """
-                file_rows = conn.execute(query, (str(root), pattern)).fetchall()
+                file_rows = conn.execute(query, (root_str, low, high)).fetchall()
 
             def _to_abs(p: str) -> str:
-                return str(canonicalize_path(Path(p)))
+                return _normalize_abs_path(Path(p))
 
         if not file_rows:
             raise ValueError("No files found under payload root in catalog; rescan required")
 
         external_consumers = []
+        external_cache: Dict[str, bool] = {}
+
+        def _is_external_cached(path_text: str) -> bool:
+            cached = external_cache.get(path_text)
+            if cached is not None:
+                return cached
+            path_obj = Path(path_text)
+            is_external = True
+            for seed_root in self.seeding_roots:
+                try:
+                    path_obj.relative_to(seed_root)
+                    is_external = False
+                    break
+                except ValueError:
+                    continue
+            external_cache[path_text] = is_external
+            return is_external
+
+        unique_inodes = sorted({int(inode) for _, inode in file_rows if inode is not None})
+        inode_paths: Dict[int, List[str]] = {}
+        inode_chunk_size = 500
+        if unique_inodes:
+            for offset in range(0, len(unique_inodes), inode_chunk_size):
+                chunk = unique_inodes[offset: offset + inode_chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                if use_device_table:
+                    rows = conn.execute(
+                        f"""
+                        SELECT inode, path
+                        FROM {table_name}
+                        WHERE status = 'active' AND inode IN ({placeholders})
+                        ORDER BY inode, path
+                        """,
+                        chunk,
+                    ).fetchall()
+                else:
+                    where_clause = "inode IN ({placeholders})".format(placeholders=placeholders)
+                    if legacy_has_status:
+                        where_clause = f"status = 'active' AND {where_clause}"
+                    rows = conn.execute(
+                        f"""
+                        SELECT inode, path
+                        FROM files
+                        WHERE {where_clause}
+                        ORDER BY inode, path
+                        """,
+                        chunk,
+                    ).fetchall()
+
+                for inode, hardlink_path in rows:
+                    inode_int = int(inode)
+                    inode_paths.setdefault(inode_int, []).append(_to_abs(str(hardlink_path)))
 
         # For each file, check if its inode has any paths outside seeding domain
         for file_path, inode in file_rows:
-            # Find all paths with same inode (hardlinks)
-            if use_device_table:
-                hardlink_query = f"""
-                    SELECT DISTINCT path
-                    FROM {table_name}
-                    WHERE inode = ? AND status = 'active'
-                    ORDER BY path
-                """
-                hardlink_paths = [
-                    _to_abs(row[0]) for row in conn.execute(hardlink_query, (inode,)).fetchall()
-                ]
-                file_path_abs = _to_abs(file_path)
-            else:
-                if legacy_has_status:
-                    hardlink_query = """
-                        SELECT DISTINCT path
-                        FROM files
-                        WHERE inode = ? AND status = 'active'
-                        ORDER BY path
-                    """
-                else:
-                    hardlink_query = """
-                        SELECT DISTINCT path
-                        FROM files
-                        WHERE inode = ?
-                        ORDER BY path
-                    """
-                hardlink_paths = [
-                    _to_abs(row[0]) for row in conn.execute(hardlink_query, (inode,)).fetchall()
-                ]
-                file_path_abs = _to_abs(file_path)
+            inode_int = int(inode)
+            hardlink_paths = inode_paths.get(inode_int, [])
+            file_path_abs = _to_abs(str(file_path))
 
             # Filter for external paths
-            external_paths = [p for p in hardlink_paths if self._is_external_path(p)]
+            external_paths = [p for p in hardlink_paths if _is_external_cached(p)]
 
             if external_paths:
                 external_consumers.append(ExternalConsumer(
@@ -442,6 +486,14 @@ class DemotionPlanner:
         if not device_rows:
             return None
 
+        def _normalize(path_text: str) -> Path:
+            # scan_roots/devices data are absolute catalog paths; lexical resolution
+            # avoids repeated mount/source subprocess calls.
+            try:
+                return Path(path_text).resolve()
+            except Exception:
+                return Path(path_text)
+
         prefixes: List[tuple[str, Path]] = []
         aliases_by_uuid: Dict[str, List[Path]] = {}
         for fs_uuid, mount_point, preferred in device_rows:
@@ -449,7 +501,7 @@ class DemotionPlanner:
             for candidate in (preferred, mount_point):
                 if not candidate:
                     continue
-                canon = canonicalize_path(Path(candidate))
+                canon = _normalize(str(candidate))
                 prefixes.append((fs_uuid, canon))
                 if canon not in alias_paths:
                     alias_paths.append(canon)
@@ -459,10 +511,10 @@ class DemotionPlanner:
 
         scanned_by_uuid: Dict[str, List[Path]] = {}
         for fs_uuid, root_path in scan_rows:
-            scanned_by_uuid.setdefault(fs_uuid, []).append(canonicalize_path(Path(root_path)))
+            scanned_by_uuid.setdefault(fs_uuid, []).append(_normalize(str(root_path)))
 
         for root in roots:
-            root_canon = canonicalize_path(root)
+            root_canon = _normalize(str(root))
             fs_uuid = None
             for candidate_uuid, candidate_root in prefixes:
                 if is_under(root_canon, candidate_root):
@@ -493,6 +545,14 @@ class DemotionPlanner:
                 return False
         return True
 
+    def _scan_roots_cover_cached(self, conn: sqlite3.Connection,
+                                 roots: List[Path]) -> Optional[bool]:
+        """Memoize scan_roots coverage checks per planner run."""
+        key = tuple(str(root) for root in roots)
+        if key not in self._scan_roots_cover_cache:
+            self._scan_roots_cover_cache[key] = self._scan_roots_cover(conn, roots)
+        return self._scan_roots_cover_cache[key]
+
 
     def _payload_exists_on_pool(self, conn: sqlite3.Connection,
                                 payload_hash: str) -> Optional[str]:
@@ -518,7 +578,11 @@ class DemotionPlanner:
 
         return row[0] if row else None
 
-    def plan_demotion(self, torrent_hash: str) -> Dict:
+    def plan_demotion(
+        self,
+        torrent_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict:
         """
         Create a demotion plan for a torrent.
 
@@ -528,7 +592,9 @@ class DemotionPlanner:
         Returns:
             Plan dictionary with decision and actions
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             # 1. Resolve torrent → payload
@@ -596,7 +662,7 @@ class DemotionPlanner:
 
             # 4a. Ensure scan roots cover seeding + library domains (if available)
             required_roots = self.seeding_roots + self.library_roots
-            coverage = self._scan_roots_cover(conn, required_roots)
+            coverage = self._scan_roots_cover_cached(conn, required_roots)
             if coverage is False:
                 return {
                     "version": "1.0",
@@ -781,9 +847,14 @@ class DemotionPlanner:
                 }
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
-    def plan_batch_demotion_by_payload_hash(self, payload_hash: str) -> Dict:
+    def plan_batch_demotion_by_payload_hash(
+        self,
+        payload_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict:
         """
         Create a batch demotion plan for all torrents with a specific payload hash.
 
@@ -793,7 +864,9 @@ class DemotionPlanner:
         Returns:
             Batch plan dictionary with payload-level decision
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             row = conn.execute("""
@@ -810,7 +883,7 @@ class DemotionPlanner:
 
             # Use first torrent to generate plan (all siblings share same decision)
             first_torrent = row[0]
-            plan = self.plan_demotion(first_torrent)
+            plan = self.plan_demotion(first_torrent, conn=conn)
 
             # Mark as batch plan
             plan['batch_mode'] = 'payload_hash'
@@ -819,9 +892,14 @@ class DemotionPlanner:
             return plan
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
-    def plan_batch_demotion_by_tag(self, tag: str) -> List[Dict]:
+    def plan_batch_demotion_by_tag(
+        self,
+        tag: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> List[Dict]:
         """
         Create batch demotion plans for all torrents with a specific tag.
 
@@ -831,7 +909,9 @@ class DemotionPlanner:
         Returns:
             List of plans (one per unique payload)
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             torrent_rows = conn.execute("""
@@ -867,7 +947,7 @@ class DemotionPlanner:
                 payloads_seen.add(group_key)
 
                 # Generate plan for this payload
-                plan = self.plan_demotion(torrent_hash)
+                plan = self.plan_demotion(torrent_hash, conn=conn)
                 plan['batch_mode'] = 'tag'
                 plan['batch_filter'] = tag
 
@@ -876,7 +956,8 @@ class DemotionPlanner:
             return plans
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
 
 class PromotionPlanner:
@@ -940,7 +1021,11 @@ class PromotionPlanner:
 
         return row[0] if row else None
 
-    def plan_promotion(self, torrent_hash: str) -> Dict:
+    def plan_promotion(
+        self,
+        torrent_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict:
         """
         Create a promotion plan for a torrent.
 
@@ -950,7 +1035,9 @@ class PromotionPlanner:
         Returns:
             Plan dictionary with decision and actions
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             # 1. Resolve torrent → payload
@@ -1108,9 +1195,14 @@ class PromotionPlanner:
             }
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
-    def plan_batch_promotion_by_payload_hash(self, payload_hash: str) -> Dict:
+    def plan_batch_promotion_by_payload_hash(
+        self,
+        payload_hash: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict:
         """
         Create a batch promotion plan for all torrents with a specific payload hash.
 
@@ -1120,7 +1212,9 @@ class PromotionPlanner:
         Returns:
             Batch plan dictionary with payload-level decision
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             row = conn.execute("""
@@ -1137,7 +1231,7 @@ class PromotionPlanner:
 
             # Use first torrent to generate plan (all siblings share same decision)
             first_torrent = row[0]
-            plan = self.plan_promotion(first_torrent)
+            plan = self.plan_promotion(first_torrent, conn=conn)
 
             # Mark as batch plan
             plan['batch_mode'] = 'payload_hash'
@@ -1146,9 +1240,14 @@ class PromotionPlanner:
             return plan
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()
 
-    def plan_batch_promotion_by_tag(self, tag: str) -> List[Dict]:
+    def plan_batch_promotion_by_tag(
+        self,
+        tag: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> List[Dict]:
         """
         Create batch promotion plans for all torrents with a specific tag.
 
@@ -1158,7 +1257,9 @@ class PromotionPlanner:
         Returns:
             List of plans (one per unique payload)
         """
-        conn = self._get_db_connection()
+        close_conn = conn is None
+        if conn is None:
+            conn = self._get_db_connection()
 
         try:
             torrent_rows = conn.execute("""
@@ -1192,7 +1293,7 @@ class PromotionPlanner:
                     continue
 
                 payloads_seen.add(group_key)
-                plan = self.plan_promotion(torrent_hash)
+                plan = self.plan_promotion(torrent_hash, conn=conn)
                 plan['batch_mode'] = 'tag'
                 plan['batch_filter'] = tag
                 plans.append(plan)
@@ -1200,4 +1301,5 @@ class PromotionPlanner:
             return plans
 
         finally:
-            conn.close()
+            if close_conn:
+                conn.close()

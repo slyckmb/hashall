@@ -75,7 +75,14 @@ class TwoLineProgress:
                 progress.update(desc=str(item), advance=1)
     """
 
-    def __init__(self, total: int, prefix: str = "Processing", unit: str = "items", enabled: bool = None):
+    def __init__(
+        self,
+        total: int,
+        prefix: str = "Processing",
+        unit: str = "items",
+        enabled: bool = None,
+        min_update_interval_s: float = 0.1,
+    ):
         """Initialize progress display.
 
         Args:
@@ -94,6 +101,10 @@ class TwoLineProgress:
         self.start = time.monotonic()
         self.n = 0
         self.desc = ""
+        self.min_update_interval_s = max(0.0, float(min_update_interval_s))
+        self._last_render_ts = 0.0
+        self._last_render_n = 0
+        self._last_render_desc = ""
         if self.enabled:
             self.file.write("\r\x1b[2K")
             print("", file=self.file, flush=True)
@@ -129,10 +140,20 @@ class TwoLineProgress:
         """
         if not self.enabled:
             return
+        now = time.monotonic()
         if desc is not None:
             self.desc = desc.replace("\n", " ")
         if advance:
             self.n += advance
+        else:
+            # Throttle frequent redraws when progress count is unchanged.
+            # This reduces terminal churn during long-running heartbeat updates.
+            if (
+                self.n == self._last_render_n
+                and self.desc == self._last_render_desc
+                and (now - self._last_render_ts) < self.min_update_interval_s
+            ):
+                return
         width = self._width()
         status_line = _pad_to_width(_truncate_middle(self.desc, width), width)
         bar_line = self._progress_line(width)
@@ -140,6 +161,9 @@ class TwoLineProgress:
         self.file.write("\x1b[1B\r\x1b[2K" + bar_line)
         self.file.write("\x1b[1B\r")
         self.file.flush()
+        self._last_render_ts = now
+        self._last_render_n = self.n
+        self._last_render_desc = self.desc
 
     def close(self) -> None:
         """Close progress display and clear lines."""

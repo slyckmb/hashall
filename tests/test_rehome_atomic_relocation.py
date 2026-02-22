@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import shutil
 import sqlite3
+import os
 
 import pytest
 
@@ -19,6 +20,7 @@ class FakeQbitClient:
         self.fail_on = set(fail_on or [])
         self.save_paths = {}
         self.default_path = default_path
+        self.recheck_calls = []
 
     def pause_torrent(self, torrent_hash: str) -> bool:
         self.save_paths.setdefault(torrent_hash, self.default_path)
@@ -33,14 +35,27 @@ class FakeQbitClient:
     def resume_torrent(self, torrent_hash: str) -> bool:
         return True
 
+    def recheck_torrent(self, torrent_hash: str) -> bool:
+        self.recheck_calls.append(torrent_hash)
+        return True
+
     def get_torrent_info(self, torrent_hash: str):
-        return SimpleNamespace(save_path=self.save_paths.get(torrent_hash, self.default_path))
+        return SimpleNamespace(
+            save_path=self.save_paths.get(torrent_hash, self.default_path),
+            auto_tmm=False,
+            state="pausedUP",
+            progress=1.0,
+            amount_left=0,
+            size=1024,
+            completed=1024,
+        )
 
     def get_torrent_files(self, torrent_hash: str):
         return []
 
 
 def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient(fail_on={"t2"})
 
@@ -54,6 +69,59 @@ def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
 
     # t1 should be rolled back to source path
     assert executor.qbit_client.save_paths["t1"] == "/stash/seeding"
+
+
+def test_copy_with_rsync_progress_applies_bwlimit_env(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    commands = []
+
+    def fake_run(cmd, check=True):
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("REHOME_RSYNC_BWLIMIT_KBPS", "51200")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"x")
+    target = tmp_path / "target.bin"
+
+    executor._copy_with_rsync_progress(source, target)
+
+    assert commands
+    cmd = commands[0]
+    assert "--bwlimit=51200" in cmd
+    assert str(source) in cmd
+    assert str(target) in cmd
+
+
+def test_copy_with_rsync_progress_ignores_invalid_bwlimit_env(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    commands = []
+    messages = []
+
+    def fake_run(cmd, check=True):
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("REHOME_RSYNC_BWLIMIT_KBPS", "abc")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(executor, "_log", lambda message, prefix="info": messages.append((prefix, message)))
+
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"x")
+    target = tmp_path / "target.bin"
+
+    executor._copy_with_rsync_progress(source, target)
+
+    assert commands
+    cmd = commands[0]
+    assert not any(part.startswith("--bwlimit=") for part in cmd)
+    assert any(prefix == "warning" and "REHOME_RSYNC_BWLIMIT_KBPS" in msg for prefix, msg in messages)
 
 
 def test_atomic_relocation_rollback_uses_qb_runtime_source_path(tmp_path, monkeypatch):
@@ -138,7 +206,75 @@ def test_atomic_relocation_retries_and_waits_for_qb_save_path(tmp_path, monkeypa
     assert executor.qbit_client.save_paths["t1"] == "/pool/seeding"
 
 
-def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
+def test_atomic_relocation_guard_blocks_resume_when_qb_reports_incomplete(tmp_path, monkeypatch):
+    class IncompleteQbitClient(FakeQbitClient):
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state="pausedDL",
+                progress=0.92,
+                amount_left=12345,
+                size=1024,
+                completed=512,
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = IncompleteQbitClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+
+    with pytest.raises(RuntimeError, match="seed-readiness guard failed"):
+        executor._relocate_torrents_atomic(relocations)
+
+
+def test_atomic_relocation_requests_recheck_before_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+
+    executor._relocate_torrents_atomic(relocations)
+    assert executor.qbit_client.recheck_calls == ["t1"]
+
+
+def test_atomic_relocation_retries_torrent_info_before_failing(tmp_path, monkeypatch):
+    class FlakyInfoQbitClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.info_calls = 0
+            self.last_error = None
+
+        def get_torrent_info(self, torrent_hash: str):
+            self.info_calls += 1
+            if self.info_calls == 1:
+                self.last_error = "Read timed out"
+                return None
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state="pausedUP",
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FlakyInfoQbitClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+
+    executor._relocate_torrents_atomic(relocations)
+    assert executor.qbit_client.info_calls >= 2
+
+
+def test_atomic_relocation_verifies_before_resume_when_resume_enabled(tmp_path, monkeypatch):
     class OrderedQbitClient(FakeQbitClient):
         def __init__(self):
             super().__init__()
@@ -148,7 +284,7 @@ def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
             return SimpleNamespace(
                 save_path=self.save_paths.get(torrent_hash, self.default_path),
                 auto_tmm=False,
-                state="pausedUP",
+                state="uploading",
             )
 
         def resume_torrent(self, torrent_hash: str) -> bool:
@@ -156,6 +292,7 @@ def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
             return True
 
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.setenv("HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE", "1")
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = OrderedQbitClient()
 
@@ -171,6 +308,97 @@ def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
     ]
     executor._relocate_torrents_atomic(relocations)
     assert executor.qbit_client.resume_calls == 1
+
+
+def test_atomic_relocation_keeps_torrents_paused_by_default(tmp_path, monkeypatch):
+    class PausedByDefaultClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.resume_calls = 0
+
+        def resume_torrent(self, torrent_hash: str) -> bool:
+            self.resume_calls += 1
+            return True
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.delenv("HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE", raising=False)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = PausedByDefaultClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+    executor._relocate_torrents_atomic(relocations)
+    assert executor.qbit_client.resume_calls == 0
+
+
+def test_atomic_relocation_only_resumes_torrents_that_were_active_before_pause(tmp_path, monkeypatch):
+    class MixedStateClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.resume_hashes = []
+            self.states = {"t_paused": "pausedUP", "t_active": "uploading"}
+
+        def resume_torrent(self, torrent_hash: str) -> bool:
+            self.resume_hashes.append(torrent_hash)
+            return True
+
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state=self.states.get(torrent_hash, "pausedUP"),
+                progress=1.0,
+                amount_left=0,
+                size=1024,
+                completed=1024,
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.setenv("HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE", "1")
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = MixedStateClient()
+
+    relocations = [
+        {"torrent_hash": "t_paused", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+        {"torrent_hash": "t_active", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+    executor._relocate_torrents_atomic(relocations)
+
+    assert executor.qbit_client.resume_hashes == ["t_active"]
+
+
+def test_atomic_relocation_uses_size_aware_verify_timeout(tmp_path, monkeypatch):
+    class LargeMoveQbitClient(FakeQbitClient):
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state="pausedUP",
+                size=25 * 1024**3,
+                total_size=25 * 1024**3,
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = LargeMoveQbitClient()
+
+    waits = []
+
+    def fake_wait(_hash, expected, **kwargs):
+        waits.append(kwargs.get("timeout_seconds"))
+        return SimpleNamespace(save_path=str(expected), auto_tmm=False), expected
+
+    monkeypatch.setattr(executor, "_wait_for_save_path", fake_wait)
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+    executor._relocate_torrents_atomic(relocations)
+
+    # Verify waits should include a materially larger timeout than the legacy fixed value.
+    assert waits
+    assert max(waits) >= 700.0
 
 
 def test_set_location_retry_succeeds_when_qb_reports_conflict_but_path_is_set(tmp_path, monkeypatch):
@@ -314,6 +542,66 @@ def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path,
     assert not target_path.exists()
 
 
+def test_execute_move_relocation_failure_cleans_partial_views(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    source_path = tmp_path / "stash" / "payload.mkv"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"x")
+    target_path = tmp_path / "pool" / "torrentleech" / "payload.mkv"
+    side_view_parent = tmp_path / "pool" / "cross-seed" / "siteA"
+    side_view_path = side_view_parent / "payload.mkv"
+
+    monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: False)
+    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
+
+    def fake_build_views(payload_root, view_targets, plan, **_kwargs):
+        for target in view_targets:
+            dst = Path(target["target_save_path"]) / target["root_name"]
+            if dst == payload_root:
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.link(payload_root, dst)
+
+    monkeypatch.setattr(executor, "_build_views", fake_build_views)
+    monkeypatch.setattr(
+        executor,
+        "_relocate_torrents_atomic",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("relocation failed")),
+    )
+
+    plan = {
+        "source_path": str(source_path),
+        "target_path": str(target_path),
+        "file_count": 1,
+        "total_bytes": 1,
+        "target_device_id": 44,
+        "seeding_roots": [str(tmp_path / "pool"), str(tmp_path / "stash")],
+        "view_targets": [
+            {
+                "torrent_hash": "t-main",
+                "source_save_path": str(tmp_path / "stash" / "torrentleech"),
+                "target_save_path": str(target_path.parent),
+                "root_name": target_path.name,
+            },
+            {
+                "torrent_hash": "t-side",
+                "source_save_path": str(tmp_path / "stash" / "cross-seed" / "siteA"),
+                "target_save_path": str(side_view_parent),
+                "root_name": target_path.name,
+            },
+        ],
+    }
+
+    with pytest.raises(RuntimeError, match="relocation failed"):
+        executor._execute_move(plan, spot_check=0)
+
+    assert source_path.exists()
+    assert not target_path.exists()
+    assert not side_view_path.exists()
+
+
 def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()
@@ -347,6 +635,98 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
     executor._execute_move(plan, spot_check=1)
     assert target_path.exists()
     assert not source_path.exists()
+
+
+def test_execute_move_filters_view_target_that_recreates_source(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    source_path = tmp_path / "pool" / "data" / "seeds" / "cross-seed" / "thegeeks" / "book.epub"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"x")
+    target_path = tmp_path / "pool" / "data" / "seeds" / "thegeeks" / "book.epub"
+
+    monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: False)
+    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+
+    captured = {}
+
+    def fake_build_relocations(_conn, exec_plan):
+        captured["view_targets"] = list(exec_plan.get("view_targets") or [])
+        return []
+
+    monkeypatch.setattr(executor, "_build_relocations", fake_build_relocations)
+
+    plan = {
+        "source_path": str(source_path),
+        "target_path": str(target_path),
+        "file_count": 1,
+        "total_bytes": 1,
+        "target_device_id": 44,
+        "view_targets": [
+            {
+                "torrent_hash": "t1",
+                "source_save_path": str(source_path.parent),
+                "target_save_path": str(source_path.parent),
+                "root_name": source_path.name,
+            }
+        ],
+    }
+
+    executor._execute_move(plan, spot_check=0)
+    assert captured["view_targets"] == []
+    assert target_path.exists()
+    assert not source_path.exists()
+
+
+def test_atomic_relocation_fails_when_qb_content_path_stays_missing(tmp_path, monkeypatch):
+    class MissingContentQbitClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__(default_path="/stash/seeding")
+            self.missing_content = tmp_path / "does-not-exist" / "payload.mkv"
+
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                content_path=str(self.missing_content),
+                auto_tmm=False,
+                state="pausedUP",
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = MissingContentQbitClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+
+    with pytest.raises(RuntimeError, match="qB content path missing after relocation"):
+        executor._relocate_torrents_atomic(relocations)
+
+    # Rollback should restore qB save_path authority after failed validation.
+    assert executor.qbit_client.save_paths["t1"] == "/stash/seeding"
+
+
+def test_is_cross_filesystem_checks_existing_ancestor_when_target_missing(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    source_path = tmp_path / "stash" / "payload.mkv"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"x")
+    target_parent = tmp_path / "pool" / "missing" / "branch"
+
+    real_stat = Path.stat
+
+    def fake_stat(self, *args, **kwargs):
+        if self == source_path:
+            return SimpleNamespace(st_dev=49)
+        if self == tmp_path:
+            return SimpleNamespace(st_dev=44)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fake_stat, raising=False)
+    assert executor._is_cross_filesystem(source_path, target_parent) is True
 
 
 def test_spot_check_persists_sha256_and_inode_peers(tmp_path, monkeypatch):

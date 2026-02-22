@@ -294,8 +294,40 @@ def payload():
     show_default=True,
     help="Hash progress detail level for --upgrade-missing.",
 )
+@click.option(
+    "--upgrade-order",
+    type=click.Choice(["input", "small-first"], case_sensitive=False),
+    default="small-first",
+    show_default=True,
+    help="Root processing order for --upgrade-missing.",
+)
+@click.option(
+    "--upgrade-root-limit",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Limit number of queued incomplete roots to hash-upgrade (0 means all).",
+)
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixes, path_prefix_file, limit, dry_run, upgrade_missing, parallel, workers, hash_progress, low_priority):
+def payload_sync(
+    db,
+    qbit_url,
+    qbit_user,
+    qbit_pass,
+    category,
+    tag,
+    path_prefixes,
+    path_prefix_file,
+    limit,
+    dry_run,
+    upgrade_missing,
+    parallel,
+    workers,
+    hash_progress,
+    upgrade_order,
+    upgrade_root_limit,
+    low_priority,
+):
     """
     Sync torrent instances from qBittorrent and map to payloads.
 
@@ -414,6 +446,10 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
     root_path_from_content_path = 0
     write_batch_ops = 0
     write_batch_threshold = 400
+    upgrade_queue: dict[str, dict] = {}
+    upgrade_started = 0
+    upgrade_completed = 0
+    upgrade_failed = 0
 
     with TwoLineProgress(
         total=len(torrents),
@@ -460,109 +496,17 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                 missing_in_catalog += 1
 
             if (not dry_run) and payload.status != 'complete' and upgrade_missing:
-                hash_log_state = {
-                    "last_done": 0,
-                    "last_total": 0,
-                    "last_bytes_done": 0,
-                    "last_bytes_total": 0,
-                    "last_path": "",
-                    "done_event_seen": False,
-                }
-                hash_reporter = HashProgressReporter(label=torrent.name, mode=hash_progress.lower())
-                heartbeat_stop = threading.Event()
-                heartbeat_thread = None
-
-                def _hash_progress(event, done, total, abs_path, **meta):
-                    hash_log_state["last_done"] = max(0, int(done or 0))
-                    hash_log_state["last_total"] = max(0, int(total or 0))
-                    hash_log_state["last_path"] = str(abs_path or hash_log_state["last_path"])
-                    hash_log_state["last_bytes_done"] = max(
-                        0,
-                        int(meta.get("hashed_bytes") or hash_log_state["last_bytes_done"]),
-                    )
-                    hash_log_state["last_bytes_total"] = max(
-                        0,
-                        int(meta.get("total_bytes") or hash_log_state["last_bytes_total"]),
-                    )
-                    if event == "done":
-                        hash_log_state["done_event_seen"] = True
-                    if event == "start":
-                        hash_reporter.start(
-                            total_groups=hash_log_state["last_total"],
-                            total_bytes=hash_log_state["last_bytes_total"],
-                        )
-                    else:
-                        hash_reporter.update(
-                            event=event,
-                            done_groups=hash_log_state["last_done"],
-                            total_groups=hash_log_state["last_total"],
-                            path=abs_path,
-                            file_bytes_done=meta.get("group_bytes_done"),
-                            file_bytes_total=meta.get("group_bytes_total"),
-                            batch_bytes_done=hash_log_state["last_bytes_done"],
-                            batch_bytes_total=hash_log_state["last_bytes_total"],
-                        )
-                    if hash_log_state["last_total"] > 0:
-                        progress.update(
-                            desc=hash_reporter.status_desc(
-                                done_groups=hash_log_state["last_done"],
-                                total_groups=hash_log_state["last_total"],
-                                path=torrent.name,
-                            ),
-                            advance=0,
-                        )
-
-                if hash_progress.lower() == "full":
-                    def _heartbeat_loop():
-                        while not heartbeat_stop.wait(5.0):
-                            if hash_log_state["last_total"] <= 0:
-                                continue
-                            hash_reporter.update(
-                                event="heartbeat",
-                                done_groups=hash_log_state["last_done"],
-                                total_groups=hash_log_state["last_total"],
-                                path=hash_log_state["last_path"] or torrent.name,
-                                batch_bytes_done=hash_log_state["last_bytes_done"],
-                                batch_bytes_total=hash_log_state["last_bytes_total"],
-                                force=True,
-                            )
-                            progress.update(
-                                desc=hash_reporter.status_desc(
-                                    done_groups=hash_log_state["last_done"],
-                                    total_groups=hash_log_state["last_total"],
-                                    path=torrent.name,
-                                ),
-                                advance=0,
-                            )
-
-                    heartbeat_thread = threading.Thread(
-                        target=_heartbeat_loop,
-                        daemon=True,
-                    )
-                    heartbeat_thread.start()
-
-                try:
-                    upgraded = upgrade_payload_missing_sha256(
-                        conn,
-                        root_path,
-                        device_id=payload.device_id,
-                        parallel=parallel,
-                        workers=workers,
-                        progress_cb=_hash_progress,
-                    )
-                finally:
-                    heartbeat_stop.set()
-                    if heartbeat_thread is not None:
-                        heartbeat_thread.join(timeout=0.2)
-                if hash_log_state["last_total"] > 0 and not hash_log_state["done_event_seen"]:
-                    hash_reporter.finish(
-                        done_groups=hash_log_state["last_done"],
-                        total_groups=hash_log_state["last_total"],
-                        batch_bytes_done=hash_log_state["last_bytes_done"],
-                        batch_bytes_total=hash_log_state["last_bytes_total"],
-                    )
-                if upgraded > 0:
-                    payload = build_payload(conn, str(root_canon), device_id=payload.device_id, already_canonical=True)
+                key = str(root_canon)
+                if key not in upgrade_queue:
+                    upgrade_queue[key] = {
+                        "root_path": key,
+                        "device_id": payload.device_id,
+                        "first_torrent": torrent.name,
+                        "first_hash": torrent.hash,
+                        "first_seen_order": processed,
+                        "file_count": int(payload.file_count or 0),
+                        "total_bytes": int(payload.total_bytes or 0),
+                    }
 
             if not dry_run:
                 # Insert/update payload
@@ -590,18 +534,191 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
                 print(f"      {payload.file_count} files, {payload.total_bytes:,} bytes")
                 synced_count += 1
             else:
-                print(f"   ⚠️  Payload incomplete (missing SHA256s)")
+                if (not dry_run) and upgrade_missing:
+                    print("   ⚠️  Payload incomplete (missing SHA256s; queued for upgrade)")
+                else:
+                    print("   ⚠️  Payload incomplete (missing SHA256s)")
                 incomplete_count += 1
             processed += 1
             checked += 1
             progress.update(advance=1)
+
+    if (not dry_run) and upgrade_missing and upgrade_queue:
+        print("------------------------------------------------------------")
+        print("Phase: upgrade-hash-backfill")
+        print("What this does: fill missing payload hashes after sync mapping is complete.")
+        print("------------------------------------------------------------")
+        upgrade_stage_start = time.monotonic()
+        queue_items = list(upgrade_queue.values())
+        order_mode = (upgrade_order or "small-first").lower()
+        if order_mode == "small-first":
+            queue_items.sort(
+                key=lambda item: (
+                    int(item.get("total_bytes") or 0) <= 0,
+                    int(item.get("total_bytes") or 0),
+                    int(item.get("file_count") or 0),
+                    int(item.get("first_seen_order") or 0),
+                )
+            )
+        else:
+            queue_items.sort(key=lambda item: int(item.get("first_seen_order") or 0))
+
+        if upgrade_root_limit > 0:
+            queue_items = queue_items[:upgrade_root_limit]
+
+        if write_batch_ops:
+            conn.commit()
+            write_batch_ops = 0
+
+        total_upgrade_roots = len(queue_items)
+        total_upgrade_bytes = sum(max(0, int(item.get("total_bytes") or 0)) for item in queue_items)
+        print(
+            "\n🔧 Upgrade stage queued roots: "
+            f"{total_upgrade_roots} order={order_mode} "
+            f"total_bytes={total_upgrade_bytes:,}"
+        )
+        if upgrade_root_limit > 0:
+            print(f"   upgrade root limit applied: {upgrade_root_limit}")
+
+        for root_idx, item in enumerate(queue_items, start=1):
+            root_path = str(item.get("root_path") or "")
+            torrent_label = str(item.get("first_torrent") or "")
+            torrent_hash = str(item.get("first_hash") or "")
+            root_bytes = max(0, int(item.get("total_bytes") or 0))
+            root_files = max(0, int(item.get("file_count") or 0))
+            print(
+                f"\n🔧 Upgrading root {root_idx}/{total_upgrade_roots}: "
+                f"{Path(root_path).name or root_path}"
+            )
+            print(
+                f"   root={root_path} files={root_files} bytes={root_bytes:,} "
+                f"seed_torrent={torrent_hash[:16]}"
+            )
+            print(
+                f"   upgrade_progress roots_done={root_idx - 1}/{total_upgrade_roots} "
+                f"completed={upgrade_completed} failed={upgrade_failed}"
+            )
+            upgrade_started += 1
+
+            hash_log_state = {
+                "last_done": 0,
+                "last_total": 0,
+                "last_bytes_done": 0,
+                "last_bytes_total": 0,
+                "last_path": "",
+                "done_event_seen": False,
+            }
+            hash_reporter = HashProgressReporter(label=torrent_label or root_path, mode=hash_progress.lower())
+            heartbeat_stop = threading.Event()
+            heartbeat_thread = None
+
+            def _hash_progress(event, done, total, abs_path, **meta):
+                hash_log_state["last_done"] = max(0, int(done or 0))
+                hash_log_state["last_total"] = max(0, int(total or 0))
+                hash_log_state["last_path"] = str(abs_path or hash_log_state["last_path"])
+                hash_log_state["last_bytes_done"] = max(
+                    0,
+                    int(meta.get("hashed_bytes") or hash_log_state["last_bytes_done"]),
+                )
+                hash_log_state["last_bytes_total"] = max(
+                    0,
+                    int(meta.get("total_bytes") or hash_log_state["last_bytes_total"]),
+                )
+                if event == "done":
+                    hash_log_state["done_event_seen"] = True
+                if event == "start":
+                    hash_reporter.start(
+                        total_groups=hash_log_state["last_total"],
+                        total_bytes=hash_log_state["last_bytes_total"],
+                    )
+                else:
+                    hash_reporter.update(
+                        event=event,
+                        done_groups=hash_log_state["last_done"],
+                        total_groups=hash_log_state["last_total"],
+                        path=abs_path,
+                        file_bytes_done=meta.get("group_bytes_done"),
+                        file_bytes_total=meta.get("group_bytes_total"),
+                        batch_bytes_done=hash_log_state["last_bytes_done"],
+                        batch_bytes_total=hash_log_state["last_bytes_total"],
+                    )
+            if hash_progress.lower() == "full":
+                def _heartbeat_loop():
+                    while not heartbeat_stop.wait(5.0):
+                        if hash_log_state["last_total"] <= 0:
+                            continue
+                        hash_reporter.update(
+                            event="heartbeat",
+                            done_groups=hash_log_state["last_done"],
+                            total_groups=hash_log_state["last_total"],
+                            path=hash_log_state["last_path"] or root_path,
+                            batch_bytes_done=hash_log_state["last_bytes_done"],
+                            batch_bytes_total=hash_log_state["last_bytes_total"],
+                            force=True,
+                        )
+
+                heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+                heartbeat_thread.start()
+
+            try:
+                upgraded_groups = upgrade_payload_missing_sha256(
+                    conn,
+                    root_path,
+                    device_id=item.get("device_id"),
+                    parallel=parallel,
+                    workers=workers,
+                    progress_cb=_hash_progress,
+                )
+            except Exception as exc:
+                upgrade_failed += 1
+                print(f"   ❌ Upgrade failed: {exc}")
+                continue
+            finally:
+                heartbeat_stop.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=0.2)
+
+            if hash_log_state["last_total"] > 0 and not hash_log_state["done_event_seen"]:
+                hash_reporter.finish(
+                    done_groups=hash_log_state["last_done"],
+                    total_groups=hash_log_state["last_total"],
+                    batch_bytes_done=hash_log_state["last_bytes_done"],
+                    batch_bytes_total=hash_log_state["last_bytes_total"],
+                )
+
+            refreshed = build_payload(conn, root_path, device_id=item.get("device_id"), already_canonical=True)
+            upsert_payload(conn, refreshed, commit=False)
+            write_batch_ops += 1
+            if write_batch_ops >= write_batch_threshold:
+                conn.commit()
+                write_batch_ops = 0
+
+            if refreshed.status == "complete":
+                upgrade_completed += 1
+                print(
+                    f"   ✅ Upgrade complete: groups={upgraded_groups} "
+                    f"payload_hash={str(refreshed.payload_hash or '')[:16]}"
+                )
+            else:
+                print(f"   ⚠️  Upgrade ended incomplete: groups={upgraded_groups}")
+        upgrade_elapsed = int(time.monotonic() - upgrade_stage_start)
+        print(
+            "upgrade_summary "
+            f"queued={total_upgrade_roots} started={upgrade_started} "
+            f"completed={upgrade_completed} failed={upgrade_failed} elapsed_s={upgrade_elapsed}"
+        )
+        print("------------------------------------------------------------")
 
     if not dry_run and write_batch_ops:
         conn.commit()
 
     if (not dry_run) and limit == 0:
         prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
-        prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
+        try:
+            prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
+        except Exception as exc:
+            print(f"   ⚠️  orphan prune failed (non-fatal): {exc}")
+            prune_stats = None
 
     if dry_run:
         print(f"\n✅ DRY-RUN complete (no DB changes)")
@@ -623,6 +740,12 @@ def payload_sync(db, qbit_url, qbit_user, qbit_pass, category, tag, path_prefixe
         f"content_path={root_path_from_content_path}, "
         f"files_api_fallback={getattr(qbit, 'root_path_files_fallback_calls', 0)}"
     )
+    if upgrade_missing and not dry_run:
+        print(
+            "   upgrade stage: "
+            f"queued={len(upgrade_queue)} started={upgrade_started} "
+            f"completed={upgrade_completed} failed={upgrade_failed}"
+        )
     if prune_stats is not None:
         print(
             "   orphan gc candidates: "

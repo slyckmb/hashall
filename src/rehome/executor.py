@@ -53,6 +53,43 @@ class DemotionExecutor:
         self.tag_strict = os.getenv("HASHALL_REHOME_TAG_STRICT") == "1"
         self.disable_atm_on_rehome = os.getenv("HASHALL_REHOME_DISABLE_ATM", "1") != "0"
         self.debug_qb = os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self.force_recheck_after_relocate = (
+            os.getenv("HASHALL_REHOME_QB_FORCE_RECHECK", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        self.resume_after_relocate = (
+            os.getenv("HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.resume_on_failure = (
+            os.getenv("HASHALL_REHOME_QB_RESUME_ON_FAILURE", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        try:
+            self.recheck_base_seconds = max(
+                60.0, float(os.getenv("HASHALL_REHOME_QB_RECHECK_BASE_SECONDS", "120"))
+            )
+        except ValueError:
+            self.recheck_base_seconds = 120.0
+        try:
+            self.recheck_seconds_per_gib = max(
+                1.0, float(os.getenv("HASHALL_REHOME_QB_RECHECK_S_PER_GIB", "20"))
+            )
+        except ValueError:
+            self.recheck_seconds_per_gib = 20.0
+        try:
+            self.recheck_safety_margin = max(
+                1.0, float(os.getenv("HASHALL_REHOME_QB_RECHECK_MARGIN", "2.0"))
+            )
+        except ValueError:
+            self.recheck_safety_margin = 2.0
+        try:
+            self.recheck_max_seconds = max(
+                self.recheck_base_seconds,
+                float(os.getenv("HASHALL_REHOME_QB_RECHECK_MAX_SECONDS", "7200")),
+            )
+        except ValueError:
+            self.recheck_max_seconds = 7200.0
 
     def _get_db_connection(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Get database connection."""
@@ -118,10 +155,25 @@ class DemotionExecutor:
 
     def _is_cross_filesystem(self, source_path: Path, target_parent: Path) -> bool:
         """Return True when source and target parent are on different filesystems."""
+        def _existing_probe(path: Path) -> Optional[Path]:
+            probe = Path(path)
+            if probe.exists():
+                return probe
+            for parent in probe.parents:
+                if parent.exists():
+                    return parent
+            return None
+
         try:
-            return source_path.stat().st_dev != target_parent.stat().st_dev
+            source_probe = _existing_probe(source_path)
+            target_probe = _existing_probe(target_parent)
+            if source_probe is None or target_probe is None:
+                # Be conservative: force copy strategy when mount cannot be determined.
+                return True
+            return source_probe.stat().st_dev != target_probe.stat().st_dev
         except FileNotFoundError:
-            return False
+            # Be conservative if either side disappears mid-check.
+            return True
 
     @staticmethod
     def _is_permission_error(exc: BaseException) -> bool:
@@ -167,6 +219,7 @@ class DemotionExecutor:
 
     def _copy_with_rsync_progress(self, source_path: Path, target_path: Path) -> None:
         """Copy payload with rsync progress output, preserving metadata and hardlinks."""
+        bwlimit_kbps_raw = os.getenv("REHOME_RSYNC_BWLIMIT_KBPS", "").strip()
         rsync_cmd = [
             "rsync",
             "-aHAX",
@@ -174,6 +227,16 @@ class DemotionExecutor:
             "--human-readable",
             "--info=progress2",
         ]
+        if bwlimit_kbps_raw:
+            try:
+                bwlimit_kbps = int(bwlimit_kbps_raw)
+                if bwlimit_kbps > 0:
+                    rsync_cmd.append(f"--bwlimit={bwlimit_kbps}")
+            except ValueError:
+                self._log(
+                    f"invalid REHOME_RSYNC_BWLIMIT_KBPS={bwlimit_kbps_raw}; ignoring",
+                    "warning",
+                )
         if source_path.is_dir():
             rsync_cmd.extend([f"{source_path}/", f"{target_path}/"])
         else:
@@ -502,6 +565,196 @@ class DemotionExecutor:
             })
         return relocations
 
+    def _get_torrent_info_with_retry(
+        self,
+        torrent_hash: str,
+        *,
+        attempts: int = 3,
+        delay_seconds: float = 1.0,
+    ) -> Optional[object]:
+        """Fetch torrent info with retries for transient qB timeouts."""
+        import time
+
+        for attempt in range(1, attempts + 1):
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if info:
+                return info
+            if attempt < attempts:
+                self._log(
+                    f"  retry_get_torrent_info hash={torrent_hash[:16]} "
+                    f"attempt={attempt + 1}/{attempts}",
+                    "warning",
+                )
+                time.sleep(min(delay_seconds * attempt, 3.0))
+        return None
+
+    def _relocation_verify_timeout_seconds(self, info: Optional[object]) -> float:
+        """
+        Estimate qB setLocation settle timeout using payload size.
+
+        Large payloads can keep qB in `moving` state for several minutes before
+        save_path flips. Use a size-aware window to avoid false failures.
+        """
+        if not info:
+            return 180.0
+
+        size_bytes = 0
+        for attr in ("size", "total_size", "completed"):
+            value = getattr(info, attr, None)
+            try:
+                if value is not None:
+                    size_bytes = max(size_bytes, int(value))
+            except (TypeError, ValueError):
+                continue
+
+        size_gib = float(size_bytes) / float(1024 ** 3) if size_bytes > 0 else 0.0
+        timeout = 180.0 + (size_gib * 25.0)
+        return max(180.0, min(timeout, 3600.0))
+
+    def _qb_recheck_timeout_seconds(self, info: Optional[object]) -> float:
+        """Estimate timeout window for post-relocation qB recheck/validation."""
+        if not info:
+            return max(self.recheck_base_seconds, 300.0)
+
+        size_bytes = 0
+        for attr in ("size", "total_size", "completed"):
+            value = getattr(info, attr, None)
+            try:
+                if value is not None:
+                    size_bytes = max(size_bytes, int(value))
+            except (TypeError, ValueError):
+                continue
+
+        size_gib = float(size_bytes) / float(1024 ** 3) if size_bytes > 0 else 0.0
+        raw = (self.recheck_base_seconds + (size_gib * self.recheck_seconds_per_gib))
+        timeout = raw * self.recheck_safety_margin
+        return max(300.0, min(timeout, self.recheck_max_seconds))
+
+    def _is_qb_seed_ready(self, info: object) -> tuple[bool, str]:
+        """Gate that torrent is complete and in a seeding-safe state."""
+        state = str(getattr(info, "state", "") or "").strip().lower()
+        progress_raw = getattr(info, "progress", 1.0)
+        try:
+            progress = float(progress_raw)
+        except (TypeError, ValueError):
+            progress = 0.0
+        amount_left_raw = getattr(info, "amount_left", 0)
+        try:
+            amount_left = int(amount_left_raw or 0)
+        except (TypeError, ValueError):
+            amount_left = 0
+
+        if "checking" in state or "moving" in state or "allocating" in state:
+            return False, "state_transient"
+        if state in {"error", "missingfiles"}:
+            return False, "state_error"
+        if state in {"downloading", "stalleddl", "queueddl", "forceddl", "metadl", "pauseddl"}:
+            return False, "state_downloading"
+        if progress < 0.9999:
+            return False, "progress_below_100"
+        if amount_left > 0:
+            return False, "amount_left_nonzero"
+        if not state:
+            return True, "ok_no_state"
+        if state not in {"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}:
+            return False, f"state_not_seed_ready:{state or 'unknown'}"
+        return True, "ok"
+
+    @staticmethod
+    def _is_qb_state_paused_or_stopped(state: str) -> bool:
+        state_l = str(state or "").strip().lower()
+        return state_l in {"pausedup", "pauseddl", "stoppedup", "stoppeddl", "paused", "stopped"}
+
+    def _ensure_qb_seed_ready_after_relocate(
+        self,
+        torrent_hash: str,
+        *,
+        min_timeout_seconds: float = 300.0,
+        interval_seconds: float = 2.0,
+    ) -> None:
+        """Force recheck (optional) and block resume until qB reports seed-ready."""
+        import time
+
+        info = self._get_torrent_info_with_retry(torrent_hash, attempts=3, delay_seconds=1.0)
+        timeout_seconds = max(min_timeout_seconds, self._qb_recheck_timeout_seconds(info))
+
+        if self.force_recheck_after_relocate:
+            if not hasattr(self.qbit_client, "recheck_torrent"):
+                self._log(
+                    f"  recheck_guard hash={torrent_hash[:16]} status=skipped reason=client_missing_recheck_api",
+                    "warning",
+                )
+            else:
+                self._log(
+                    f"  recheck_guard hash={torrent_hash[:16]} status=requested timeout_s={int(timeout_seconds)}"
+                )
+                if not self.qbit_client.recheck_torrent(torrent_hash):
+                    last_error = str(getattr(self.qbit_client, "last_error", "") or "unknown")
+                    raise RuntimeError(
+                        f"Failed qB recheck request for torrent {torrent_hash[:16]} error={last_error}"
+                    )
+
+        deadline = time.monotonic() + timeout_seconds
+        last_debug = 0.0
+        last_state = "unknown"
+        last_progress = -1.0
+        last_amount_left = -1
+
+        while time.monotonic() <= deadline:
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if not info:
+                time.sleep(interval_seconds)
+                continue
+
+            state = str(getattr(info, "state", "") or "").strip().lower()
+            progress_raw = getattr(info, "progress", 1.0)
+            try:
+                progress = float(progress_raw)
+            except (TypeError, ValueError):
+                progress = 0.0
+            amount_left_raw = getattr(info, "amount_left", 0)
+            try:
+                amount_left = int(amount_left_raw or 0)
+            except (TypeError, ValueError):
+                amount_left = 0
+
+            last_state = state or "unknown"
+            last_progress = progress
+            last_amount_left = amount_left
+
+            ready, reason = self._is_qb_seed_ready(info)
+            if ready:
+                self._log(
+                    f"  recheck_guard hash={torrent_hash[:16]} status=ready "
+                    f"state={state} progress={progress:.4f} amount_left={amount_left}"
+                )
+                return
+
+            # Hard failures: do not resume torrents that would redownload.
+            if reason in {"state_error", "state_downloading", "progress_below_100", "amount_left_nonzero"}:
+                raise RuntimeError(
+                    f"qB seed-readiness guard failed for torrent {torrent_hash[:16]} "
+                    f"reason={reason} state={state} progress={progress:.4f} amount_left={amount_left}"
+                )
+
+            now = time.monotonic()
+            if (now - last_debug) >= 5.0:
+                self._log(
+                    f"  recheck_wait hash={torrent_hash[:16]} "
+                    f"state={state or 'unknown'} progress={progress:.4f} "
+                    f"amount_left={amount_left} reason={reason}",
+                    "warning",
+                )
+                last_debug = now
+
+            time.sleep(interval_seconds)
+
+        raise RuntimeError(
+            f"qB seed-readiness guard timeout for torrent {torrent_hash[:16]} "
+            f"state={last_state} progress={last_progress:.4f} amount_left={last_amount_left} "
+            f"timeout_s={int(timeout_seconds)}"
+        )
+
     def _relocate_torrents_atomic(self, relocations: List[Dict]) -> None:
         """
         Atomically relocate multiple torrents.
@@ -510,12 +763,14 @@ class DemotionExecutor:
         1. Pause all
         2. Set locations for all
         3. Verify all while paused
-        4. Resume all
+        4. Resume only when explicitly enabled
         Rollback location changes if any step fails.
         """
         paused = []
         moved = []
+        resume_candidates: List[str] = []
         original_qb_paths: Dict[str, str] = {}
+        verify_timeout_by_hash: Dict[str, float] = {}
         total = len(relocations)
         progress_every = 5 if total <= 50 else 25
 
@@ -523,12 +778,22 @@ class DemotionExecutor:
             # Capture runtime qB save_path as rollback source-of-truth.
             for r in relocations:
                 torrent_hash = r["torrent_hash"]
-                info = self.qbit_client.get_torrent_info(torrent_hash)
-                if not info or not getattr(info, "save_path", None):
+                info = self._get_torrent_info_with_retry(torrent_hash, attempts=3, delay_seconds=1.0)
+                if not info:
+                    last_error = str(getattr(self.qbit_client, "last_error", "") or "unknown")
+                    raise RuntimeError(
+                        f"qB info unavailable for torrent {torrent_hash[:16]} "
+                        f"error={last_error}"
+                    )
+                if not getattr(info, "save_path", None):
                     raise RuntimeError(f"Missing qB save_path for torrent {torrent_hash[:16]}")
                 original_qb_path = str(getattr(info, "save_path")).strip()
                 original_qb_paths[torrent_hash] = original_qb_path
                 r["original_save_path_qb"] = original_qb_path
+                verify_timeout = self._relocation_verify_timeout_seconds(info)
+                verify_timeout_by_hash[torrent_hash] = verify_timeout
+                if not self._is_qb_state_paused_or_stopped(str(getattr(info, "state", "") or "")):
+                    resume_candidates.append(torrent_hash)
 
                 auto_enabled = bool(getattr(info, "auto_tmm", False)) if info else False
                 if self.disable_atm_on_rehome:
@@ -567,10 +832,11 @@ class DemotionExecutor:
             for idx, r in enumerate(relocations, start=1):
                 torrent_hash = r["torrent_hash"]
                 expected_path = canonicalize_path(Path(r["target_save_path"]).resolve())
+                verify_timeout = verify_timeout_by_hash.get(torrent_hash, 180.0)
                 torrent_info, actual_path = self._wait_for_save_path(
                     torrent_hash,
                     expected_path,
-                    timeout_seconds=90.0,
+                    timeout_seconds=verify_timeout,
                     interval_seconds=1.0,
                 )
                 if not torrent_info:
@@ -591,7 +857,7 @@ class DemotionExecutor:
                     torrent_info, actual_path = self._wait_for_save_path(
                         torrent_hash,
                         expected_path,
-                        timeout_seconds=120.0,
+                        timeout_seconds=max(verify_timeout, 300.0),
                         interval_seconds=1.0,
                     )
                     if (not relocated) or (actual_path != expected_path):
@@ -618,23 +884,150 @@ class DemotionExecutor:
                         f"  auto_tmm_after hash={torrent_hash[:16]} "
                         f"enabled={str(bool(getattr(torrent_info, 'auto_tmm', False))).lower()}"
                     )
+                self._validate_qb_content_path(
+                    torrent_hash,
+                    attempts=5,
+                    delay_seconds=1.0,
+                )
+                self._ensure_qb_seed_ready_after_relocate(
+                    torrent_hash,
+                    min_timeout_seconds=max(verify_timeout, 300.0),
+                    interval_seconds=2.0,
+                )
                 if idx == 1 or idx == total or idx % progress_every == 0:
                     self._log(f"  relocate_progress phase=verify done={idx}/{total}")
 
-            for idx, h in enumerate(paused, start=1):
-                if not self.qbit_client.resume_torrent(h):
-                    raise RuntimeError(f"Failed to resume torrent {h[:16]}")
-                if idx == 1 or idx == total or idx % progress_every == 0:
-                    self._log(f"  relocate_progress phase=resume done={idx}/{total}")
+            if self.resume_after_relocate:
+                resume_total = len(resume_candidates)
+                for idx, h in enumerate(resume_candidates, start=1):
+                    if not self.qbit_client.resume_torrent(h):
+                        raise RuntimeError(f"Failed to resume torrent {h[:16]}")
+                    if idx == 1 or idx == resume_total or idx % progress_every == 0:
+                        self._log(f"  relocate_progress phase=resume done={idx}/{resume_total}")
+            else:
+                self._log(
+                    f"  relocate_progress phase=resume skipped=policy_keep_paused count={len(paused)}"
+                )
         except Exception as e:
             # Rollback to original locations if possible
             for m in moved:
                 src = m.get("original_save_path_qb") or original_qb_paths.get(m["torrent_hash"])
                 if src:
                     self._set_location_with_retry(m["torrent_hash"], src, attempts=12, delay_seconds=1.0)
-            for h in paused:
-                self.qbit_client.resume_torrent(h)
+            if self.resume_on_failure:
+                for h in resume_candidates:
+                    if not self.qbit_client.resume_torrent(h):
+                        self._log(
+                            f"  relocate_progress phase=resume_on_failure hash={h[:16]} status=resume_failed",
+                            "warning",
+                        )
+            else:
+                self._log(
+                    f"  relocate_progress phase=resume skipped=failure_keep_paused count={len(paused)}",
+                    "warning",
+                )
             raise
+
+    def _rollback_partial_target_views(self, plan: Dict) -> None:
+        """
+        Remove pool-side views created before relocation failure.
+
+        This keeps rollback idempotent when payload move is restored but view links
+        were already materialized for sibling save paths.
+        """
+        view_targets = plan.get("view_targets") or []
+        if not view_targets:
+            return
+
+        source_path = Path(plan.get("source_path", "")).resolve() if plan.get("source_path") else None
+        target_path = Path(plan.get("target_path", "")).resolve() if plan.get("target_path") else None
+        seeding_roots = [Path(r).resolve() for r in plan.get("seeding_roots", [])]
+        seen: set[str] = set()
+        removed = 0
+        skipped = 0
+
+        for target in view_targets:
+            target_save = str(target.get("target_save_path") or "").strip()
+            root_name = str(target.get("root_name") or "").strip()
+            if not target_save or not root_name:
+                skipped += 1
+                continue
+
+            view_path = (Path(target_save) / root_name).resolve()
+            key = str(view_path)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if source_path is not None and view_path == source_path:
+                skipped += 1
+                continue
+            if target_path is not None and view_path == target_path:
+                skipped += 1
+                continue
+            if seeding_roots and not self._is_under_roots(view_path, seeding_roots):
+                skipped += 1
+                continue
+            if not view_path.exists():
+                skipped += 1
+                continue
+
+            try:
+                if view_path.is_dir():
+                    shutil.rmtree(view_path)
+                else:
+                    view_path.unlink()
+                removed += 1
+                self._log(f"  rollback_cleanup_view path={view_path}", "warning")
+            except Exception as exc:
+                skipped += 1
+                self._log(
+                    f"  rollback_cleanup_view_failed path={view_path} error={exc}",
+                    "warning",
+                )
+
+        self._log(f"  rollback_cleanup_summary removed={removed} skipped={skipped}")
+
+    def _filter_move_view_targets(self, plan: Dict, source_path: Path) -> List[Dict]:
+        """
+        For MOVE plans, drop view targets that resolve to the old source path.
+
+        Without this filter, a MOVE can rename source->target, then rebuild a view
+        back at the source location, which trips verify_source_removed.
+        """
+        view_targets = plan.get("view_targets") or []
+        if not view_targets:
+            return []
+
+        source_resolved = canonicalize_path(source_path.resolve())
+        filtered: List[Dict] = []
+        skipped = 0
+
+        for target in view_targets:
+            target_save = str(target.get("target_save_path") or "").strip()
+            root_name = str(target.get("root_name") or "").strip()
+            if not target_save or not root_name:
+                filtered.append(target)
+                continue
+            try:
+                view_path = canonicalize_path((Path(target_save) / root_name).resolve())
+            except Exception:
+                filtered.append(target)
+                continue
+            if view_path == source_resolved:
+                skipped += 1
+                continue
+            filtered.append(target)
+
+        if skipped:
+            self._log(
+                "move_view_target_filter "
+                f"removed_source_equivalent={skipped} "
+                f"before={len(view_targets)} after={len(filtered)}",
+                "warning",
+            )
+
+        return filtered
 
     def _set_location_with_retry(
         self,
@@ -677,7 +1070,8 @@ class DemotionExecutor:
                     f"attempt={attempt + 1}/{attempts}",
                     "warning",
                 )
-                time.sleep(min(delay_seconds * attempt, 3.0))
+                backoff = min(delay_seconds * (2 ** (attempt - 1)), 8.0)
+                time.sleep(backoff)
         # Final check in case qB committed late.
         info, actual = self._wait_for_save_path(
             torrent_hash,
@@ -753,6 +1147,63 @@ class DemotionExecutor:
                         last_debug_log = now
             time.sleep(interval_seconds)
         return last_info, last_actual
+
+    def _validate_qb_content_path(
+        self,
+        torrent_hash: str,
+        *,
+        attempts: int = 5,
+        delay_seconds: float = 1.0,
+    ) -> None:
+        """Best-effort qB content-path validation after relocation."""
+        import time
+
+        warned_missing_field = False
+        last_content = ""
+        for attempt in range(1, attempts + 1):
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if not info:
+                if attempt < attempts:
+                    self._log(
+                        f"  retry_validate_content hash={torrent_hash[:16]} "
+                        f"attempt={attempt + 1}/{attempts} reason=no_info",
+                        "warning",
+                    )
+                    backoff = min(delay_seconds * (2 ** (attempt - 1)), 8.0)
+                    time.sleep(backoff)
+                    continue
+                raise RuntimeError(
+                    f"qB info unavailable during content validation for torrent {torrent_hash[:16]}"
+                )
+
+            raw = str(getattr(info, "content_path", "") or "").strip()
+            if not raw:
+                if self.debug_qb and not warned_missing_field:
+                    self._log(
+                        f"  validate_content_skipped hash={torrent_hash[:16]} reason=no_content_path_field",
+                        "warning",
+                    )
+                    warned_missing_field = True
+                return
+
+            last_content = raw
+            content_path = Path(raw).resolve()
+            if content_path.exists():
+                return
+
+            if attempt < attempts:
+                self._log(
+                    f"  retry_validate_content hash={torrent_hash[:16]} "
+                    f"attempt={attempt + 1}/{attempts} path_missing={content_path}",
+                    "warning",
+                )
+                backoff = min(delay_seconds * (2 ** (attempt - 1)), 8.0)
+                time.sleep(backoff)
+
+        raise RuntimeError(
+            f"qB content path missing after relocation for torrent {torrent_hash[:16]} "
+            f"path={last_content or 'unknown'}"
+        )
 
     def _debug_qb_snapshot(self, torrent_hash: str, label: str) -> None:
         if not self.debug_qb:
@@ -912,16 +1363,11 @@ class DemotionExecutor:
         # 2. Set location
         self._log(f"  set_location hash={torrent_hash[:16]} location={new_path}")
         if not self.qbit_client.set_location(torrent_hash, new_path):
-            # Try to resume on failure
-            self.qbit_client.resume_torrent(torrent_hash)
+            if self.resume_on_failure:
+                self.qbit_client.resume_torrent(torrent_hash)
             raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
 
-        # 3. Resume torrent
-        self._log(f"  resume_torrent hash={torrent_hash[:16]}")
-        if not self.qbit_client.resume_torrent(torrent_hash):
-            raise RuntimeError(f"Failed to resume torrent {torrent_hash[:16]}")
-
-        # 4. Verify new location
+        # 3. Verify new location
         self._log(f"  verify_location hash={torrent_hash[:16]}")
         import time
         time.sleep(1)  # Give qBittorrent time to update
@@ -953,6 +1399,16 @@ class DemotionExecutor:
             self._log(
                 f"  auto_tmm_after hash={torrent_hash[:16]} "
                 f"enabled={str(bool(getattr(torrent_info, 'auto_tmm', False))).lower()}"
+            )
+
+        # 4. Resume torrent only when explicitly enabled.
+        if self.resume_after_relocate:
+            self._log(f"  resume_torrent hash={torrent_hash[:16]}")
+            if not self.qbit_client.resume_torrent(torrent_hash):
+                raise RuntimeError(f"Failed to resume torrent {torrent_hash[:16]}")
+        else:
+            self._log(
+                f"  resume_torrent hash={torrent_hash[:16]} status=skipped policy=keep_paused"
             )
 
         self._log(f"  verified hash={torrent_hash[:16]} save_path={actual_path}", "success")
@@ -1815,6 +2271,8 @@ class DemotionExecutor:
         phase_times: Dict[str, float] = {}
         source_path = Path(plan['source_path'])
         target_path = Path(plan['target_path'])
+        execute_plan = dict(plan)
+        execute_plan["view_targets"] = self._filter_move_view_targets(plan, source_path)
 
         moved_payload = False
         move_strategy = "rename"
@@ -1868,8 +2326,8 @@ class DemotionExecutor:
             self._log("step=build_views")
             self._build_views(
                 target_path,
-                plan.get("view_targets") or [],
-                plan,
+                execute_plan.get("view_targets") or [],
+                execute_plan,
                 preloaded_files=preloaded_files,
             )
             phase_times["build_views"] = time.monotonic() - t0
@@ -1877,7 +2335,7 @@ class DemotionExecutor:
             t0 = time.monotonic()
             conn = self._get_db_connection()
             try:
-                relocations = self._build_relocations(conn, plan)
+                relocations = self._build_relocations(conn, execute_plan)
             finally:
                 conn.close()
             phase_times["build_relocations"] = time.monotonic() - t0
@@ -1909,6 +2367,7 @@ class DemotionExecutor:
                             self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
             else:
                 self._log("  rollback skipped reason=idempotent_mode_no_move", "warning")
+            self._rollback_partial_target_views(execute_plan)
             raise
 
         # For rsync-based cross-filesystem moves, remove source only after relocation succeeded.
