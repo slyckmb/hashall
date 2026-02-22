@@ -274,7 +274,7 @@ def test_atomic_relocation_retries_torrent_info_before_failing(tmp_path, monkeyp
     assert executor.qbit_client.info_calls >= 2
 
 
-def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
+def test_atomic_relocation_verifies_before_resume_when_resume_enabled(tmp_path, monkeypatch):
     class OrderedQbitClient(FakeQbitClient):
         def __init__(self):
             super().__init__()
@@ -284,7 +284,7 @@ def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
             return SimpleNamespace(
                 save_path=self.save_paths.get(torrent_hash, self.default_path),
                 auto_tmm=False,
-                state="pausedUP",
+                state="uploading",
             )
 
         def resume_torrent(self, torrent_hash: str) -> bool:
@@ -292,6 +292,7 @@ def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
             return True
 
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.setenv("HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE", "1")
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = OrderedQbitClient()
 
@@ -307,6 +308,64 @@ def test_atomic_relocation_verifies_before_resume(tmp_path, monkeypatch):
     ]
     executor._relocate_torrents_atomic(relocations)
     assert executor.qbit_client.resume_calls == 1
+
+
+def test_atomic_relocation_keeps_torrents_paused_by_default(tmp_path, monkeypatch):
+    class PausedByDefaultClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.resume_calls = 0
+
+        def resume_torrent(self, torrent_hash: str) -> bool:
+            self.resume_calls += 1
+            return True
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.delenv("HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE", raising=False)
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = PausedByDefaultClient()
+
+    relocations = [
+        {"torrent_hash": "t1", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+    executor._relocate_torrents_atomic(relocations)
+    assert executor.qbit_client.resume_calls == 0
+
+
+def test_atomic_relocation_only_resumes_torrents_that_were_active_before_pause(tmp_path, monkeypatch):
+    class MixedStateClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.resume_hashes = []
+            self.states = {"t_paused": "pausedUP", "t_active": "uploading"}
+
+        def resume_torrent(self, torrent_hash: str) -> bool:
+            self.resume_hashes.append(torrent_hash)
+            return True
+
+        def get_torrent_info(self, torrent_hash: str):
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                auto_tmm=False,
+                state=self.states.get(torrent_hash, "pausedUP"),
+                progress=1.0,
+                amount_left=0,
+                size=1024,
+                completed=1024,
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.setenv("HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE", "1")
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = MixedStateClient()
+
+    relocations = [
+        {"torrent_hash": "t_paused", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+        {"torrent_hash": "t_active", "source_save_path": "/stash/seeding", "target_save_path": "/pool/seeding"},
+    ]
+    executor._relocate_torrents_atomic(relocations)
+
+    assert executor.qbit_client.resume_hashes == ["t_active"]
 
 
 def test_atomic_relocation_uses_size_aware_verify_timeout(tmp_path, monkeypatch):

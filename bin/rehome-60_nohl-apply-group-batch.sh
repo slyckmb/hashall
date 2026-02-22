@@ -18,6 +18,9 @@ Options:
   --pool-name NAME          ZFS pool name to guard (default: pool)
   --min-free-pct N          Minimum required free percent on pool (default: 20)
   --spot-check N            Spot-check files during apply (default: 0)
+  --resume-after-relocate 0|1
+                            Resume torrents after relocate (default: 0)
+  --resume-on-failure 0|1   Resume torrents on relocation failure (default: 0)
   --debug                   Enable HASHALL_REHOME_QB_DEBUG=1
   --limit N                 Limit plan rows to process (default: 0 = all)
   --fast                    Fast mode annotation in logs
@@ -50,6 +53,8 @@ DEBUG_MODE=0
 LIMIT="0"
 OUTPUT_PREFIX="nohl"
 FAST_MODE=0
+RESUME_AFTER_RELOCATE="${HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE:-0}"
+RESUME_ON_FAILURE="${HASHALL_REHOME_QB_RESUME_ON_FAILURE:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,6 +65,8 @@ while [[ $# -gt 0 ]]; do
     --pool-name) POOL_NAME="${2:-}"; shift 2 ;;
     --min-free-pct) MIN_FREE_PCT="${2:-}"; shift 2 ;;
     --spot-check) SPOT_CHECK="${2:-}"; shift 2 ;;
+    --resume-after-relocate) RESUME_AFTER_RELOCATE="${2:-}"; shift 2 ;;
+    --resume-on-failure) RESUME_ON_FAILURE="${2:-}"; shift 2 ;;
     --debug) DEBUG_MODE=1; shift ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
     --fast) FAST_MODE=1; shift ;;
@@ -70,8 +77,17 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 2
       ;;
-  esac
+    esac
 done
+
+if [[ "$RESUME_AFTER_RELOCATE" != "0" && "$RESUME_AFTER_RELOCATE" != "1" ]]; then
+  echo "Invalid --resume-after-relocate value: $RESUME_AFTER_RELOCATE" >&2
+  exit 2
+fi
+if [[ "$RESUME_ON_FAILURE" != "0" && "$RESUME_ON_FAILURE" != "1" ]]; then
+  echo "Invalid --resume-on-failure value: $RESUME_ON_FAILURE" >&2
+  exit 2
+fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -144,6 +160,8 @@ fi
 if [[ "$DEBUG_MODE" -eq 1 ]]; then
   export HASHALL_REHOME_QB_DEBUG=1
 fi
+export HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE="$RESUME_AFTER_RELOCATE"
+export HASHALL_REHOME_QB_RESUME_ON_FAILURE="$RESUME_ON_FAILURE"
 
 pool_free_pct() {
   local used_pct free_pct
@@ -178,7 +196,7 @@ echo "Phase 60: Live apply for dryrun-approved groups"
 echo "What this does: execute existing dryrun-approved plan files."
 hr
 echo "run_id=${stamp} step=nohl-apply-group-batch"
-echo "config queue=${queue_tsv} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} spot_check=${SPOT_CHECK} fast=${FAST_MODE} debug=${DEBUG_MODE}"
+echo "config queue=${queue_tsv} db=${DB_PATH} pool_name=${POOL_NAME} min_free_pct=${MIN_FREE_PCT} spot_check=${SPOT_CHECK} resume_after_relocate=${RESUME_AFTER_RELOCATE} resume_on_failure=${RESUME_ON_FAILURE} fast=${FAST_MODE} debug=${DEBUG_MODE}"
 
 total="$(wc -l < "$queue_tsv" | tr -d ' ')"
 if ! assert_pool_space "preflight"; then

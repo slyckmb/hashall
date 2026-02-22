@@ -15,6 +15,9 @@ Options:
   --mode dryrun|apply       Execution mode (default: dryrun)
   --limit N                 Limit actions processed (default: 0 = all)
   --only-reason NAME        Filter actions by reason (repeatable)
+  --resume 0|1              Resume torrents after remediation (default: 0)
+  --max-apply-actions N     Safety cap for apply mode (default: 50)
+  --force-large-apply       Override max-apply-actions safety cap
   --heartbeat-s N           Heartbeat interval seconds (default: 5)
   --poll-s N                Poll interval seconds (default: 2)
   --timeout-s N             Per-item verification timeout seconds (default: 60)
@@ -39,6 +42,9 @@ TIMEOUT_S="60"
 OUTPUT_PREFIX="nohl"
 FAST_MODE=0
 DEBUG_MODE=0
+RESUME_AFTER_VERIFY="${REMEDIATE_RESUME_AFTER_VERIFY:-0}"
+MAX_APPLY_ACTIONS="${REMEDIATE_MAX_APPLY_ACTIONS:-50}"
+FORCE_LARGE_APPLY=0
 ONLY_REASONS=()
 
 while [[ $# -gt 0 ]]; do
@@ -47,6 +53,9 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="${2:-}"; shift 2 ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
     --only-reason) ONLY_REASONS+=("${2:-}"); shift 2 ;;
+    --resume) RESUME_AFTER_VERIFY="${2:-}"; shift 2 ;;
+    --max-apply-actions) MAX_APPLY_ACTIONS="${2:-}"; shift 2 ;;
+    --force-large-apply) FORCE_LARGE_APPLY=1; shift ;;
     --heartbeat-s) HEARTBEAT_S="${2:-}"; shift 2 ;;
     --poll-s) POLL_S="${2:-}"; shift 2 ;;
     --timeout-s) TIMEOUT_S="${2:-}"; shift 2 ;;
@@ -80,6 +89,14 @@ if ! [[ "$POLL_S" =~ ^[0-9]+$ ]] || [[ "$POLL_S" -lt 1 ]]; then
 fi
 if ! [[ "$TIMEOUT_S" =~ ^[0-9]+$ ]] || [[ "$TIMEOUT_S" -lt 1 ]]; then
   echo "Invalid --timeout-s value: $TIMEOUT_S" >&2
+  exit 2
+fi
+if [[ "$RESUME_AFTER_VERIFY" != "0" && "$RESUME_AFTER_VERIFY" != "1" ]]; then
+  echo "Invalid --resume value: $RESUME_AFTER_VERIFY" >&2
+  exit 2
+fi
+if ! [[ "$MAX_APPLY_ACTIONS" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --max-apply-actions value: $MAX_APPLY_ACTIONS" >&2
   exit 2
 fi
 
@@ -118,13 +135,16 @@ echo "Phase 57: qB missingFiles remediation"
 echo "What this does: execute setLocation fixes from the remediation plan."
 hr
 echo "run_id=${stamp} step=qb-missing-remediate"
-echo "config plan=${PLAN_JSON} mode=${MODE} limit=${LIMIT} heartbeat_s=${HEARTBEAT_S} poll_s=${POLL_S} timeout_s=${TIMEOUT_S} only_reasons=${ONLY_REASONS_CSV:-all} fast=${FAST_MODE} debug=${DEBUG_MODE}"
+echo "config plan=${PLAN_JSON} mode=${MODE} limit=${LIMIT} resume=${RESUME_AFTER_VERIFY} max_apply_actions=${MAX_APPLY_ACTIONS} force_large_apply=${FORCE_LARGE_APPLY} heartbeat_s=${HEARTBEAT_S} poll_s=${POLL_S} timeout_s=${TIMEOUT_S} only_reasons=${ONLY_REASONS_CSV:-all} fast=${FAST_MODE} debug=${DEBUG_MODE}"
 
 PYTHONPATH=src \
 REMEDIATE_PLAN_JSON="$PLAN_JSON" \
 REMEDIATE_MODE="$MODE" \
 REMEDIATE_LIMIT="$LIMIT" \
 REMEDIATE_ONLY_REASONS="$ONLY_REASONS_CSV" \
+REMEDIATE_RESUME_AFTER_VERIFY="$RESUME_AFTER_VERIFY" \
+REMEDIATE_MAX_APPLY_ACTIONS="$MAX_APPLY_ACTIONS" \
+REMEDIATE_FORCE_LARGE_APPLY="$FORCE_LARGE_APPLY" \
 REMEDIATE_HEARTBEAT_S="$HEARTBEAT_S" \
 REMEDIATE_POLL_S="$POLL_S" \
 REMEDIATE_TIMEOUT_S="$TIMEOUT_S" \
@@ -153,6 +173,9 @@ def _norm(path: str) -> str:
 plan_path = Path(os.environ["REMEDIATE_PLAN_JSON"])
 mode = os.environ.get("REMEDIATE_MODE", "dryrun")
 limit = int(os.environ.get("REMEDIATE_LIMIT", "0") or 0)
+resume_after_verify = os.environ.get("REMEDIATE_RESUME_AFTER_VERIFY", "0").strip() == "1"
+max_apply_actions = int(os.environ.get("REMEDIATE_MAX_APPLY_ACTIONS", "50") or 50)
+force_large_apply = os.environ.get("REMEDIATE_FORCE_LARGE_APPLY", "0").strip() == "1"
 only_reasons = {
     item.strip()
     for item in os.environ.get("REMEDIATE_ONLY_REASONS", "").split(",")
@@ -173,6 +196,13 @@ if limit > 0:
     actions = actions[:limit]
 
 print(f"actions_selected={len(actions)}")
+if mode == "apply" and max_apply_actions > 0 and len(actions) > max_apply_actions and not force_large_apply:
+    print(
+        "guardrail_blocked "
+        f"reason=too_many_apply_actions selected={len(actions)} "
+        f"max_apply_actions={max_apply_actions} override=--force-large-apply"
+    )
+    raise SystemExit(4)
 if actions:
     reason_counts = {}
     for action in actions:
@@ -184,6 +214,8 @@ if actions:
 results = []
 ok_hashes = []
 failed_hashes = []
+resumed_count = 0
+held_paused_count = 0
 
 qb = None
 if mode == "apply":
@@ -261,7 +293,7 @@ for idx, action in enumerate(actions, start=1):
         failed_hashes.append(torrent_hash)
     finally:
         waited_s = int(time.monotonic() - start)
-        if paused:
+        if paused and resume_after_verify:
             if not qb.resume_torrent(torrent_hash):
                 if status == "ok":
                     status = "error"
@@ -270,6 +302,10 @@ for idx, action in enumerate(actions, start=1):
                     error = f"{error};resume_failed"
                 else:
                     error = "resume_failed"
+            else:
+                resumed_count += 1
+        elif paused:
+            held_paused_count += 1
 
     print(
         f"result idx={idx}/{total} hash={torrent_hash[:16]} status={status} "
@@ -295,6 +331,8 @@ summary = {
     "ok": sum(1 for r in results if r.get("status") == "ok"),
     "errors": sum(1 for r in results if r.get("status") == "error"),
     "dryrun": sum(1 for r in results if r.get("status") == "dryrun"),
+    "resumed": resumed_count,
+    "held_paused": held_paused_count,
 }
 
 result_obj = {
@@ -310,7 +348,8 @@ failed_hashes_path.write_text("\n".join(failed_hashes) + ("\n" if failed_hashes 
 
 print(
     f"summary selected={summary['selected_actions']} ok={summary['ok']} "
-    f"errors={summary['errors']} dryrun={summary['dryrun']}"
+    f"errors={summary['errors']} dryrun={summary['dryrun']} "
+    f"resumed={summary['resumed']} held_paused={summary['held_paused']}"
 )
 print(f"result_json={result_json}")
 print(f"ok_hashes={ok_hashes_path}")

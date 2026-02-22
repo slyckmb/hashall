@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  bin/rehome-stage0.sh [--dryrun|--apply]
+  bin/rehome-stage0.sh [--dryrun|--apply] [--resume 0|1]
 
 Description:
   Move completed qBittorrent items with save_path under /pool/data/*
@@ -12,7 +12,10 @@ Description:
 
 Modes:
   --dryrun   Plan only (default)
-  --apply    Pause -> setLocation -> poll save_path -> resume
+  --apply    Pause -> setLocation -> poll save_path
+
+Options:
+  --resume   Resume torrents after relocation (default: 0)
 
 Environment:
   QBIT_URL   qB base URL (default: http://localhost:9003)
@@ -22,13 +25,20 @@ USAGE
 }
 
 MODE="dryrun"
-if [[ $# -gt 0 ]]; then
+RESUME_AFTER_RELOCATE="${HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE:-0}"
+while [[ $# -gt 0 ]]; do
   case "${1:-}" in
     --dryrun)
       MODE="dryrun"
+      shift
       ;;
     --apply)
       MODE="apply"
+      shift
+      ;;
+    --resume)
+      RESUME_AFTER_RELOCATE="${2:-}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -40,11 +50,10 @@ if [[ $# -gt 0 ]]; then
       exit 2
       ;;
   esac
-  if [[ $# -gt 1 ]]; then
-    echo "Only one mode flag is allowed." >&2
-    usage >&2
-    exit 2
-  fi
+done
+if [[ "$RESUME_AFTER_RELOCATE" != "0" && "$RESUME_AFTER_RELOCATE" != "1" ]]; then
+  echo "Invalid --resume value: $RESUME_AFTER_RELOCATE" >&2
+  exit 2
 fi
 
 for bin in curl jq; do
@@ -258,7 +267,7 @@ poll_until_location() {
   done
 }
 
-printf 'stage0 mode=%s qbit_url=%s log=%s\n' "$MODE" "$QBIT_URL" "$log_file"
+printf 'stage0 mode=%s resume=%s qbit_url=%s log=%s\n' "$MODE" "$RESUME_AFTER_RELOCATE" "$QBIT_URL" "$log_file"
 
 if ! qb_login; then
   echo "Failed to authenticate to qBittorrent at ${QBIT_URL}" >&2
@@ -340,7 +349,7 @@ for ((i = 0; i < total; i++)); do
     fi
   fi
 
-  if (( paused == 1 )); then
+  if (( paused == 1 )) && [[ "$RESUME_AFTER_RELOCATE" == "1" ]]; then
     if ! qb_resume "$hash"; then
       if [[ "$result" == "ok" ]]; then
         result="error"

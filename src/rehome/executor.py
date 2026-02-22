@@ -57,6 +57,14 @@ class DemotionExecutor:
             os.getenv("HASHALL_REHOME_QB_FORCE_RECHECK", "1").strip().lower()
             not in {"0", "false", "no", "off"}
         )
+        self.resume_after_relocate = (
+            os.getenv("HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.resume_on_failure = (
+            os.getenv("HASHALL_REHOME_QB_RESUME_ON_FAILURE", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         try:
             self.recheck_base_seconds = max(
                 60.0, float(os.getenv("HASHALL_REHOME_QB_RECHECK_BASE_SECONDS", "120"))
@@ -652,6 +660,11 @@ class DemotionExecutor:
             return False, f"state_not_seed_ready:{state or 'unknown'}"
         return True, "ok"
 
+    @staticmethod
+    def _is_qb_state_paused_or_stopped(state: str) -> bool:
+        state_l = str(state or "").strip().lower()
+        return state_l in {"pausedup", "pauseddl", "stoppedup", "stoppeddl", "paused", "stopped"}
+
     def _ensure_qb_seed_ready_after_relocate(
         self,
         torrent_hash: str,
@@ -750,11 +763,12 @@ class DemotionExecutor:
         1. Pause all
         2. Set locations for all
         3. Verify all while paused
-        4. Resume all
+        4. Resume only when explicitly enabled
         Rollback location changes if any step fails.
         """
         paused = []
         moved = []
+        resume_candidates: List[str] = []
         original_qb_paths: Dict[str, str] = {}
         verify_timeout_by_hash: Dict[str, float] = {}
         total = len(relocations)
@@ -778,6 +792,8 @@ class DemotionExecutor:
                 r["original_save_path_qb"] = original_qb_path
                 verify_timeout = self._relocation_verify_timeout_seconds(info)
                 verify_timeout_by_hash[torrent_hash] = verify_timeout
+                if not self._is_qb_state_paused_or_stopped(str(getattr(info, "state", "") or "")):
+                    resume_candidates.append(torrent_hash)
 
                 auto_enabled = bool(getattr(info, "auto_tmm", False)) if info else False
                 if self.disable_atm_on_rehome:
@@ -881,19 +897,35 @@ class DemotionExecutor:
                 if idx == 1 or idx == total or idx % progress_every == 0:
                     self._log(f"  relocate_progress phase=verify done={idx}/{total}")
 
-            for idx, h in enumerate(paused, start=1):
-                if not self.qbit_client.resume_torrent(h):
-                    raise RuntimeError(f"Failed to resume torrent {h[:16]}")
-                if idx == 1 or idx == total or idx % progress_every == 0:
-                    self._log(f"  relocate_progress phase=resume done={idx}/{total}")
+            if self.resume_after_relocate:
+                resume_total = len(resume_candidates)
+                for idx, h in enumerate(resume_candidates, start=1):
+                    if not self.qbit_client.resume_torrent(h):
+                        raise RuntimeError(f"Failed to resume torrent {h[:16]}")
+                    if idx == 1 or idx == resume_total or idx % progress_every == 0:
+                        self._log(f"  relocate_progress phase=resume done={idx}/{resume_total}")
+            else:
+                self._log(
+                    f"  relocate_progress phase=resume skipped=policy_keep_paused count={len(paused)}"
+                )
         except Exception as e:
             # Rollback to original locations if possible
             for m in moved:
                 src = m.get("original_save_path_qb") or original_qb_paths.get(m["torrent_hash"])
                 if src:
                     self._set_location_with_retry(m["torrent_hash"], src, attempts=12, delay_seconds=1.0)
-            for h in paused:
-                self.qbit_client.resume_torrent(h)
+            if self.resume_on_failure:
+                for h in resume_candidates:
+                    if not self.qbit_client.resume_torrent(h):
+                        self._log(
+                            f"  relocate_progress phase=resume_on_failure hash={h[:16]} status=resume_failed",
+                            "warning",
+                        )
+            else:
+                self._log(
+                    f"  relocate_progress phase=resume skipped=failure_keep_paused count={len(paused)}",
+                    "warning",
+                )
             raise
 
     def _rollback_partial_target_views(self, plan: Dict) -> None:
@@ -1331,16 +1363,11 @@ class DemotionExecutor:
         # 2. Set location
         self._log(f"  set_location hash={torrent_hash[:16]} location={new_path}")
         if not self.qbit_client.set_location(torrent_hash, new_path):
-            # Try to resume on failure
-            self.qbit_client.resume_torrent(torrent_hash)
+            if self.resume_on_failure:
+                self.qbit_client.resume_torrent(torrent_hash)
             raise RuntimeError(f"Failed to set location for torrent {torrent_hash[:16]}")
 
-        # 3. Resume torrent
-        self._log(f"  resume_torrent hash={torrent_hash[:16]}")
-        if not self.qbit_client.resume_torrent(torrent_hash):
-            raise RuntimeError(f"Failed to resume torrent {torrent_hash[:16]}")
-
-        # 4. Verify new location
+        # 3. Verify new location
         self._log(f"  verify_location hash={torrent_hash[:16]}")
         import time
         time.sleep(1)  # Give qBittorrent time to update
@@ -1372,6 +1399,16 @@ class DemotionExecutor:
             self._log(
                 f"  auto_tmm_after hash={torrent_hash[:16]} "
                 f"enabled={str(bool(getattr(torrent_info, 'auto_tmm', False))).lower()}"
+            )
+
+        # 4. Resume torrent only when explicitly enabled.
+        if self.resume_after_relocate:
+            self._log(f"  resume_torrent hash={torrent_hash[:16]}")
+            if not self.qbit_client.resume_torrent(torrent_hash):
+                raise RuntimeError(f"Failed to resume torrent {torrent_hash[:16]}")
+        else:
+            self._log(
+                f"  resume_torrent hash={torrent_hash[:16]} status=skipped policy=keep_paused"
             )
 
         self._log(f"  verified hash={torrent_hash[:16]} save_path={actual_path}", "success")

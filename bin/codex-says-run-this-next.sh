@@ -340,24 +340,29 @@ run_nohl_restart_lane() {
   local fast_mode="${REHOME_NOHL_FAST:-1}"
   local debug_mode="${REHOME_NOHL_DEBUG:-0}"
   local hb_seconds="${REHOME_NOHL_HEARTBEAT_SECONDS:-5}"
+  local qb_resume_after="${HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE:-0}"
+  local qb_resume_on_failure="${HASHALL_REHOME_QB_RESUME_ON_FAILURE:-0}"
   local fast_arg=""
   local debug_arg=""
   [[ "$fast_mode" == "1" ]] && fast_arg="--fast"
   [[ "$debug_mode" == "1" ]] && debug_arg="--debug"
   export REHOME_PROGRESS_HEARTBEAT_SECONDS="$hb_seconds"
+  export HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE="$qb_resume_after"
+  export HASHALL_REHOME_QB_RESUME_ON_FAILURE="$qb_resume_on_failure"
 
   hr
   echo "Run mode: nohl restart"
   echo "Live apply: ${do_apply} | Execute phases: ${execute} | Fast: ${fast_mode} | Debug: ${debug_mode} | Heartbeat: ${hb_seconds}s"
   echo "Safety guard: minimum pool free space ${min_free_pct}%"
+  echo "Safety guard: keep torrents paused after relocate=${qb_resume_after} resume_on_failure=${qb_resume_on_failure}"
   hr
-  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} resume=${resume} fast=${fast_mode} debug=${debug_mode} heartbeat_s=${hb_seconds}"
+  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} resume=${resume} qb_resume_after=${qb_resume_after} qb_resume_on_failure=${qb_resume_on_failure} fast=${fast_mode} debug=${debug_mode} heartbeat_s=${hb_seconds}"
   echo "recommended_commands_begin"
-  echo "REHOME_PROCESS_MODE=nohl-restart REHOME_NOHL_EXECUTE=1 REHOME_NOHL_APPLY=1 REHOME_NOHL_RESUME=${resume} REHOME_NOHL_FAST=${fast_mode} REHOME_NOHL_DEBUG=${debug_mode} REHOME_NOHL_HEARTBEAT_SECONDS=${hb_seconds} bin/codex-says-run-this-next.sh --min-free-pct ${min_free_pct}"
+  echo "REHOME_PROCESS_MODE=nohl-restart REHOME_NOHL_EXECUTE=1 REHOME_NOHL_APPLY=1 REHOME_NOHL_RESUME=${resume} REHOME_NOHL_FAST=${fast_mode} REHOME_NOHL_DEBUG=${debug_mode} REHOME_NOHL_HEARTBEAT_SECONDS=${hb_seconds} HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE=${qb_resume_after} HASHALL_REHOME_QB_RESUME_ON_FAILURE=${qb_resume_on_failure} bin/codex-says-run-this-next.sh --min-free-pct ${min_free_pct}"
   echo "bin/rehome-30_nohl-discover-and-rank.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-40_nohl-build-group-plan.sh --output-prefix ${output_prefix} --limit ${limit} --resume ${resume} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-50_nohl-dryrun-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
-  echo "bin/rehome-60_nohl-apply-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-60_nohl-apply-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} --resume-after-relocate ${qb_resume_after} --resume-on-failure ${qb_resume_on_failure} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-70_nohl-followup-and-reconcile.sh --output-prefix ${output_prefix} --cleanup ${cleanup} --print-torrents ${print_torrents} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-80_nohl-report-and-next-batch.sh --output-prefix ${output_prefix} ${fast_arg} ${debug_arg}"
   echo "recommended_commands_end"
@@ -397,6 +402,8 @@ run_nohl_restart_lane() {
       --output-prefix "$output_prefix" \
       --min-free-pct "$min_free_pct" \
       --limit "$limit" \
+      --resume-after-relocate "$qb_resume_after" \
+      --resume-on-failure "$qb_resume_on_failure" \
       ${fast_arg:+$fast_arg} \
       ${debug_arg:+$debug_arg}
   else

@@ -220,7 +220,7 @@ def _write_fake_curl(fake_bin: Path) -> None:
     curl_path.chmod(curl_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _run_stage0(mode: str, tmp_path: Path, state: dict):
+def _run_stage0(mode: str, tmp_path: Path, state: dict, extra_env: dict | None = None):
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir(parents=True, exist_ok=True)
     _write_fake_curl(fake_bin)
@@ -234,6 +234,8 @@ def _run_stage0(mode: str, tmp_path: Path, state: dict):
     env["QBIT_URL"] = "http://fake-qbit"
     env["QBIT_USER"] = "admin"
     env["QBIT_PASS"] = "adminpass"
+    if extra_env:
+        env.update(extra_env)
 
     result = subprocess.run(
         ["bash", str(SCRIPT_PATH), mode],
@@ -305,9 +307,8 @@ def test_stage0_apply_continues_after_item_error(tmp_path):
         and call.get("hash") == "good"
         and call.get("location") == "/pool/data/seeds/b"
     )
-    good_resume_index = _find_call_index(calls, "resume", "good")
-
-    assert bad_pause_index < good_pause_index < good_set_index < good_resume_index
+    assert bad_pause_index < good_pause_index < good_set_index
+    assert not any(call.get("op") == "resume" and call.get("hash") == "good" for call in calls)
 
 
 def test_stage0_apply_falls_back_to_stop_start_on_404(tmp_path):
@@ -320,7 +321,12 @@ def test_stage0_apply_falls_back_to_stop_start_on_404(tmp_path):
         "resume_404_hashes": ["good"],
         "calls": [],
     }
-    result, final_state = _run_stage0("--apply", tmp_path, state)
+    result, final_state = _run_stage0(
+        "--apply",
+        tmp_path,
+        state,
+        extra_env={"HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE": "1"},
+    )
 
     assert result.returncode == 0, result.stdout
     assert "1/1 good /pool/data/c->/pool/data/seeds/c " in result.stdout
