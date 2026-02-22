@@ -649,9 +649,11 @@ for e in entries:
     valid = []
     for cand in candidates.values():
         reject_reasons = []
+        same_path_reject = False
         if cand["path"] == save_path and is_incomplete and not cand["expected_matches"]:
             reject_reasons.append("same_save_path_no_expected_root")
-        if not cand["evidence"] and not cand["expected_matches"]:
+            same_path_reject = True
+        if not same_path_reject and not cand["evidence"] and not cand["expected_matches"]:
             reject_reasons.append("missing_recoverability_evidence")
         if reject_reasons:
             rejected.append(
@@ -667,13 +669,23 @@ for e in entries:
 
     ordered = sorted(valid, key=lambda c: (-c["score"], c["path"]))
     best = ordered[0] if ordered else None
+    decision = "UNRESOLVED"
     confidence = "unresolved"
+    skip_reason = ""
     if best:
         confidence = "confident"
+        decision = "MAP"
+    elif rejected:
+        same_path_only = all(r.get("rejected") == "same_save_path_no_expected_root" for r in rejected)
+        same_path = all(r.get("path") == save_path for r in rejected)
+        if same_path_only and same_path and save_path and Path(save_path).exists():
+            confidence = "skip"
+            decision = "SKIP"
+            skip_reason = "already_in_place_unproven_root"
 
     if best is not None:
         confident_hashes.append(torrent_hash)
-    else:
+    elif confidence == "unresolved":
         unresolved_hashes.append(torrent_hash)
 
     mapped.append(
@@ -690,6 +702,8 @@ for e in entries:
             "expected_names": expected_names,
             "recoverable": bool(best is not None),
             "same_as_save_path": bool(best and best["path"] == save_path),
+            "decision": decision,
+            "skip_reason": skip_reason,
             "best_evidence": sorted(best["evidence"]) if best else [],
             "best_expected_matches": sorted(best["expected_matches"]) if best else [],
             "payload_hash": db.get("payload_hash", ""),
