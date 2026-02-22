@@ -342,10 +342,17 @@ run_nohl_restart_lane() {
   local hb_seconds="${REHOME_NOHL_HEARTBEAT_SECONDS:-5}"
   local qb_resume_after="${HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE:-0}"
   local qb_resume_on_failure="${HASHALL_REHOME_QB_RESUME_ON_FAILURE:-0}"
+  local qb_automation_audit="${REHOME_NOHL_QB_AUTOMATION_AUDIT:-1}"
+  local watchdog_interval="${REHOME_NOHL_WATCHDOG_INTERVAL:-15}"
+  local watchdog_allow_file="${REHOME_NOHL_WATCHDOG_ALLOW_FILE:-}"
   local fast_arg=""
   local debug_arg=""
+  local qb_audit_mode="audit"
   [[ "$fast_mode" == "1" ]] && fast_arg="--fast"
   [[ "$debug_mode" == "1" ]] && debug_arg="--debug"
+  if [[ "$do_apply" == "1" ]]; then
+    qb_audit_mode="apply"
+  fi
   export REHOME_PROGRESS_HEARTBEAT_SECONDS="$hb_seconds"
   export HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE="$qb_resume_after"
   export HASHALL_REHOME_QB_RESUME_ON_FAILURE="$qb_resume_on_failure"
@@ -355,10 +362,18 @@ run_nohl_restart_lane() {
   echo "Live apply: ${do_apply} | Execute phases: ${execute} | Fast: ${fast_mode} | Debug: ${debug_mode} | Heartbeat: ${hb_seconds}s"
   echo "Safety guard: minimum pool free space ${min_free_pct}%"
   echo "Safety guard: keep torrents paused after relocate=${qb_resume_after} resume_on_failure=${qb_resume_on_failure}"
+  echo "Safety guard: qB automation audit enabled=${qb_automation_audit} mode=${qb_audit_mode}"
+  echo "Safety guard: paused-DL watchdog interval=${watchdog_interval}s"
   hr
-  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} resume=${resume} qb_resume_after=${qb_resume_after} qb_resume_on_failure=${qb_resume_on_failure} fast=${fast_mode} debug=${debug_mode} heartbeat_s=${hb_seconds}"
+  echo "mode=nohl-restart min_free_pct=${min_free_pct} limit=${limit} execute=${execute} apply=${do_apply} resume=${resume} qb_resume_after=${qb_resume_after} qb_resume_on_failure=${qb_resume_on_failure} qb_automation_audit=${qb_automation_audit} fast=${fast_mode} debug=${debug_mode} heartbeat_s=${hb_seconds}"
   echo "recommended_commands_begin"
   echo "REHOME_PROCESS_MODE=nohl-restart REHOME_NOHL_EXECUTE=1 REHOME_NOHL_APPLY=1 REHOME_NOHL_RESUME=${resume} REHOME_NOHL_FAST=${fast_mode} REHOME_NOHL_DEBUG=${debug_mode} REHOME_NOHL_HEARTBEAT_SECONDS=${hb_seconds} HASHALL_REHOME_QB_RESUME_AFTER_RELOCATE=${qb_resume_after} HASHALL_REHOME_QB_RESUME_ON_FAILURE=${qb_resume_on_failure} bin/codex-says-run-this-next.sh --min-free-pct ${min_free_pct}"
+  echo "bin/rehome-89_nohl-basics-qb-automation-audit.sh --output-prefix ${output_prefix} --mode ${qb_audit_mode} ${fast_arg} ${debug_arg}"
+  if [[ -n "$watchdog_allow_file" ]]; then
+    echo "bin/rehome-99_qb-checking-watch.sh --interval ${watchdog_interval} --enforce-paused-dl --allow-file ${watchdog_allow_file}"
+  else
+    echo "bin/rehome-99_qb-checking-watch.sh --interval ${watchdog_interval} --enforce-paused-dl"
+  fi
   echo "bin/rehome-30_nohl-discover-and-rank.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-40_nohl-build-group-plan.sh --output-prefix ${output_prefix} --limit ${limit} --resume ${resume} ${fast_arg} ${debug_arg}"
   echo "bin/rehome-50_nohl-dryrun-group-batch.sh --output-prefix ${output_prefix} --min-free-pct ${min_free_pct} --limit ${limit} ${fast_arg} ${debug_arg}"
@@ -370,6 +385,17 @@ run_nohl_restart_lane() {
   if [[ "$execute" != "1" ]]; then
     echo "nohl_restart execute=0 status=printed_only"
     return 0
+  fi
+
+  if [[ "$qb_automation_audit" == "1" ]]; then
+    run_with_heartbeat "89 qb-automation-audit" \
+      bin/rehome-89_nohl-basics-qb-automation-audit.sh \
+      --output-prefix "$output_prefix" \
+      --mode "$qb_audit_mode" \
+      ${fast_arg:+$fast_arg} \
+      ${debug_arg:+$debug_arg}
+  else
+    echo "step=89 qb-automation-audit status=skipped reason=disabled"
   fi
 
   run_with_heartbeat "30 nohl-discover-rank" \
@@ -433,6 +459,7 @@ run_nohl_missing_recheck_lane() {
   local fast_mode="${REHOME_NOHL_FAST:-1}"
   local debug_mode="${REHOME_NOHL_DEBUG:-1}"
   local recheck_sleep_s="${REHOME_MISSING_RECHECK_SLEEP_SECONDS:-120}"
+  local watchdog_interval="${REHOME_NOHL_WATCHDOG_INTERVAL:-15}"
   local qbit_url="${QBIT_URL:-http://localhost:9003}"
   local qbit_user="${QBIT_USER:-admin}"
   local qbit_pass="${QBIT_PASS:-adminpass}"
@@ -447,6 +474,8 @@ run_nohl_missing_recheck_lane() {
   hr
   echo "mode=nohl-missing-recheck execute=${execute} output_prefix=${output_prefix} fast=${fast_mode} debug=${debug_mode} sleep_s=${recheck_sleep_s}"
   echo "recommended_commands_begin"
+  echo "bin/rehome-89_nohl-basics-qb-automation-audit.sh --output-prefix ${output_prefix} --mode audit ${fast_arg} ${debug_arg}"
+  echo "bin/rehome-99_qb-checking-watch.sh --interval ${watchdog_interval} --enforce-paused-dl"
   echo "bin/rehome-95_nohl-basics-qb-missing-audit.sh ${fast_arg} ${debug_arg}"
   echo "bin/rehome-96_nohl-basics-qb-missing-remediate-dryrun.sh ${fast_arg} ${debug_arg}"
   echo "AUDIT=\$(ls -1t out/reports/rehome-normalize/${output_prefix}-qb-missing-audit-*.json | head -n1)"
@@ -464,6 +493,7 @@ run_nohl_missing_recheck_lane() {
     return 0
   fi
 
+  bin/rehome-89_nohl-basics-qb-automation-audit.sh --output-prefix "$output_prefix" --mode audit ${fast_arg:+$fast_arg} ${debug_arg:+$debug_arg}
   bin/rehome-95_nohl-basics-qb-missing-audit.sh ${fast_arg:+$fast_arg} ${debug_arg:+$debug_arg}
   bin/rehome-96_nohl-basics-qb-missing-remediate-dryrun.sh ${fast_arg:+$fast_arg} ${debug_arg:+$debug_arg}
 
