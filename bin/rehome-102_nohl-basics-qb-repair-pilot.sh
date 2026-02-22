@@ -155,6 +155,7 @@ for e in confident:
     e["_size"] = int(b.get("size", 0) or 0)
     e["_name"] = str(b.get("name", "") or "")
     e["_state"] = str(b.get("state", "") or "")
+    e["_save_path"] = str(b.get("save_path", "") or str(e.get("save_path", "") or ""))
 
 if not confident:
     payload = {"summary": {"selected": 0, "reason": "no_confident_candidates"}, "plan": [], "results": []}
@@ -163,11 +164,65 @@ if not confident:
     print("summary selected=0 reason=no_confident_candidates")
     raise SystemExit(0)
 
-confident = sorted(confident, key=lambda e: (int(e.get("_size", 0)), str(e.get("hash", ""))))
-indices = sorted(set([0, len(confident) // 2, len(confident) - 1]))
-selected = [confident[i] for i in indices][:limit]
+eligible = []
+rejected = []
+for e in confident:
+    h = str(e.get("hash", "")).lower()
+    target = str(e.get("best_candidate", "") or "").strip()
+    current_save = str(e.get("_save_path", "") or "").strip()
+    recoverable = bool(e.get("recoverable", False))
+    same_path = bool(target and current_save and target == current_save)
+    best_evidence = list(e.get("best_evidence", []) or [])
+    best_expected = list(e.get("best_expected_matches", []) or [])
+    evidence = sorted({str(x) for x in (best_evidence + best_expected) if str(x).strip()})
+
+    reasons = []
+    if not target.startswith("/"):
+        reasons.append("invalid_target_path")
+    if same_path:
+        reasons.append("target_equals_current_save_path")
+    if not recoverable:
+        reasons.append("mapping_not_recoverable")
+    if not evidence:
+        reasons.append("missing_recoverability_evidence")
+
+    if reasons:
+        rejected.append(
+            {
+                "hash": h,
+                "name": str(e.get("_name", "")),
+                "state": str(e.get("_state", "")),
+                "current_save_path": current_save,
+                "target_save_path": target,
+                "reason": ",".join(reasons),
+            }
+        )
+        continue
+
+    e["_best_evidence"] = evidence
+    eligible.append(e)
+
+if not eligible:
+    payload = {
+        "summary": {
+            "selected": 0,
+            "reason": "no_preflight_eligible_candidates",
+            "rejected": len(rejected),
+        },
+        "plan": [],
+        "rejected": rejected,
+        "results": [],
+    }
+    plan_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    result_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"summary selected=0 reason=no_preflight_eligible_candidates rejected={len(rejected)}")
+    raise SystemExit(0)
+
+eligible = sorted(eligible, key=lambda e: (int(e.get("_size", 0)), str(e.get("hash", ""))))
+indices = sorted(set([0, len(eligible) // 2, len(eligible) - 1]))
+selected = [eligible[i] for i in indices][:limit]
 if len(selected) < limit:
-    for e in confident:
+    for e in eligible:
         if e in selected:
             continue
         selected.append(e)
@@ -182,19 +237,30 @@ for e in selected:
             "name": str(e.get("_name", "")),
             "size": int(e.get("_size", 0)),
             "state": str(e.get("_state", "")),
+            "current_save_path": str(e.get("_save_path", "")),
             "target_save_path": str(e.get("best_candidate", "")),
             "best_reason": str(e.get("best_reason", "")),
             "best_score": int(e.get("best_score", 0) or 0),
+            "best_evidence": list(e.get("_best_evidence", [])),
         }
     )
 
-plan_payload = {"summary": {"selected": len(plan_rows), "mode": mode}, "plan": plan_rows}
+plan_payload = {
+    "summary": {
+        "selected": len(plan_rows),
+        "mode": mode,
+        "eligible": len(eligible),
+        "rejected": len(rejected),
+    },
+    "plan": plan_rows,
+    "rejected": rejected,
+}
 plan_json.write_text(json.dumps(plan_payload, indent=2) + "\n", encoding="utf-8")
-print(f"pilot_plan selected={len(plan_rows)} plan_json={plan_json}")
+print(f"pilot_plan selected={len(plan_rows)} eligible={len(eligible)} rejected={len(rejected)} plan_json={plan_json}")
 for idx, row in enumerate(plan_rows, start=1):
     print(
         f"pilot_item idx={idx}/{len(plan_rows)} hash={row['hash'][:8]} "
-        f"size={row['size']} state={row['state']} target={row['target_save_path']}"
+        f"size={row['size']} state={row['state']} current={row['current_save_path']} target={row['target_save_path']}"
     )
 
 if not apply_mode:
@@ -219,12 +285,15 @@ def state_lower(info):
 for idx, row in enumerate(plan_rows, start=1):
     h = row["hash"]
     target = str(row["target_save_path"] or "").strip()
+    current_save = str(row.get("current_save_path", "") or "").strip()
     item = {"hash": h, "target_save_path": target, "status": "error", "error": "", "elapsed_s": 0}
     start = time.monotonic()
-    print(f"pilot_start idx={idx}/{len(plan_rows)} hash={h[:8]} target={target}")
+    print(f"pilot_start idx={idx}/{len(plan_rows)} hash={h[:8]} current={current_save} target={target}")
     try:
         if not target.startswith("/"):
             raise RuntimeError("invalid_target_path")
+        if current_save and current_save == target:
+            raise RuntimeError("preflight_target_equals_current_save_path")
 
         if not qb.pause_torrent(h):
             raise RuntimeError("pause_failed")
@@ -255,6 +324,12 @@ for idx, row in enumerate(plan_rows, start=1):
                 last_hb = now
             time.sleep(poll_s)
         print(f"pilot_step hash={h[:8]} phase=wait_moving_clear ok=1")
+        content_path_after_move = str(getattr(info, "content_path", "") or "")
+        if content_path_after_move and not content_path_after_move.startswith(target):
+            print(
+                f"pilot_warn hash={h[:8]} phase=wait_moving_clear "
+                f"content_path_mismatch content_path={content_path_after_move}"
+            )
 
         if not qb.recheck_torrent(h):
             raise RuntimeError("recheck_failed")
@@ -262,6 +337,11 @@ for idx, row in enumerate(plan_rows, start=1):
 
         deadline = time.monotonic() + timeout_s
         last_hb = 0.0
+        stuck_window_s = max(45, heartbeat_s * 3)
+        recovery_attempted = False
+        recovery_deadline = None
+        last_terminal_signature = None
+        last_terminal_change = time.monotonic()
         while True:
             now = time.monotonic()
             if now >= deadline:
@@ -272,10 +352,37 @@ for idx, row in enumerate(plan_rows, start=1):
             st = state_lower(info)
             progress = float(getattr(info, "progress", 0.0) or 0.0)
             amount_left = int(getattr(info, "amount_left", 0) or 0)
+            terminal_signature = (st, round(progress, 4), amount_left)
+            if terminal_signature != last_terminal_signature:
+                last_terminal_signature = terminal_signature
+                last_terminal_change = now
             if progress >= 0.9999 and amount_left == 0 and not st.startswith("checking") and st not in {"downloading", "stalleddl", "moving", "missingfiles"}:
                 break
             if st in {"downloading", "stalleddl", "missingfiles"}:
                 raise RuntimeError(f"bad_terminal_state:{st}")
+
+            # qB can accept setLocation+recheck but remain stuck in stoppedDL with unchanged totals.
+            if st == "stoppeddl" and amount_left > 0 and (now - last_terminal_change >= stuck_window_s):
+                if recovery_deadline is not None and now >= recovery_deadline:
+                    raise RuntimeError("stuck_terminal_after_recovery")
+                if not recovery_attempted:
+                    print(
+                        f"pilot_step hash={h[:8]} phase=stuck_recovery "
+                        f"action=resume_pause_recheck elapsed_s={int(now - start)}"
+                    )
+                    if not qb.resume_torrent(h):
+                        raise RuntimeError("stuck_recovery_resume_failed")
+                    time.sleep(min(2, poll_s))
+                    if not qb.pause_torrent(h):
+                        raise RuntimeError("stuck_recovery_pause_failed")
+                    if not qb.recheck_torrent(h):
+                        raise RuntimeError("stuck_recovery_recheck_failed")
+                    recovery_attempted = True
+                    recovery_deadline = now + stuck_window_s
+                    last_terminal_signature = None
+                    last_terminal_change = now
+                    continue
+
             if now - last_hb >= heartbeat_s:
                 print(
                     f"pilot_wait hash={h[:8]} phase=wait_terminal state={st} "

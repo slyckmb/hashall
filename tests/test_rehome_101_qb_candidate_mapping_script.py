@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -49,6 +50,8 @@ def test_rehome_101_help_lists_options() -> None:
 def test_rehome_101_runs_with_custom_baseline_and_missing_db(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     _write_baseline(baseline)
+    allowed_root = tmp_path / "allowed-root"
+    allowed_root.mkdir(parents=True, exist_ok=True)
 
     result = subprocess.run(
         [
@@ -65,8 +68,12 @@ def test_rehome_101_runs_with_custom_baseline_and_missing_db(tmp_path: Path) -> 
         text=True,
         capture_output=True,
         check=False,
+        env={
+            **os.environ,
+            "MAP_ALLOWED_ROOTS": str(allowed_root),
+            "MAP_ENABLE_DISCOVERY_SCAN": "0",
+        },
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
     assert "summary mapped=2" in result.stdout
-    assert "manual_only=" in result.stdout
-
+    assert "unresolved=" in result.stdout

@@ -116,6 +116,41 @@ fi
 
 echo "watchdog_config interval_s=${INTERVAL_S} once=${ONCE} until_clear=${UNTIL_CLEAR} enforce_paused_dl=${ENFORCE_PAUSED_DL} allow_count=${#ALLOW_HASH_MAP[@]} events_jsonl=${EVENTS_JSONL:-none} max_iterations=${MAX_ITERATIONS}"
 
+api_post_status() {
+  local endpoint="$1"
+  local hashes="$2"
+  curl -sS -o /dev/null -w "%{http_code}" \
+    -b "$COOKIE_FILE" \
+    --data-urlencode "hashes=${hashes}" \
+    "${QBIT_URL}${endpoint}" || echo "000"
+}
+
+pause_with_fallback() {
+  local hashes="$1"
+  local code=""
+
+  code="$(api_post_status "/api/v2/torrents/pause" "$hashes")"
+  case "$code" in
+    200|202)
+      PAUSE_ACTION_RESULT="paused"
+      return 0
+      ;;
+    404)
+      code="$(api_post_status "/api/v2/torrents/stop" "$hashes")"
+      if [[ "$code" == "200" || "$code" == "202" ]]; then
+        PAUSE_ACTION_RESULT="paused_via_stop"
+        return 0
+      fi
+      PAUSE_ACTION_RESULT="pause_failed_stop_http_${code}"
+      return 1
+      ;;
+    *)
+      PAUSE_ACTION_RESULT="pause_failed_http_${code}"
+      return 1
+      ;;
+  esac
+}
+
 iteration=0
 
 while true; do
@@ -131,9 +166,16 @@ while true; do
   read -r CHECKING MISSING MOVING DOWN UP TOP_STATES <<<"$(jq -r '
     [
       ([.[] | (.state // "" | ascii_downcase) | select(startswith("checking"))] | length),
-      ([.[] | select((.state // "") == "missingFiles")] | length),
+      ([.[] | select((.state // "" | ascii_downcase) == "missingfiles")] | length),
       ([.[] | select((.state // "" | ascii_downcase) == "moving")] | length),
-      ([.[] | select((.state // "" | ascii_downcase) == "downloading" or (.state // "" | ascii_downcase) == "stalleddl")] | length),
+      ([.[] | select(
+        (.state // "" | ascii_downcase) == "downloading"
+        or (.state // "" | ascii_downcase) == "stalleddl"
+        or (.state // "" | ascii_downcase) == "queueddl"
+        or (.state // "" | ascii_downcase) == "forceddl"
+        or (.state // "" | ascii_downcase) == "metadl"
+        or (.state // "" | ascii_downcase) == "checkingdl"
+      )] | length),
       ([.[] | select((.state // "" | ascii_downcase) == "uploading" or (.state // "" | ascii_downcase) == "stalledup")] | length),
       (
         group_by(.state // "UNKNOWN")
@@ -151,6 +193,10 @@ while true; do
     | select(
         (.state // "" | ascii_downcase) == "downloading"
         or (.state // "" | ascii_downcase) == "stalleddl"
+        or (.state // "" | ascii_downcase) == "queueddl"
+        or (.state // "" | ascii_downcase) == "forceddl"
+        or (.state // "" | ascii_downcase) == "metadl"
+        or (.state // "" | ascii_downcase) == "checkingdl"
       )
     | (.hash // "" | ascii_downcase)
   ' <<<"$TORRENTS_JSON")
@@ -171,11 +217,12 @@ while true; do
   if [[ "$ENFORCE_PAUSED_DL" -eq 1 && "${#UNEXPECTED_DOWN[@]}" -gt 0 ]]; then
     pause_hashes="$(IFS='|'; echo "${UNEXPECTED_DOWN[*]}")"
     pause_action="pause_failed"
-    if curl -fsS -b "$COOKIE_FILE" \
-      --data-urlencode "hashes=${pause_hashes}" \
-      "${QBIT_URL}/api/v2/torrents/pause" >/dev/null; then
-      pause_action="paused"
+    PAUSE_ACTION_RESULT="pause_failed"
+    if pause_with_fallback "$pause_hashes"; then
+      pause_action="$PAUSE_ACTION_RESULT"
       paused_now="${#UNEXPECTED_DOWN[@]}"
+    else
+      pause_action="$PAUSE_ACTION_RESULT"
     fi
     alert_hashes="$(IFS=,; echo "${UNEXPECTED_DOWN[*]}")"
     printf '%s ALERT unexpected_downloading action=%s count=%s hashes=%s\n' \
