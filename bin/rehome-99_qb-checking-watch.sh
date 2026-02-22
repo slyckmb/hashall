@@ -163,7 +163,7 @@ while true; do
 
   TORRENTS_JSON="$(curl -fsS -b "$COOKIE_FILE" "${QBIT_URL}/api/v2/torrents/info")"
 
-  read -r CHECKING MISSING MOVING DOWN UP COUNT_ZERO COUNT_PARTIAL STOPPED_UP STOPPED_DL TOP_STATES <<<"$(jq -r '
+  read -r CHECKING MISSING MOVING DOWN UP COUNT_ZERO COUNT_PARTIAL STOPPED_UP STOPPED_DL STALLED_UP UPLOADING QUEUED_UP TOP_STATES <<<"$(jq -r '
     [
       ([.[] | (.state // "" | ascii_downcase) | select(startswith("checking"))] | length),
       ([.[] | select((.state // "" | ascii_downcase) == "missingfiles")] | length),
@@ -181,6 +181,9 @@ while true; do
       ([.[] | select((.progress // 0) > 0.0 and (.progress // 0) < 1.0)] | length),
       ([.[] | select((.state // "" | ascii_downcase) == "stoppedup")] | length),
       ([.[] | select((.state // "" | ascii_downcase) == "stoppeddl")] | length),
+      ([.[] | select((.state // "" | ascii_downcase) == "stalledup")] | length),
+      ([.[] | select((.state // "" | ascii_downcase) == "uploading")] | length),
+      ([.[] | select((.state // "" | ascii_downcase) == "queuedup")] | length),
       (
         group_by(.state // "UNKNOWN")
         | map({s: (.[0].state // "UNKNOWN"), c: length})
@@ -245,8 +248,8 @@ while true; do
   fi
 
   top_states="stoppedUP=${STOPPED_UP},stoppedDL=${STOPPED_DL}"
-  printf '%s checking=%s missing=%s moving=%s down=%s up=%s unexpected_down=%s paused_now=%s count_zero=%s count_partial=%s top=%s\n' \
-    "$(date '+%F %T')" "$CHECKING" "$MISSING" "$MOVING" "$DOWN" "$UP" "${#UNEXPECTED_DOWN[@]}" "$paused_now" "$COUNT_ZERO" "$COUNT_PARTIAL" "$top_states"
+  printf '%s checking=%s missing=%s moving=%s down=%s up=%s unexpected_down=%s paused_now=%s count_zero=%s count_partial=%s top=%s stalledUP=%s uploading=%s queuedUP=%s\n' \
+    "$(date '+%F %T')" "$CHECKING" "$MISSING" "$MOVING" "$DOWN" "$UP" "${#UNEXPECTED_DOWN[@]}" "$paused_now" "$COUNT_ZERO" "$COUNT_PARTIAL" "$top_states" "$STALLED_UP" "$UPLOADING" "$QUEUED_UP"
 
   if [[ "$UNTIL_CLEAR" -eq 1 && "$CHECKING" -eq 0 && "$MOVING" -eq 0 && "$DOWN" -eq 0 ]]; then
     echo "done checking=0 moving=0 down=0"
