@@ -124,6 +124,7 @@ import json
 import os
 import time
 from pathlib import Path
+import glob
 
 from hashall.qbittorrent import get_qbittorrent_client
 
@@ -164,6 +165,22 @@ if not confident:
     print("summary selected=0 reason=no_confident_candidates")
     raise SystemExit(0)
 
+handled_stoppedup = set()
+for result_path in sorted(glob.glob(str(mapping_json.parent / "*-qb-repair-pilot-result-*.json")), reverse=True)[:25]:
+    try:
+        payload = json.loads(Path(result_path).read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    for item in payload.get("results", []):
+        if str(item.get("final_state", "")).lower() == "stoppedup":
+            h = str(item.get("hash", "")).lower().strip()
+            if h:
+                handled_stoppedup.add(h)
+
+qb = get_qbittorrent_client()
+if not qb.test_connection() or not qb.login():
+    qb = None
+
 eligible = []
 rejected = []
 for e in confident:
@@ -185,6 +202,15 @@ for e in confident:
         reasons.append("mapping_not_recoverable")
     if not evidence:
         reasons.append("missing_recoverability_evidence")
+    if qb is not None and target:
+        info = qb.get_torrent_info(h)
+        if info is not None:
+            live_state = (getattr(info, "state", "") or "").lower()
+            live_save = str(getattr(info, "save_path", "") or "").strip()
+            if live_state == "stoppedup" and live_save == target:
+                reasons.append("already_normalized_stoppedup_same_path")
+            elif h in handled_stoppedup and live_save == target:
+                reasons.append("already_normalized_stoppedup_same_path")
 
     if reasons:
         rejected.append(
