@@ -36,47 +36,47 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --interval)
-      INTERVAL_S="${2:-}"
-      shift 2
-      ;;
-    --once)
-      ONCE=1
-      shift
-      ;;
-    --until-clear)
-      UNTIL_CLEAR=1
-      shift
-      ;;
-    --enforce-paused-dl)
-      ENFORCE_PAUSED_DL=1
-      shift
-      ;;
-    --allow-hash)
-      ALLOW_HASHES+=("${2:-}")
-      shift 2
-      ;;
-    --allow-file)
-      ALLOW_FILE="${2:-}"
-      shift 2
-      ;;
-    --events-jsonl)
-      EVENTS_JSONL="${2:-}"
-      shift 2
-      ;;
-    --max-iterations)
-      MAX_ITERATIONS="${2:-}"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown argument: $1" >&2
-      usage >&2
-      exit 2
-      ;;
+  --interval)
+    INTERVAL_S="${2:-}"
+    shift 2
+    ;;
+  --once)
+    ONCE=1
+    shift
+    ;;
+  --until-clear)
+    UNTIL_CLEAR=1
+    shift
+    ;;
+  --enforce-paused-dl)
+    ENFORCE_PAUSED_DL=1
+    shift
+    ;;
+  --allow-hash)
+    ALLOW_HASHES+=("${2:-}")
+    shift 2
+    ;;
+  --allow-file)
+    ALLOW_FILE="${2:-}"
+    shift 2
+    ;;
+  --events-jsonl)
+    EVENTS_JSONL="${2:-}"
+    shift 2
+    ;;
+  --max-iterations)
+    MAX_ITERATIONS="${2:-}"
+    shift 2
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "Unknown argument: $1" >&2
+    usage >&2
+    exit 2
+    ;;
   esac
 done
 
@@ -105,7 +105,7 @@ if [[ -n "$ALLOW_FILE" && -f "$ALLOW_FILE" ]]; then
     line="${line%%#*}"
     key="$(tr '[:upper:]' '[:lower:]' <<<"${line//[[:space:]]/}")"
     [[ -n "$key" ]] && ALLOW_HASH_MAP["$key"]=1
-  done < "$ALLOW_FILE"
+  done <"$ALLOW_FILE"
 fi
 
 if [[ "$ENFORCE_PAUSED_DL" -eq 1 && -z "$EVENTS_JSONL" ]]; then
@@ -131,23 +131,23 @@ pause_with_fallback() {
 
   code="$(api_post_status "/api/v2/torrents/pause" "$hashes")"
   case "$code" in
-    200|202)
-      PAUSE_ACTION_RESULT="paused"
+  200 | 202)
+    PAUSE_ACTION_RESULT="paused"
+    return 0
+    ;;
+  404)
+    code="$(api_post_status "/api/v2/torrents/stop" "$hashes")"
+    if [[ "$code" == "200" || "$code" == "202" ]]; then
+      PAUSE_ACTION_RESULT="paused_via_stop"
       return 0
-      ;;
-    404)
-      code="$(api_post_status "/api/v2/torrents/stop" "$hashes")"
-      if [[ "$code" == "200" || "$code" == "202" ]]; then
-        PAUSE_ACTION_RESULT="paused_via_stop"
-        return 0
-      fi
-      PAUSE_ACTION_RESULT="pause_failed_stop_http_${code}"
-      return 1
-      ;;
-    *)
-      PAUSE_ACTION_RESULT="pause_failed_http_${code}"
-      return 1
-      ;;
+    fi
+    PAUSE_ACTION_RESULT="pause_failed_stop_http_${code}"
+    return 1
+    ;;
+  *)
+    PAUSE_ACTION_RESULT="pause_failed_http_${code}"
+    return 1
+    ;;
   esac
 }
 
@@ -222,7 +222,10 @@ while true; do
 
   paused_now=0
   if [[ "$ENFORCE_PAUSED_DL" -eq 1 && "${#UNEXPECTED_DOWN[@]}" -gt 0 ]]; then
-    pause_hashes="$(IFS='|'; echo "${UNEXPECTED_DOWN[*]}")"
+    pause_hashes="$(
+      IFS='|'
+      echo "${UNEXPECTED_DOWN[*]}"
+    )"
     pause_action="pause_failed"
     PAUSE_ACTION_RESULT="pause_failed"
     if pause_with_fallback "$pause_hashes"; then
@@ -231,7 +234,10 @@ while true; do
     else
       pause_action="$PAUSE_ACTION_RESULT"
     fi
-    alert_hashes="$(IFS=,; echo "${UNEXPECTED_DOWN[*]}")"
+    alert_hashes="$(
+      IFS=,
+      echo "${UNEXPECTED_DOWN[*]}"
+    )"
     printf '%s ALERT unexpected_downloading action=%s count=%s hashes=%s\n' \
       "$(date '+%F %T')" "$pause_action" "${#UNEXPECTED_DOWN[@]}" "$alert_hashes"
     if [[ -n "$EVENTS_JSONL" ]]; then
@@ -243,14 +249,13 @@ while true; do
         --argjson paused "$paused_now" \
         --argjson hashes "$hashes_json" \
         '{ts:$ts,event:"unexpected_downloading",action:$action,count:$count,paused:$paused,hashes:$hashes}' \
-        >> "$EVENTS_JSONL"
+        >>"$EVENTS_JSONL"
     fi
   fi
 
-  top_states="stoppedUP=${STOPPED_UP},stoppedDL=${STOPPED_DL}"
-  printf '%s checking=%s missing=%s moving=%s down=%s up=%s unexpected_down=%s paused_now=%s count_zero=%s count_partial=%s top=%s stalledUP=%s uploading=%s queuedUP=%s\n' \
-    "$(date '+%F %T')" "$CHECKING" "$MISSING" "$MOVING" "$DOWN" "$UP" "${#UNEXPECTED_DOWN[@]}" "$paused_now" "$COUNT_ZERO" "$COUNT_PARTIAL" "$top_states" "$STALLED_UP" "$UPLOADING" "$QUEUED_UP"
-
+  printf '%s checking=%s missing=%s moving=%s down=%s up=%s unexpected_down=%s paused_now=%s count_zero=%s count_partial=%s top=%s stoppedUP=%s stoppedDL=%s stalledUP=%s uploading=%s queuedUP=%s\n' \
+    "$(date '+%F %T')" "$CHECKING" "$MISSING" "$MOVING" "$DOWN" "$UP" "${#UNEXPECTED_DOWN[@]}" "$paused_now" "$COUNT_ZERO" "$COUNT_PARTIAL" "$TOP_STATES" "$STOPPED_UP" "$STOPPED_DL" "$STALLED_UP" "$UPLOADING" "$QUEUED_UP"
+    
   if [[ "$UNTIL_CLEAR" -eq 1 && "$CHECKING" -eq 0 && "$MOVING" -eq 0 && "$DOWN" -eq 0 ]]; then
     echo "done checking=0 moving=0 down=0"
     exit 0
