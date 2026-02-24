@@ -331,12 +331,11 @@ for c in plan:
     # Delete incomplete files BEFORE patching (prevents QB from moving them to save_path)
     # NOTE: qBittorrent container never mounts /stash; all stash paths appear as /data/media/
     #       Path string comparison is unreliable — use inode comparison instead.
-    if old and root_name:
+    #       File paths come from QB's files API (bf_*.json), NOT from root_name assumption.
+    if old:
         host_dl     = container_to_host(old)
         broken_save = c.get("broken_save", "")
         if host_dl:
-            target = os.path.join(host_dl, root_name)
-
             def same_inode(a, b):
                 try:
                     return os.path.exists(a) and os.path.exists(b) and \
@@ -345,39 +344,39 @@ for c in plan:
                 except: return False
 
             def is_good_content(path):
-                """Return True if path is a hardlink to any good/save file we know about."""
-                # Check against all good_abs paths in rebuild_files
+                """Return True if path shares inode with any good/save file we know about."""
                 for rf in c.get("rebuild_files", []):
                     gf = rf.get("good")
                     if gf and same_inode(path, gf):
                         return True
-                # Check against broken_save file (it IS the live content, don't delete)
-                save_file = os.path.join(broken_save, root_name)
-                if same_inode(path, save_file):
-                    return True
+                # Also check the corresponding file at broken_save (live seed content)
+                if broken_save:
+                    rel = os.path.relpath(path, host_dl)
+                    save_file = os.path.join(broken_save, rel)
+                    if same_inode(path, save_file):
+                        return True
                 return False
 
-            if os.path.isfile(target):
+            # Use QB file list to enumerate exact paths — never assume root_name layout
+            try:
+                broken_qb_files = json.load(open(f"{tmpdir}/bf_{h}.json"))
+            except Exception:
+                broken_qb_files = []
+
+            deleted, skipped = 0, 0
+            for qbf in broken_qb_files:
+                target = os.path.join(host_dl, qbf["name"])
+                if not os.path.exists(target):
+                    continue
                 if is_good_content(target):
-                    print(f"  [{h[:12]}] SKIP file: same inode as good/save content")
+                    skipped += 1
                 elif apply:
                     os.remove(target)
-                    print(f"  [{h[:12]}] deleted incomplete file: {target}")
+                    deleted += 1
                 else:
-                    print(f"  [{h[:12]}] [dry-run] would delete file: {target}")
-            elif os.path.isdir(target):
-                # For directories: check if the dir itself is the broken_save dir (same realpath)
-                save_dir = os.path.join(broken_save, root_name)
-                try:
-                    same_dir = os.path.realpath(target) == os.path.realpath(save_dir)
-                except: same_dir = False
-                if same_dir:
-                    print(f"  [{h[:12]}] SKIP dir: realpath matches broken_save dir")
-                elif apply:
-                    shutil.rmtree(target)
-                    print(f"  [{h[:12]}] deleted incomplete dir: {target}")
-                else:
-                    print(f"  [{h[:12]}] [dry-run] would delete dir: {target}")
+                    print(f"  [{h[:12]}] [dry-run] would delete: {os.path.basename(target)}")
+            if apply and (deleted or skipped):
+                print(f"  [{h[:12]}] deleted {deleted} incomplete file(s), skipped {skipped} (live content)")
 
     # Patch fastresume
     if not old:
