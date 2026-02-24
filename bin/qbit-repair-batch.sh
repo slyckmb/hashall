@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.4.0
+# Version: 1.4.1
 # Date:    2026-02-24
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.4.1"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -78,7 +78,7 @@ exec > >(tee -a "$LOGFILE") 2>&1
 echo "Log: $LOGFILE"
 
 qb_login() {
-  curl -fsS -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
+  curl -fsS --max-time 15 -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
     --data-urlencode "username=$QB_USER" \
     --data-urlencode "password=$QB_PASS" >/dev/null
 }
@@ -94,7 +94,7 @@ echo "════════════════════════�
 if [[ "$NO_RAMP" == true ]]; then
   echo "▸ --no-ramp: drain stoppedUP"
   qb_login
-  curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
+  curl -fsS --max-time 30 -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
   python3 - "$TMPD" << 'PYEOF'
 import json, sys
 tmpdir = sys.argv[1]
@@ -108,7 +108,7 @@ PYEOF
   STOPPED_UP_HASHES=$(sed -n '1p' "$TMPD/stopped_up_hashes.txt")
   N_UP=$(sed -n '2p' "$TMPD/stopped_up_hashes.txt")
   if [[ "$APPLY" == true && "$N_UP" -gt 0 ]]; then
-    HTTP=$(curl -sS -o /dev/null -w "%{http_code}" \
+    HTTP=$(curl -sS --max-time 30 -o /dev/null -w "%{http_code}" \
       -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/start" \
       --data-urlencode "hashes=$STOPPED_UP_HASHES")
     echo "  started $N_UP stoppedUP torrents: HTTP $HTTP"
@@ -127,7 +127,7 @@ fi
 # ── P0: Discovery ─────────────────────────────────────────────────────────────
 echo "▸ P0 discovery"
 qb_login
-curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
+curl -fsS --max-time 30 -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
 
 python3 - "$DB" "$TMPD" "$LIMIT" << 'PYEOF'
 import json, sqlite3, os, sys
@@ -202,16 +202,27 @@ echo ""
 echo "▸ P1 content analysis"
 qb_login 2>/dev/null || true
 
-# Fetch QB files for all candidates in parallel
+# Write hash pairs to file so curls run in main shell (not a pipe subshell).
 python3 -c "
 import json
 c = json.load(open('$TMPD/candidates.json'))
 for r in c: print(r['good_hash'], r['broken_hash'])
-" | while read -r GH BH; do
-  curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/files?hash=$GH" > "$TMPD/gf_${GH}.json" &
-  curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/files?hash=$BH" > "$TMPD/bf_${BH}.json" &
-done
-wait
+" > "$TMPD/pairs.txt"
+
+# Fetch QB files for all candidates in parallel.
+# IMPORTANT: track PIDs explicitly and use wait <pid> (not bare "wait").
+# Bare "wait" waits for ALL children including the exec > >(tee ...) process
+# substitution, which deadlocks because tee can't exit while bash holds stdout.
+CURL_PIDS=()
+while read -r GH BH; do
+  curl --max-time 30 -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/files?hash=$GH" \
+    > "$TMPD/gf_${GH}.json" 2>/dev/null || true &
+  CURL_PIDS+=($!)
+  curl --max-time 30 -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/files?hash=$BH" \
+    > "$TMPD/bf_${BH}.json" 2>/dev/null || true &
+  CURL_PIDS+=($!)
+done < "$TMPD/pairs.txt"
+for _pid in "${CURL_PIDS[@]}"; do wait "$_pid" 2>/dev/null || true; done
 
 python3 - "$DB" "$TMPD" << 'PYEOF'
 import json, os, sqlite3, sys
@@ -348,7 +359,7 @@ for c in plan:
     if c['same_fs'] == 'cross-fs':
         print(c['broken_hash'] + '|' + c['good_save'])
 " | while IFS='|' read -r BHASH TARGET; do
-    HTTP=$(curl -sS -o /dev/null -w "%{http_code}" \
+    HTTP=$(curl -sS --max-time 30 -o /dev/null -w "%{http_code}" \
       -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/setLocation" \
       --data-urlencode "hashes=$BHASH" \
       --data-urlencode "location=$TARGET")
@@ -532,7 +543,7 @@ echo "▸ P4 recheckTorrents"
 HASH_LIST=$(python3 -c "import json; print('|'.join(c['broken_hash'] for c in json.load(open('$TMPD/plan.json'))))")
 if [[ "$APPLY" == true ]]; then
   qb_login 2>/dev/null || true
-  HTTP=$(curl -sS -o /dev/null -w "%{http_code}" \
+  HTTP=$(curl -sS --max-time 30 -o /dev/null -w "%{http_code}" \
     -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/recheck" \
     --data-urlencode "hashes=${HASH_LIST}")
   echo "  recheckTorrents ($NCAN hashes): HTTP $HTTP"
