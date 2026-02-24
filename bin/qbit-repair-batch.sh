@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.3.0
+# Version: 1.4.0
 # Date:    2026-02-24
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
@@ -15,13 +15,15 @@
 #   - Parallel recheck of all candidates
 #   - No 90s verification: recheck→stoppedUP = success
 #
-# Usage: bin/qbit-repair-batch.sh [--limit N] [--apply]
-#   --limit N   Process at most N candidates (default: 10)
-#   --apply     Execute changes (dry-run if omitted)
+# Usage: bin/qbit-repair-batch.sh [--limit N] [--apply] [--no-ramp]
+#   --limit N    Process at most N stoppedDL candidates (default: 10)
+#   --apply      Execute changes (dry-run if omitted)
+#   --no-ramp    Drain mode: start ALL stoppedUP torrents immediately (no repair workflow)
+#   -h, --help   Show this help and exit
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -35,13 +37,34 @@ SUCCESS_FILE="$HOME/.logs/hashall/reports/qbit-triage/repair-consecutive-success
 TMPD="/tmp/qb_repair_batch"
 mkdir -p "$HOME/.logs/hashall/reports/qbit-triage" "$TMPD"
 
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [OPTIONS]
+
+Repair stoppedDL torrents by rebuilding hardlinks + fastresume patch.
+Safe by default (dry-run). Pass --apply to execute changes.
+
+Options:
+  --limit N    Max stoppedDL candidates per batch (default: 10)
+  --apply      Execute changes (default: dry-run)
+  --no-ramp    Drain mode: start ALL stoppedUP torrents at once, then exit
+  -h, --help   Show this help and exit
+
+Logs: ~/.logs/hashall/reports/qbit-triage/qbit-repair-batch-TIMESTAMP.log
+Streak: ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt
+USAGE
+}
+
 LIMIT=10
 APPLY=false
+NO_RAMP=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --limit) LIMIT="$2"; shift 2 ;;
-    --apply) APPLY=true; shift ;;
-    *) echo "unknown: $1" >&2; exit 1 ;;
+    --limit)        LIMIT="$2"; shift 2 ;;
+    --apply)        APPLY=true; shift ;;
+    --no-ramp)      NO_RAMP=true; shift ;;
+    -h|--help)      usage; exit 0 ;;
+    *) echo "unknown: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
@@ -64,8 +87,42 @@ set_streak() { echo "$1" > "$SUCCESS_FILE"; }
 
 echo "════════════════════════════════════════════════════════════"
 echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-echo "apply=$APPLY  limit=$LIMIT"
+echo "apply=$APPLY  limit=$LIMIT  no-ramp=$NO_RAMP"
 echo "════════════════════════════════════════════════════════════"
+
+# ── --no-ramp: drain stoppedUP bucket ─────────────────────────────────────────
+if [[ "$NO_RAMP" == true ]]; then
+  echo "▸ --no-ramp: drain stoppedUP"
+  qb_login
+  curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
+  python3 - "$TMPD" << 'PYEOF'
+import json, sys
+tmpdir = sys.argv[1]
+torrents = json.load(open(f"{tmpdir}/all_torrents.json"))
+hashes = [t["hash"] for t in torrents if t["state"] == "stoppedUP"]
+print(f"  stoppedUP count: {len(hashes)}")
+with open(f"{tmpdir}/stopped_up_hashes.txt", "w") as f:
+    f.write("|".join(hashes) + "\n")
+    f.write(str(len(hashes)) + "\n")
+PYEOF
+  STOPPED_UP_HASHES=$(sed -n '1p' "$TMPD/stopped_up_hashes.txt")
+  N_UP=$(sed -n '2p' "$TMPD/stopped_up_hashes.txt")
+  if [[ "$APPLY" == true && "$N_UP" -gt 0 ]]; then
+    HTTP=$(curl -sS -o /dev/null -w "%{http_code}" \
+      -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/start" \
+      --data-urlencode "hashes=$STOPPED_UP_HASHES")
+    echo "  started $N_UP stoppedUP torrents: HTTP $HTTP"
+  elif [[ "$APPLY" == false ]]; then
+    echo "  [dry-run] would start $N_UP stoppedUP torrents"
+  else
+    echo "  nothing to start"
+  fi
+  echo ""
+  echo "════════════════════════════════════════════════════════════"
+  echo "DONE  $(date '+%F %T')"
+  echo "════════════════════════════════════════════════════════════"
+  exit 0
+fi
 
 # ── P0: Discovery ─────────────────────────────────────────────────────────────
 echo "▸ P0 discovery"
