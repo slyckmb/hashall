@@ -6,6 +6,36 @@
 
 ---
 
+## Background Context (read first, every session)
+
+### Hashall Repo Baseline Docs
+
+Always read these to understand the system before doing anything:
+
+| Doc | Purpose |
+|-----|---------|
+| `README.md` | Repo overview, goals, key concepts |
+| `docs/REQUIREMENTS.md` | Detailed functional requirements |
+| `docs/theory-of-operations.md` | How the system works (hardlinks, catalog DB, QB integration) |
+| `docs/tooling/quick-reference.md` | Script inventory and usage cheat-sheet |
+
+### Hydration: Pre-existing Chatrap Session (continuing from a previous session)
+
+If you are a **new agent instance resuming a prior chatrap session** (i.e. you received a
+handoff prompt or next-agent prompt rather than a clean bootstrap), hydrate with:
+
+1. **Chatrap bootstrap template:**
+   `/home/michael/dev/tools/chatrap/prompts/bootstrap-template.md`
+
+2. **Session baseline** (objective facts about this session's starting state):
+   `/home/michael/dev/work/hashall/.agent/baselines/<chat_id>-baseline.md`
+   → substitute the actual chat ID shown at the top of this file or in the handoff prompt
+
+> These two docs apply **only** when continuing an existing session. If this is a
+> freshly bootstrapped new session, the bootstrap process has already handled hydration.
+
+---
+
 ## Goal
 
 Repair ~2103 `stoppedDL` torrents in qBittorrent → get them to `stoppedUP 100%` so they can seed again.
