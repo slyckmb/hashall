@@ -4,7 +4,7 @@ iowatch - Real-time I/O and system monitoring dashboard
 Monitors disk I/O, CPU usage, and hashall scan processes with colors!
 """
 
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 
 import sys
 import time
@@ -59,16 +59,24 @@ UPDATE_INTERVAL = 2
 
 # Disk Mapping (Serial to Friendly Name)
 DRIVE_MAP = {
-    'sdb': 's1-ZYD4E0KX',
-    'sdc': 's2-ZYD4SAR6',
-    'sdd': 's3-ZYD5WTGH',
-    'sde': 's4-ZYD6202W',
+    # ZFS stash pool (raidz2) drives — slots in ZFS listing order
+    'sdc': 's1-ZYD4E0KX',
+    'sdd': 's2-ZYD4SAR6',
+    'sde': 's3-ZYD5WTGH',
+    'sdf': 's4-ZYD6202W',
     'sda': 's5-ZYD6HT07',
-    'sdf': 'p1-D38DLF1D', 
-    'sdg': 'p2-D38DLYEJ',
-    'sdh': 'p3-D38DL453',
+    # ZFS pool pool (raidz1) drives — slots in ZFS listing order
+    'sdg': 'p1-Z4D3LES1',
+    'sdh': 'p2-D38DLYEJ',
+    'sdi': 'p3-D38DL453',
+    # Not in any ZFS pool
+    'sdb': 'spare-Z4D3LETT',
+    # System / non-ZFS
     'nvme0n1': 'n0-30801662'
 }
+
+# Drives that belong to a ZFS pool (always shown in disk I/O section even at zero activity)
+POOL_DRIVES = {dev for dev, label in DRIVE_MAP.items() if label.startswith(('p', 's'))}
 
 def clear_screen():
     """Clear terminal screen."""
@@ -522,12 +530,27 @@ def main():
             print(colorize("📊 DISK I/O & HEALTH", Colors.BOLD + Colors.BRIGHT_MAGENTA))
             print(colorize("-" * WIDTH, Colors.BRIGHT_BLACK))
             
-            if active_io:
+            # Build display_io: always include pool/stash drives; others only when active
+            display_io = dict(active_io)  # copy active (already-seen) drives
+            for dev in POOL_DRIVES:
+                if dev not in display_io:
+                    # Include pool/stash drive even if idle
+                    if dev in disk_stats and dev in prev_disk_stats:
+                        curr_d = disk_stats[dev]
+                        prev_d = prev_disk_stats[dev]
+                        rd_mb = ((curr_d['read_sectors'] - prev_d['read_sectors']) * 512) / (1024*1024) / elapsed
+                        wr_mb = ((curr_d['write_sectors'] - prev_d['write_sectors']) * 512) / (1024*1024) / elapsed
+                        util_pct = min(100, max(0, ((curr_d['io_ms'] - prev_d['io_ms']) / (elapsed * 1000)) * 100))
+                        display_io[dev] = {'rd': rd_mb, 'wr': wr_mb, 'util': util_pct}
+                    else:
+                        display_io[dev] = {'rd': 0.0, 'wr': 0.0, 'util': 0.0}
+
+            if display_io:
                 print(f"     Device      R/W [log(MB/s)]   Total        Util")
                 print(f"  -----------   -----------------  -----   --------------") 
                 
                 groups = {'POOL': [], 'STASH': [], 'OTHER': []}
-                for dev, data in active_io.items():
+                for dev, data in display_io.items():
                     friendly = DRIVE_MAP.get(dev, dev)
                     if friendly.startswith('p'): groups['POOL'].append((friendly, data))
                     elif friendly.startswith('s'): groups['STASH'].append((friendly, data))

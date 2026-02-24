@@ -163,8 +163,8 @@ def rename_files_table(cursor: sqlite3.Cursor, old_device_id: int, new_device_id
         # This is rare but possible in edge cases
         return
 
-    # Rename the table
-    cursor.execute(f"ALTER TABLE {old_table_name} RENAME TO {new_table_name}")
+    # Rename the table (quoted to handle negative or unusual device_ids)
+    cursor.execute(f'ALTER TABLE "{old_table_name}" RENAME TO "{new_table_name}"')
 
     print(f"✅ Renamed table: files_{old_device_id} → files_{new_device_id}")
 
@@ -327,7 +327,35 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                 'changed_at': datetime.now().isoformat()
             })
 
-            # Rename the files table
+            # If another device currently holds new device_id, park it at a temp
+            # negative id BEFORE renaming our files table, so the target slot is
+            # clear. That device will be corrected to its real new id when scanned.
+            colliding = cursor.execute(
+                "SELECT fs_uuid FROM devices WHERE device_id = ? AND fs_uuid != ?",
+                (device_id, fs_uuid)
+            ).fetchone()
+            if colliding:
+                colliding_uuid = colliding[0]
+                temp_id = -(abs(hash(colliding_uuid)) % (2 ** 30))
+                while cursor.execute(
+                    "SELECT 1 FROM devices WHERE device_id = ?", (temp_id,)
+                ).fetchone():
+                    temp_id -= 1
+                colliding_table = f"files_{device_id}"
+                temp_table = f"files_{temp_id}"
+                if cursor.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (colliding_table,)
+                ).fetchone():
+                    cursor.execute(f'ALTER TABLE "{colliding_table}" RENAME TO "{temp_table}"')
+                cursor.execute(
+                    "UPDATE devices SET device_id = ? WHERE fs_uuid = ?",
+                    (temp_id, colliding_uuid)
+                )
+                print(f"⚠️  Parked conflicting device {colliding_uuid[:8]} at temp id {temp_id}"
+                      f" (will update on next scan of that device)")
+
+            # Rename our files table now that the target slot is guaranteed clear
             rename_files_table(cursor, old_device_id, device_id)
 
             # Update device record with new device_id
