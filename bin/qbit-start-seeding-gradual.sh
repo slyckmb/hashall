@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.0.0
+# Version: 1.0.1
 # Date:    2026-02-24
 #
 # After each batch waits for state to settle, then checks no torrent flipped
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -41,7 +41,8 @@ done
 
 COOKIE=$(mktemp /tmp/qb.XXXXXX)
 TMPJSON=$(mktemp /tmp/qb_sg.XXXXXX)
-trap 'rm -f "$COOKIE" "$TMPJSON"' EXIT
+TMPWATCH=$(mktemp /tmp/qb_sg_watch.XXXXXX)   # newline-separated started hashes
+trap 'rm -f "$COOKIE" "$TMPJSON" "$TMPWATCH"' EXIT
 
 log() { echo "$*" | tee -a "$LOG"; }
 
@@ -98,7 +99,6 @@ BAD_STATES="checkingDL|downloading|stalledDL|missingFiles|error"
 # States that mean "is downloading content" — the critical failure mode
 IS_DOWNLOADING='checkingDL|downloading|stalledDL|stoppedDL'
 
-started_hashes=()
 total_started=0
 failures=0
 
@@ -132,20 +132,20 @@ for bsize in "${BATCH_SIZES[@]}"; do
             -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/start" \
             --data-urlencode "hashes=$PIPE")
         log "  start HTTP: $HTTP"
-        started_hashes+=("${batch[@]}")
+        # Append new batch hashes to watch file
+        printf '%s\n' "${batch[@]}" >> "$TMPWATCH"
         total_started=$(( total_started + bsize ))
 
         log "  waiting ${SETTLE_SECS}s for state to settle..."
         sleep "$SETTLE_SECS"
         qb_login 2>/dev/null || true
 
-        # Check all started torrents for bad states
-        PIPE_ALL=$(IFS='|'; echo "${started_hashes[*]}")
+        # Check all started torrents for bad states (read watch list from file, not arg)
         curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPJSON"
-        CHECK=$(python3 - "$TMPJSON" "$PIPE_ALL" << 'PYEOF'
+        CHECK=$(python3 - "$TMPJSON" "$TMPWATCH" << 'PYEOF'
 import json, sys
 data = json.load(open(sys.argv[1]))
-watch = set(sys.argv[2].split('|'))
+watch = set(open(sys.argv[2]).read().split())
 download_bad = {'checkingDL','downloading','stalledDL'}
 other_bad    = {'missingFiles','error'}
 results = {'ok':[], 'downloading':[], 'other_bad':[], 'still_stopped':[]}
