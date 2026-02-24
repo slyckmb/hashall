@@ -329,22 +329,55 @@ for c in plan:
     old   = old_b.decode('utf-8', errors='replace') if isinstance(old_b, bytes) else str(old_b)
 
     # Delete incomplete files BEFORE patching (prevents QB from moving them to save_path)
+    # NOTE: qBittorrent container never mounts /stash; all stash paths appear as /data/media/
+    #       Path string comparison is unreliable — use inode comparison instead.
     if old and root_name:
-        host_dl = container_to_host(old)
+        host_dl     = container_to_host(old)
+        broken_save = c.get("broken_save", "")
         if host_dl:
             target = os.path.join(host_dl, root_name)
-            if os.path.isdir(target):
-                if apply:
-                    shutil.rmtree(target)
-                    print(f"  [{h[:12]}] deleted incomplete dir: {target}")
-                else:
-                    print(f"  [{h[:12]}] [dry-run] would delete dir: {target}")
-            elif os.path.isfile(target):
-                if apply:
+
+            def same_inode(a, b):
+                try:
+                    return os.path.exists(a) and os.path.exists(b) and \
+                           os.stat(a).st_ino == os.stat(b).st_ino and \
+                           os.stat(a).st_dev == os.stat(b).st_dev
+                except: return False
+
+            def is_good_content(path):
+                """Return True if path is a hardlink to any good/save file we know about."""
+                # Check against all good_abs paths in rebuild_files
+                for rf in c.get("rebuild_files", []):
+                    gf = rf.get("good")
+                    if gf and same_inode(path, gf):
+                        return True
+                # Check against broken_save file (it IS the live content, don't delete)
+                save_file = os.path.join(broken_save, root_name)
+                if same_inode(path, save_file):
+                    return True
+                return False
+
+            if os.path.isfile(target):
+                if is_good_content(target):
+                    print(f"  [{h[:12]}] SKIP file: same inode as good/save content")
+                elif apply:
                     os.remove(target)
                     print(f"  [{h[:12]}] deleted incomplete file: {target}")
                 else:
                     print(f"  [{h[:12]}] [dry-run] would delete file: {target}")
+            elif os.path.isdir(target):
+                # For directories: check if the dir itself is the broken_save dir (same realpath)
+                save_dir = os.path.join(broken_save, root_name)
+                try:
+                    same_dir = os.path.realpath(target) == os.path.realpath(save_dir)
+                except: same_dir = False
+                if same_dir:
+                    print(f"  [{h[:12]}] SKIP dir: realpath matches broken_save dir")
+                elif apply:
+                    shutil.rmtree(target)
+                    print(f"  [{h[:12]}] deleted incomplete dir: {target}")
+                else:
+                    print(f"  [{h[:12]}] [dry-run] would delete dir: {target}")
 
     # Patch fastresume
     if not old:
