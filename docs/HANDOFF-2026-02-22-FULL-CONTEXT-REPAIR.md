@@ -102,10 +102,10 @@ Pool-pool torrents (save_path on `/pool/data/`) failed immediately to stoppedDL 
 | Feb 24 | batch-50 (be122cd) | 50 | 21 | 29 | 0 | BUG-4: wall-clock timeout; 29 were checkingUP at timeout |
 | Feb 24 | batch-50 (b7246e0) | 50 | 20 | 30 | 0 | BUG-5: stagnation on queued 0% torrents |
 | Feb 24 | batch-50 (bc6b411) | 50 | 46 | 4 | 0 | BUG-6: 4 pool-pool failures |
-| Feb 24 | batch-50 (b4345cd) | 50 | 29+ | 2 | 0 | BUG-6 fixed; batch was still running when captured; 2 confirmed ✗, 19 still checkingUP |
+| Feb 24 | batch-50 (b4345cd) | 50 | ~48 | 2 | 0 | BUG-6 fixed (pool-pool ✓); 2 persistent failures: 5fc73670 (Pink Floyd), 6b3471fd |
 
-**Total confirmed repaired:** ~157+ torrents
-**Streak as of last capture:** 0
+**Total confirmed repaired:** ~258 (2103 - 1845)
+**Streak:** 0
 
 ---
 
@@ -129,13 +129,13 @@ Pool-pool torrents (save_path on `/pool/data/`) failed immediately to stoppedDL 
 
 ---
 
-## Current State (Feb 24)
+## Current State (Feb 24 ~07:10)
 
-- stoppedDL: **~1896** (may decrease as b4345cd finishes)
-- stoppedUP: **~3250** (gradual start in progress via `qbit-start-seeding-gradual.sh`)
-- Streak: **0**
-- All 6 bugs fixed; batches run cleanly now
-- ~41 more batches of 50 needed to clear the backlog
+- stoppedDL: **1845** (confirmed live)
+- stalledUP: **3278** (seeding; 0 flipped to downloading — gradual-start complete)
+- stoppedUP: **6** (newly repaired, not yet started — run gradual-start)
+- Streak: **0** (b4345cd: 2 persistent failures: 5fc73670 Pink Floyd, 6b3471fd)
+- All 6 bugs fixed; ~40 more batches of 50 needed to clear the backlog
 
 ---
 

@@ -8,10 +8,11 @@
 
 ## Current State
 
-- **stoppedDL:** ~1896 (need repair)
-- **stoppedUP:** ~3250 (being started by `qbit-start-seeding-gradual.sh`)
-- **Streak:** 0 (b4345cd had 2 confirmed failures out of 50; 19 were still checking when captured)
-- **Total repaired this campaign:** ~157+ confirmed
+- **stoppedDL:** 1845 (confirmed live — need repair)
+- **stalledUP:** 3278 (seeding; 0 have flipped to downloading)
+- **stoppedUP:** 6 (newly repaired, not started yet — run gradual-start to pick up)
+- **Streak:** 0 (b4345cd: 2 persistent failures; 5fc73670 Pink Floyd, 6b3471fd)
+- **Total repaired this campaign:** ~258 confirmed (2103 - 1845)
 
 ---
 
@@ -19,11 +20,11 @@
 
 1. **BUG-6 fixed** (pool-pool timing race): `bin/qbit-repair-batch.sh` now retries recheck on stoppedDL detection during P5 monitor + 120s grace for pool-pool torrents. Confirmed working: West Wing S02 and Brave New World (pool-pool) both resolved ✓ in b4345cd.
 
-2. **b4345cd batch** (50 torrents, BUG-6 fix active): Was still running when captured. Last observed: 29 ✓, 2 ✗, 19 still in checkingUP. Likely completed successfully for most of the 19 still checking. The 2 confirmed failures are:
-   - `5fc73670` — Pink Floyd Division Bell (stash-stash; was `already_hardlinked: 22, garbage: 1`)
+2. **b4345cd batch** (50 torrents, BUG-6 fix active): **COMPLETED.** ~48/50 success. 2 persistent failures:
+   - `5fc73670` — Pink Floyd Division Bell (stash-stash; `already_hardlinked: 22, garbage: 1`)
    - `6b3471fd` — (stash-stash; `already_hardlinked: 13`)
 
-3. **bc77cce** (`bin/qbit-start-seeding-gradual.sh --apply`): Started stoppedUP torrents in escalating batches (1, 2, 5, 10, 25, 50, 100...). Was through batch-3 (8 total started, all stable) when captured. Likely still running or completed.
+3. **qbit-start-seeding-gradual.sh**: **COMPLETED.** All stoppedUP torrents started in 11 escalating batches (1→2→5→10→25→50→100→250→500→1000+mop-up). 3278 total started, **0 flipped to downloading** — all seeding cleanly.
 
 ---
 
@@ -53,7 +54,7 @@ All 6 known bugs are fixed. Batches should run cleanly. Run as many as needed.
 - Each batch of 50 takes ~20-30 minutes (P5 monitor waits for all to resolve)
 - Pool-pool pairs resolve fine now (BUG-6 fix handles the timing race)
 - Streak counter auto-updates in `out/reports/qbit-triage/repair-consecutive-successes.txt`
-- ~1896 stoppedDL / ~46 repairs per batch ≈ ~41 more batches to go
+- ~1845 stoppedDL / ~46 repairs per batch ≈ ~40 more batches to go
 - Milestone: streak=10 (was achieved Feb 23 with batch-20 → streak=30, then reset by bugs)
 
 ---

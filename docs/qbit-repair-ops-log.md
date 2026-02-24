@@ -31,10 +31,10 @@
 | Feb 23 | batch-50 (be122cd) | 50 | 21 | 29 | 0 | all 29 were checkingUP; wall-clock timeout too short |
 | Feb 24 | batch-50 (b7246e0) | 50 | 20 | 30 | 0 | stale10m on queued-at-0% torrents |
 | Feb 24 | batch-50 (bc6b411) | 50 | 46 | 4 | 0 | 4 pool-pool failures (see below) |
-| Feb 24 | batch-50 (b4345cd) | 50 | 29+ | 2 | 0 | BUG-6 fixed; batch still running when output captured; 2 confirmed failures (5fc73670, 6b3471fd), 19 still checkingUP at capture time |
+| Feb 24 | batch-50 (b4345cd) | 50 | ~48 | 2 | 0 | BUG-6 confirmed fixed (pool-pool pairs ✓); 2 failures: 5fc73670 (Pink Floyd), 6b3471fd |
 
-**Total repaired (confirmed stoppedUP):** ~157+ torrents (128 prior + 29 confirmed from b4345cd)
-**Streak:** 0 (b4345cd still in progress; 2 confirmed failures reset streak)
+**Total repaired (confirmed stoppedUP):** ~180+ torrents
+**Streak:** 0 (b4345cd 2 failures reset streak)
 
 ---
 
@@ -76,16 +76,15 @@ Pool-pool torrents were failing with immediate `stoppedDL` after recheckTorrents
 
 ---
 
-## Current State (Feb 24)
+## Current State (Feb 24 ~07:10)
 
-stoppedDL count: **~1896** (from watchdog output; actual may be lower after b4345cd completes)
-stoppedUP count: **~3250** (being gradually started by `bin/qbit-start-seeding-gradual.sh --apply`)
-Streak: **0** (b4345cd had 2 confirmed failures; if no other failures, streak depends on final b4345cd result)
+stoppedDL count: **1845** (confirmed live, after b4345cd)
+seeding (stalledUP): **3278** — all started via `qbit-start-seeding-gradual.sh`, **0 flipped to downloading**
+stoppedUP (not yet started): **6** — run gradual-start to pick these up
+Streak: **0** (b4345cd 2 failures: 5fc73670 Pink Floyd, 6b3471fd — persistent across batches)
+Scripts: `qbit-repair-batch.sh` v1.1.0, `qbit-start-seeding-gradual.sh` v1.0.1 (ARG_MAX fix)
 
-BUG-6 fixed — pool-pool pairs now handled with retry-recheck + 120s grace.
-b4345cd batch was still running when captured (29 confirmed ✓, 2 ✗, 19 still checking).
-bc77cce (`qbit-start-seeding-gradual.sh --apply`) started stoppedUP torrents in escalating batches — was through batch-3 (8 started, all stable) when captured.
-Next repair batch: ready to run `bash bin/qbit-repair-batch.sh --limit 50 --apply`.
+All 6 bugs fixed. Next: `bash bin/qbit-repair-batch.sh --limit 50 --apply` to continue.
 
 ---
 
@@ -93,7 +92,7 @@ Next repair batch: ready to run `bash bin/qbit-repair-batch.sh --limit 50 --appl
 
 - [x] Fix pool-pool batch timing bug (BUG-6 fixed)
 - [ ] Run clean batch → establish streak > 0
-- [ ] Scale: ~1896 / 46 per batch ≈ 41 more batches needed
+- [ ] Scale: ~1845 / 46 per batch ≈ 40 more batches needed
 - [ ] Reach streak=10 (milestone)
 - [ ] Handle same-save-path pairs
 - [ ] Handle Trashy.Lady and Legion S03 variants
