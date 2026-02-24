@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Batch repair of stoppedDL torrents.
+# qbit-repair-batch.sh — batch repair of stoppedDL torrents.
+# Version: 1.1.0
+# Date:    2026-02-24
+#
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
+# Safe by default: runs in dry-run mode unless --apply is passed.
+# Idempotent: re-runs discover live QB state each time; already-repaired torrents
+# are stoppedUP and won't appear as candidates again.
 #
 # Fixes vs single-pair script:
 #   - Skips same-save-path pairs (good_save == broken_save)
@@ -10,7 +16,13 @@
 #   - No 90s verification: recheck→stoppedUP = success
 #
 # Usage: bin/qbit-repair-batch.sh [--limit N] [--apply]
+#   --limit N   Process at most N candidates (default: 10)
+#   --apply     Execute changes (dry-run if omitted)
 set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_VERSION="1.1.0"
+SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
@@ -46,7 +58,8 @@ get_streak() { [[ -f "$SUCCESS_FILE" ]] && cat "$SUCCESS_FILE" || echo 0; }
 set_streak() { echo "$1" > "$SUCCESS_FILE"; }
 
 echo "════════════════════════════════════════════════════════════"
-echo "qbit-repair-batch  apply=$APPLY  limit=$LIMIT  $(date '+%F %T')"
+echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
+echo "apply=$APPLY  limit=$LIMIT"
 echo "════════════════════════════════════════════════════════════"
 
 # ── P0: Discovery ─────────────────────────────────────────────────────────────

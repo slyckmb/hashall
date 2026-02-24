@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
-# Gradually start stoppedUP torrents in escalating batches.
-# After each batch, verifies no torrent flipped to a downloading/broken state.
-# On any bad state: immediately stops affected torrents and halts.
+# qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
+# Version: 1.0.0
+# Date:    2026-02-24
+#
+# After each batch waits for state to settle, then checks no torrent flipped
+# to a downloading/broken state. On any bad state: immediately stops the
+# affected torrents and halts.
+# Safe by default: dry-run unless --apply is passed.
+# Idempotent: only targets stoppedUP (100%) torrents; already-started ones
+# are stalledUP/uploading and are skipped automatically.
 #
 # Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume]
-#   --apply   Actually start torrents (default: dry-run)
+#   --apply   Execute changes (dry-run if omitted)
 #   --resume  Skip torrents already in stalledUP/uploading/queuedUP
 set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_VERSION="1.0.0"
+SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
@@ -43,7 +54,8 @@ qb_login() {
 qb_login
 
 log "════════════════════════════════════════════════════════════"
-log "qbit-start-seeding-gradual  apply=$APPLY  $(date '+%F %T')"
+log "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
+log "apply=$APPLY  resume=$RESUME"
 log "════════════════════════════════════════════════════════════"
 
 # Fetch all torrents into temp file (avoids stdin conflicts with Python heredocs)
