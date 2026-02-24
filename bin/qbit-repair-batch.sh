@@ -429,7 +429,8 @@ names  = {c["broken_hash"]: c["root_name"][:40] for c in plan}
 
 TERMINAL = {"stoppedUP", "stoppedDL", "error", "missingFiles"}
 CHECKING = {"checkingDL", "checkingUP", "checkingResumeData", "moving"}
-results  = {}
+results        = {}
+pending_stopDL = {}  # hash -> timestamp first seen stoppedDL (re-poll grace)
 end      = time.time() + 900  # 15 min timeout
 
 def get_states():
@@ -449,8 +450,22 @@ while time.time() < end:
         t = ts.get(h, {})
         s, p = t.get("state", "?"), t.get("progress", 0)
         if s in TERMINAL:
-            results[h] = s
-            parts.append(f"{'✓' if s=='stoppedUP' else '✗'}{h[:8]}")
+            if s == "stoppedDL":
+                # Transient stoppedDL: may be mid-transition to stoppedUP.
+                # Re-poll after 10s before recording as failure.
+                if h not in pending_stopDL:
+                    pending_stopDL[h] = time.time()
+                    parts.append(f"?{h[:8]}=stpDL(wait)")
+                    all_done = False
+                elif time.time() - pending_stopDL[h] >= 10:
+                    results[h] = s
+                    parts.append(f"✗{h[:8]}")
+                else:
+                    parts.append(f"?{h[:8]}=stpDL(wait)")
+                    all_done = False
+            else:
+                results[h] = s
+                parts.append(f"{'✓' if s=='stoppedUP' else '✗'}{h[:8]}")
         elif s in CHECKING:
             parts.append(f"{h[:8]}={s[:7]}({p*100:.0f}%)")
             all_done = False
