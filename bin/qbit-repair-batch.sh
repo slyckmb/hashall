@@ -477,7 +477,10 @@ TERMINAL = {"stoppedUP", "stoppedDL", "error", "missingFiles"}
 CHECKING = {"checkingDL", "checkingUP", "checkingResumeData", "moving"}
 results        = {}
 pending_stopDL = {}  # hash -> timestamp first seen stoppedDL (re-poll grace)
-end      = time.time() + 900  # 15 min timeout
+last_progress  = {}  # hash -> last seen progress value
+last_change    = {}  # hash -> time progress last changed (stagnation detection)
+STAGNANT_SECS  = 600  # 10 min without progress change = genuine timeout
+SAFETY_END     = time.time() + 7200  # 2 hr hard safety cap
 
 def get_states():
     raw = subprocess.run(["curl", "-fsS", "-b", cookie, f"{qb_url}/api/v2/torrents/info"],
@@ -485,9 +488,10 @@ def get_states():
     try:    return {t["hash"]: t for t in json.loads(raw) if t["hash"] in set(hashes)}
     except: return {}
 
-while time.time() < end:
+while time.time() < SAFETY_END:
     time.sleep(5)
     ts = get_states()
+    now = time.time()
     parts, all_done = [], True
     for h in hashes:
         if h in results:
@@ -500,10 +504,10 @@ while time.time() < end:
                 # Transient stoppedDL: may be mid-transition to stoppedUP.
                 # Re-poll after 10s before recording as failure.
                 if h not in pending_stopDL:
-                    pending_stopDL[h] = time.time()
+                    pending_stopDL[h] = now
                     parts.append(f"?{h[:8]}=stpDL(wait)")
                     all_done = False
-                elif time.time() - pending_stopDL[h] >= 10:
+                elif now - pending_stopDL[h] >= 10:
                     results[h] = s
                     parts.append(f"✗{h[:8]}")
                 else:
@@ -513,8 +517,19 @@ while time.time() < end:
                 results[h] = s
                 parts.append(f"{'✓' if s=='stoppedUP' else '✗'}{h[:8]}")
         elif s in CHECKING:
-            parts.append(f"{h[:8]}={s[:7]}({p*100:.0f}%)")
-            all_done = False
+            # Track progress to detect stagnation
+            if last_progress.get(h) != p:
+                last_progress[h] = p
+                last_change[h] = now
+            elif h not in last_change:
+                last_change[h] = now
+            stale_secs = now - last_change.get(h, now)
+            if stale_secs >= STAGNANT_SECS:
+                results[h] = "timeout"
+                parts.append(f"✗{h[:8]}=stale{int(stale_secs//60)}m")
+            else:
+                parts.append(f"{h[:8]}={s[:7]}({p*100:.0f}%)")
+                all_done = False
         else:
             # Unexpected active state — stop it
             subprocess.run(["curl", "-fsS", "-b", cookie, "-X", "POST",
@@ -531,7 +546,7 @@ while time.time() < end:
     sys.stdout.flush()
     if all_done or len(results) == len(hashes): break
 
-# Remaining = timeout
+# Safety cap hit — remaining still checking = timeout
 for h in hashes:
     if h not in results: results[h] = "timeout"
 
