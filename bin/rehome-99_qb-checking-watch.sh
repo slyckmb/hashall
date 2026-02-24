@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Version: 1.0.2
+# Version: 1.0.3
 set -euo pipefail
 
+SCRIPT_VERSION="1.0.3"
 QBIT_URL="${QBIT_URL:-http://localhost:9003}"
 QBIT_USER="${QBIT_USER:-admin}"
 QBIT_PASS="${QBIT_PASS:-adminpass}"
@@ -97,7 +98,12 @@ if ! [[ "$MAX_ITERATIONS" =~ ^[0-9]+$ ]]; then
 fi
 
 COOKIE_FILE="$(mktemp)"
-trap 'rm -f "$COOKIE_FILE"' EXIT
+_on_exit() {
+  rm -f "$COOKIE_FILE"
+  # Ensure cursor is on a clean line after dashboard mode
+  [[ "$DASHBOARD" -eq 1 ]] && printf '\n'
+}
+trap '_on_exit' EXIT
 if [[ "$ENFORCE_PAUSED_DL" -eq 1 && -n "$EVENTS_JSONL" ]]; then
   mkdir -p "$(dirname "$EVENTS_JSONL")"
 fi
@@ -177,7 +183,7 @@ print_dashboard() {
   local interval_s="${13}"
 
   local sep="─────────────────────────────────────────────────"
-  local hdr="── qBittorrent ── ${ts} ────────"
+  local hdr="── qBittorrent v${SCRIPT_VERSION} ── ${ts} ────────"
   hdr="${hdr:0:49}"
 
   printf '%s\n' "$hdr"
@@ -203,12 +209,49 @@ iteration=0
 while true; do
   iteration=$((iteration + 1))
 
-  curl -fsS -c "$COOKIE_FILE" \
-    --data-urlencode "username=${QBIT_USER}" \
-    --data-urlencode "password=${QBIT_PASS}" \
-    "${QBIT_URL}/api/v2/auth/login" >/dev/null
+  FETCH_ERROR=""
+  if ! curl -sS -c "$COOKIE_FILE" \
+      --data-urlencode "username=${QBIT_USER}" \
+      --data-urlencode "password=${QBIT_PASS}" \
+      "${QBIT_URL}/api/v2/auth/login" >/dev/null 2>&1; then
+    FETCH_ERROR="login_failed"
+  fi
 
-  TORRENTS_JSON="$(curl -fsS -b "$COOKIE_FILE" "${QBIT_URL}/api/v2/torrents/info")"
+  TORRENTS_JSON="[]"
+  if [[ -z "$FETCH_ERROR" ]]; then
+    _raw=""
+    if ! _raw="$(curl -sS -b "$COOKIE_FILE" "${QBIT_URL}/api/v2/torrents/info" 2>&1)"; then
+      FETCH_ERROR="fetch_failed"
+    elif ! jq -e . >/dev/null 2>&1 <<<"$_raw"; then
+      FETCH_ERROR="invalid_json"
+    else
+      TORRENTS_JSON="$_raw"
+    fi
+  fi
+
+  if [[ -n "$FETCH_ERROR" ]]; then
+    _err_ts="$(date '+%F %T')"
+    if [[ "$DASHBOARD" -eq 1 ]]; then
+      if [[ "$_DASHBOARD_FIRST" -eq 1 ]]; then
+        printf '[2J[H'
+        _DASHBOARD_FIRST=0
+      else
+        printf '[H'
+      fi
+      printf '%-49s\n' "── qBittorrent v${SCRIPT_VERSION} ── ERROR ──────────────"
+      printf '%-12s : %-35s\n' "error" "$FETCH_ERROR"
+      printf '%-49s\n' "─────────────────────────────────────────────────"
+      printf '%-12s : %-35s\n' "last_try" "$_err_ts"
+      printf '%-12s : %4ss\n'  "interval" "$INTERVAL_S"
+    else
+      printf '%s error fetch_error=%s\n' "$_err_ts" "$FETCH_ERROR"
+    fi
+    if [[ "$ONCE" -eq 1 ]]; then
+      exit 1
+    fi
+    sleep "$INTERVAL_S"
+    continue
+  fi
 
   read -r CHECKING MISSING MOVING DOWN UP COUNT_ZERO COUNT_PARTIAL STOPPED_UP STOPPED_DL STALLED_UP UPLOADING QUEUED_UP TOP_STATES <<<"$(jq -r '
     [
