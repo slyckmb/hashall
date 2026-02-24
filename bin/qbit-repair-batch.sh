@@ -172,38 +172,50 @@ for c in candidates:
     except Exception as e:
         c["error"] = str(e); c["rebuild_files"] = []; plan.append(c); continue
 
+    # Build good lookup: by QB basename (primary) and by index position (fallback)
     good_by_name = {}
+    good_by_idx  = []
     for f in good_files:
         ap = os.path.join(good_save, f["name"])
-        good_by_name[os.path.basename(f["name"])] = {"abs": ap, "qhash": catalog_qhash(ap)}
+        entry = {"abs": ap, "qhash": catalog_qhash(ap), "size": f.get("size", -1)}
+        good_by_name[os.path.basename(f["name"])] = entry
+        good_by_idx.append(entry)
 
+    # Pre-scan broken quick_hashes for dup detection
     broken_qhash_counts = Counter()
-    broken_by_name = {}
     for f in broken_files:
-        ap = os.path.join(broken_save, f["name"])
-        qh = catalog_qhash(ap)
-        broken_by_name[os.path.basename(f["name"])] = {"abs": ap, "qhash": qh}
+        qh = catalog_qhash(os.path.join(broken_save, f["name"]))
         if qh: broken_qhash_counts[qh] += 1
 
     rebuild_files = []
     if same_fs:
-        for bname, bf in broken_by_name.items():
-            gf = good_by_name.get(bname)
+        for i, bf_qb in enumerate(broken_files):
+            ap  = os.path.join(broken_save, bf_qb["name"])
+            qh  = catalog_qhash(ap)
+            bsz = bf_qb.get("size", -1)
+
+            # Primary: match by QB filename basename
+            gf = good_by_name.get(os.path.basename(bf_qb["name"]))
+            # Fallback: same position in QB file list, same size (cross-seed name variants)
+            if gf is None and i < len(good_by_idx) and bsz > 0 and good_by_idx[i]["size"] == bsz:
+                gf = good_by_idx[i]
+
             if gf is None:
-                rebuild_files.append({"bad": bf["abs"], "good": None, "action": "no_match"}); continue
-            bqh, gqh = bf["qhash"], gf["qhash"]
+                rebuild_files.append({"bad": ap, "good": None, "action": "no_match"}); continue
+
+            bqh, gqh = qh, gf["qhash"]
             try:
-                b_ino = os.stat(bf["abs"]).st_ino if os.path.exists(bf["abs"]) else 0
+                b_ino = os.stat(ap).st_ino if os.path.exists(ap) else 0
                 g_ino = os.stat(gf["abs"]).st_ino if os.path.exists(gf["abs"]) else 0
             except: b_ino = g_ino = 0
 
             if b_ino and g_ino and b_ino == g_ino:             action = "already_hardlinked"
-            elif not os.path.exists(bf["abs"]):                 action = "missing"
+            elif not os.path.exists(ap):                        action = "missing"
             elif bqh and broken_qhash_counts.get(bqh, 0) > 1:  action = "garbage"
             elif bqh and gqh and bqh != gqh:                    action = "garbage"
             elif bqh and gqh and bqh == gqh:                    action = "dup_copy"
             else:                                                action = "unknown_keep"
-            rebuild_files.append({"bad": bf["abs"], "good": gf["abs"], "action": action})
+            rebuild_files.append({"bad": ap, "good": gf["abs"], "action": action})
 
     counts = Counter(f["action"] for f in rebuild_files)
     c["rebuild_files"] = rebuild_files
