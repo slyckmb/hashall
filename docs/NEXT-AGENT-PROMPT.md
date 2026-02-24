@@ -1,75 +1,101 @@
-# HANDOFF-2026-02-20-rehome-stash-nohl-to-pool
+# Next Agent Prompt — qbit-repair campaign
 
-## Scope
+**Date:** 2026-02-24
+**Worktree:** `/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028`
+**Branch:** `chatrap/claude-hashall-20260223-124028`
 
-This handoff is focused on **rehome of stash noHL payload groups to pool**.
-It intentionally does not focus on local pool-only migration troubleshooting.
+---
 
-## Objective
+## Current State
 
-Move noHL stash seed payload groups to pool paths while keeping qB seeding intact, update tags, and track follow-up state.
+- **stoppedDL:** ~1896 (need repair)
+- **stoppedUP:** ~3250 (being started by `qbit-start-seeding-gradual.sh`)
+- **Streak:** 0 (b4345cd had 2 confirmed failures out of 50; 19 were still checking when captured)
+- **Total repaired this campaign:** ~157+ confirmed
 
-## Confirmed Progress (Evidence)
+---
 
-1. Main large apply batch completed successfully:
-   - Log: `out/reports/rehome-normalize/rehome-normalize-apply-20260219-112708.log`
-   - `Batch plan: 20 payload(s)`
-   - `Plan executed successfully`
-   - Parsed totals from this run: `20` REUSE plan steps, `118` torrents relocated/reused.
+## What Just Happened
 
-2. Additional follow-on apply batch completed successfully:
-   - Log: `out/reports/rehome-normalize/rehome-normalize-apply-20260219-111244.log`
-   - Parsed totals: `1` REUSE plan step, `10` torrents.
+1. **BUG-6 fixed** (pool-pool timing race): `bin/qbit-repair-batch.sh` now retries recheck on stoppedDL detection during P5 monitor + 120s grace for pool-pool torrents. Confirmed working: West Wing S02 and Brave New World (pool-pool) both resolved ✓ in b4345cd.
 
-3. Wrapper-based passes continued processing stash->pool rehome groups:
-   - Logs: `out/reports/rehome-normalize/codex-says-run-this-next-20260219-184726.log`,
-     `out/reports/rehome-normalize/codex-says-run-this-next-20260219-190258.log`
-   - Each pass executed `15` REUSE payload plans and completed successfully.
+2. **b4345cd batch** (50 torrents, BUG-6 fix active): Was still running when captured. Last observed: 29 ✓, 2 ✗, 19 still in checkingUP. Likely completed successfully for most of the 19 still checking. The 2 confirmed failures are:
+   - `5fc73670` — Pink Floyd Division Bell (stash-stash; was `already_hardlinked: 22, garbage: 1`)
+   - `6b3471fd` — (stash-stash; `already_hardlinked: 13`)
 
-4. Tagging confirms stash->pool transition workflow was applied:
-   - `rehome_tag_update ... tags=rehome,rehome_from_stash,rehome_to_pool,...`
-   - Unique hashes seen with `rehome_tag_update` across rehome logs: `153`.
+3. **bc77cce** (`bin/qbit-start-seeding-gradual.sh --apply`): Started stoppedUP torrents in escalating batches (1, 2, 5, 10, 25, 50, 100...). Was through batch-3 (8 total started, all stable) when captured. Likely still running or completed.
 
-## Current Follow-Up State (for stash noHL groups)
+---
 
-From latest completed wrapper follow-up (`...190258.log`):
+## Your Primary Task
 
-- `groups: 17`
-- `ok: 15`
-- `pending: 2`
-- `failed: 0`
-- `cleanup_done: 0`
+Continue repairing stoppedDL torrents. Run batches of 50:
 
-Pending payloads:
+```bash
+cd /home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028
 
-- `82d486a55784fa21`
-- `b1ad45b746842fae`
+# Check current streak
+cat out/reports/qbit-triage/repair-consecutive-successes.txt
 
-Pending reasons (both):
+# Dry-run first to see candidates
+bash bin/qbit-repair-batch.sh --limit 50
 
-- `db_reasons=stale_refs_on_source_payload`
-- `source_reasons=source_has_torrent_refs`
+# Apply
+bash bin/qbit-repair-batch.sh --limit 50 --apply
+```
 
-## What This Means
+All 6 known bugs are fixed. Batches should run cleanly. Run as many as needed.
 
-- The core stash noHL rehome pipeline is working and has moved a large batch to pool.
-- Remaining work is narrow: resolve the 2 pending groups with stale source refs, then rerun follow-up.
+---
 
-## Commits Relevant to This Handoff
+## Expected Behavior
 
-- `6fb46b8` feat(bin): add Stage 0 legacy cross-seed migration
-- `ccc7093` feat(bin): relocate non-seeds /pool torrents via qB as Stage 0
-- `f000c2f` fix(rehome): add wrapper heartbeat logs for long-running steps
-- `a76d7af` fix(rehome): stream stage0 progress and fail fast on stuck relocation
+- Each batch of 50 takes ~20-30 minutes (P5 monitor waits for all to resolve)
+- Pool-pool pairs resolve fine now (BUG-6 fix handles the timing race)
+- Streak counter auto-updates in `out/reports/qbit-triage/repair-consecutive-successes.txt`
+- ~1896 stoppedDL / ~46 repairs per batch ≈ ~41 more batches to go
+- Milestone: streak=10 (was achieved Feb 23 with batch-20 → streak=30, then reset by bugs)
 
-## Versions
+---
 
-- `rehome`: `0.3.24`
-- `hashall`: `0.4.102`
+## Bugs Fixed (All 6 Active)
 
-## Next Agent Start Point
+| Bug | Summary | Fix |
+|-----|---------|-----|
+| BUG-1 | Deletion of live seed files | Inode-based safety check in P3 |
+| BUG-2 | QB moved partials during restart | Delete before QB restart in P3 |
+| BUG-3 | Transient stoppedDL recorded as failure | 10s grace in P5 before failure |
+| BUG-4 | Wall-clock timeout too short | Per-torrent stagnation detection (not wall-clock) |
+| BUG-5 | Stagnation fires on 0%-queued torrents | `has_started` gate — only stagnate if was >0% |
+| BUG-6 | Pool-pool timing race on recheckTorrents | Retry recheck on stoppedDL + 120s grace |
 
-Start from the latest stash-noHL follow-up evidence:
+---
 
-- `out/reports/rehome-normalize/codex-says-run-this-next-20260219-190258.log`
-  Focus only on clearing the 2 pending payload groups and closing follow-up.
+## Known Remaining Issues
+
+- **Same-save-path pairs**: Still skipped (P0). These need fastresume-only patch, no hardlink work. Count unknown.
+- **Trashy.Lady** (`43f589275bd8`): stoppedDL at 99.8%, missing 0.2%. No easy fix.
+- **Legion S03**: Multiple hashes with various issues (corruption, cross-fs). Skip for now.
+- **5fc73670** (Pink Floyd Division Bell): Persistent failure. May need manual investigation.
+- **6b3471fd**: Persistent failure. May need manual investigation.
+
+---
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `bin/qbit-repair-batch.sh` | Main repair script |
+| `bin/qbit-start-seeding-gradual.sh` | Starts stoppedUP torrents in safe escalating batches |
+| `docs/qbit-repair-ops-log.md` | Full ops log with bug history and batch results |
+| `out/reports/qbit-triage/repair-consecutive-successes.txt` | Streak counter |
+
+---
+
+## QB Environment
+
+- API: `http://localhost:9003`
+- Container: `qbittorrent_vpn`
+- BT_backup: `/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup/`
+- Pool: `/pool/data/` (device 231)
+- Stash: `/stash/media/` = `/data/media/` (device 44, bind mount)

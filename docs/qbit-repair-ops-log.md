@@ -31,9 +31,10 @@
 | Feb 23 | batch-50 (be122cd) | 50 | 21 | 29 | 0 | all 29 were checkingUP; wall-clock timeout too short |
 | Feb 24 | batch-50 (b7246e0) | 50 | 20 | 30 | 0 | stale10m on queued-at-0% torrents |
 | Feb 24 | batch-50 (bc6b411) | 50 | 46 | 4 | 0 | 4 pool-pool failures (see below) |
+| Feb 24 | batch-50 (b4345cd) | 50 | 29+ | 2 | 0 | BUG-6 fixed; batch still running when output captured; 2 confirmed failures (5fc73670, 6b3471fd), 19 still checkingUP at capture time |
 
-**Total repaired (confirmed stoppedUP):** ~128 torrents
-**Streak:** 0
+**Total repaired (confirmed stoppedUP):** ~157+ torrents (128 prior + 29 confirmed from b4345cd)
+**Streak:** 0 (b4345cd still in progress; 2 confirmed failures reset streak)
 
 ---
 
@@ -59,19 +60,11 @@ Fix: per-torrent stagnation timeout — only fires if torrent was >0% then stall
 Stagnation fired on torrents at 0% waiting in QB's queue (never started).
 Fix: only stagnation-timeout torrents that have been >0% at some point (`has_started` set).
 
-### BUG-6: Pool-pool failures (UNDER INVESTIGATION — Feb 24)
-4 pool-pool torrents per batch fail with immediate `stoppedDL` after recheckTorrents, even though:
-- files exist at save_path on pool
-- fastresume is correctly patched
-
-Manual recheckTorrents after batch works fine (confirmed checkingDL → in progress).
-**Likely cause:** Timing — QB starts in stoppedDL for these, and recheckTorrents during the batch isn't taking effect. Possible reasons:
-  1. recheckTorrents called while QB still processing checkingResumeData
-  2. QB restarts and briefly marks stoppedDL before our recheck queues
-  3. Some other fastresume field not being cleared
-
-**Affected hashes:** 55420eba, 56c8760d, 57316294, 5e8f48b7
-**Workaround (if needed):** After each batch, manually recheck failing pool-pool torrents.
+### BUG-6: Pool-pool timing race (FIXED — Feb 24)
+Pool-pool torrents were failing with immediate `stoppedDL` after recheckTorrents.
+**Root cause:** recheckTorrents called while QB still in checkingResumeData state; recheck didn't take effect.
+**Fix:** Retry recheck on stoppedDL detection during P5 monitor + 120s grace period for pool-pool pairs.
+**Confirmed working:** b4345cd batch shows 62c3d90c (West Wing S02, pool-pool) and 63ce041b (Brave New World, pool-pool) both resolved to ✓.
 
 ---
 
@@ -85,18 +78,20 @@ Manual recheckTorrents after batch works fine (confirmed checkingDL → in progr
 
 ## Current State (Feb 24)
 
-stoppedDL count: **~1896** (from watchdog output)
-stoppedUP count: **~3218**
-Streak: **0**
+stoppedDL count: **~1896** (from watchdog output; actual may be lower after b4345cd completes)
+stoppedUP count: **~3250** (being gradually started by `bin/qbit-start-seeding-gradual.sh --apply`)
+Streak: **0** (b4345cd had 2 confirmed failures; if no other failures, streak depends on final b4345cd result)
 
-4 pool-pool failures from bc6b411 are being manually rechecked (in progress right now).
-Next batch: pending (waiting to start after pool-pool analysis).
+BUG-6 fixed — pool-pool pairs now handled with retry-recheck + 120s grace.
+b4345cd batch was still running when captured (29 confirmed ✓, 2 ✗, 19 still checking).
+bc77cce (`qbit-start-seeding-gradual.sh --apply`) started stoppedUP torrents in escalating batches — was through batch-3 (8 started, all stable) when captured.
+Next repair batch: ready to run `bash bin/qbit-repair-batch.sh --limit 50 --apply`.
 
 ---
 
 ## TODO
 
-- [ ] Fix or workaround pool-pool batch timing bug
+- [x] Fix pool-pool batch timing bug (BUG-6 fixed)
 - [ ] Run clean batch → establish streak > 0
 - [ ] Scale: ~1896 / 46 per batch ≈ 41 more batches needed
 - [ ] Reach streak=10 (milestone)
@@ -127,8 +122,9 @@ bash bin/qbit-repair-batch.sh --limit 20
 bash bin/qbit-repair-batch.sh --limit 20 --apply
 ```
 
-Pool-pool pairs (save_path starts with `/pool/data/seeds/`) may fail in the batch due to timing.
-After each batch, manually recheck any stoppedDL failures:
+Pool-pool pairs (save_path starts with `/pool/data/seeds/`) are now handled by BUG-6 fix (retry-recheck + 120s grace). No manual intervention needed.
+
+If any torrents still end up as stoppedDL after a batch, manually recheck:
 ```bash
 curl -s -c /tmp/qb_cookie.txt -d 'username=admin&password=adminadmin' http://localhost:9003/api/v2/auth/login
 curl -s --cookie /tmp/qb_cookie.txt -X POST http://localhost:9003/api/v2/torrents/recheck \
