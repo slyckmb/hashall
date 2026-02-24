@@ -106,10 +106,10 @@ bash bin/fix-permissions.sh
 nohup bash bin/qbit-start-seeding-gradual.sh --daemon --apply --min-batch 10 --poll 60 > /tmp/gradual-daemon.log 2>&1 &
 
 # If daemon halted due to downloading detection, investigate then:
-touch out/reports/qbit-triage/daemon-halt-reset
+touch ~/.logs/hashall/reports/qbit-triage/daemon-halt-reset
 ```
 
-Daemon log: `out/reports/qbit-triage/daemon.log`
+Daemon log: `~/.logs/hashall/reports/qbit-triage/daemon.log`
 
 ---
 
@@ -119,7 +119,7 @@ Daemon log: `out/reports/qbit-triage/daemon.log`
 cd /home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028
 
 # Check state
-cat out/reports/qbit-triage/repair-consecutive-successes.txt   # streak
+cat ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt   # streak
 curl -s http://localhost:9003/api/v2/torrents/info | python3 -c "
 import json,sys; from collections import Counter
 t=json.load(sys.stdin); s=Counter(x['state'] for x in t)
@@ -186,5 +186,5 @@ DB may be stale — verify on-disk when critical.
 bash bin/rehome-99_qb-checking-watch.sh --dashboard
 
 # Daemon log
-tail -f out/reports/qbit-triage/daemon.log
+tail -f ~/.logs/hashall/reports/qbit-triage/daemon.log
 ```

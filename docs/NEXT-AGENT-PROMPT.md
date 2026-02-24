@@ -36,7 +36,7 @@ Continue repairing stoppedDL torrents. Run batches of 50:
 cd /home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028
 
 # Check current streak
-cat out/reports/qbit-triage/repair-consecutive-successes.txt
+cat ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt
 
 # Dry-run first to see candidates
 bash bin/qbit-repair-batch.sh --limit 50
@@ -53,7 +53,7 @@ All 6 known bugs are fixed. Batches should run cleanly. Run as many as needed.
 
 - Each batch of 50 takes ~20-30 minutes (P5 monitor waits for all to resolve)
 - Pool-pool pairs resolve fine now (BUG-6 fix handles the timing race)
-- Streak counter auto-updates in `out/reports/qbit-triage/repair-consecutive-successes.txt`
+- Streak counter auto-updates in `~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt`
 - ~1845 stoppedDL / ~46 repairs per batch ≈ ~40 more batches to go
 - Milestone: streak=10 (was achieved Feb 23 with batch-20 → streak=30, then reset by bugs)
 
@@ -89,7 +89,7 @@ All 6 known bugs are fixed. Batches should run cleanly. Run as many as needed.
 | `bin/qbit-repair-batch.sh` | Main repair script |
 | `bin/qbit-start-seeding-gradual.sh` | Starts stoppedUP torrents in safe escalating batches |
 | `docs/qbit-repair-ops-log.md` | Full ops log with bug history and batch results |
-| `out/reports/qbit-triage/repair-consecutive-successes.txt` | Streak counter |
+| `~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt` | Streak counter |
 
 ---
 

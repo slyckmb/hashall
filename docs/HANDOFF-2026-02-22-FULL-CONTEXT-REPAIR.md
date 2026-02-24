@@ -51,7 +51,7 @@ Phases:
 - **P5**: Monitor all in parallel until terminal state (stoppedUP=success, stoppedDL=failure)
 - **P6**: Update streak counter
 
-Streak file: `out/reports/qbit-triage/repair-consecutive-successes.txt`
+Streak file: `~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt`
 
 ---
 
@@ -145,7 +145,7 @@ Pool-pool torrents (save_path on `/pool/data/`) failed immediately to stoppedDL 
 cd /home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028
 
 # Check streak
-cat out/reports/qbit-triage/repair-consecutive-successes.txt
+cat ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt
 
 # Dry-run
 bash bin/qbit-repair-batch.sh --limit 50

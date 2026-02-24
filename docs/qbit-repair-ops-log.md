@@ -14,7 +14,7 @@
 | QB API | `http://localhost:9003` |
 | QB container | `qbittorrent_vpn` |
 | BT_backup (fastresumes) | `/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup/` |
-| Streak file | `out/reports/qbit-triage/repair-consecutive-successes.txt` |
+| Streak file | `~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt` |
 | Pool path | `/pool/data/...` (dev=231) |
 | Stash path | `/stash/media/...` = `/data/media/...` (dev=44) |
 
@@ -101,7 +101,7 @@ Scripts:
 - `fix-permissions.sh` **v1.0.0** — NEW: resets media root perms after docker ownership damage
 
 **Daemon running:** PID 3559295 — `qbit-start-seeding-gradual.sh --daemon --apply --min-batch 10 --poll 60`
-Logs: `out/reports/qbit-triage/daemon.log`
+Logs: `~/.logs/hashall/reports/qbit-triage/daemon.log`
 
 **fix-permissions.sh** running in background (PID 4127316), fixing `/data/media`, `/pool/data`, `/mnt/hotspare6tb`.
 
@@ -127,7 +127,7 @@ bash bin/qbit-repair-batch.sh --limit 50 --apply
 
 - **Fleet status:** `bin/rehome-99_qb-checking-watch.sh` — shows checking/missing/stoppedDL counts
 - **During batch:** P5 monitor built into `qbit-repair-batch.sh` polls every 5s per-torrent
-- **Streak:** `cat out/reports/qbit-triage/repair-consecutive-successes.txt`
+- **Streak:** `cat ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt`
 
 ---
 
@@ -136,7 +136,7 @@ bash bin/qbit-repair-batch.sh --limit 50 --apply
 Read this file first. Then:
 ```bash
 # Check streak
-cat out/reports/qbit-triage/repair-consecutive-successes.txt
+cat ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt
 
 # Dry-run to see next candidates
 bash bin/qbit-repair-batch.sh --limit 20

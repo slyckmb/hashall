@@ -51,6 +51,8 @@ tools/inject_staged.sh
 tools/pre-commit-gptrail.sh
 # Ignore dev-only GPTrail symlinks
 
+# out/ is for local prompt/doc scratch files (prepend_remote_preamble.sh workflow)
+# Logs and reports go to ~/.logs/hashall/reports/ (not tracked here)
 out/
 **/._*
 .state/
