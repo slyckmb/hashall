@@ -477,10 +477,12 @@ TERMINAL = {"stoppedUP", "stoppedDL", "error", "missingFiles"}
 CHECKING = {"checkingDL", "checkingUP", "checkingResumeData", "moving"}
 results        = {}
 pending_stopDL = {}  # hash -> timestamp first seen stoppedDL (re-poll grace)
+recheck_issued = set()  # hashes for which a retry recheck was issued
 last_progress  = {}  # hash -> last seen progress value
 last_change    = {}  # hash -> time progress last changed (stagnation detection)
 has_started    = set()  # hashes that have ever made progress > 0%
 STAGNANT_SECS  = 600  # 10 min without progress change = genuine timeout (only if started)
+STOPDL_GRACE   = 120  # seconds to wait after retry recheck before giving up
 SAFETY_END     = time.time() + 7200  # 2 hr hard safety cap
 
 def get_states():
@@ -488,6 +490,12 @@ def get_states():
                          capture_output=True, text=True).stdout
     try:    return {t["hash"]: t for t in json.loads(raw) if t["hash"] in set(hashes)}
     except: return {}
+
+def retry_recheck(h):
+    subprocess.run(["curl", "-fsS", "-b", cookie, "-X", "POST",
+                    f"{qb_url}/api/v2/torrents/recheck",
+                    "--data-urlencode", f"hashes={h}"],
+                   capture_output=True)
 
 while time.time() < SAFETY_END:
     time.sleep(5)
@@ -502,17 +510,22 @@ while time.time() < SAFETY_END:
         s, p = t.get("state", "?"), t.get("progress", 0)
         if s in TERMINAL:
             if s == "stoppedDL":
-                # Transient stoppedDL: may be mid-transition to stoppedUP.
-                # Re-poll after 10s before recording as failure.
+                # Transient stoppedDL: QB may still be in checkingResumeData when
+                # initial recheckTorrents fires (pool-pool race condition), or may be
+                # mid-transition. Issue a retry recheck on first detection, then wait
+                # STOPDL_GRACE seconds for it to complete before recording as failure.
                 if h not in pending_stopDL:
                     pending_stopDL[h] = now
-                    parts.append(f"?{h[:8]}=stpDL(wait)")
+                    if h not in recheck_issued:
+                        retry_recheck(h)
+                        recheck_issued.add(h)
+                    parts.append(f"?{h[:8]}=stpDL(recheck)")
                     all_done = False
-                elif now - pending_stopDL[h] >= 10:
+                elif now - pending_stopDL[h] >= STOPDL_GRACE:
                     results[h] = s
                     parts.append(f"✗{h[:8]}")
                 else:
-                    parts.append(f"?{h[:8]}=stpDL(wait)")
+                    parts.append(f"?{h[:8]}=stpDL({int(now-pending_stopDL[h])}s)")
                     all_done = False
             else:
                 results[h] = s
