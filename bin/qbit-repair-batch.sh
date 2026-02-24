@@ -146,19 +146,36 @@ db, tmpdir = sys.argv[1], sys.argv[2]
 candidates = json.load(open(f"{tmpdir}/candidates.json"))
 con = sqlite3.connect(db)
 
-def catalog_qhash(abspath):
+def _fs_table(abspath):
+    """Return (table, prefix, rel) for a given absolute path, or None."""
     if abspath.startswith("/pool/data/"):
-        rel = abspath[len("/pool/data/"):]
-        row = con.execute("SELECT quick_hash FROM files_231 WHERE path=? AND status='active' LIMIT 1", (rel,)).fetchone()
-    elif abspath.startswith("/stash/media/"):
-        rel = abspath[len("/stash/media/"):]
-        row = con.execute("SELECT quick_hash FROM files_44 WHERE path=? AND status='active' LIMIT 1", (rel,)).fetchone()
-    elif abspath.startswith("/data/media/"):
-        rel = abspath[len("/data/media/"):]
-        row = con.execute("SELECT quick_hash FROM files_44 WHERE path=? AND status='active' LIMIT 1", (rel,)).fetchone()
-    else:
-        row = None
-    return row[0] if row and row[0] else None
+        return "files_231", "/pool/data/", abspath[len("/pool/data/"):]
+    if abspath.startswith("/stash/media/"):
+        return "files_44",  "/stash/media/", abspath[len("/stash/media/"):]
+    if abspath.startswith("/data/media/"):
+        return "files_44",  "/stash/media/", abspath[len("/data/media/"):]
+    return None, None, None
+
+def catalog_lookup(abspath):
+    """Return (quick_hash, sha256) from DB for a given path, or (None, None)."""
+    table, _, rel = _fs_table(abspath)
+    if not table: return (None, None)
+    row = con.execute(f"SELECT quick_hash, sha256 FROM {table} WHERE path=? AND status='active' LIMIT 1", (rel,)).fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+def catalog_qhash(abspath):
+    return catalog_lookup(abspath)[0]
+
+def catalog_find_by_qhash(qhash, abspath_hint):
+    """Find any active file with given quick_hash on the same filesystem as abspath_hint.
+    Returns absolute path of a DB-confirmed on-disk file, or None."""
+    if not qhash: return None
+    table, prefix, _ = _fs_table(abspath_hint)
+    if not table: return None
+    row = con.execute(f"SELECT path FROM {table} WHERE quick_hash=? AND status='active' LIMIT 1", (qhash,)).fetchone()
+    if not row: return None
+    candidate = prefix + row[0]
+    return candidate if os.path.exists(candidate) else None
 
 plan = []
 for c in candidates:
@@ -177,7 +194,8 @@ for c in candidates:
     good_by_idx  = []
     for f in good_files:
         ap = os.path.join(good_save, f["name"])
-        entry = {"abs": ap, "qhash": catalog_qhash(ap), "size": f.get("size", -1)}
+        qh, sh = catalog_lookup(ap)
+        entry = {"abs": ap, "qhash": qh, "sha256": sh, "size": f.get("size", -1)}
         good_by_name[os.path.basename(f["name"])] = entry
         good_by_idx.append(entry)
 
@@ -196,17 +214,23 @@ for c in candidates:
 
             # Primary: match by QB filename basename
             gf = good_by_name.get(os.path.basename(bf_qb["name"]))
-            # Fallback: same position in QB file list, same size (cross-seed name variants)
+            # Fallback: same index in QB file list + same size + DB-confirmed qhash on good file
+            # (handles cross-seed name variants like spaces-vs-dots; qhash gates the guess)
             if gf is None and i < len(good_by_idx) and bsz > 0 and good_by_idx[i]["size"] == bsz:
-                gf = good_by_idx[i]
+                cand = good_by_idx[i]
+                if cand["qhash"]:  # DB confirms good file is known content — not just size
+                    gf = cand
 
             if gf is None:
                 rebuild_files.append({"bad": ap, "good": None, "action": "no_match"}); continue
 
+            # Resolve best on-disk source: prefer QB-reported path; fall back to DB hash search
+            good_src = gf["abs"] if os.path.exists(gf["abs"]) else catalog_find_by_qhash(gf["qhash"], gf["abs"])
+
             bqh, gqh = qh, gf["qhash"]
             try:
                 b_ino = os.stat(ap).st_ino if os.path.exists(ap) else 0
-                g_ino = os.stat(gf["abs"]).st_ino if os.path.exists(gf["abs"]) else 0
+                g_ino = os.stat(good_src).st_ino if good_src and os.path.exists(good_src) else 0
             except: b_ino = g_ino = 0
 
             if b_ino and g_ino and b_ino == g_ino:             action = "already_hardlinked"
@@ -215,7 +239,7 @@ for c in candidates:
             elif bqh and gqh and bqh != gqh:                    action = "garbage"
             elif bqh and gqh and bqh == gqh:                    action = "dup_copy"
             else:                                                action = "unknown_keep"
-            rebuild_files.append({"bad": ap, "good": gf["abs"], "action": action})
+            rebuild_files.append({"bad": ap, "good": good_src, "action": action})
 
     counts = Counter(f["action"] for f in rebuild_files)
     c["rebuild_files"] = rebuild_files
