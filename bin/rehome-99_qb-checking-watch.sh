@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Version: 1.0.3
+# Version: 1.0.4
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.4"
 QBIT_URL="${QBIT_URL:-http://localhost:9003}"
 QBIT_USER="${QBIT_USER:-admin}"
 QBIT_PASS="${QBIT_PASS:-adminpass}"
@@ -100,8 +100,7 @@ fi
 COOKIE_FILE="$(mktemp)"
 _on_exit() {
   rm -f "$COOKIE_FILE"
-  # Ensure cursor is on a clean line after dashboard mode
-  [[ "$DASHBOARD" -eq 1 ]] && printf '\n'
+  if [[ "$DASHBOARD" -eq 1 ]]; then printf '\n'; fi
 }
 trap '_on_exit' EXIT
 if [[ "$ENFORCE_PAUSED_DL" -eq 1 && -n "$EVENTS_JSONL" ]]; then
@@ -182,11 +181,11 @@ print_dashboard() {
   local unexpected_down="${12}"
   local interval_s="${13}"
 
-  local sep="─────────────────────────────────────────────────"
-  local hdr="── qBittorrent v${SCRIPT_VERSION} ── ${ts} ────────"
-  hdr="${hdr:0:49}"
+  local sep="──────────────────────"
 
-  printf '%s\n' "$hdr"
+  printf '── qBittorrent v%s ──\n' "$SCRIPT_VERSION"
+  printf '%s\n' "$ts"
+  printf '%s\n' "$sep"
   printf '%-12s : %5s\n' "checking" "$checking"
   printf '%-12s : %5s\n' "missing" "$missing"
   printf '%-12s : %5s\n' "moving" "$moving"
@@ -203,7 +202,10 @@ print_dashboard() {
   printf '%-12s : %4ss\n' "interval" "$interval_s"
 }
 
-_DASHBOARD_FIRST=1
+_FORCE_REDRAW=0
+_on_winch() { _FORCE_REDRAW=1; }
+[[ "$DASHBOARD" -eq 1 ]] && trap '_on_winch' SIGWINCH
+
 iteration=0
 
 while true; do
@@ -232,24 +234,24 @@ while true; do
   if [[ -n "$FETCH_ERROR" ]]; then
     _err_ts="$(date '+%F %T')"
     if [[ "$DASHBOARD" -eq 1 ]]; then
-      if [[ "$_DASHBOARD_FIRST" -eq 1 ]]; then
-        printf '[2J[H'
-        _DASHBOARD_FIRST=0
-      else
-        printf '[H'
-      fi
-      printf '%-49s\n' "── qBittorrent v${SCRIPT_VERSION} ── ERROR ──────────────"
-      printf '%-12s : %-35s\n' "error" "$FETCH_ERROR"
-      printf '%-49s\n' "─────────────────────────────────────────────────"
-      printf '%-12s : %-35s\n' "last_try" "$_err_ts"
-      printf '%-12s : %4ss\n'  "interval" "$INTERVAL_S"
+      printf '\033[2J\033[H'
+      printf '── qBittorrent v%s ── ERROR\n' "$SCRIPT_VERSION"
+      printf '%s\n' "$_err_ts"
+      printf '──────────────────────\n'
+      printf '%-12s : %s\n' "error" "$FETCH_ERROR"
+      printf '──────────────────────\n'
+      printf '%-12s : %4ss\n' "interval" "$INTERVAL_S"
+      _FORCE_REDRAW=0
     else
       printf '%s error fetch_error=%s\n' "$_err_ts" "$FETCH_ERROR"
     fi
     if [[ "$ONCE" -eq 1 ]]; then
       exit 1
     fi
-    sleep "$INTERVAL_S"
+    sleep "$INTERVAL_S" &
+    _SLEEP_PID=$!
+    wait "$_SLEEP_PID" 2>/dev/null || true
+    kill "$_SLEEP_PID" 2>/dev/null || true
     continue
   fi
 
@@ -344,12 +346,8 @@ while true; do
   fi
 
   if [[ "$DASHBOARD" -eq 1 ]]; then
-    if [[ "$_DASHBOARD_FIRST" -eq 1 ]]; then
-      printf '[2J[H'
-      _DASHBOARD_FIRST=0
-    else
-      printf '[H'
-    fi
+    printf '\033[2J\033[H'
+    _FORCE_REDRAW=0
     print_dashboard \
       "$(date '+%F %T')" \
       "$CHECKING" "$MISSING" "$MOVING" "$DOWN" "$UP" \
@@ -376,5 +374,8 @@ while true; do
     exit 0
   fi
 
-  sleep "$INTERVAL_S"
+  sleep "$INTERVAL_S" &
+  _SLEEP_PID=$!
+  wait "$_SLEEP_PID" 2>/dev/null || true
+  kill "$_SLEEP_PID" 2>/dev/null || true
 done
