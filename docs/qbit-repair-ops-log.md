@@ -33,9 +33,11 @@
 | Feb 24 | batch-50 (bc6b411) | 50 | 46 | 4 | 0 | 4 pool-pool failures (see below) |
 | Feb 24 | batch-50 (b4345cd) | 50 | ~48 | 2 | 0 | BUG-6 confirmed fixed (pool-pool pairs ✓); 2 failures: 5fc73670 (Pink Floyd), 6b3471fd |
 | Feb 24 | batch-50 (v1.2.0) | 50 | 50 | 0 | 50 | v1.2.0 fix: expanded good pool to stalledUP+uploading; PERFECT BATCH — streak reset to 50 |
+| Feb 24 | batch-50 (v1.2.0, 2nd) | ~51 | ~51 | 0 | 51(+1) | daemon drained 1 more; stoppedDL 1741→1690 |
+| Feb 24 | batch-50 (v1.2.1) | ABORTED | — | — | 0 | concurrent run collision; both scripts crashed mid-P3; QB manually restarted; 12 fastresumes patched pre-crash, rechecked manually; PermissionError on root-owned dir (HD-Space) → BUG-7 fixed in v1.2.1 |
 
-**Total repaired (confirmed stoppedUP):** ~308+ torrents
-**Streak:** 50 (first clean batch with v1.2.0 fix)
+**Total repaired (confirmed stoppedUP):** ~360+ torrents
+**Streak:** 0 (aborted batch; need clean run to re-establish)
 
 ---
 
@@ -67,6 +69,12 @@ Pool-pool torrents were failing with immediate `stoppedDL` after recheckTorrents
 **Fix:** Retry recheck on stoppedDL detection during P5 monitor + 120s grace period for pool-pool pairs.
 **Confirmed working:** b4345cd batch shows 62c3d90c (West Wing S02, pool-pool) and 63ce041b (Brave New World, pool-pool) both resolved to ✓.
 
+### BUG-7: PermissionError on root-owned directories (FIXED — Feb 24)
+P3 `os.remove()` raised `PermissionError` on files in dirs owned by root (e.g. `HD-Space` cross-seed dir set by docker container).
+**Root cause:** Some docker containers `chown`/`chmod` media dirs to root, leaving them inaccessible to the `michael` user.
+**Fix (script):** Wrap `os.remove()` in `try/except PermissionError` — log warning, skip deletion, continue with fastresume patch. (`qbit-repair-batch.sh` v1.2.1)
+**Fix (system):** `bin/fix-permissions.sh` — recursively resets `/data/media`, `/pool/data`, `/mnt/hotspare6tb` to `michael:michael`, dirs `2755`, files `644`. Run periodically after docker ops.
+
 ---
 
 ## Known Skipped Cases
@@ -77,27 +85,27 @@ Pool-pool torrents were failing with immediate `stoppedDL` after recheckTorrents
 
 ---
 
-## Current State (Feb 24 ~09:30)
+## Current State (Feb 24 ~10:20)
 
-stoppedDL count: **1741** (started at ~2103; ~362 repaired total this campaign)
-seeding (stalledUP): **3385** (daemon continuously starts new stoppedUP rounds)
-stoppedUP (not yet started): **3** (daemon active, will start when ≥10 accumulate)
-Streak: **50** (v1.2.0 first batch — perfect 50/50)
+stoppedDL count: **1679** (started at ~2103; ~360+ repaired this campaign)
+seeding (stalledUP): **3421** (daemon continuously starts new stoppedUP rounds)
+stoppedUP (not yet started): **12** (daemon will drain these)
+checking: **~17** (resolving from aborted batch + manual recheck)
+Streak: **0** (aborted batch; needs clean run to re-establish)
 
 Scripts:
-- `qbit-repair-batch.sh` **v1.2.0** — P0 now includes `stalledUP`/`uploading` as good sources
-- `qbit-start-seeding-gradual.sh` **v1.1.1** — daemon mode + halt state + stop-on-download bug fix (was passing truncated 12-char hashes to API)
-- `rehome-99_qb-checking-watch.sh` **v1.0.2** — dashboard mode; checkingDL removed from `down=` bucket
-- `iowatch` **v1.4.3** — drive map corrected after stash pool refactor; pool drives always shown
+- `qbit-repair-batch.sh` **v1.2.1** — BUG-7: PermissionError on root-owned dirs handled gracefully
+- `qbit-start-seeding-gradual.sh` **v1.1.1** — daemon mode (running)
+- `rehome-99_qb-checking-watch.sh` **v1.0.3** — curl robustness; version in header
+- `iowatch` **v1.4.3** — drive map corrected
+- `fix-permissions.sh` **v1.0.0** — NEW: resets media root perms after docker ownership damage
 
-**v1.2.0 key fix:** P0 now includes `stalledUP`/`uploading` as good sources (was only `stoppedUP`).
-**Impact:** Unlocked 731 processable stoppedDL pairs (was 0 after previous batches exhausted stoppedUP pool).
+**Daemon running:** PID 3559295 — `qbit-start-seeding-gradual.sh --daemon --apply --min-batch 10 --poll 60`
+Logs: `out/reports/qbit-triage/daemon.log`
 
-**Daemon running:** `qbit-start-seeding-gradual.sh --daemon --apply --min-batch 10 --poll 60 &`
-Polls every 60s, triggers ramp-start when stoppedUP ≥ 10. Logs: `out/reports/qbit-triage/daemon.log`
-Reset file (to resume after halt): `out/reports/qbit-triage/daemon-halt-reset`
+**fix-permissions.sh** running in background (PID 4127316), fixing `/data/media`, `/pool/data`, `/mnt/hotspare6tb`.
 
-**~681 more processable candidates remain** (731 total - 50 done). Run:
+**~630 processable candidates remain** (~731 - ~101 done). Next:
 ```bash
 bash bin/qbit-repair-batch.sh --limit 50 --apply
 ```

@@ -12,15 +12,16 @@ Repair ~2103 `stoppedDL` torrents in qBittorrent → get them to `stoppedUP 100%
 
 ---
 
-## Current State (Feb 24 ~09:30)
+## Current State (Feb 24 ~10:20)
 
 | Item | Value |
 |------|-------|
-| stoppedDL remaining | **1741** |
-| stalledUP (seeding) | **3385** |
-| stoppedUP (pending daemon start) | ~3 |
-| Streak | **50** (perfect v1.2.0 batch) |
-| Processable candidates remaining | **~681** (731 total - 50 done) |
+| stoppedDL remaining | **1679** |
+| stalledUP (seeding) | **3421** |
+| stoppedUP (pending daemon start) | ~12 |
+| checking (resolving) | ~17 |
+| Streak | **0** (aborted batch; needs clean run) |
+| Processable candidates remaining | **~630** (~731 total - ~101 done) |
 
 ---
 
@@ -48,10 +49,23 @@ Two distinct problems on `stoppedDL` torrents:
 
 | Script | Version | Notes |
 |--------|---------|-------|
-| `bin/qbit-repair-batch.sh` | **v1.2.0** | P0 includes stalledUP/uploading as good sources (was stoppedUP-only) |
+| `bin/qbit-repair-batch.sh` | **v1.2.1** | BUG-7: PermissionError on root-owned dirs handled gracefully |
 | `bin/qbit-start-seeding-gradual.sh` | **v1.1.1** | Daemon mode; halt state; stop-on-download bug fix |
-| `bin/rehome-99_qb-checking-watch.sh` | **v1.0.2** | Dashboard mode (`--dashboard`); checkingDL fixed |
+| `bin/rehome-99_qb-checking-watch.sh` | **v1.0.3** | Curl error robustness; version in dashboard header |
+| `bin/fix-permissions.sh` | **v1.0.0** | NEW: resets media root perms after docker ownership damage |
 | `iowatch` | **v1.4.3** | Drive map corrected after stash pool refactor |
+
+---
+
+## Permissions Note (IMPORTANT)
+
+Docker containers sometimes `chown` media dirs to root, causing `PermissionError` in repair scripts.
+**Fix:** Run periodically (especially after docker ops):
+```bash
+bash bin/fix-permissions.sh
+# Targets: /data/media  /pool/data  /mnt/hotspare6tb
+# Sets: owner=michael:michael  dirs=2755  files=644
+```
 
 ---
 
@@ -79,30 +93,30 @@ cat out/reports/qbit-triage/repair-consecutive-successes.txt   # streak
 curl -s http://localhost:9003/api/v2/torrents/info | python3 -c "
 import json,sys; from collections import Counter
 t=json.load(sys.stdin); s=Counter(x['state'] for x in t)
-print(f'stoppedDL={s[\"stoppedDL\"]} stalledUP={s[\"stalledUP\"]} stoppedUP={s[\"stoppedUP\"]}')"
+checking = sum(v for k,v in s.items() if 'checking' in k.lower())
+print(f'stoppedDL={s[\"stoppedDL\"]} stalledUP={s[\"stalledUP\"]} stoppedUP={s[\"stoppedUP\"]} checking={checking}')"
+
+# Ensure no concurrent batch is running
+ps aux | grep qbit-repair-batch | grep -v grep
 
 # Ensure daemon is running
 ps aux | grep qbit-start-seeding | grep -v grep
 
-# Dry-run next batch
+# Wait for checking=0 before running batch
+# Then dry-run
 bash bin/qbit-repair-batch.sh --limit 50
 
-# Apply
+# Apply (ONE at a time — never run concurrent batches)
 bash bin/qbit-repair-batch.sh --limit 50 --apply
 ```
 
----
-
-## Key Fix: v1.2.0 P0 Change
-
-**Before:** `good_hashes = {... if t["state"] == "stoppedUP" ...}`
-**After:** `good_hashes = {... if t["state"] in ("stoppedUP", "stalledUP", "uploading") ...}`
-
-Without this, all 3277 stalledUP (seeding) torrents were excluded as repair sources → 0 candidates.
+**CRITICAL: Never run two `qbit-repair-batch.sh --apply` concurrently.** Both will stop QB,
+patch overlapping fastresumes, and crash each other — QB ends up stopped with partial patches.
+If this happens: `docker start qbittorrent_vpn`, then wait for QB to come up and recheck affected hashes.
 
 ---
 
-## All 6 Bugs Fixed
+## All 7 Bugs Fixed
 
 | Bug | Fix |
 |-----|-----|
@@ -112,6 +126,7 @@ Without this, all 3277 stalledUP (seeding) torrents were excluded as repair sour
 | BUG-4 | Wall-clock timeout too short — per-torrent stagnation detection |
 | BUG-5 | Stagnation fires on queued-at-0% torrents — `has_started` gate |
 | BUG-6 | Pool-pool timing race — retry recheck + 120s grace |
+| BUG-7 | PermissionError on root-owned dirs — try/except, warn+skip |
 
 ---
 

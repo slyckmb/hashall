@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.2.0
+# Version: 1.2.1
 # Date:    2026-02-24
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -431,12 +431,16 @@ for c in plan:
                 if is_good_content(target):
                     skipped += 1
                 elif apply:
-                    os.remove(target)
-                    deleted += 1
+                    try:
+                        os.remove(target)
+                        deleted += 1
+                    except PermissionError as e:
+                        print(f"  [{h[:12]}] warn: cannot delete (permission denied): {os.path.basename(target)}")
+                        skipped += 1
                 else:
                     print(f"  [{h[:12]}] [dry-run] would delete: {os.path.basename(target)}")
             if apply and (deleted or skipped):
-                print(f"  [{h[:12]}] deleted {deleted} incomplete file(s), skipped {skipped} (live content)")
+                print(f"  [{h[:12]}] deleted {deleted} incomplete file(s), skipped {skipped} (live/no-perm)")
 
     # Patch fastresume
     if not old:
