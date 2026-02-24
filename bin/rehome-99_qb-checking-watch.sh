@@ -122,7 +122,7 @@ fi
 
 if [[ "$ENFORCE_PAUSED_DL" -eq 1 && -z "$EVENTS_JSONL" ]]; then
   stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
-  EVENTS_JSONL="out/reports/rehome-normalize/qb-paused-dl-watchdog-${stamp}.jsonl"
+  EVENTS_JSONL="$HOME/.logs/hashall/reports/rehome-normalize/qb-paused-dl-watchdog-${stamp}.jsonl"
   mkdir -p "$(dirname "$EVENTS_JSONL")"
 fi
 

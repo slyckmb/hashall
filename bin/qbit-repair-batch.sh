@@ -32,9 +32,9 @@ DB="${HOME}/.hashall/catalog.db"
 BT_BACKUP="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup"
 QB_CONTAINER="qbittorrent_vpn"
 WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
-SUCCESS_FILE="$WT/out/reports/qbit-triage/repair-consecutive-successes.txt"
+SUCCESS_FILE="$HOME/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt"
 TMPD="/tmp/qb_repair_batch"
-mkdir -p "$WT/out/reports/qbit-triage" "$TMPD"
+mkdir -p "$HOME/.logs/hashall/reports/qbit-triage" "$TMPD"
 
 LIMIT=10
 APPLY=false

@@ -1602,7 +1602,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate hashall operational status report")
     parser.add_argument("--db", default=str(Path.home() / ".hashall" / "catalog.db"))
     parser.add_argument("--roots", help="Comma-separated roots (auto-discover if omitted)")
-    parser.add_argument("--output-dir", default="out/reports")
+    parser.add_argument("--output-dir", default=str(Path.home() / ".logs/hashall/reports"))
     parser.add_argument("--media-root", default="/data/media")
     parser.add_argument("--recovery-prefix", default="/data/media/torrents/seeding/recovery_20260211")
     parser.add_argument("--pocket-depth", type=int, default=2)

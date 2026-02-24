@@ -13,7 +13,7 @@ if [[ ! -f "$BAK" ]]; then
 fi
 
 WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
-LOGDIR="$WT/out/reports/db-refresh"
+LOGDIR="$HOME/.logs/hashall/reports/db-refresh"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/sha256-recovery-$(date +%Y%m%d-%H%M%S).log"
 

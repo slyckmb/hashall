@@ -58,7 +58,7 @@ cd "$repo_root"
 
 export PYTHONUNBUFFERED=1
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 run_log="${log_dir}/rehome-normalize-refresh-plan-run-${stamp}.log"
 plan_log="${log_dir}/rehome-normalize-refresh-plan-${stamp}.log"

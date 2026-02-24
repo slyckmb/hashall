@@ -10,7 +10,7 @@ WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-1240
 PYTHON="/home/michael/.venvs/hashall/bin/python"
 export PYTHONPATH="$WT/src"
 
-LOGDIR="$WT/out/reports/db-refresh"
+LOGDIR="$HOME/.logs/hashall/reports/db-refresh"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/step3-dupes-upgrade-$(date +%Y%m%d-%H%M%S).log"
 

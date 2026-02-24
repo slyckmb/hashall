@@ -63,7 +63,7 @@ PAYLOAD_ORPHAN_TIMER_SERVICE ?= hashall-payload-orphan-snapshot.service
 STATUS_ROOTS ?=
 STATUS_REPORT_TOP ?= 15
 STATUS_REPORT_POCKET_DEPTH ?= 2
-STATUS_REPORT_OUTPUT_DIR ?= out/reports
+STATUS_REPORT_OUTPUT_DIR ?= $(HOME)/.logs/hashall/reports
 STATUS_REPORT_MEDIA_ROOT ?= /data/media
 STATUS_REPORT_RECOVERY_PREFIX ?= /data/media/torrents/seeding/recovery_20260211
 STATUS_REPORT_PHONE_WIDTH ?= 0
@@ -114,7 +114,7 @@ REHOME_SAFE_LIMIT ?= 5
 REHOME_SAFE_APPLY ?= 0
 REHOME_SAFE_SEEDING_ROOT ?= /stash/media
 REHOME_SAFE_LIBRARY_ROOT ?= /stash/media
-REHOME_SAFE_RUN_LOG_DIR ?= out/reports/rehome-safe-runs
+REHOME_SAFE_RUN_LOG_DIR ?= $(HOME)/.logs/hashall/reports/rehome-safe-runs
 REHOME_SAFE_RUN_LOG ?=
 REHOME_SAFE_VERIFY_STRICT ?= 1
 REHOME_SAFE_VERIFY_CLEANUP ?= 0
@@ -138,7 +138,7 @@ RECOVERY_WORKFLOW_STASH_DEVICE ?= 49
 RECOVERY_WORKFLOW_POOL_DEVICE ?= 44
 RECOVERY_WORKFLOW_LIMIT ?= 20
 RECOVERY_WORKFLOW_APPLY ?= 0
-RECOVERY_WORKFLOW_OUTPUT_DIR ?= out/reports/recovery-workflow
+RECOVERY_WORKFLOW_OUTPUT_DIR ?= $(HOME)/.logs/hashall/reports/recovery-workflow
 
 REHOME_SEEDING_ARGS := $(foreach r,$(REHOME_SEEDING_ROOTS),--seeding-root "$(r)")
 HELP_BANNER := hashall - $(shell PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c "from hashall import __version__; print(__version__)" 2>/dev/null || echo unknown) - $(shell TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)

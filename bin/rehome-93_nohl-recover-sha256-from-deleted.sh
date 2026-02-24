@@ -15,7 +15,7 @@ Options:
   --root PATH           Root path used to infer device id (default: /pool/data)
   --device-id N         Override inferred device id
   --sample N            Number of candidate samples to print (default: 20)
-  --log-dir PATH        Log directory (default: out/reports/rehome-normalize)
+  --log-dir PATH        Log directory (default: $HOME/.logs/hashall/reports/rehome-normalize)
   --output-prefix NAME  Log file prefix (default: nohl)
   --apply               Apply updates (default: dryrun)
   --debug               Print extra debug fields in sample output
@@ -30,7 +30,7 @@ DB_PATH="${DB_PATH:-$HOME/.hashall/catalog.db}"
 ROOT_PATH="${ROOT_PATH:-/pool/data}"
 DEVICE_ID="${DEVICE_ID:-}"
 SAMPLE="${SAMPLE:-20}"
-LOG_DIR="${LOG_DIR:-out/reports/rehome-normalize}"
+LOG_DIR="${LOG_DIR:-$HOME/.logs/hashall/reports/rehome-normalize}"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-nohl}"
 APPLY_MODE=0
 DEBUG_MODE=0

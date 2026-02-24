@@ -67,7 +67,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 stamp="$(date +%Y%m%d-%H%M%S)"
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 log_file="${log_dir}/stage0-${stamp}.log"
 exec > >(tee -a "$log_file") 2>&1

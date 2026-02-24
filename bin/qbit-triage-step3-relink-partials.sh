@@ -21,7 +21,7 @@ QB_PASS="$QBITTORRENTAPI_PASSWORD"
 WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
 DB="${HOME}/.hashall/catalog.db"
 
-LOGDIR="$WT/out/reports/qbit-triage"
+LOGDIR="$HOME/.logs/hashall/reports/qbit-triage"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/relink-partials-$(date +%Y%m%d-%H%M%S).log"
 

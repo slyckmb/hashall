@@ -11,7 +11,7 @@ QB_USER="$QBITTORRENTAPI_USERNAME"
 QB_PASS="$QBITTORRENTAPI_PASSWORD"
 
 WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
-LOGDIR="$WT/out/reports/qbit-triage"
+LOGDIR="$HOME/.logs/hashall/reports/qbit-triage"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/start-stopped-up-$(date +%Y%m%d-%H%M%S).log"
 

@@ -16,7 +16,7 @@ LOW_PRIORITY="${LOW_PRIORITY:-1}"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-nohl}"
 SCAN_ROOTS_CSV="${SCAN_ROOTS_CSV:-/pool/data,/mnt/hotspare6tb}"
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-basics-scan-pool-${stamp}.log"

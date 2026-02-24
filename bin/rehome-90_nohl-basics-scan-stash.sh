@@ -15,7 +15,7 @@ PARALLEL="${PARALLEL:-1}"
 LOW_PRIORITY="${LOW_PRIORITY:-1}"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-nohl}"
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-basics-scan-stash-${stamp}.log"
