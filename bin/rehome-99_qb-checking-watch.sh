@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Version: 1.0.2
 set -euo pipefail
 
 QBIT_URL="${QBIT_URL:-http://localhost:9003}"
@@ -11,6 +12,7 @@ ENFORCE_PAUSED_DL=0
 ALLOW_FILE=""
 EVENTS_JSONL=""
 MAX_ITERATIONS=0
+DASHBOARD=0
 declare -a ALLOW_HASHES=()
 
 usage() {
@@ -30,6 +32,7 @@ Options:
   --allow-file PATH       File with allowlisted hashes (one per line)
   --events-jsonl PATH     Write watchdog events as JSONL
   --max-iterations N      Exit after N polling iterations (default: 0 = infinite)
+  --dashboard             Overwrite-in-place dashboard mode (like watch)
   -h, --help              Show help
 USAGE
 }
@@ -67,6 +70,10 @@ while [[ $# -gt 0 ]]; do
   --max-iterations)
     MAX_ITERATIONS="${2:-}"
     shift 2
+    ;;
+  --dashboard)
+    DASHBOARD=1
+    shift
     ;;
   -h | --help)
     usage
@@ -114,7 +121,9 @@ if [[ "$ENFORCE_PAUSED_DL" -eq 1 && -z "$EVENTS_JSONL" ]]; then
   mkdir -p "$(dirname "$EVENTS_JSONL")"
 fi
 
-echo "watchdog_config interval_s=${INTERVAL_S} once=${ONCE} until_clear=${UNTIL_CLEAR} enforce_paused_dl=${ENFORCE_PAUSED_DL} allow_count=${#ALLOW_HASH_MAP[@]} events_jsonl=${EVENTS_JSONL:-none} max_iterations=${MAX_ITERATIONS}"
+if [[ "$DASHBOARD" -eq 0 ]]; then
+  echo "watchdog_config interval_s=${INTERVAL_S} once=${ONCE} until_clear=${UNTIL_CLEAR} enforce_paused_dl=${ENFORCE_PAUSED_DL} allow_count=${#ALLOW_HASH_MAP[@]} events_jsonl=${EVENTS_JSONL:-none} max_iterations=${MAX_ITERATIONS}"
+fi
 
 api_post_status() {
   local endpoint="$1"
@@ -151,6 +160,44 @@ pause_with_fallback() {
   esac
 }
 
+# Print the dashboard panel to stdout.
+print_dashboard() {
+  local ts="$1"
+  local checking="$2"
+  local missing="$3"
+  local moving="$4"
+  local down="$5"
+  local seeding_up="$6"
+  local stopped_dl="$7"
+  local stalled_up="$8"
+  local uploading="$9"
+  local stopped_up="${10}"
+  local queued_up="${11}"
+  local unexpected_down="${12}"
+  local interval_s="${13}"
+
+  local sep="─────────────────────────────────────────────────"
+  local hdr="── qBittorrent ── ${ts} ────────"
+  hdr="${hdr:0:49}"
+
+  printf '%s\n' "$hdr"
+  printf '%-12s : %5s\n' "checking" "$checking"
+  printf '%-12s : %5s\n' "missing" "$missing"
+  printf '%-12s : %5s\n' "moving" "$moving"
+  printf '%-12s : %5s\n' "downloading" "$down"
+  printf '%-12s : %5s\n' "seeding(up)" "$seeding_up"
+  printf '%-12s : %5s\n' "stoppedDL" "$stopped_dl"
+  printf '%-12s : %5s\n' "stalledUP" "$stalled_up"
+  printf '%-12s : %5s\n' "uploading" "$uploading"
+  printf '%-12s : %5s\n' "stoppedUP" "$stopped_up"
+  printf '%-12s : %5s\n' "queuedUP" "$queued_up"
+  printf '%s\n' "$sep"
+  printf '%-12s : %5s\n' "unexpected↓" "$unexpected_down"
+  printf '%s\n' "$sep"
+  printf '%-12s : %4ss\n' "interval" "$interval_s"
+}
+
+_DASHBOARD_FIRST=1
 iteration=0
 
 while true; do
@@ -174,7 +221,6 @@ while true; do
         or (.state // "" | ascii_downcase) == "queueddl"
         or (.state // "" | ascii_downcase) == "forceddl"
         or (.state // "" | ascii_downcase) == "metadl"
-        or (.state // "" | ascii_downcase) == "checkingdl"
       )] | length),
       ([.[] | select((.state // "" | ascii_downcase) == "uploading" or (.state // "" | ascii_downcase) == "stalledup")] | length),
       ([.[] | select((.progress // 0) <= 0.0)] | length),
@@ -203,7 +249,6 @@ while true; do
         or (.state // "" | ascii_downcase) == "queueddl"
         or (.state // "" | ascii_downcase) == "forceddl"
         or (.state // "" | ascii_downcase) == "metadl"
-        or (.state // "" | ascii_downcase) == "checkingdl"
       )
     | (.hash // "" | ascii_downcase)
   ' <<<"$TORRENTS_JSON")
@@ -238,8 +283,10 @@ while true; do
       IFS=,
       echo "${UNEXPECTED_DOWN[*]}"
     )"
-    printf '%s ALERT unexpected_downloading action=%s count=%s hashes=%s\n' \
-      "$(date '+%F %T')" "$pause_action" "${#UNEXPECTED_DOWN[@]}" "$alert_hashes"
+    if [[ "$DASHBOARD" -eq 0 ]]; then
+      printf '%s ALERT unexpected_downloading action=%s count=%s hashes=%s\n' \
+        "$(date '+%F %T')" "$pause_action" "${#UNEXPECTED_DOWN[@]}" "$alert_hashes"
+    fi
     if [[ -n "$EVENTS_JSONL" ]]; then
       hashes_json="$(printf '%s\n' "${UNEXPECTED_DOWN[@]}" | jq -Rsc 'split("\n")[:-1]')"
       jq -cn \
@@ -253,11 +300,26 @@ while true; do
     fi
   fi
 
-  printf '%s checking=%s missing=%s moving=%s down=%s up=%s unexpected_down=%s paused_now=%s count_zero=%s count_partial=%s top=%s stoppedUP=%s stoppedDL=%s stalledUP=%s uploading=%s queuedUP=%s\n' \
-    "$(date '+%F %T')" "$CHECKING" "$MISSING" "$MOVING" "$DOWN" "$UP" "${#UNEXPECTED_DOWN[@]}" "$paused_now" "$COUNT_ZERO" "$COUNT_PARTIAL" "$TOP_STATES" "$STOPPED_UP" "$STOPPED_DL" "$STALLED_UP" "$UPLOADING" "$QUEUED_UP"
-    
+  if [[ "$DASHBOARD" -eq 1 ]]; then
+    if [[ "$_DASHBOARD_FIRST" -eq 1 ]]; then
+      printf '[2J[H'
+      _DASHBOARD_FIRST=0
+    else
+      printf '[H'
+    fi
+    print_dashboard \
+      "$(date '+%F %T')" \
+      "$CHECKING" "$MISSING" "$MOVING" "$DOWN" "$UP" \
+      "$STOPPED_DL" "$STALLED_UP" "$UPLOADING" "$STOPPED_UP" "$QUEUED_UP" \
+      "${#UNEXPECTED_DOWN[@]}" "$INTERVAL_S"
+  else
+    printf '%s checking=%s missing=%s moving=%s down=%s up=%s unexpected_down=%s paused_now=%s count_zero=%s count_partial=%s top=%s stoppedUP=%s stoppedDL=%s stalledUP=%s uploading=%s queuedUP=%s\n' \
+      "$(date '+%F %T')" "$CHECKING" "$MISSING" "$MOVING" "$DOWN" "$UP" "${#UNEXPECTED_DOWN[@]}" "$paused_now" "$COUNT_ZERO" "$COUNT_PARTIAL" "$TOP_STATES" "$STOPPED_UP" "$STOPPED_DL" "$STALLED_UP" "$UPLOADING" "$QUEUED_UP"
+  fi
   if [[ "$UNTIL_CLEAR" -eq 1 && "$CHECKING" -eq 0 && "$MOVING" -eq 0 && "$DOWN" -eq 0 ]]; then
-    echo "done checking=0 moving=0 down=0"
+    if [[ "$DASHBOARD" -eq 0 ]]; then
+      echo "done checking=0 moving=0 down=0"
+    fi
     exit 0
   fi
 
@@ -265,7 +327,9 @@ while true; do
     exit 0
   fi
   if [[ "$MAX_ITERATIONS" -gt 0 && "$iteration" -ge "$MAX_ITERATIONS" ]]; then
-    echo "done max_iterations=${MAX_ITERATIONS}"
+    if [[ "$DASHBOARD" -eq 0 ]]; then
+      echo "done max_iterations=${MAX_ITERATIONS}"
+    fi
     exit 0
   fi
 
