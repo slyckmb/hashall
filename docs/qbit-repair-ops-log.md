@@ -32,9 +32,10 @@
 | Feb 24 | batch-50 (b7246e0) | 50 | 20 | 30 | 0 | stale10m on queued-at-0% torrents |
 | Feb 24 | batch-50 (bc6b411) | 50 | 46 | 4 | 0 | 4 pool-pool failures (see below) |
 | Feb 24 | batch-50 (b4345cd) | 50 | ~48 | 2 | 0 | BUG-6 confirmed fixed (pool-pool pairs ✓); 2 failures: 5fc73670 (Pink Floyd), 6b3471fd |
+| Feb 24 | batch-50 (v1.2.0) | 50 | 50 | 0 | 50 | v1.2.0 fix: expanded good pool to stalledUP+uploading; PERFECT BATCH — streak reset to 50 |
 
-**Total repaired (confirmed stoppedUP):** ~180+ torrents
-**Streak:** 0 (b4345cd 2 failures reset streak)
+**Total repaired (confirmed stoppedUP):** ~308+ torrents
+**Streak:** 50 (first clean batch with v1.2.0 fix)
 
 ---
 
@@ -70,21 +71,36 @@ Pool-pool torrents were failing with immediate `stoppedDL` after recheckTorrents
 
 ## Known Skipped Cases
 
-- **Same-save-path pairs**: Discovery skips them (P0). Need fastresume-only fix, no hardlink work. ~unknown count.
+- **Same-save-path pairs**: Discovery skips them (P0). Need fastresume-only fix, no hardlink work. Analyzed: 1826 total (419 have stoppedUP partner at same path; 1426 have no seeding partner — likely unrecoverable without source data).
 - **Trashy.Lady** (`43f589275bd8`): stoppedDL 99.8%, missing 0.2% of BD50. No easy fix.
 - **Legion S03** (`0782850032bf`, `20f1e09447b6`, `f38a29c856e9`, `4c11952b3840`): Various issues. `109ffabfc401` was manually repaired Feb 23.
 
 ---
 
-## Current State (Feb 24 ~07:10)
+## Current State (Feb 24 ~09:30)
 
-stoppedDL count: **1845** (confirmed live, after b4345cd)
-seeding (stalledUP): **3278** — all started via `qbit-start-seeding-gradual.sh`, **0 flipped to downloading**
-stoppedUP (not yet started): **6** — run gradual-start to pick these up
-Streak: **0** (b4345cd 2 failures: 5fc73670 Pink Floyd, 6b3471fd — persistent across batches)
-Scripts: `qbit-repair-batch.sh` v1.1.0, `qbit-start-seeding-gradual.sh` v1.0.1 (ARG_MAX fix)
+stoppedDL count: **1741** (started at ~2103; ~362 repaired total this campaign)
+seeding (stalledUP): **3385** (daemon continuously starts new stoppedUP rounds)
+stoppedUP (not yet started): **3** (daemon active, will start when ≥10 accumulate)
+Streak: **50** (v1.2.0 first batch — perfect 50/50)
 
-All 6 bugs fixed. Next: `bash bin/qbit-repair-batch.sh --limit 50 --apply` to continue.
+Scripts:
+- `qbit-repair-batch.sh` **v1.2.0** — P0 now includes `stalledUP`/`uploading` as good sources
+- `qbit-start-seeding-gradual.sh` **v1.1.1** — daemon mode + halt state + stop-on-download bug fix (was passing truncated 12-char hashes to API)
+- `rehome-99_qb-checking-watch.sh` **v1.0.2** — dashboard mode; checkingDL removed from `down=` bucket
+- `iowatch` **v1.4.3** — drive map corrected after stash pool refactor; pool drives always shown
+
+**v1.2.0 key fix:** P0 now includes `stalledUP`/`uploading` as good sources (was only `stoppedUP`).
+**Impact:** Unlocked 731 processable stoppedDL pairs (was 0 after previous batches exhausted stoppedUP pool).
+
+**Daemon running:** `qbit-start-seeding-gradual.sh --daemon --apply --min-batch 10 --poll 60 &`
+Polls every 60s, triggers ramp-start when stoppedUP ≥ 10. Logs: `out/reports/qbit-triage/daemon.log`
+Reset file (to resume after halt): `out/reports/qbit-triage/daemon-halt-reset`
+
+**~681 more processable candidates remain** (731 total - 50 done). Run:
+```bash
+bash bin/qbit-repair-batch.sh --limit 50 --apply
+```
 
 ---
 

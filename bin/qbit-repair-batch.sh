@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.1.0
+# Version: 1.2.0
 # Date:    2026-02-24
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -76,7 +76,7 @@ db, tmpdir, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 torrents = json.load(open(f"{tmpdir}/all_torrents.json"))
 by_hash  = {t["hash"]: t for t in torrents}
 
-good_hashes   = {t["hash"] for t in torrents if t["state"] == "stoppedUP" and t["progress"] >= 0.9999}
+good_hashes   = {t["hash"] for t in torrents if t["state"] in ("stoppedUP", "stalledUP", "uploading") and t["progress"] >= 0.9999}
 broken_hashes = {t["hash"] for t in torrents if t["state"] == "stoppedDL"}
 
 con = sqlite3.connect(db)
