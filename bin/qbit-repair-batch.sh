@@ -209,16 +209,19 @@ for c in candidates:
     if same_fs:
         for i, bf_qb in enumerate(broken_files):
             ap  = os.path.join(broken_save, bf_qb["name"])
-            qh  = catalog_qhash(ap)
+            # DB lookup for broken file: quick_hash=fast-hash (partial content), sha256=full hash
+            # DB is a pre-session scan snapshot — good evidence but not live truth.
+            # sha256 may be NULL (backfill deferred); quick_hash present for all scanned files.
+            bqh, bsh = catalog_lookup(ap)
             bsz = bf_qb.get("size", -1)
 
             # Primary: match by QB filename basename
             gf = good_by_name.get(os.path.basename(bf_qb["name"]))
-            # Fallback: same index in QB file list + same size + DB-confirmed qhash on good file
-            # (handles cross-seed name variants like spaces-vs-dots; qhash gates the guess)
+            # Fallback: same index in QB file list + same size + DB-confirmed quick_hash on good
+            # (handles cross-seed name variants like spaces-vs-dots; quick_hash gates the guess)
             if gf is None and i < len(good_by_idx) and bsz > 0 and good_by_idx[i]["size"] == bsz:
                 cand = good_by_idx[i]
-                if cand["qhash"]:  # DB confirms good file is known content — not just size
+                if cand["qhash"]:  # DB confirms good file content known — not just size match
                     gf = cand
 
             if gf is None:
@@ -227,18 +230,26 @@ for c in candidates:
             # Resolve best on-disk source: prefer QB-reported path; fall back to DB hash search
             good_src = gf["abs"] if os.path.exists(gf["abs"]) else catalog_find_by_qhash(gf["qhash"], gf["abs"])
 
-            bqh, gqh = qh, gf["qhash"]
+            gqh, gsh = gf["qhash"], gf["sha256"]
             try:
                 b_ino = os.stat(ap).st_ino if os.path.exists(ap) else 0
                 g_ino = os.stat(good_src).st_ino if good_src and os.path.exists(good_src) else 0
             except: b_ino = g_ino = 0
 
-            if b_ino and g_ino and b_ino == g_ino:             action = "already_hardlinked"
-            elif not os.path.exists(ap):                        action = "missing"
-            elif bqh and broken_qhash_counts.get(bqh, 0) > 1:  action = "garbage"
-            elif bqh and gqh and bqh != gqh:                    action = "garbage"
-            elif bqh and gqh and bqh == gqh:                    action = "dup_copy"
-            else:                                                action = "unknown_keep"
+            if b_ino and g_ino and b_ino == g_ino:
+                action = "already_hardlinked"
+            elif not os.path.exists(ap):
+                action = "missing"
+            else:
+                # Classify existing broken file: prefer sha256 (full hash) over quick_hash (fast-hash)
+                # sha256 is definitive; quick_hash is corroborating evidence (partial content only)
+                if bsh and gsh:
+                    action = "dup_copy" if bsh == gsh else "garbage"
+                elif bqh and gqh:
+                    if broken_qhash_counts.get(bqh, 0) > 1: action = "garbage"  # sparse placeholder
+                    else: action = "dup_copy" if bqh == gqh else "garbage"
+                else:
+                    action = "unknown_keep"  # no DB evidence either way — leave it alone
             rebuild_files.append({"bad": ap, "good": good_src, "action": action})
 
     counts = Counter(f["action"] for f in rebuild_files)
