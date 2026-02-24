@@ -479,7 +479,8 @@ results        = {}
 pending_stopDL = {}  # hash -> timestamp first seen stoppedDL (re-poll grace)
 last_progress  = {}  # hash -> last seen progress value
 last_change    = {}  # hash -> time progress last changed (stagnation detection)
-STAGNANT_SECS  = 600  # 10 min without progress change = genuine timeout
+has_started    = set()  # hashes that have ever made progress > 0%
+STAGNANT_SECS  = 600  # 10 min without progress change = genuine timeout (only if started)
 SAFETY_END     = time.time() + 7200  # 2 hr hard safety cap
 
 def get_states():
@@ -517,14 +518,18 @@ while time.time() < SAFETY_END:
                 results[h] = s
                 parts.append(f"{'✓' if s=='stoppedUP' else '✗'}{h[:8]}")
         elif s in CHECKING:
-            # Track progress to detect stagnation
+            # Track progress to detect stagnation.
+            # Stagnation timeout only fires if the torrent has STARTED (progress > 0%)
+            # and then stopped — not while it's still queued at 0%.
+            if p > 0:
+                has_started.add(h)
             if last_progress.get(h) != p:
                 last_progress[h] = p
                 last_change[h] = now
             elif h not in last_change:
                 last_change[h] = now
             stale_secs = now - last_change.get(h, now)
-            if stale_secs >= STAGNANT_SECS:
+            if h in has_started and stale_secs >= STAGNANT_SECS:
                 results[h] = "timeout"
                 parts.append(f"✗{h[:8]}=stale{int(stale_secs//60)}m")
             else:
