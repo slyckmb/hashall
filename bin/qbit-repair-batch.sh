@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.2.1
+# Version: 1.3.0
 # Date:    2026-02-24
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.3.0"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -31,7 +31,6 @@ QB_PASS="$QBITTORRENTAPI_PASSWORD"
 DB="${HOME}/.hashall/catalog.db"
 BT_BACKUP="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup"
 QB_CONTAINER="qbittorrent_vpn"
-WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
 SUCCESS_FILE="$HOME/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt"
 TMPD="/tmp/qb_repair_batch"
 mkdir -p "$HOME/.logs/hashall/reports/qbit-triage" "$TMPD"
@@ -48,6 +47,12 @@ done
 
 COOKIE=$(mktemp /tmp/qb.XXXXXX)
 trap 'rm -f "$COOKIE"' EXIT
+
+LOGDIR="$HOME/.logs/hashall/reports/qbit-triage"
+LOGFILE="$LOGDIR/qbit-repair-batch-$(date +%Y%m%d-%H%M%S).log"
+mkdir -p "$LOGDIR"
+exec > >(tee -a "$LOGFILE") 2>&1
+echo "Log: $LOGFILE"
 
 qb_login() {
   curl -fsS -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
@@ -482,10 +487,10 @@ echo ""
 # ── P5: Monitor all ───────────────────────────────────────────────────────────
 echo "▸ P5 monitor"
 if [[ "$APPLY" == true ]]; then
-  python3 - "$COOKIE" "$QB_URL" "$TMPD" << 'PYEOF'
+  python3 - "$COOKIE" "$QB_URL" "$TMPD" "$QB_USER" "$QB_PASS" << 'PYEOF'
 import json, time, subprocess, sys, os
 
-cookie, qb_url, tmpdir = sys.argv[1], sys.argv[2], sys.argv[3]
+cookie, qb_url, tmpdir, qb_user, qb_pass = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 plan   = json.load(open(f"{tmpdir}/plan.json"))
 hashes = [c["broken_hash"] for c in plan]
 names  = {c["broken_hash"]: c["root_name"][:40] for c in plan}
@@ -502,11 +507,29 @@ STAGNANT_SECS  = 600  # 10 min without progress change = genuine timeout (only i
 STOPDL_GRACE   = 120  # seconds to wait after retry recheck before giving up
 SAFETY_END     = time.time() + 7200  # 2 hr hard safety cap
 
+def relogin():
+    subprocess.run(["curl", "-fsS", "--max-time", "10", "-c", cookie,
+                    "-X", "POST", f"{qb_url}/api/v2/auth/login",
+                    "--data-urlencode", f"username={qb_user}",
+                    "--data-urlencode", f"password={qb_pass}"],
+                   capture_output=True)
+
 def get_states():
-    raw = subprocess.run(["curl", "-fsS", "-b", cookie, f"{qb_url}/api/v2/torrents/info"],
-                         capture_output=True, text=True).stdout
-    try:    return {t["hash"]: t for t in json.loads(raw) if t["hash"] in set(hashes)}
-    except: return {}
+    """Query QB API. Retries up to 3× with re-login on parse failure (BUG-7 fix)."""
+    for attempt in range(4):
+        if attempt > 0:
+            print(f"  [WARN] QB API unavailable (retry {attempt}/3), re-login + 10s wait...", flush=True)
+            time.sleep(10)
+            relogin()
+        raw = subprocess.run(["curl", "-fsS", "--max-time", "15", "-b", cookie,
+                               f"{qb_url}/api/v2/torrents/info"],
+                              capture_output=True, text=True).stdout
+        try:
+            return {t["hash"]: t for t in json.loads(raw) if t["hash"] in set(hashes)}
+        except Exception:
+            continue
+    print("  [WARN] QB API failed after 3 retries; pending hashes may be stale", flush=True)
+    return {}
 
 def retry_recheck(h):
     subprocess.run(["curl", "-fsS", "-b", cookie, "-X", "POST",

@@ -21,7 +21,6 @@ QB_PASS="$QBITTORRENTAPI_PASSWORD"
 DB="${HOME}/.hashall/catalog.db"
 BT_BACKUP="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup"
 QB_CONTAINER="qbittorrent_vpn"
-WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
 SUCCESS_FILE="$HOME/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt"
 mkdir -p "$HOME/.logs/hashall/reports/qbit-triage"
 
@@ -40,6 +39,12 @@ done
 
 COOKIE=$(mktemp /tmp/qb.XXXXXX)
 trap 'rm -f "$COOKIE"' EXIT
+
+LOGDIR="$HOME/.logs/hashall/reports/qbit-triage"
+LOGFILE="$LOGDIR/qbit-repair-payload-$(date +%Y%m%d-%H%M%S)-${BROKEN_HASH:0:12}.log"
+mkdir -p "$LOGDIR"
+exec > >(tee -a "$LOGFILE") 2>&1
+echo "Log: $LOGFILE"
 
 qb_login() {
   curl -fsS -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
