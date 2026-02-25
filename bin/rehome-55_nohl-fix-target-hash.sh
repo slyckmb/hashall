@@ -25,7 +25,7 @@ USAGE
 
 latest_manifest() {
   local prefix="$1"
-  ls -1t "out/reports/rehome-normalize/${prefix}-plan-manifest-"*.json 2>/dev/null | head -n1
+  ls -1t "$HOME/.logs/hashall/reports/rehome-normalize/${prefix}-plan-manifest-"*.json 2>/dev/null | head -n1
 }
 
 PAYLOAD_PREFIX=""
@@ -129,7 +129,7 @@ if [[ ! -f "$PLAN_PATH" ]]; then
   exit 4
 fi
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-target-fix-${stamp}.log"

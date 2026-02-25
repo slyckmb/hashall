@@ -4,11 +4,11 @@
 # Paste full output to Claude — torrent count and any errors matter.
 set -euo pipefail
 
-WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
+REPO="/home/michael/dev/work/hashall"
 PYTHON="/home/michael/.venvs/hashall/bin/python"
-export PYTHONPATH="$WT/src"
+export PYTHONPATH="$REPO/src"
 
-LOGDIR="$WT/out/reports/db-refresh"
+LOGDIR="$HOME/.logs/hashall/reports/db-refresh"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/step4-payload-sync-$(date +%Y%m%d-%H%M%S).log"
 

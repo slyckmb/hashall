@@ -14,7 +14,7 @@
 | QB API | `http://localhost:9003` |
 | QB container | `qbittorrent_vpn` |
 | BT_backup (fastresumes) | `/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup/` |
-| Streak file | `out/reports/qbit-triage/repair-consecutive-successes.txt` |
+| Streak file | `~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt` |
 | Pool path | `/pool/data/...` (dev=231) |
 | Stash path | `/stash/media/...` = `/data/media/...` (dev=44) |
 
@@ -35,6 +35,7 @@
 | Feb 24 | batch-50 (v1.2.0) | 50 | 50 | 0 | 50 | v1.2.0 fix: expanded good pool to stalledUP+uploading; PERFECT BATCH — streak reset to 50 |
 | Feb 24 | batch-50 (v1.2.0, 2nd) | ~51 | ~51 | 0 | 51(+1) | daemon drained 1 more; stoppedDL 1741→1690 |
 | Feb 24 | batch-50 (v1.2.1) | ABORTED | — | — | 0 | concurrent run collision; both scripts crashed mid-P3; QB manually restarted; 12 fastresumes patched pre-crash, rechecked manually; PermissionError on root-owned dir (HD-Space) → BUG-7 fixed in v1.2.1 |
+| Feb 25 | session (v1.6.0→v1.6.1) | — | — | — | — | Fixes A/B/C/D (pausedDL, catalog fallback, fuzzy match, already_hardlinked→recheck); pd-triage.sh; pd-score.sh v1.0.0 (1027 stoppedDL tiered: T1=6, T2=29, T3=4, T4=988); BUG-8 retry loop; db-refresh path+UUID+stash fixes; T4 nohl-basics plan |
 
 **Total repaired (confirmed stoppedUP):** ~360+ torrents
 **Streak:** 0 (aborted batch; need clean run to re-establish)
@@ -85,30 +86,25 @@ P3 `os.remove()` raised `PermissionError` on files in dirs owned by root (e.g. `
 
 ---
 
-## Current State (Feb 24 ~10:20)
+## Current State (Feb 25)
 
-stoppedDL count: **1679** (started at ~2103; ~360+ repaired this campaign)
-seeding (stalledUP): **3421** (daemon continuously starts new stoppedUP rounds)
-stoppedUP (not yet started): **12** (daemon will drain these)
-checking: **~17** (resolving from aborted batch + manual recheck)
-Streak: **0** (aborted batch; needs clean run to re-establish)
+stoppedDL count: **~1027** (T1=6, T2=29, T3=4, T4=988 nohl-basics)
+seeding (stalledUP): unknown (daemon running)
+Streak: N/A (new triage; T1/T2/T3 not yet run this session)
 
 Scripts:
-- `qbit-repair-batch.sh` **v1.2.1** — BUG-7: PermissionError on root-owned dirs handled gracefully
-- `qbit-start-seeding-gradual.sh` **v1.1.1** — daemon mode (running)
-- `rehome-99_qb-checking-watch.sh` **v1.0.3** — curl robustness; version in header
-- `iowatch` **v1.4.3** — drive map corrected
-- `fix-permissions.sh` **v1.0.0** — NEW: resets media root perms after docker ownership damage
+- `qbit-repair-batch.sh` **v1.6.1** — BUG-8: retry_recheck loop → timeout on genuine stpDL
+- `pd-score.sh` **v1.0.0** — NEW: tier scoring for bulk stoppedDL triage
+- `pd-triage.sh` **v1.0.0** — NEW: per-torrent diagnosis helper
+- `db-uuid-migration.sh` **v1.0.0** — NEW: ONE-TIME dev-XX → zfs-XXXX UUID migration
+- `db-refresh-step1-4` — updated: stale path fixed, full stash scan, UUID prereq
 
-**Daemon running:** PID 3559295 — `qbit-start-seeding-gradual.sh --daemon --apply --min-batch 10 --poll 60`
-Logs: `out/reports/qbit-triage/daemon.log`
-
-**fix-permissions.sh** running in background (PID 4127316), fixing `/data/media`, `/pool/data`, `/mnt/hotspare6tb`.
-
-**~630 processable candidates remain** (~731 - ~101 done). Next:
-```bash
-bash bin/qbit-repair-batch.sh --limit 50 --apply
-```
+**Next actions (in order):**
+1. `bin/qbit-repair-batch.sh --limit 10 --apply` (T1)
+2. `bin/qbit-repair-batch.sh --same-save --apply` (clear timed-out + same-save)
+3. `bin/qbit-repair-batch.sh --limit 30 --apply` (T2)
+4. Direct recheck for T3 hashes (4 torrents)
+5. `bin/db-uuid-migration.sh --apply` → db-refresh steps 1-4 → rehome-89/100/101/102 (T4)
 
 ---
 
@@ -127,7 +123,7 @@ bash bin/qbit-repair-batch.sh --limit 50 --apply
 
 - **Fleet status:** `bin/rehome-99_qb-checking-watch.sh` — shows checking/missing/stoppedDL counts
 - **During batch:** P5 monitor built into `qbit-repair-batch.sh` polls every 5s per-torrent
-- **Streak:** `cat out/reports/qbit-triage/repair-consecutive-successes.txt`
+- **Streak:** `cat ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt`
 
 ---
 
@@ -136,7 +132,7 @@ bash bin/qbit-repair-batch.sh --limit 50 --apply
 Read this file first. Then:
 ```bash
 # Check streak
-cat out/reports/qbit-triage/repair-consecutive-successes.txt
+cat ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt
 
 # Dry-run to see next candidates
 bash bin/qbit-repair-batch.sh --limit 20

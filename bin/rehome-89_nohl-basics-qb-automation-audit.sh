@@ -82,7 +82,7 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 3
 fi
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-basics-qb-automation-audit-${stamp}.log"

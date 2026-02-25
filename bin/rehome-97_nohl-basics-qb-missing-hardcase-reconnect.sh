@@ -108,10 +108,10 @@ if [[ -z "$REBUILD" ]]; then
 fi
 
 if [[ -z "$AUDIT_JSON" ]]; then
-  AUDIT_JSON="$(latest_file "out/reports/rehome-normalize/${OUTPUT_PREFIX}-qb-missing-audit-*.json")"
+  AUDIT_JSON="$(latest_file "$HOME/.logs/hashall/reports/rehome-normalize/${OUTPUT_PREFIX}-qb-missing-audit-*.json")"
 fi
 if [[ -z "$PLAN_JSON" ]]; then
-  PLAN_JSON="$(latest_file "out/reports/rehome-normalize/${OUTPUT_PREFIX}-qb-missing-remediate-plan-*.json")"
+  PLAN_JSON="$(latest_file "$HOME/.logs/hashall/reports/rehome-normalize/${OUTPUT_PREFIX}-qb-missing-remediate-plan-*.json")"
 fi
 if [[ -z "$AUDIT_JSON" || ! -f "$AUDIT_JSON" ]]; then
   echo "Missing audit JSON; run bin/rehome-95_nohl-basics-qb-missing-audit.sh first." >&2
@@ -122,7 +122,7 @@ if [[ -z "$PLAN_JSON" || ! -f "$PLAN_JSON" ]]; then
   exit 3
 fi
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-basics-qb-missing-hardcase-reconnect-${stamp}.log"
@@ -263,8 +263,8 @@ if [[ "$REFRESH_AUDIT" == "1" ]]; then
   fi
   echo "cmd=${audit_cmd[*]}"
   "${audit_cmd[@]}"
-  audit_for_filter="$(latest_file "out/reports/rehome-normalize/${refresh_prefix}-qb-missing-audit-*.json")"
-  plan_for_filter="$(latest_file "out/reports/rehome-normalize/${refresh_prefix}-qb-missing-remediate-plan-*.json")"
+  audit_for_filter="$(latest_file "$HOME/.logs/hashall/reports/rehome-normalize/${refresh_prefix}-qb-missing-audit-*.json")"
+  plan_for_filter="$(latest_file "$HOME/.logs/hashall/reports/rehome-normalize/${refresh_prefix}-qb-missing-remediate-plan-*.json")"
   if [[ -z "$audit_for_filter" || -z "$plan_for_filter" ]]; then
     echo "Failed to refresh hardcase audit/plan artifacts." >&2
     exit 4

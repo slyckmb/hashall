@@ -152,8 +152,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--library-root", default="/stash/media")
     parser.add_argument("--stash-device", type=int, required=True)
     parser.add_argument("--pool-device", type=int, required=True)
-    parser.add_argument("--out-dir", default="out/reports/rehome-plans")
-    parser.add_argument("--run-log-dir", default="out/reports/rehome-safe-runs")
+    parser.add_argument("--out-dir", default=str(Path.home() / ".logs/hashall/reports/rehome-plans"))
+    parser.add_argument("--run-log-dir", default=str(Path.home() / ".logs/hashall/reports/rehome-safe-runs"))
     parser.add_argument(
         "--apply",
         action="store_true",

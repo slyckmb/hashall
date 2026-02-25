@@ -30,16 +30,16 @@ USAGE
 }
 
 latest_ready_plans() {
-  ls -1t out/reports/rehome-normalize/nohl-payload-plans-dryrun-ready-*.tsv 2>/dev/null | head -n1
+  ls -1t $HOME/.logs/hashall/reports/rehome-normalize/nohl-payload-plans-dryrun-ready-*.tsv 2>/dev/null | head -n1
 }
 
 latest_ready_hashes() {
-  ls -1t out/reports/rehome-normalize/nohl-payload-hashes-dryrun-ready-*.txt 2>/dev/null | head -n1
+  ls -1t $HOME/.logs/hashall/reports/rehome-normalize/nohl-payload-hashes-dryrun-ready-*.txt 2>/dev/null | head -n1
 }
 
 latest_manifest() {
   local prefix="$1"
-  ls -1t "out/reports/rehome-normalize/${prefix}-plan-manifest-"*.json 2>/dev/null | head -n1
+  ls -1t "$HOME/.logs/hashall/reports/rehome-normalize/${prefix}-plan-manifest-"*.json 2>/dev/null | head -n1
 }
 
 PLANS_FILE=""
@@ -102,7 +102,7 @@ if [[ -z "$MANIFEST_JSON" ]]; then
   MANIFEST_JSON="$(latest_manifest "$OUTPUT_PREFIX")"
 fi
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-apply-group-batch-${stamp}.log"

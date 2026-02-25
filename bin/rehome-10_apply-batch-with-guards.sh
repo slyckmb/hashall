@@ -122,7 +122,7 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-mkdir -p out/reports/rehome-pilot
+mkdir -p $HOME/.logs/hashall/reports/rehome-pilot
 
 HASHALL_SEMVER="$(PYTHONPATH=src python - <<'PY'
 from hashall import __version__
@@ -251,14 +251,14 @@ for hash in "${HASHES[@]}"; do
   idx=$((idx + 1))
   stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
   prefix="${hash:0:12}"
-  batch_log="out/reports/rehome-pilot/rehome-batch-${idx}-${prefix}-${stamp}.log"
+  batch_log="$HOME/.logs/hashall/reports/rehome-pilot/rehome-batch-${idx}-${prefix}-${stamp}.log"
 
   {
     echo "==== batch=${idx}/${#HASHES[@]} hash=${hash} ===="
     assert_pool_space
 
     echo "step=plan"
-    plan_path="out/reports/rehome-pilot/rehome-pilot-${prefix}-${stamp}.json"
+    plan_path="$HOME/.logs/hashall/reports/rehome-pilot/rehome-pilot-${prefix}-${stamp}.json"
     PYTHONPATH=src python -m rehome.cli plan \
       --demote \
       --payload-hash "$hash" \

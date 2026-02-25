@@ -36,8 +36,8 @@ cd "$REPO_DIR"
 
 RECOVERY_PREFIX="${RECOVERY_PREFIX:-/data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207}"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
-mkdir -p out/reports/recovery-workflow
-log="out/reports/recovery-workflow/recovery-20-reaudit-${stamp}.log"
+mkdir -p $HOME/.logs/hashall/reports/recovery-workflow
+log="$HOME/.logs/hashall/reports/recovery-workflow/recovery-20-reaudit-${stamp}.log"
 
 {
   make recovery-auto RECOVERY_WORKFLOW_PREFIX="$RECOVERY_PREFIX" "$@"

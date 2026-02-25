@@ -4,11 +4,11 @@
 # Pause after this and paste tail of log to Claude before continuing.
 set -euo pipefail
 
-WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
+REPO="/home/michael/dev/work/hashall"
 PYTHON="/home/michael/.venvs/hashall/bin/python"
-export PYTHONPATH="$WT/src"
+export PYTHONPATH="$REPO/src"
 
-LOGDIR="$WT/out/reports/db-refresh"
+LOGDIR="$HOME/.logs/hashall/reports/db-refresh"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/step1-scan-stash-$(date +%Y%m%d-%H%M%S).log"
 
@@ -17,7 +17,12 @@ echo "STEP 1: scan /stash/media — $(date '+%F %T')"
 echo "log: $LOGFILE"
 echo "================================================================"
 
-"$PYTHON" -m hashall scan /stash/media --parallel --workers 8 2>&1 | tee "$LOGFILE"
+"$PYTHON" -m hashall scan /stash/media          --parallel --workers 8 2>&1 | tee    "$LOGFILE"
+"$PYTHON" -m hashall scan /stash/home/michael  --parallel --workers 8 2>&1 | tee -a "$LOGFILE"
+"$PYTHON" -m hashall scan /stash/home/kimberly --parallel --workers 8 2>&1 | tee -a "$LOGFILE"
+"$PYTHON" -m hashall scan /stash/hiker/cloud    --parallel --workers 8 2>&1 | tee -a "$LOGFILE"
+"$PYTHON" -m hashall scan /stash/hiker/computing --parallel --workers 4 2>&1 | tee -a "$LOGFILE"
+"$PYTHON" -m hashall scan /stash/secrets        --parallel --workers 4 2>&1 | tee -a "$LOGFILE"
 
 echo ""
 echo "--- devices list after step 1 ---"

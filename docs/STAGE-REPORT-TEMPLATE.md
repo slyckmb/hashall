@@ -1,6 +1,6 @@
 # Stage Completion Report (QC-Oriented)
 
-Write your report to `out/STAGE<N>-REPORT.md`.
+Write your report to `~/.logs/hashall/STAGE<N>-REPORT.md`.
 
 ## 1. Scope and Intent
 - Stage goal(s) and what you aimed to complete.

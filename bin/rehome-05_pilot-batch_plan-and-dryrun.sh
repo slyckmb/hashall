@@ -10,7 +10,7 @@ Usage:
 Runs one rehome pilot batch end-to-end:
 1) create demote plan for one payload hash
 2) dry-run apply that plan
-3) tee full output to out/reports/rehome-pilot/
+3) tee full output to $HOME/.logs/hashall/reports/rehome-pilot/
 EOF
 }
 
@@ -48,11 +48,11 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-mkdir -p out/reports/rehome-pilot
+mkdir -p $HOME/.logs/hashall/reports/rehome-pilot
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 prefix="${payload_hash:0:12}"
-plan="out/reports/rehome-pilot/rehome-pilot-${prefix}-${stamp}.json"
-log="out/reports/rehome-pilot/rehome-pilot-${prefix}-${stamp}.log"
+plan="$HOME/.logs/hashall/reports/rehome-pilot/rehome-pilot-${prefix}-${stamp}.json"
+log="$HOME/.logs/hashall/reports/rehome-pilot/rehome-pilot-${prefix}-${stamp}.log"
 
 {
   echo "cmd_plan=PYTHONPATH=src python -m rehome.cli plan --demote --payload-hash ${payload_hash} --catalog /home/michael/.hashall/catalog.db --seeding-root /stash/media --seeding-root /data/media --seeding-root /pool/data --library-root /stash/media --library-root /data/media --stash-device 49 --pool-device 44 --stash-seeding-root /stash/media/torrents/seeding --pool-seeding-root /pool/data/seeds --pool-payload-root /pool/data/seeds --output ${plan}"

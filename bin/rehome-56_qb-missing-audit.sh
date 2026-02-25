@@ -80,19 +80,19 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 if [[ -z "$MANIFEST_JSON" ]]; then
-  MANIFEST_JSON="$(latest_file "out/reports/rehome-normalize/${OUTPUT_PREFIX}-plan-manifest-*.json")"
+  MANIFEST_JSON="$(latest_file "$HOME/.logs/hashall/reports/rehome-normalize/${OUTPUT_PREFIX}-plan-manifest-*.json")"
 fi
 if [[ -z "$APPLY_FAILED_PATH" ]]; then
-  APPLY_FAILED_PATH="$(latest_file "out/reports/rehome-normalize/${OUTPUT_PREFIX}-payload-hashes-apply-failed-*.txt")"
+  APPLY_FAILED_PATH="$(latest_file "$HOME/.logs/hashall/reports/rehome-normalize/${OUTPUT_PREFIX}-payload-hashes-apply-failed-*.txt")"
 fi
 if [[ -z "$APPLY_DEFERRED_PATH" ]]; then
-  APPLY_DEFERRED_PATH="$(latest_file "out/reports/rehome-normalize/${OUTPUT_PREFIX}-payload-hashes-apply-deferred-*.txt")"
+  APPLY_DEFERRED_PATH="$(latest_file "$HOME/.logs/hashall/reports/rehome-normalize/${OUTPUT_PREFIX}-payload-hashes-apply-deferred-*.txt")"
 fi
 if [[ -z "$FOLLOWUP_JSON" ]]; then
-  FOLLOWUP_JSON="$(latest_file "out/reports/rehome-normalize/${OUTPUT_PREFIX}-followup-*.json")"
+  FOLLOWUP_JSON="$(latest_file "$HOME/.logs/hashall/reports/rehome-normalize/${OUTPUT_PREFIX}-followup-*.json")"
 fi
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-qb-missing-audit-${stamp}.log"

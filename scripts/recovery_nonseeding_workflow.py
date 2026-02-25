@@ -507,7 +507,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--recovery-prefix", required=True, help="Recovery prefix path (absolute or DB-relative)")
     p.add_argument("--stash-device", type=int, default=49, help="Stash device id (files table source)")
     p.add_argument("--pool-device", type=int, default=44, help="Pool device id (files table compare target)")
-    p.add_argument("--output-dir", default="out/reports/recovery-workflow")
+    p.add_argument("--output-dir", default=str(Path.home() / ".logs/hashall/reports/recovery-workflow"))
     p.add_argument("--output", default="", help="Optional explicit report JSON path")
     p.add_argument("--limit", type=int, default=20, help="Apply limit for prune actions (0 = unlimited)")
     p.add_argument("--apply", action="store_true", help="Delete exact duplicate units and mark files deleted")

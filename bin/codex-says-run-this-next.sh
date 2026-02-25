@@ -47,12 +47,12 @@ if [[ -n "$CLI_NOHL_MIN_FREE_PCT" ]]; then
 fi
 
 stamp="$(date +%Y%m%d-%H%M%S)"
-run_log="out/reports/rehome-normalize/codex-says-run-this-next-${stamp}.log"
-mkdir -p out/reports/rehome-normalize
+run_log="$HOME/.logs/hashall/reports/rehome-normalize/codex-says-run-this-next-${stamp}.log"
+mkdir -p $HOME/.logs/hashall/reports/rehome-normalize
 exec > >(tee -a "$run_log") 2>&1
 
 resolve_latest_plan() {
-  ls -1t out/reports/rehome-normalize/rehome-plan-normalize-*.json rehome-plan-normalize-*.json 2>/dev/null | head -n1
+  ls -1t $HOME/.logs/hashall/reports/rehome-normalize/rehome-plan-normalize-*.json rehome-plan-normalize-*.json 2>/dev/null | head -n1
 }
 
 print_plan_summary() {
@@ -478,8 +478,8 @@ run_nohl_missing_recheck_lane() {
   echo "bin/rehome-99_qb-checking-watch.sh --interval ${watchdog_interval} --enforce-paused-dl"
   echo "bin/rehome-95_nohl-basics-qb-missing-audit.sh ${fast_arg} ${debug_arg}"
   echo "bin/rehome-96_nohl-basics-qb-missing-remediate-dryrun.sh ${fast_arg} ${debug_arg}"
-  echo "AUDIT=\$(ls -1t out/reports/rehome-normalize/${output_prefix}-qb-missing-audit-*.json | head -n1)"
-  echo "HASH_FILE=out/reports/rehome-normalize/${output_prefix}-qb-missing-hashes-\$(TZ=America/New_York date +%Y%m%d-%H%M%S).txt"
+  echo "AUDIT=\$(ls -1t $HOME/.logs/hashall/reports/rehome-normalize/${output_prefix}-qb-missing-audit-*.json | head -n1)"
+  echo "HASH_FILE=$HOME/.logs/hashall/reports/rehome-normalize/${output_prefix}-qb-missing-hashes-\$(TZ=America/New_York date +%Y%m%d-%H%M%S).txt"
   echo "jq -r '.entries[].torrent_hash' \"\$AUDIT\" | sort -u > \"\$HASH_FILE\""
   echo "source /mnt/config/secrets/qbittorrent/api.env 2>/dev/null || true"
   echo "QBIT_URL=\"${qbit_url}\" QBIT_USER=\"${qbit_user}\" QBIT_PASS=\"${qbit_pass}\" HASH_FILE=\"\$HASH_FILE\" bash -lc 'curl -fsS -c /tmp/qb.cookie --data-urlencode \"username=\$QBIT_USER\" --data-urlencode \"password=\$QBIT_PASS\" \"\$QBIT_URL/api/v2/auth/login\" && HASHES=\$(paste -sd\"|\" \"\$HASH_FILE\") && curl -fsS -b /tmp/qb.cookie --data-urlencode \"hashes=\$HASHES\" \"\$QBIT_URL/api/v2/torrents/recheck\"'"
@@ -498,12 +498,12 @@ run_nohl_missing_recheck_lane() {
   bin/rehome-96_nohl-basics-qb-missing-remediate-dryrun.sh ${fast_arg:+$fast_arg} ${debug_arg:+$debug_arg}
 
   local audit_file
-  audit_file="$(ls -1t "out/reports/rehome-normalize/${output_prefix}-qb-missing-audit-"*.json 2>/dev/null | head -n1 || true)"
+  audit_file="$(ls -1t "$HOME/.logs/hashall/reports/rehome-normalize/${output_prefix}-qb-missing-audit-"*.json 2>/dev/null | head -n1 || true)"
   if [[ -z "$audit_file" || ! -f "$audit_file" ]]; then
     echo "missing_audit_json_for_recheck output_prefix=${output_prefix}" >&2
     return 2
   fi
-  local hash_file="out/reports/rehome-normalize/${output_prefix}-qb-missing-hashes-${stamp}.txt"
+  local hash_file="$HOME/.logs/hashall/reports/rehome-normalize/${output_prefix}-qb-missing-hashes-${stamp}.txt"
   jq -r '.entries[].torrent_hash' "$audit_file" | sort -u > "$hash_file"
   echo "recheck_hash_file=${hash_file}"
   local hash_count
@@ -828,7 +828,7 @@ run_with_heartbeat "sync-snapshot payload-sync" \
   PAYLOAD_LOW_PRIORITY=1 \
   PAYLOAD_HASH_PROGRESS="${HASH_PROGRESS}"
 
-PLAN="out/reports/rehome-normalize/rehome-plan-normalize-frozen-${stamp}.json"
+PLAN="$HOME/.logs/hashall/reports/rehome-normalize/rehome-plan-normalize-frozen-${stamp}.json"
 echo "step=plan-from-db"
 run_with_heartbeat "plan-from-db normalize-plan" \
   make rehome-normalize-plan \
@@ -872,7 +872,7 @@ elif [[ "$skipped" -gt 0 ]]; then
 fi
 
 echo "step=apply-dry"
-PLAN_READY="out/reports/rehome-normalize/$(basename "${PLAN%.json}")-live.json"
+PLAN_READY="$HOME/.logs/hashall/reports/rehome-normalize/$(basename "${PLAN%.json}")-live.json"
 sanitize_plan_live_torrents "$PLAN" "$PLAN_READY"
 print_plan_summary "$PLAN_READY"
 if [[ "$(jq -r '.plans | length' "$PLAN_READY")" -eq 0 ]]; then

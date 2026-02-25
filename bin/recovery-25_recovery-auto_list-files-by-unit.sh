@@ -60,8 +60,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
-mkdir -p out/reports/recovery-workflow
-log="out/reports/recovery-workflow/recovery-25-list-files-${stamp}.log"
+mkdir -p $HOME/.logs/hashall/reports/recovery-workflow
+log="$HOME/.logs/hashall/reports/recovery-workflow/recovery-25-list-files-${stamp}.log"
 
 UNIT_FILTER="$unit" LIMIT="$limit" python3 - <<'PY' 2>&1 | tee "$log"
 import glob, json, os, sqlite3, sys
@@ -69,7 +69,7 @@ import glob, json, os, sqlite3, sys
 unit_filter = os.environ.get("UNIT_FILTER", "").strip()
 limit = int(os.environ.get("LIMIT", "50"))
 
-reports = sorted(glob.glob('out/reports/recovery-workflow/recovery-workflow-*.json'))
+reports = sorted(glob.glob('$HOME/.logs/hashall/reports/recovery-workflow/recovery-workflow-*.json'))
 if not reports:
     print('No recovery workflow report found. Run: make recovery-auto')
     sys.exit(1)

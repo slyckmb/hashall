@@ -211,7 +211,7 @@ def _verify_candidate(
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Verify and cleanup rehome-safe run")
     p.add_argument("--run-log", help="Path to rehome-safe-run-*.json (defaults to latest)")
-    p.add_argument("--run-log-dir", default="out/reports/rehome-safe-runs")
+    p.add_argument("--run-log-dir", default=str(Path.home() / ".logs/hashall/reports/rehome-safe-runs"))
     p.add_argument("--db", help="Override DB path (defaults to run-log db)")
     p.add_argument("--cleanup", action="store_true", help="Delete source paths for verified-clean groups")
     p.add_argument("--strict", action="store_true", help="Exit non-zero if any group is not ready")

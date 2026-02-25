@@ -13,7 +13,7 @@ LIMIT="${LIMIT:-0}"
 FAST="${FAST:-1}"
 DEBUG="${DEBUG:-1}"
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-basics-qb-missing-audit-${stamp}.log"

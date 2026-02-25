@@ -26,12 +26,12 @@ USAGE
 }
 
 latest_hashes_file() {
-  ls -1t out/reports/rehome-normalize/nohl-payload-hashes-ranked-*.txt 2>/dev/null | head -n1
+  ls -1t $HOME/.logs/hashall/reports/rehome-normalize/nohl-payload-hashes-ranked-*.txt 2>/dev/null | head -n1
 }
 
 latest_manifest_file() {
   local prefix="$1"
-  ls -1t "out/reports/rehome-normalize/${prefix}-plan-manifest-"*.json 2>/dev/null | head -n1
+  ls -1t "$HOME/.logs/hashall/reports/rehome-normalize/${prefix}-plan-manifest-"*.json 2>/dev/null | head -n1
 }
 
 HASHES_FILE=""
@@ -77,7 +77,7 @@ if [[ -z "$HASHES_FILE" || ! -f "$HASHES_FILE" ]]; then
   exit 3
 fi
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-build-group-plan-${stamp}.log"

@@ -7,7 +7,7 @@ hr() {
 
 latest_plan() {
   local prefix="$1"
-  ls -1t "out/reports/rehome-normalize/${prefix}-qb-missing-remediate-plan-"*.json 2>/dev/null | head -n1 || true
+  ls -1t "$HOME/.logs/hashall/reports/rehome-normalize/${prefix}-qb-missing-remediate-plan-"*.json 2>/dev/null | head -n1 || true
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,7 +28,7 @@ if [[ -z "$PLAN" || ! -f "$PLAN" ]]; then
   exit 3
 fi
 
-log_dir="out/reports/rehome-normalize"
+log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
 run_log="${log_dir}/${OUTPUT_PREFIX}-basics-qb-missing-remediate-dryrun-${stamp}.log"

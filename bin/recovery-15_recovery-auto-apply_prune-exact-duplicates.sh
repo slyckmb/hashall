@@ -38,8 +38,8 @@ cd "$REPO_DIR"
 RECOVERY_PREFIX="${RECOVERY_PREFIX:-/data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207}"
 RECOVERY_LIMIT="${RECOVERY_LIMIT:-5}"
 stamp="$(TZ=America/New_York date +%Y%m%d-%H%M%S)"
-mkdir -p out/reports/recovery-workflow
-log="out/reports/recovery-workflow/recovery-15-apply-${stamp}.log"
+mkdir -p $HOME/.logs/hashall/reports/recovery-workflow
+log="$HOME/.logs/hashall/reports/recovery-workflow/recovery-15-apply-${stamp}.log"
 
 make recovery-auto-apply \
   RECOVERY_WORKFLOW_PREFIX="$RECOVERY_PREFIX" \
