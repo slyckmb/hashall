@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL/pausedDL torrents.
-# Version: 1.6.0
+# Version: 1.6.1
 # Date:    2026-02-25
+#
+# v1.6.1 fix(P5): retry_recheck loop causing timeout instead of stoppedDL
+#   Only issue retry_recheck when torrent never entered actual checking
+#   (has_started=False).  Genuine check failures (0%→N%→stpDL) no longer
+#   get retried — they wait STOPDL_GRACE then are marked stoppedDL+blacklisted.
+#   Previously: retry sent them back to checkin(0%), other queued torrents held
+#   the check slot for >STAGNANT_SECS, stagnation fired → "timeout" (not BL'd).
 #
 # v1.6.0 PD triage fixes:
 #   Fix A: pausedDL state now recognised alongside stoppedDL
@@ -31,7 +38,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.6.1"
 SCRIPT_DATE="2026-02-25"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -812,14 +819,22 @@ while time.time() < SAFETY_END:
             if s == "stoppedDL":
                 # Transient stoppedDL: QB may still be in checkingResumeData when
                 # initial recheckTorrents fires (pool-pool race condition), or may be
-                # mid-transition. Issue a retry recheck on first detection, then wait
-                # STOPDL_GRACE seconds for it to complete before recording as failure.
+                # mid-transition.  Only retry if the torrent never entered actual
+                # checking (has_started is False).  If it DID check (0%→N%→stpDL),
+                # that is a genuine failure — retrying just re-queues it at p=0%,
+                # which causes stagnation timeout when other torrents hold the check
+                # queue for longer than STAGNANT_SECS.  Let it fall through to the
+                # STOPDL_GRACE window and be marked as stoppedDL → blacklisted.
                 if h not in pending_stopDL:
                     pending_stopDL[h] = now
-                    if h not in recheck_issued:
+                    if h not in recheck_issued and h not in has_started:
+                        # Race-condition case: never actually checked — retry to start.
                         retry_recheck(h)
                         recheck_issued.add(h)
-                    parts.append(f"?{h[:8]}=stpDL(recheck)")
+                        parts.append(f"?{h[:8]}=stpDL(recheck)")
+                    else:
+                        # Genuine failure: checked and failed, or retry already issued.
+                        parts.append(f"?{h[:8]}=stpDL(grace)")
                     all_done = False
                 elif now - pending_stopDL[h] >= STOPDL_GRACE:
                     results[h] = s
