@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.4.4
-# Date:    2026-02-24
+# Version: 1.5.0
+# Date:    2026-02-25
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
 # Safe by default: runs in dry-run mode unless --apply is passed.
@@ -9,22 +9,24 @@
 # are stoppedUP and won't appear as candidates again.
 #
 # Fixes vs single-pair script:
-#   - Skips same-save-path pairs (good_save == broken_save)
+#   - Skips same-save-path pairs by default (use --same-save for those)
 #   - Deletes incomplete files at old download_path BEFORE QB restart (prevents overwrite)
 #   - One QB stop/start for entire batch (fast)
 #   - Parallel recheck of all candidates
 #   - No 90s verification: recheck→stoppedUP = success
 #
-# Usage: bin/qbit-repair-batch.sh [--limit N] [--apply] [--no-ramp]
+# Usage: bin/qbit-repair-batch.sh [--limit N] [--apply] [--no-ramp] [--same-save] [--clear-bl]
 #   --limit N    Process at most N stoppedDL candidates (default: 10)
 #   --apply      Execute changes (dry-run if omitted)
 #   --no-ramp    Drain mode: start ALL stoppedUP torrents immediately (no repair workflow)
+#   --same-save  Process same-save-path pairs: clear download_path + recheck (no hardlink work)
+#   --clear-bl   Clear the repair blacklist and exit
 #   -h, --help   Show this help and exit
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.4.4"
-SCRIPT_DATE="2026-02-24"
+SCRIPT_VERSION="1.5.0"
+SCRIPT_DATE="2026-02-25"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
@@ -34,6 +36,7 @@ DB="${HOME}/.hashall/catalog.db"
 BT_BACKUP="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup"
 QB_CONTAINER="qbittorrent_vpn"
 SUCCESS_FILE="$HOME/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt"
+BLACKLIST_FILE="$HOME/.logs/hashall/reports/qbit-triage/repair-blacklist.txt"
 TMPD="/tmp/qb_repair_batch"
 mkdir -p "$HOME/.logs/hashall/reports/qbit-triage" "$TMPD"
 
@@ -48,21 +51,27 @@ Options:
   --limit N    Max stoppedDL candidates per batch (default: 10)
   --apply      Execute changes (default: dry-run)
   --no-ramp    Drain mode: start ALL stoppedUP torrents at once, then exit
+  --same-save  Same-save mode: clear download_path + recheck for pairs where good_save==broken_save
+  --clear-bl   Clear the repair blacklist and exit
   -h, --help   Show this help and exit
 
-Logs: ~/.logs/hashall/reports/qbit-triage/qbit-repair-batch-TIMESTAMP.log
-Streak: ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt
+Logs:      ~/.logs/hashall/reports/qbit-triage/qbit-repair-batch-TIMESTAMP.log
+Streak:    ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt
+Blacklist: ~/.logs/hashall/reports/qbit-triage/repair-blacklist.txt
 USAGE
 }
 
 LIMIT=10
 APPLY=false
 NO_RAMP=false
+SAME_SAVE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --limit)        LIMIT="$2"; shift 2 ;;
     --apply)        APPLY=true; shift ;;
     --no-ramp)      NO_RAMP=true; shift ;;
+    --same-save)    SAME_SAVE=true; shift ;;
+    --clear-bl)     rm -f "$BLACKLIST_FILE"; echo "Blacklist cleared."; exit 0 ;;
     -h|--help)      usage; exit 0 ;;
     *) echo "unknown: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -86,7 +95,7 @@ set_streak() { echo "$1" > "$SUCCESS_FILE"; }
 
 echo "════════════════════════════════════════════════════════════"
 echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-echo "apply=$APPLY  limit=$LIMIT  no-ramp=$NO_RAMP"
+echo "apply=$APPLY  limit=$LIMIT  no-ramp=$NO_RAMP  same-save=$SAME_SAVE"
 echo "log=$LOGFILE"
 echo "════════════════════════════════════════════════════════════"
 
@@ -130,17 +139,29 @@ echo "▸ P0 discovery"
 qb_login
 curl -fsS --max-time 30 -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
 
-python3 - "$DB" "$TMPD" "$LIMIT" << 'PYEOF'
+python3 - "$DB" "$TMPD" "$LIMIT" "$BLACKLIST_FILE" "$SAME_SAVE" << 'PYEOF'
 import json, sqlite3, os, sys
 from collections import defaultdict
 
-db, tmpdir, limit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+db, tmpdir, limit, blacklist_file, same_save = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5] == "true"
+
+# Load blacklist (one hash per line; comments with # are ignored)
+blacklist = set()
+if os.path.exists(blacklist_file):
+    for line in open(blacklist_file):
+        h = line.split('#')[0].strip()
+        if h: blacklist.add(h)
 
 torrents = json.load(open(f"{tmpdir}/all_torrents.json"))
 by_hash  = {t["hash"]: t for t in torrents}
 
 good_hashes   = {t["hash"] for t in torrents if t["state"] in ("stoppedUP", "stalledUP", "uploading") and t["progress"] >= 0.9999}
-broken_hashes = {t["hash"] for t in torrents if t["state"] == "stoppedDL"}
+broken_hashes = {t["hash"] for t in torrents if t["state"] == "stoppedDL" and t["hash"] not in blacklist}
+
+if blacklist:
+    bl_skipped = sum(1 for t in torrents if t["state"] == "stoppedDL" and t["hash"] in blacklist)
+    if bl_skipped:
+        print(f"  (skipping {bl_skipped} blacklisted hashes)")
 
 con = sqlite3.connect(db)
 def get_root_names(hashes):
@@ -168,31 +189,41 @@ for bh, bname in broken_names.items():
     for gh in good:
         gt = by_hash[gh]
         good_save = gt["save_path"]
-        # SKIP same-save-path (same directory — no hardlink work needed, handled separately)
-        if good_save == broken_save:
-            continue
-        gp, bp = good_save, broken_save
-        if   gp.startswith("/pool/data")   and bp.startswith("/pool/data"):   same_fs = "pool-pool"
-        elif gp.startswith("/stash/media") and bp.startswith("/stash/media"): same_fs = "stash-stash"
-        elif gp.startswith("/data/media")  and bp.startswith("/data/media"):  same_fs = "stash-stash"
-        else: same_fs = "cross-fs"
+        is_same_save = (good_save == broken_save)
+        if same_save:
+            if not is_same_save: continue   # --same-save: only want same-save pairs
+        else:
+            if is_same_save: continue       # normal: skip same-save pairs
+        if same_save:
+            same_fs_label = "same-save"
+        else:
+            gp, bp = good_save, broken_save
+            if   gp.startswith("/pool/data")   and bp.startswith("/pool/data"):   same_fs_label = "pool-pool"
+            elif gp.startswith("/stash/media") and bp.startswith("/stash/media"): same_fs_label = "stash-stash"
+            elif gp.startswith("/data/media")  and bp.startswith("/data/media"):  same_fs_label = "stash-stash"
+            else: same_fs_label = "cross-fs"
         results.append({
             "good_hash": gh, "broken_hash": bh,
-            "same_fs": same_fs, "root_name": bname,
+            "same_fs": same_fs_label, "root_name": bname,
             "progress": bt["progress"],
             "good_save": good_save, "broken_save": broken_save, "broken_dl": broken_dl,
         })
         seen_broken.add(bh)
         break  # one good partner per broken hash
 
-# Sort: same-fs first, then progress ASC
-results.sort(key=lambda x: (0 if x["same_fs"] != "cross-fs" else 1, x["progress"]))
+if same_save:
+    results.sort(key=lambda x: x["progress"])
+    mode_str = "same-save pairs"
+else:
+    results.sort(key=lambda x: (0 if x["same_fs"] != "cross-fs" else 1, x["progress"]))
+    mode_str = "cross-fs/same-fs (skipping same-save-path pairs)"
 if limit: results = results[:limit]
 
 json.dump(results, open(f"{tmpdir}/candidates.json", "w"), indent=2)
-print(f"  {len(results)} candidates (skipping same-save-path pairs)")
+print(f"  {len(results)} candidates ({mode_str})")
 for r in results:
-    print(f"  {r['broken_hash'][:12]}  {r['same_fs']:12}  prog={r['progress']:.3f}  {r['root_name'][:55]}")
+    dl_str = f"  dl={r['broken_dl'][:25]}" if r['broken_dl'] else ""
+    print(f"  {r['broken_hash'][:12]}  {r['same_fs']:12}  prog={r['progress']:.3f}  {r['root_name'][:55]}{dl_str}")
 PYEOF
 
 NCAN=$(python3 -c "import json; print(len(json.load(open('$TMPD/candidates.json'))))")
@@ -203,17 +234,18 @@ echo ""
 echo "▸ P1 content analysis"
 qb_login 2>/dev/null || true
 
-# Write hash pairs to file so curls run in main shell (not a pipe subshell).
-python3 -c "
-import json
-c = json.load(open('$TMPD/candidates.json'))
-for r in c: print(r['good_hash'], r['broken_hash'])
-" > "$TMPD/pairs.txt"
-
-# Fetch QB files for all candidates in parallel.
+# Write hash pairs to file for non-same-save candidates only (same-save skips content analysis).
 # IMPORTANT: track PIDs explicitly and use wait <pid> (not bare "wait").
 # Bare "wait" waits for ALL children including the exec > >(tee ...) process
 # substitution, which deadlocks because tee can't exit while bash holds stdout.
+python3 -c "
+import json
+c = json.load(open('$TMPD/candidates.json'))
+for r in c:
+    if r.get('same_fs') != 'same-save':
+        print(r['good_hash'], r['broken_hash'])
+" > "$TMPD/pairs.txt"
+
 CURL_PIDS=()
 while read -r GH BH; do
   curl --max-time 30 -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/files?hash=$GH" \
@@ -225,11 +257,11 @@ while read -r GH BH; do
 done < "$TMPD/pairs.txt"
 for _pid in "${CURL_PIDS[@]}"; do wait "$_pid" 2>/dev/null || true; done
 
-python3 - "$DB" "$TMPD" << 'PYEOF'
+python3 - "$DB" "$TMPD" "$BLACKLIST_FILE" << 'PYEOF'
 import json, os, sqlite3, sys
 from collections import Counter
 
-db, tmpdir = sys.argv[1], sys.argv[2]
+db, tmpdir, blacklist_file = sys.argv[1], sys.argv[2], sys.argv[3]
 candidates = json.load(open(f"{tmpdir}/candidates.json"))
 con = sqlite3.connect(db)
 
@@ -268,6 +300,14 @@ plan = []
 for c in candidates:
     gh, bh = c["good_hash"], c["broken_hash"]
     good_save, broken_save = c["good_save"], c["broken_save"]
+
+    # same-save candidates skip content analysis (no hardlink work needed)
+    if c.get("same_fs") == "same-save":
+        c["rebuild_files"] = []
+        plan.append(c)
+        print(f"  {bh[:12]}  same-save (skip content analysis)")
+        continue
+
     same_fs = (c["same_fs"] != "cross-fs")
 
     try:
@@ -350,9 +390,57 @@ for c in candidates:
     plan.append(c)
     print(f"  {bh[:12]}  {dict(counts)}")
 
-json.dump(plan, open(f"{tmpdir}/plan.json", "w"), indent=2)
+# ── Noop / unrepairable detection ─────────────────────────────────────────────
+# Skip candidates where repair cannot succeed and blacklist them to prevent
+# re-queuing on future runs.
+#
+# Unrepairable: has no_match files — no good source for those files, recheck
+#   will always fail regardless of what we do. Hardlinking the other files
+#   doesn't help.
+#
+# Noop: all files already_hardlinked AND QB reports no download_path — nothing
+#   to change in fastresume, recheck will just fail again exactly as before.
+#
+# same-save candidates: NOT filtered here — they may benefit from clearing
+#   download_path even if QB API shows it empty (fastresume may differ).
+#   They get blacklisted by P5 if they fail after recheck.
+actionable = []
+noop_list  = []
+for c in plan:
+    if c.get("same_fs") == "same-save":
+        actionable.append(c)
+        continue
+    h        = c["broken_hash"]
+    summary  = c.get("summary", {})
+    broken_dl = c.get("broken_dl", "")
+    has_no_match = summary.get("no_match", 0) > 0
+    rf = c.get("rebuild_files", [])
+    all_already  = bool(rf) and all(f["action"] == "already_hardlinked" for f in rf)
+    is_noop      = (not broken_dl) and all_already
+    if has_no_match:
+        noop_list.append((c, f"unrepairable: {summary.get('no_match')} no_match files"))
+    elif is_noop:
+        noop_list.append((c, "noop: all files already_hardlinked, no download_path"))
+    else:
+        actionable.append(c)
+
+if noop_list:
+    with open(blacklist_file, "a") as bl:
+        for c, reason in noop_list:
+            bl.write(f"{c['broken_hash']}  # {reason} | {c['root_name'][:50]}\n")
+    for c, reason in noop_list:
+        print(f"  SKIP+BL [{c['broken_hash'][:12]}] {reason}: {c['root_name'][:40]}")
+    print(f"  {len(actionable)} proceed  {len(noop_list)} skipped+blacklisted")
+else:
+    if actionable:
+        print(f"  all {len(actionable)} candidates actionable")
+
+json.dump(actionable, open(f"{tmpdir}/plan.json", "w"), indent=2)
 PYEOF
 echo ""
+
+NACT=$(python3 -c "import json; print(len(json.load(open('$TMPD/plan.json'))))")
+if [[ "$NACT" -eq 0 ]]; then echo "No actionable candidates after P1 check. Exiting."; exit 0; fi
 
 # ── P2: Hardlink rebuild + cross-fs setLocation (QB running) ─────────────────
 echo "▸ P2 hardlink rebuild"
@@ -372,7 +460,7 @@ for c in plan:
     echo "  setLocation [${BHASH:0:12}] → $TARGET: HTTP $HTTP"
   done
 
-  # Same-fs: rebuild hardlinks
+  # Same-fs: rebuild hardlinks (same-save has empty rebuild_files → naturally skipped)
   python3 - "$TMPD" << 'PYEOF'
 import json, os, sys
 tmpdir = sys.argv[1]
@@ -476,6 +564,23 @@ for c in plan:
     old_b = d.get(b'qBt-downloadPath', b'')
     old   = old_b.decode('utf-8', errors='replace') if isinstance(old_b, bytes) else str(old_b)
 
+    # same-save candidates: skip file deletion entirely.
+    # The content QB needs lives at save_path (= good_save = broken_save).
+    # Any files at download_path are separate incomplete copies that become
+    # orphaned once we clear the fastresume — they don't interfere with recheck.
+    if c.get("same_fs") == "same-save":
+        if not old:
+            print(f"  [{h[:12]}] same-save: download_path already empty"); continue
+        if apply:
+            d[b'qBt-downloadPath'] = b''
+            tmp = fr + '.tmp'
+            with open(tmp, 'wb') as f: f.write(bencode(d))
+            os.replace(tmp, fr)
+            print(f"  [{h[:12]}] same-save: cleared '{old}'")
+        else:
+            print(f"  [{h[:12]}] [dry-run] same-save: would clear '{old}'")
+        continue
+
     # Delete incomplete files BEFORE patching (prevents QB from moving them to save_path)
     # NOTE: qBittorrent container never mounts /stash; all stash paths appear as /data/media/
     #       Path string comparison is unreliable — use inode comparison instead.
@@ -571,19 +676,19 @@ if [[ "$APPLY" == true ]]; then
   HTTP=$(curl -sS --max-time 30 -o /dev/null -w "%{http_code}" \
     -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/recheck" \
     --data-urlencode "hashes=${HASH_LIST}")
-  echo "  recheckTorrents ($NCAN hashes): HTTP $HTTP"
+  echo "  recheckTorrents ($NACT hashes): HTTP $HTTP"
 else
-  echo "  [dry-run] would recheckTorrents for $NCAN hashes"
+  echo "  [dry-run] would recheckTorrents for $NACT hashes"
 fi
 echo ""
 
 # ── P5: Monitor all ───────────────────────────────────────────────────────────
 echo "▸ P5 monitor"
 if [[ "$APPLY" == true ]]; then
-  python3 - "$COOKIE" "$QB_URL" "$TMPD" "$QB_USER" "$QB_PASS" << 'PYEOF'
+  python3 - "$COOKIE" "$QB_URL" "$TMPD" "$QB_USER" "$QB_PASS" "$BLACKLIST_FILE" << 'PYEOF'
 import json, time, subprocess, sys, os
 
-cookie, qb_url, tmpdir, qb_user, qb_pass = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+cookie, qb_url, tmpdir, qb_user, qb_pass, blacklist_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 plan   = json.load(open(f"{tmpdir}/plan.json"))
 hashes = [c["broken_hash"] for c in plan]
 names  = {c["broken_hash"]: c["root_name"][:40] for c in plan}
@@ -740,6 +845,16 @@ for h in hashes:
 json.dump({"results": results, "successes": successes, "failures": failures},
           open(f"{tmpdir}/results.json", "w"))
 print(f"\n  successes={successes}  failures={failures}")
+
+# Blacklist persistent stoppedDL failures to prevent re-queuing on future runs.
+# Only blacklist stoppedDL (genuine repair failure), not timeout/stale (those may
+# succeed next run under less queue pressure).
+stpdl_fails = [h for h, r in results.items() if r == "stoppedDL"]
+if stpdl_fails:
+    with open(blacklist_file, "a") as bl:
+        for h in stpdl_fails:
+            bl.write(f"{h}  # stoppedDL after repair | {names.get(h, '')[:50]}\n")
+    print(f"\n  → blacklisted {len(stpdl_fails)} persistent stoppedDL hash(es)")
 PYEOF
 else
   echo "  [dry-run]"
