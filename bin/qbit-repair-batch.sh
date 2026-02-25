@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.4.1
+# Version: 1.4.2
 # Date:    2026-02-24
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.4.1"
+SCRIPT_VERSION="1.4.2"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -75,7 +75,6 @@ LOGDIR="$HOME/.logs/hashall/reports/qbit-triage"
 LOGFILE="$LOGDIR/qbit-repair-batch-$(date +%Y%m%d-%H%M%S).log"
 mkdir -p "$LOGDIR"
 exec > >(tee -a "$LOGFILE") 2>&1
-echo "Log: $LOGFILE"
 
 qb_login() {
   curl -fsS --max-time 15 -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
@@ -88,6 +87,7 @@ set_streak() { echo "$1" > "$SUCCESS_FILE"; }
 echo "════════════════════════════════════════════════════════════"
 echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
 echo "apply=$APPLY  limit=$LIMIT  no-ramp=$NO_RAMP"
+echo "log=$LOGFILE"
 echo "════════════════════════════════════════════════════════════"
 
 # ── --no-ramp: drain stoppedUP bucket ─────────────────────────────────────────
@@ -120,6 +120,7 @@ PYEOF
   echo ""
   echo "════════════════════════════════════════════════════════════"
   echo "DONE  $(date '+%F %T')"
+  echo "log=$LOGFILE"
   echo "════════════════════════════════════════════════════════════"
   exit 0
 fi
@@ -276,13 +277,15 @@ for c in candidates:
         c["error"] = str(e); c["rebuild_files"] = []; plan.append(c); continue
 
     # Build good lookup: by QB basename (primary) and by index position (fallback)
-    good_by_name = {}
+    # good_by_name maps basename -> list of entries; multiple files can share a basename
+    # (e.g. root/cover.jpg + Covers/cover.jpg) so we must not blindly overwrite.
+    good_by_name = {}  # basename -> [entry, ...]
     good_by_idx  = []
     for f in good_files:
         ap = os.path.join(good_save, f["name"])
         qh, sh = catalog_lookup(ap)
         entry = {"abs": ap, "qhash": qh, "sha256": sh, "size": f.get("size", -1)}
-        good_by_name[os.path.basename(f["name"])] = entry
+        good_by_name.setdefault(os.path.basename(f["name"]), []).append(entry)
         good_by_idx.append(entry)
 
     # Pre-scan broken quick_hashes for dup detection
@@ -301,8 +304,11 @@ for c in candidates:
             bqh, bsh = catalog_lookup(ap)
             bsz = bf_qb.get("size", -1)
 
-            # Primary: match by QB filename basename
-            gf = good_by_name.get(os.path.basename(bf_qb["name"]))
+            # Primary: match by QB filename basename — only when unambiguous (1 match).
+            # If multiple files share the same basename (e.g. cover.jpg at different paths),
+            # skip name-based match and fall through to the index-based fallback below.
+            _name_matches = good_by_name.get(os.path.basename(bf_qb["name"]), [])
+            gf = _name_matches[0] if len(_name_matches) == 1 else None
             # Fallback: same index in QB file list + same size + DB-confirmed quick_hash on good
             # (handles cross-seed name variants like spaces-vs-dots; quick_hash gates the guess)
             if gf is None and i < len(good_by_idx) and bsz > 0 and good_by_idx[i]["size"] == bsz:
@@ -380,9 +386,18 @@ for c in plan:
         bad, good = f["bad"], f.get("good")
         if not good or not os.path.exists(good):
             print(f"  SKIP no good src: {os.path.basename(bad)}"); continue
-        if os.path.exists(bad): os.remove(bad)
         os.makedirs(os.path.dirname(bad), exist_ok=True)
-        os.link(good, bad)
+        # Atomic replace: link to temp then rename so QB (still running) cannot
+        # recreate bad between an os.remove and os.link (non-atomic window).
+        tmp = bad + ".__hl_tmp__"
+        try:
+            if os.path.exists(tmp): os.unlink(tmp)
+            os.link(good, tmp)
+            os.rename(tmp, bad)  # atomic on Linux (same filesystem — same_fs check above)
+        except Exception as e:
+            try: os.unlink(tmp)
+            except: pass
+            raise
         total += 1
 print(f"  {total} hardlinks rebuilt")
 PYEOF
@@ -563,14 +578,16 @@ plan   = json.load(open(f"{tmpdir}/plan.json"))
 hashes = [c["broken_hash"] for c in plan]
 names  = {c["broken_hash"]: c["root_name"][:40] for c in plan}
 
-TERMINAL = {"stoppedUP", "stoppedDL", "error", "missingFiles"}
-CHECKING = {"checkingDL", "checkingUP", "checkingResumeData", "moving"}
+TERMINAL        = {"stoppedUP", "stoppedDL", "error", "missingFiles"}
+CHECKING        = {"checkingDL", "checkingUP", "checkingResumeData", "moving"}
+CHECKING_ACTIVE = {"checkingDL", "checkingUP"}  # actual piece verification (not resume replay)
 results        = {}
 pending_stopDL = {}  # hash -> timestamp first seen stoppedDL (re-poll grace)
 recheck_issued = set()  # hashes for which a retry recheck was issued
 last_progress  = {}  # hash -> last seen progress value
 last_change    = {}  # hash -> time progress last changed (stagnation detection)
-has_started    = set()  # hashes that have ever made progress > 0%
+prev_state     = {}  # hash -> state from previous poll (for transition detection)
+has_started    = set()  # hashes that have entered checkingDL/UP with p > 0
 STAGNANT_SECS  = 600  # 10 min without progress change = genuine timeout (only if started)
 STOPDL_GRACE   = 120  # seconds to wait after retry recheck before giving up
 SAFETY_END     = time.time() + 7200  # 2 hr hard safety cap
@@ -639,16 +656,25 @@ while time.time() < SAFETY_END:
                 results[h] = s
                 parts.append(f"{'✓' if s=='stoppedUP' else '✗'}{h[:8]}")
         elif s in CHECKING:
-            # Track progress to detect stagnation.
-            # Stagnation timeout only fires if the torrent has STARTED (progress > 0%)
-            # and then stopped — not while it's still queued at 0%.
-            if p > 0:
+            # Stagnation detection:
+            # checkingResumeData replays the prior fastresume data and shows the OLD
+            # high progress value (e.g. 99.93%) — this is NOT real checking progress.
+            # Only mark has_started when we're in checkingDL/checkingUP with p > 0,
+            # and reset the stagnation clock whenever we transition OUT of
+            # checkingResumeData into actual checking so queued torrents get a
+            # fresh STAGNANT_SECS window from when their real check begins.
+            if s in CHECKING_ACTIVE and p > 0:
                 has_started.add(h)
-            if last_progress.get(h) != p:
+            # Transition: checkingResumeData → actual checking — restart stagnation clock
+            if prev_state.get(h) == "checkingResumeData" and s in CHECKING_ACTIVE:
+                last_change[h] = now
+                last_progress[h] = p
+            elif last_progress.get(h) != p:
                 last_progress[h] = p
                 last_change[h] = now
             elif h not in last_change:
                 last_change[h] = now
+            prev_state[h] = s
             stale_secs = now - last_change.get(h, now)
             if h in has_started and stale_secs >= STAGNANT_SECS:
                 results[h] = "timeout"
@@ -714,4 +740,5 @@ fi
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "DONE  $(date '+%F %T')"
+echo "log=$LOGFILE"
 echo "════════════════════════════════════════════════════════════"
