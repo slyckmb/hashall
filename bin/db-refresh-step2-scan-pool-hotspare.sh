@@ -4,9 +4,9 @@
 # Pause after this and paste tail of log to Claude before continuing.
 set -euo pipefail
 
-WT="/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028"
+REPO="/home/michael/dev/work/hashall"
 PYTHON="/home/michael/.venvs/hashall/bin/python"
-export PYTHONPATH="$WT/src"
+export PYTHONPATH="$REPO/src"
 
 LOGDIR="$HOME/.logs/hashall/reports/db-refresh"
 mkdir -p "$LOGDIR"
