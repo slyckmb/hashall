@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.4.3
+# Version: 1.4.4
 # Date:    2026-02-24
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.4.3"
+SCRIPT_VERSION="1.4.4"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -483,7 +483,17 @@ for c in plan:
     if old:
         host_dl     = container_to_host(old)
         broken_save = c.get("broken_save", "")
-        if host_dl:
+        good_save   = c.get("good_save", "")
+        if host_dl and os.path.normpath(host_dl) == os.path.normpath(good_save):
+            # download_path IS the setLocation target: the files here are the content
+            # QB needs after the repair. Deleting them would wipe partially-downloaded
+            # data that may be 90%+ complete. Skip deletion entirely; just clear the
+            # fastresume download_path below so QB uses save_path = good_save directly.
+            if apply:
+                print(f"  [{h[:12]}] skip deletion: broken_dl==good_save ({os.path.basename(host_dl)})")
+            else:
+                print(f"  [{h[:12]}] [dry-run] skip deletion: broken_dl==good_save")
+        elif host_dl:
             def same_inode(a, b):
                 try:
                     return os.path.exists(a) and os.path.exists(b) and \
@@ -589,6 +599,7 @@ last_change    = {}  # hash -> time progress last changed (stagnation detection)
 prev_state     = {}  # hash -> state from previous poll (for transition detection)
 has_started    = set()  # hashes that have entered checkingDL/UP with p > 0
 moving_since   = {}  # hash -> time first seen in moving state (for stuck-move timeout)
+MOVING_TIMEOUT = 3600  # 1 hr: cross-fs copies of large season packs legitimately take >10m
 STAGNANT_SECS  = 600  # 10 min without progress change = genuine timeout (only if started)
 STOPDL_GRACE   = 120  # seconds to wait after retry recheck before giving up
 SAFETY_END     = time.time() + 7200  # 2 hr hard safety cap
@@ -672,7 +683,7 @@ while time.time() < SAFETY_END:
                 if h not in moving_since:
                     moving_since[h] = now
                 moving_secs = now - moving_since[h]
-                if moving_secs >= STAGNANT_SECS:
+                if moving_secs >= MOVING_TIMEOUT:
                     results[h] = "timeout"
                     parts.append(f"✗{h[:8]}=mov_stuck{int(moving_secs//60)}m")
                 else:
