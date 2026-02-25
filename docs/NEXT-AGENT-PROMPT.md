@@ -1,95 +1,140 @@
 # Next Agent Prompt — qbit-repair campaign
 
-**Date:** 2026-02-24
-**Worktree:** `/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028`
-**Branch:** `chatrap/claude-hashall-20260223-124028`
+**Date:** 2026-02-25
+**Worktree:** `/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260224-132659`
+**Branch:** `chatrap/claude-hashall-20260224-132659`
 
 ---
 
 ## Current State
 
-- **stoppedDL:** 1845 (confirmed live — need repair)
-- **stalledUP:** 3278 (seeding; 0 have flipped to downloading)
-- **stoppedUP:** 6 (newly repaired, not started yet — run gradual-start to pick up)
-- **Streak:** 0 (b4345cd: 2 persistent failures; 5fc73670 Pink Floyd, 6b3471fd)
-- **Total repaired this campaign:** ~258 confirmed (2103 - 1845)
+- **stoppedDL:** ~1027 (T1=6 pending repair, T2=29 pending repair, T3=4 direct recheck, T4=988 nohl-basics pipeline)
+- **Scripts:** `qbit-repair-batch.sh` v1.6.1, `pd-score.sh` v1.0.0, `pd-triage.sh` v1.0.0
+- **Recent commits:** 24cd941 (v1.6.1), 327bfc0 (pd-score), 6698bb5 (v1.6.0), 82a37df (db-refresh)
 
 ---
 
-## What Just Happened
+## Tier Breakdown (from pd-score.sh output)
 
-1. **BUG-6 fixed** (pool-pool timing race): `bin/qbit-repair-batch.sh` now retries recheck on stoppedDL detection during P5 monitor + 120s grace for pool-pool torrents. Confirmed working: West Wing S02 and Brave New World (pool-pool) both resolved ✓ in b4345cd.
+| Tier | Count | Description | Tool |
+|------|-------|-------------|------|
+| T1 | 6 | EXACT name match, ≥99% progress | qbit-repair-batch (--limit 10) |
+| T2 | 29 | Has QB partner (EXACT or FUZZY) | qbit-repair-batch (--limit 30) |
+| T3 | 4 | No QB partner but disk=100% (Legion S03 ×2, Bullet Train, Trapped) | Direct QB recheck |
+| T4 | 988 | No QB partner, 0% progress, cross-seed slots | rehome-100/101/102 |
 
-2. **b4345cd batch** (50 torrents, BUG-6 fix active): **COMPLETED.** ~48/50 success. 2 persistent failures:
-   - `5fc73670` — Pink Floyd Division Bell (stash-stash; `already_hardlinked: 22, garbage: 1`)
-   - `6b3471fd` — (stash-stash; `already_hardlinked: 13`)
-
-3. **qbit-start-seeding-gradual.sh**: **COMPLETED.** All stoppedUP torrents started in 11 escalating batches (1→2→5→10→25→50→100→250→500→1000+mop-up). 3278 total started, **0 flipped to downloading** — all seeding cleanly.
+10 torrents timed out in the last --same-save run (NOT blacklisted). v1.6.1 will properly
+fail them (stpDL grace) and blacklist them on next run.
 
 ---
 
-## Your Primary Task
+## Primary Tasks (in order)
 
-Continue repairing stoppedDL torrents. Run batches of 50:
+### T1/T2 — qbit-repair-batch
 
 ```bash
-cd /home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260223-124028
+cd /home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260224-132659
 
-# Check current streak
-cat ~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt
+# T1: EXACT ≥99% (6 torrents)
+bin/qbit-repair-batch.sh --limit 10           # dryrun
+bin/qbit-repair-batch.sh --limit 10 --apply
 
-# Dry-run first to see candidates
-bash bin/qbit-repair-batch.sh --limit 50
+# --same-save pass (clears 10 timed-out + same-save partners)
+bin/qbit-repair-batch.sh --same-save --apply
 
-# Apply
-bash bin/qbit-repair-batch.sh --limit 50 --apply
+# T2: remaining with QB partner
+bin/qbit-repair-batch.sh --limit 30 --apply
 ```
 
-All 6 known bugs are fixed. Batches should run cleanly. Run as many as needed.
+### T3 — Direct recheck (4 hashes with disk=100%)
+
+```bash
+# Get T3 hashes from pd-score output
+python3 -c "
+import json
+data = json.load(open('/home/michael/.logs/hashall/reports/qbit-triage/pd-score-20260225-120826.json'))
+t3 = [x['hash'] for x in data['torrents'] if x['tier'] == 3]
+print('|'.join(t3))
+"
+# Then recheck via QB API:
+source /home/michael/dev/secrets/qbittorrent/api.env
+COOKIE=$(mktemp /tmp/qb.XXXXX)
+curl -fsS -c "$COOKIE" -X POST http://localhost:9003/api/v2/auth/login \
+  --data-urlencode "username=$QBITTORRENTAPI_USERNAME" \
+  --data-urlencode "password=$QBITTORRENTAPI_PASSWORD" >/dev/null
+curl -fsS -b "$COOKIE" -X POST http://localhost:9003/api/v2/torrents/recheck \
+  --data-urlencode "hashes=HASH1|HASH2|HASH3|HASH4"
+```
+
+### T4 — DB Refresh + nohl-basics pipeline
+
+**CRITICAL ORDER — UUID migration MUST precede any rescan:**
+
+```bash
+# Step 1: UUID migration (ONE-TIME, before first rescan)
+bin/db-uuid-migration.sh           # dryrun — confirms 6 dev-XX → zfs-XXXX mappings
+bin/db-uuid-migration.sh --apply   # apply
+
+# Steps 2-5: DB Refresh
+bin/db-refresh-step1-scan-stash.sh
+bin/db-refresh-step2-scan-pool-hotspare.sh
+bin/db-refresh-step3-sha256-backfill.sh
+bin/db-refresh-step4-payload-sync.sh
+
+# Safety gate
+bin/rehome-89_nohl-basics-qb-automation-audit.sh
+bin/rehome-89_nohl-basics-qb-automation-audit.sh --mode apply  # if risks found
+
+# Baseline snapshot
+bin/rehome-100_nohl-basics-qb-repair-baseline.sh
+
+# Candidate mapping (exit 2 = unresolved OK; confident list still written)
+bin/rehome-101_nohl-basics-qb-candidate-mapping.sh
+# If many unresolved (>100):
+# MAP_ENABLE_DISCOVERY_SCAN=1 bin/rehome-101_nohl-basics-qb-candidate-mapping.sh
+
+# Dryrun pilot
+bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode dryrun --limit 10
+
+# Pilot apply
+bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 10
+
+# Full batch (repeat until done)
+bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 100
+bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 250
+```
+
+**102 auto-skips items with final_state=stoppedup in prior result files.**
+
+On failures in 102: items where recheck lands in stoppedDL (data not at target path) are
+logged as errors and skipped. Review errors in result JSON. These likely went to unresolved.
+
+**Unresolved items (COAs):**
+- COA A (Recommended): Accept as truly lost — queue for QB deletion
+- COA B: Re-run rehome-101 with `MAP_ENABLE_DISCOVERY_SCAN=1`
+- COA C: Manual sample investigation
+
+Note: Phases 95-97 are for `missingFiles` state torrents (separate pipeline). Do NOT run
+them for stoppedDL unresolved items.
 
 ---
 
-## Expected Behavior
+## All Bugs Fixed
 
-- Each batch of 50 takes ~20-30 minutes (P5 monitor waits for all to resolve)
-- Pool-pool pairs resolve fine now (BUG-6 fix handles the timing race)
-- Streak counter auto-updates in `~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt`
-- ~1845 stoppedDL / ~46 repairs per batch ≈ ~40 more batches to go
-- Milestone: streak=10 (was achieved Feb 23 with batch-20 → streak=30, then reset by bugs)
-
----
-
-## Bugs Fixed (All 6 Active)
-
-| Bug | Summary | Fix |
-|-----|---------|-----|
-| BUG-1 | Deletion of live seed files | Inode-based safety check in P3 |
-| BUG-2 | QB moved partials during restart | Delete before QB restart in P3 |
-| BUG-3 | Transient stoppedDL recorded as failure | 10s grace in P5 before failure |
-| BUG-4 | Wall-clock timeout too short | Per-torrent stagnation detection (not wall-clock) |
-| BUG-5 | Stagnation fires on 0%-queued torrents | `has_started` gate — only stagnate if was >0% |
-| BUG-6 | Pool-pool timing race on recheckTorrents | Retry recheck on stoppedDL + 120s grace |
-
----
-
-## Known Remaining Issues
-
-- **Same-save-path pairs**: Still skipped (P0). These need fastresume-only patch, no hardlink work. Count unknown.
-- **Trashy.Lady** (`43f589275bd8`): stoppedDL at 99.8%, missing 0.2%. No easy fix.
-- **Legion S03**: Multiple hashes with various issues (corruption, cross-fs). Skip for now.
-- **5fc73670** (Pink Floyd Division Bell): Persistent failure. May need manual investigation.
-- **6b3471fd**: Persistent failure. May need manual investigation.
-
----
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `bin/qbit-repair-batch.sh` | Main repair script |
-| `bin/qbit-start-seeding-gradual.sh` | Starts stoppedUP torrents in safe escalating batches |
-| `docs/qbit-repair-ops-log.md` | Full ops log with bug history and batch results |
-| `~/.logs/hashall/reports/qbit-triage/repair-consecutive-successes.txt` | Streak counter |
+| Bug | Summary | Fixed in |
+|-----|---------|----------|
+| BUG-1 | Deletion of live seed files | early |
+| BUG-2 | QB moved partials during restart | early |
+| BUG-3 | Transient stoppedDL recorded as failure | early |
+| BUG-4 | Wall-clock timeout too short | early |
+| BUG-5 | Stagnation fires on queued-at-0% torrents | early |
+| BUG-6 | Pool-pool timing race on recheckTorrents | Feb 24 |
+| BUG-7 | PermissionError on root-owned dirs | Feb 24 |
+| Fix-A | pausedDL now included in broken states | v1.6.0 |
+| Fix-B | catalog fallback to QB API name | v1.6.0 |
+| Fix-C | fuzzy name matching | v1.6.0 |
+| Fix-D | already_hardlinked noops → recheck instead of skip | v1.6.0 |
+| BUG-8 | retry_recheck loop → timeout on genuine stpDL | v1.6.1 |
 
 ---
 
@@ -100,3 +145,18 @@ All 6 known bugs are fixed. Batches should run cleanly. Run as many as needed.
 - BT_backup: `/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup/`
 - Pool: `/pool/data/` (device 231)
 - Stash: `/stash/media/` = `/data/media/` (device 44, bind mount)
+
+---
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `bin/qbit-repair-batch.sh` | Main repair script (v1.6.1) |
+| `bin/pd-score.sh` | Tier scoring for bulk stoppedDL triage |
+| `bin/pd-triage.sh` | Per-torrent diagnosis helper |
+| `bin/db-uuid-migration.sh` | ONE-TIME: migrate dev-XX UUIDs → zfs-XXXX (run before db-refresh) |
+| `bin/db-refresh-step1-4` | Catalog DB refresh pipeline |
+| `bin/rehome-89,100,101,102` | nohl-basics repair pipeline |
+| `docs/qbit-repair-ops-log.md` | Full ops log with bug history and batch results |
+| `docs/qbit-repair-handoff.md` | Session handoff notes |

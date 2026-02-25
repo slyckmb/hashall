@@ -188,3 +188,69 @@ bash bin/rehome-99_qb-checking-watch.sh --dashboard
 # Daemon log
 tail -f ~/.logs/hashall/reports/qbit-triage/daemon.log
 ```
+
+---
+
+## Session — 2026-02-25
+
+**Branch:** `chatrap/claude-hashall-20260224-132659`
+**Worktree:** `/home/michael/dev/work/hashall/.agent/worktrees/claude-hashall-20260224-132659`
+
+### What Changed
+
+#### qbit-repair-batch.sh v1.6.0 (6698bb5)
+
+Four fix modes for previously skipped/failing stoppedDL torrents:
+
+- **Fix-A:** `pausedDL` now included in broken states (was: only `stoppedDL`)
+- **Fix-B:** Catalog name lookup falls back to QB API name when catalog entry missing
+- **Fix-C:** Fuzzy name matching (strip year/resolution/tags) for partner search
+- **Fix-D:** `already_hardlinked` noops now issue a recheck instead of silently skipping
+
+Also added `pd-triage.sh` (per-torrent diagnosis helper used internally by repair logic).
+
+#### pd-score.sh v1.0.0 (327bfc0)
+
+New script for bulk stoppedDL triage. Scores 1027 torrents into 4 tiers:
+
+| Tier | Count | Description |
+|------|-------|-------------|
+| T1 | 6 | EXACT name match, ≥99% progress |
+| T2 | 29 | Has QB partner (EXACT or FUZZY) |
+| T3 | 4 | No QB partner but disk=100% |
+| T4 | 988 | No QB partner, 0% progress, cross-seed slots |
+
+Output: `~/.logs/hashall/reports/qbit-triage/pd-score-YYYYMMDD-HHMMSS.json`
+
+#### db-refresh fixes (82a37df)
+
+- Fixed stale worktree path in db-refresh scripts
+- Added `db-uuid-migration.sh` — ONE-TIME migration of dev-XX UUIDs → zfs-XXXX before first rescan
+- Full stash scan (previously only scanned subset of stash datasets)
+- **CRITICAL:** `db-uuid-migration.sh --apply` MUST run before any db-refresh rescan or 680k+ rows orphan
+
+#### qbit-repair-batch.sh v1.6.1 (24cd941)
+
+**BUG-8:** `retry_recheck` loop fired on genuine stpDL failures (not just race-condition stpDL).
+Fix: only retry the race-condition case (immediate stpDL after recheck command). Genuine
+stpDL after checking→stpDL now times out via stpDL grace counter → blacklisted permanently.
+
+### Current State (Feb 25)
+
+| Item | Value |
+|------|-------|
+| stoppedDL remaining | ~1027 |
+| T1 (EXACT ≥99%) | 6 — pending qbit-repair-batch |
+| T2 (has QB partner) | 29 — pending qbit-repair-batch |
+| T3 (disk=100%, no partner) | 4 — pending direct recheck |
+| T4 (nohl-basics) | 988 — pending DB refresh + rehome-100/101/102 |
+
+### Scripts
+
+| Script | Version |
+|--------|---------|
+| `qbit-repair-batch.sh` | **v1.6.1** |
+| `pd-score.sh` | **v1.0.0** |
+| `pd-triage.sh` | **v1.0.0** |
+| `db-uuid-migration.sh` | **v1.0.0** (NEW) |
+| `db-refresh-step1-4` | updated paths + stash coverage |
