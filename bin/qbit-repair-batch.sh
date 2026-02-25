@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.4.2
+# Version: 1.4.3
 # Date:    2026-02-24
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.4.2"
+SCRIPT_VERSION="1.4.3"
 SCRIPT_DATE="2026-02-24"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -588,6 +588,7 @@ last_progress  = {}  # hash -> last seen progress value
 last_change    = {}  # hash -> time progress last changed (stagnation detection)
 prev_state     = {}  # hash -> state from previous poll (for transition detection)
 has_started    = set()  # hashes that have entered checkingDL/UP with p > 0
+moving_since   = {}  # hash -> time first seen in moving state (for stuck-move timeout)
 STAGNANT_SECS  = 600  # 10 min without progress change = genuine timeout (only if started)
 STOPDL_GRACE   = 120  # seconds to wait after retry recheck before giving up
 SAFETY_END     = time.time() + 7200  # 2 hr hard safety cap
@@ -663,6 +664,22 @@ while time.time() < SAFETY_END:
             # and reset the stagnation clock whenever we transition OUT of
             # checkingResumeData into actual checking so queued torrents get a
             # fresh STAGNANT_SECS window from when their real check begins.
+            #
+            # moving state: QB is physically relocating files (always reports p=0).
+            # Progress-based stagnation never fires here, so we track wall-clock time
+            # from when moving first started and timeout if it exceeds STAGNANT_SECS.
+            if s == "moving":
+                if h not in moving_since:
+                    moving_since[h] = now
+                moving_secs = now - moving_since[h]
+                if moving_secs >= STAGNANT_SECS:
+                    results[h] = "timeout"
+                    parts.append(f"✗{h[:8]}=mov_stuck{int(moving_secs//60)}m")
+                else:
+                    parts.append(f"{h[:8]}=moving({int(moving_secs)}s)")
+                    all_done = False
+                prev_state[h] = s
+                continue
             if s in CHECKING_ACTIVE and p > 0:
                 has_started.add(h)
             # Transition: checkingResumeData → actual checking — restart stagnation clock
