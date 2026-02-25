@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# qbit-repair-batch.sh — batch repair of stoppedDL torrents.
-# Version: 1.5.0
+# qbit-repair-batch.sh — batch repair of stoppedDL/pausedDL torrents.
+# Version: 1.6.0
 # Date:    2026-02-25
+#
+# v1.6.0 PD triage fixes:
+#   Fix A: pausedDL state now recognised alongside stoppedDL
+#   Fix B: catalog fallback — torrents not in DB use QB API name for matching
+#   Fix C: fuzzy name matching second pass (dots/underscores vs spaces)
+#   Fix D: all-already-hardlinked noops → recheck instead of blacklist
 #
 # Discover candidates → rebuild hardlinks → ONE QB stop/start for all → parallel recheck.
 # Safe by default: runs in dry-run mode unless --apply is passed.
@@ -25,7 +31,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 SCRIPT_DATE="2026-02-25"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -140,7 +146,7 @@ qb_login
 curl -fsS --max-time 30 -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
 
 python3 - "$DB" "$TMPD" "$LIMIT" "$BLACKLIST_FILE" "$SAME_SAVE" << 'PYEOF'
-import json, sqlite3, os, sys
+import json, re, sqlite3, os, sys
 from collections import defaultdict
 
 db, tmpdir, limit, blacklist_file, same_save = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5] == "true"
@@ -156,10 +162,10 @@ torrents = json.load(open(f"{tmpdir}/all_torrents.json"))
 by_hash  = {t["hash"]: t for t in torrents}
 
 good_hashes   = {t["hash"] for t in torrents if t["state"] in ("stoppedUP", "stalledUP", "uploading") and t["progress"] >= 0.9999}
-broken_hashes = {t["hash"] for t in torrents if t["state"] == "stoppedDL" and t["hash"] not in blacklist}
+broken_hashes = {t["hash"] for t in torrents if t["state"] in ("stoppedDL", "pausedDL") and t["hash"] not in blacklist}
 
 if blacklist:
-    bl_skipped = sum(1 for t in torrents if t["state"] == "stoppedDL" and t["hash"] in blacklist)
+    bl_skipped = sum(1 for t in torrents if t["state"] in ("stoppedDL", "pausedDL") and t["hash"] in blacklist)
     if bl_skipped:
         print(f"  (skipping {bl_skipped} blacklisted hashes)")
 
@@ -168,7 +174,11 @@ def get_root_names(hashes):
     if not hashes: return {}
     ph = ",".join("?" * len(hashes))
     rows = con.execute(f"SELECT torrent_hash, root_name FROM torrent_instances WHERE torrent_hash IN ({ph})", list(hashes)).fetchall()
-    return {h: n for h, n in rows}
+    result = {h: n for h, n in rows}
+    for h in hashes:
+        if h not in result:
+            result[h] = by_hash[h]["name"]  # fallback: QB API name
+    return result
 
 good_names   = get_root_names(good_hashes)
 broken_names = get_root_names(broken_hashes)
@@ -194,6 +204,48 @@ for bh, bname in broken_names.items():
             if not is_same_save: continue   # --same-save: only want same-save pairs
         else:
             if is_same_save: continue       # normal: skip same-save pairs
+        if same_save:
+            same_fs_label = "same-save"
+        else:
+            gp, bp = good_save, broken_save
+            if   gp.startswith("/pool/data")   and bp.startswith("/pool/data"):   same_fs_label = "pool-pool"
+            elif gp.startswith("/stash/media") and bp.startswith("/stash/media"): same_fs_label = "stash-stash"
+            elif gp.startswith("/data/media")  and bp.startswith("/data/media"):  same_fs_label = "stash-stash"
+            else: same_fs_label = "cross-fs"
+        results.append({
+            "good_hash": gh, "broken_hash": bh,
+            "same_fs": same_fs_label, "root_name": bname,
+            "progress": bt["progress"],
+            "good_save": good_save, "broken_save": broken_save, "broken_dl": broken_dl,
+        })
+        seen_broken.add(bh)
+        break  # one good partner per broken hash
+
+# Fuzzy name matching: second pass for still-unmatched broken torrents.
+# Normalizes dots/underscores to spaces, case-insensitive — handles e.g.
+# "Behind.Convent.Walls.(1978).[BD50]" vs "Behind Convent Walls (1978) [BD50]".
+def normalize_name(n):
+    return re.sub(r'\s+', ' ', re.sub(r'[._]', ' ', n)).strip().lower()
+
+norm_to_good = defaultdict(list)
+for h, n in good_names.items():
+    if n: norm_to_good[normalize_name(n)].append(h)
+
+for bh, bname in broken_names.items():
+    if not bname or bh in seen_broken: continue
+    good = norm_to_good.get(normalize_name(bname), [])
+    if not good: continue
+    bt = by_hash[bh]
+    broken_save = bt["save_path"]
+    broken_dl   = bt.get("download_path", "") or ""
+    for gh in good:
+        gt = by_hash[gh]
+        good_save = gt["save_path"]
+        is_same_save = (good_save == broken_save)
+        if same_save:
+            if not is_same_save: continue
+        else:
+            if is_same_save: continue
         if same_save:
             same_fs_label = "same-save"
         else:
@@ -404,8 +456,9 @@ for c in candidates:
 # same-save candidates: NOT filtered here — they may benefit from clearing
 #   download_path even if QB API shows it empty (fastresume may differ).
 #   They get blacklisted by P5 if they fail after recheck.
-actionable = []
-noop_list  = []
+actionable    = []
+noop_list     = []
+recheck_noops = []
 for c in plan:
     if c.get("same_fs") == "same-save":
         actionable.append(c)
@@ -420,7 +473,7 @@ for c in plan:
     if has_no_match:
         noop_list.append((c, f"unrepairable: {summary.get('no_match')} no_match files"))
     elif is_noop:
-        noop_list.append((c, "noop: all files already_hardlinked, no download_path"))
+        recheck_noops.append(c)  # data present (shared inodes), just needs recheck
     else:
         actionable.append(c)
 
@@ -430,10 +483,15 @@ if noop_list:
             bl.write(f"{c['broken_hash']}  # {reason} | {c['root_name'][:50]}\n")
     for c, reason in noop_list:
         print(f"  SKIP+BL [{c['broken_hash'][:12]}] {reason}: {c['root_name'][:40]}")
-    print(f"  {len(actionable)} proceed  {len(noop_list)} skipped+blacklisted")
-else:
-    if actionable:
-        print(f"  all {len(actionable)} candidates actionable")
+if recheck_noops:
+    for c in recheck_noops:
+        print(f"  RECHECK [{c['broken_hash'][:12]}] noop→recheck: all files already_hardlinked | {c['root_name'][:40]}")
+    actionable.extend(recheck_noops)
+total_skip = len(noop_list)
+if total_skip or recheck_noops:
+    print(f"  {len(actionable)} proceed  {total_skip} skipped+blacklisted  {len(recheck_noops)} noop→recheck")
+elif actionable:
+    print(f"  all {len(actionable)} candidates actionable")
 
 json.dump(actionable, open(f"{tmpdir}/plan.json", "w"), indent=2)
 PYEOF
