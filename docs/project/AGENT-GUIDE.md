@@ -33,6 +33,9 @@ Hashall is a unified file catalog and payload-identity system that enables safe 
 - `docs/tooling/cli.md`
 - `docs/tooling/link-guide.md`
 - `docs/tooling/REHOME.md`
+- `docs/ops-log.md`
+- `docs/handoff.md`
+- `docs/next-agent.md`
 
 **Architecture / schema:**
 - `docs/architecture/architecture.md`
@@ -83,7 +86,7 @@ pytest tests/test_rehome.py tests/test_rehome_promotion.py tests/test_rehome_sta
 ## Next Work (High Priority)
 
 1. Implement `src/hashall/diff.py`
-2. Keep docs aligned as code changes
+2. Keep living docs aligned as operations progress (`docs/ops-log.md`, `docs/handoff.md`, `docs/next-agent.md`)
 
 ---
 
