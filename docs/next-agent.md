@@ -16,7 +16,11 @@ Continue the qbit-repair campaign from the current db-refresh stage, then run no
 
 - Link dedup apply plans complete: 30 (`data`), 31 (`stash`), 32 (`spare`).
 - No failed actions in those plans.
-- Next required pipeline step is payload sync (db-refresh step4).
+- Ownership-safe repair upgrade is implemented:
+  - `rehome-100` includes tracker and payload-root metadata.
+  - `rehome-101` supports tracker-aware ranking and top-N candidate export.
+  - `rehome-102` supports ranked fallback attempts.
+  - `rehome-103` blocks apply if payload ownership conflicts are found.
 
 ## Ordered Commands
 
@@ -31,16 +35,21 @@ bin/rehome-89_nohl-basics-qb-automation-audit.sh --mode apply
 
 # Baseline + mapping
 bin/rehome-100_nohl-basics-qb-repair-baseline.sh
-bin/rehome-101_nohl-basics-qb-candidate-mapping.sh
+bin/rehome-101_nohl-basics-qb-candidate-mapping.sh --tracker-aware --candidate-top-n 10
 # Optional deeper discovery if unresolved volume is high:
-MAP_ENABLE_DISCOVERY_SCAN=1 bin/rehome-101_nohl-basics-qb-candidate-mapping.sh
+MAP_ENABLE_DISCOVERY_SCAN=1 bin/rehome-101_nohl-basics-qb-candidate-mapping.sh --tracker-aware --candidate-top-n 10
+
+# Ownership gate (must be clean before apply)
+bin/rehome-103_nohl-basics-qb-payload-ownership-audit.sh
 
 # Pilot
-bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode dryrun --limit 10
-bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 10
+bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode dryrun --limit 10 --candidate-top-n 3 --candidate-fallback
+bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 10 --candidate-top-n 3 --candidate-fallback
 
 # Scale
-bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 100
+bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 100 --candidate-top-n 3 --candidate-fallback
+# Post-batch ownership verification
+bin/rehome-103_nohl-basics-qb-payload-ownership-audit.sh
 ```
 
 ## Validate After Each Step
@@ -53,4 +62,3 @@ bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 100
 
 - Investigate qbit-repair monitor edge case around `checkUP -> pausedDL/stoppedDL` transitions (`a047ce7c` symptom).
 - Improve durable identity references away from ephemeral numeric `device_id`.
-
