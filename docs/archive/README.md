@@ -37,6 +37,12 @@ GPT session artifacts and historical snapshots.
 - `gpt-*.md` - Simulation testing notes
 - `reports/hashall_REPO_BRIEFING.md` - Historical repo snapshot
 
+### `2026-doc-cleanup/`
+Top-level documentation snapshots moved during the 2026-02-26 docs rationalization.
+
+- Preserves pre-consolidation versions of qbit handoff/ops/prompt docs
+- Preserves dated one-off planning and reporting docs removed from the active index
+
 ---
 
 ## Why Documents Were Archived
@@ -60,13 +66,7 @@ Documents describing work that has been completed:
 
 ## Which Docs Are Current?
 
-See the main `docs/` directory for current documentation:
-- `architecture.md` - Current unified catalog design
-- `docs/architecture/schema.md` - Concise schema summary (active)
-- `cli.md` - Current CLI reference
-- `docs/architecture/architecture.md` - Canonical unified catalog architecture (active)
-- `symlinks-and-bind-mounts.md` - Canonical path handling
-- `conductor-guide.md` - Deduplication workflow
+See `docs/README.md` for the current active documentation set.
 
 ---
 
