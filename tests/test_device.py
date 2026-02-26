@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from hashall.device import (
     ensure_files_table,
+    ensure_files_indexes,
     rename_files_table,
+    repair_all_files_table_indexes,
     suggest_device_alias,
     register_or_update_device,
     _get_fs_type
@@ -292,7 +294,7 @@ def test_rename_files_table_noop_when_old_not_exists(test_db):
 
 
 def test_rename_files_table_preserves_indexes(test_db):
-    """Test that indexes are preserved when renaming table."""
+    """Test that expected index names are repaired when renaming table."""
     cursor = test_db
     old_device_id = 500
     new_device_id = 600
@@ -306,8 +308,6 @@ def test_rename_files_table_preserves_indexes(test_db):
     cursor.connection.commit()
 
     # Verify indexes exist for new table
-    # Note: SQLite ALTER TABLE RENAME only updates the tbl_name in index metadata,
-    # but keeps the original index names (idx_files_500_*). This is expected behavior.
     new_table_name = f"files_{new_device_id}"
     indexes = cursor.execute("""
         SELECT name FROM sqlite_master
@@ -315,16 +315,19 @@ def test_rename_files_table_preserves_indexes(test_db):
         ORDER BY name
     """, (new_table_name,)).fetchall()
 
-    # Should have at least 3 indexes: sha1, inode, status
-    # (SQLite may create additional indexes like autoindex for PRIMARY KEY)
-    assert len(indexes) >= 3
+    # Should have hashall indexes + PK autoindex
+    assert len(indexes) >= 6
 
-    # Verify the indexes still reference the old device_id in their names
-    # (SQLite doesn't rename index names, only updates tbl_name)
-    index_names = [idx[0] for idx in indexes]
-    assert f"idx_files_{old_device_id}_inode" in index_names
-    assert f"idx_files_{old_device_id}_sha1" in index_names
-    assert f"idx_files_{old_device_id}_status" in index_names
+    # Verify indexes now reference the new device_id in their names.
+    index_names = {idx[0] for idx in indexes}
+    assert f"idx_files_{new_device_id}_quick_hash" in index_names
+    assert f"idx_files_{new_device_id}_sha1" in index_names
+    assert f"idx_files_{new_device_id}_sha256" in index_names
+    assert f"idx_files_{new_device_id}_inode" in index_names
+    assert f"idx_files_{new_device_id}_status" in index_names
+    assert f"idx_files_{old_device_id}_inode" not in index_names
+    assert f"idx_files_{old_device_id}_sha1" not in index_names
+    assert f"idx_files_{old_device_id}_status" not in index_names
 
     # Most importantly, verify the indexes are functional on the new table
     # Try to use one of the indexes
@@ -378,6 +381,60 @@ def test_rename_files_table_when_new_already_exists(test_db):
         SELECT path FROM {new_table_name}
     """).fetchone()
     assert result[0] == 'new/file.txt'
+
+
+def test_ensure_files_indexes_repairs_conflicting_index_name(test_db):
+    """If idx_files_<id>_* names point to another table, they are reclaimed."""
+    cursor = test_db
+    table_a = ensure_files_table(cursor, 44)
+    table_b = ensure_files_table(cursor, 231)
+    cursor.connection.commit()
+
+    # Simulate stale rename fallout:
+    # - drop table A hashall indexes
+    # - create one of A's expected index names on table B
+    cursor.execute("DROP INDEX IF EXISTS idx_files_44_quick_hash")
+    cursor.execute("DROP INDEX IF EXISTS idx_files_44_sha1")
+    cursor.execute("DROP INDEX IF EXISTS idx_files_44_sha256")
+    cursor.execute("DROP INDEX IF EXISTS idx_files_44_inode")
+    cursor.execute("DROP INDEX IF EXISTS idx_files_44_status")
+    cursor.execute("CREATE INDEX idx_files_44_quick_hash ON files_231(quick_hash)")
+    cursor.connection.commit()
+
+    stats = ensure_files_indexes(cursor, table_a, verbose=False)
+    cursor.connection.commit()
+
+    assert stats["dropped_conflicts"] >= 1
+
+    # Name now belongs to table A again.
+    row = cursor.execute(
+        "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_files_44_quick_hash'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "files_44"
+
+
+def test_repair_all_files_table_indexes_summary(test_db):
+    """Global repair walks files_* tables and recreates missing expected indexes."""
+    cursor = test_db
+    ensure_files_table(cursor, 7001)
+    ensure_files_table(cursor, 7002)
+    cursor.connection.commit()
+
+    cursor.execute("DROP INDEX IF EXISTS idx_files_7001_quick_hash")
+    cursor.execute("DROP INDEX IF EXISTS idx_files_7001_sha1")
+    cursor.connection.commit()
+
+    summary = repair_all_files_table_indexes(cursor, verbose=False)
+    cursor.connection.commit()
+
+    assert summary["tables"] >= 2
+    assert summary["recreated"] >= 2
+
+    idx = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_files_7001_quick_hash'"
+    ).fetchone()
+    assert idx is not None
 
 
 # Tests for _get_fs_type()
