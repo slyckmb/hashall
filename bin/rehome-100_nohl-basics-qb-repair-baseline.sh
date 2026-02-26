@@ -81,6 +81,7 @@ python - <<'PY'
 import csv
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -97,6 +98,55 @@ tsv_out = Path(os.environ["BASELINE_TSV_OUT"])
 hashes_out = Path(os.environ["BASELINE_HASHES_OUT"])
 
 target_states = {"stoppeddl", "missingfiles"} | extra_states
+tracker_tag_ignored = {
+    "cross-seed",
+    "cross_seed",
+    "crossseed",
+    "rehome",
+    "rehome_verify_pending",
+    "rehome_verify_ok",
+    "rehome_verify_failed",
+}
+
+
+def split_tags(raw: str) -> list[str]:
+    return [t.strip() for t in str(raw or "").split(",") if t and t.strip()]
+
+
+def normalize_tracker_key(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("(api)", " ")
+    text = re.sub(r"[^a-z0-9]+", "", text)
+    return text
+
+
+def tracker_from_path(raw_path: str) -> str:
+    path = Path(str(raw_path or "").strip())
+    parts = list(path.parts)
+    for idx, part in enumerate(parts):
+        lowered = str(part).lower()
+        if lowered in {"cross-seed", "cross_seed", "crossseed"} and idx + 1 < len(parts):
+            value = str(parts[idx + 1]).strip()
+            if value:
+                return value
+    return ""
+
+
+def select_tracker_hint(*, save_path: str, content_path: str, category: str, tags: list[str]) -> str:
+    for raw in (save_path, content_path):
+        candidate = tracker_from_path(raw)
+        if candidate:
+            return candidate
+    category_clean = str(category or "").strip()
+    category_l = category_clean.lower()
+    if category_clean and category_l not in {"cross-seed", "cross_seed", "crossseed"}:
+        return category_clean
+    for tag in tags:
+        if normalize_tracker_key(tag) and tag.lower() not in tracker_tag_ignored:
+            return tag
+    return ""
 
 qb = get_qbittorrent_client(
     base_url=os.getenv("QBIT_URL", "http://localhost:9003"),
@@ -114,6 +164,24 @@ for t in rows:
         content_path = str(t.content_path or "")
         save_exists = Path(save_path).exists() if save_path else False
         content_exists = Path(content_path).exists() if content_path else False
+        tags_raw = str(t.tags or "")
+        category = str(t.category or "")
+        tags_list = split_tags(tags_raw)
+        normalized_tags = [normalize_tracker_key(x) for x in tags_list if normalize_tracker_key(x)]
+        tracker_name = select_tracker_hint(
+            save_path=save_path,
+            content_path=content_path,
+            category=category,
+            tags=tags_list,
+        )
+        tracker_key = normalize_tracker_key(tracker_name)
+        current_payload_root = ""
+        if content_path:
+            current_payload_root = content_path
+        elif save_path and str(t.name or "").strip():
+            current_payload_root = str(Path(save_path) / str(t.name or "").strip())
+        elif save_path:
+            current_payload_root = save_path
         queue.append(
             {
                 "hash": str(t.hash).lower(),
@@ -123,10 +191,14 @@ for t in rows:
                 "amount_left": int(t.amount_left or 0),
                 "save_path": save_path,
                 "content_path": content_path,
+                "current_payload_root": current_payload_root,
                 "save_exists": bool(save_exists),
                 "content_exists": bool(content_exists),
-                "tags": str(t.tags or ""),
-                "category": str(t.category or ""),
+                "tags": tags_raw,
+                "normalized_tags": normalized_tags,
+                "category": category,
+                "tracker_name": tracker_name,
+                "tracker_key": tracker_key,
                 "size": int(t.size or 0),
             }
         )
@@ -168,8 +240,12 @@ fieldnames = [
     "content_exists",
     "save_path",
     "content_path",
+    "current_payload_root",
     "category",
+    "tracker_name",
+    "tracker_key",
     "tags",
+    "normalized_tags",
     "name",
 ]
 with tsv_out.open("w", encoding="utf-8", newline="") as fh:
