@@ -16,6 +16,7 @@ Options:
   --db PATH                Catalog DB path (default: ~/.hashall/catalog.db)
   --output-prefix NAME     Output prefix (default: nohl)
   --limit N                Limit entries audited (default: 0 = all)
+  --candidate-top-n N      Candidate depth aligned with Phase 102 preflight (default: 3)
   --fast                   Fast mode annotation
   --debug                  Debug mode annotation
   -h, --help               Show help
@@ -38,6 +39,7 @@ BASELINE_JSON=""
 DB_PATH="${DB_PATH:-$HOME/.hashall/catalog.db}"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-nohl}"
 LIMIT="${LIMIT:-0}"
+CANDIDATE_TOP_N="${CANDIDATE_TOP_N:-3}"
 FAST="${FAST:-1}"
 DEBUG="${DEBUG:-1}"
 
@@ -48,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --db) DB_PATH="${2:-}"; shift 2 ;;
     --output-prefix) OUTPUT_PREFIX="${2:-}"; shift 2 ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
+    --candidate-top-n) CANDIDATE_TOP_N="${2:-}"; shift 2 ;;
     --fast) FAST=1; shift ;;
     --debug) DEBUG=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -77,6 +80,10 @@ if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
   echo "Invalid --limit: $LIMIT" >&2
   exit 2
 fi
+if ! [[ "$CANDIDATE_TOP_N" =~ ^[0-9]+$ ]] || [[ "$CANDIDATE_TOP_N" -lt 1 ]]; then
+  echo "Invalid --candidate-top-n: $CANDIDATE_TOP_N" >&2
+  exit 2
+fi
 
 log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
@@ -92,13 +99,14 @@ hr
 echo "Phase 103: qB payload ownership audit"
 echo "What this does: enforce one-hash-per-payload ownership before Phase 102 apply."
 hr
-echo "run_id=${stamp} step=basics-qb-payload-ownership-audit mapping_json=${MAPPING_JSON} baseline_json=${BASELINE_JSON} db=${DB_PATH} output_prefix=${OUTPUT_PREFIX} limit=${LIMIT} fast=${FAST} debug=${DEBUG}"
+echo "run_id=${stamp} step=basics-qb-payload-ownership-audit mapping_json=${MAPPING_JSON} baseline_json=${BASELINE_JSON} db=${DB_PATH} output_prefix=${OUTPUT_PREFIX} limit=${LIMIT} candidate_top_n=${CANDIDATE_TOP_N} fast=${FAST} debug=${DEBUG}"
 
 PYTHONPATH=src \
 AUDIT_MAPPING_JSON="$MAPPING_JSON" \
 AUDIT_BASELINE_JSON="$BASELINE_JSON" \
 AUDIT_DB_PATH="$DB_PATH" \
 AUDIT_LIMIT="$LIMIT" \
+AUDIT_CANDIDATE_TOP_N="$CANDIDATE_TOP_N" \
 AUDIT_JSON_OUT="$json_out" \
 AUDIT_TSV_OUT="$tsv_out" \
 AUDIT_HASHES_OUT="$hashes_out" \
@@ -116,6 +124,7 @@ mapping_json = Path(os.environ["AUDIT_MAPPING_JSON"])
 baseline_json = Path(os.environ["AUDIT_BASELINE_JSON"])
 db_path = Path(os.environ["AUDIT_DB_PATH"])
 limit = int(os.environ.get("AUDIT_LIMIT", "0") or 0)
+candidate_top_n = max(1, int(os.environ.get("AUDIT_CANDIDATE_TOP_N", "3") or 3))
 json_out = Path(os.environ["AUDIT_JSON_OUT"])
 tsv_out = Path(os.environ["AUDIT_TSV_OUT"])
 hashes_out = Path(os.environ["AUDIT_HASHES_OUT"])
@@ -162,6 +171,61 @@ def derive_target_payload_root(entry: dict) -> str:
     return ""
 
 
+def normalized_candidates(entry: dict) -> list[dict]:
+    out = []
+    seen = set()
+    raw = entry.get("candidates", [])
+    if isinstance(raw, list):
+        for cand in raw:
+            if not isinstance(cand, dict):
+                continue
+            path = str(cand.get("path", "")).strip()
+            if not path.startswith("/") or path in seen:
+                continue
+            seen.add(path)
+            out.append(
+                {
+                    "path": path,
+                    "payload_root": str(cand.get("payload_root", "") or "").strip(),
+                    "score": int(cand.get("score", 0) or 0),
+                    "rank": int(cand.get("rank", len(out) + 1) or len(out) + 1),
+                }
+            )
+    best = str(entry.get("best_candidate", "")).strip()
+    if best.startswith("/") and best not in seen:
+        out.insert(
+            0,
+            {
+                "path": best,
+                "payload_root": str(entry.get("best_payload_root", "") or "").strip(),
+                "score": int(entry.get("best_score", 0) or 0),
+                "rank": 1,
+            },
+        )
+    for idx, cand in enumerate(out, start=1):
+        cand["rank"] = idx
+    return out[:candidate_top_n]
+
+
+def effective_candidate(entry: dict, current_save_path: str) -> dict | None:
+    candidates = normalized_candidates(entry)
+    valid = []
+    for cand in candidates:
+        path = str(cand.get("path", "")).strip()
+        if not path.startswith("/"):
+            continue
+        if current_save_path and path == current_save_path:
+            continue
+        if not Path(path).exists():
+            continue
+        valid.append(cand)
+    if valid:
+        return valid[0]
+    if candidates:
+        return candidates[0]
+    return None
+
+
 audited = []
 target_payload_to_hashes = defaultdict(list)
 old_payload_targets = defaultdict(list)
@@ -172,25 +236,38 @@ for entry in entries:
     torrent_hash = str(entry.get("hash", "")).lower().strip()
     if not torrent_hash:
         continue
-    target_save_path = str(entry.get("best_candidate", "")).strip()
+    baseline_row = baseline_by_hash.get(torrent_hash, {})
+    current_save_path = str(entry.get("save_path", "") or baseline_row.get("save_path", "")).strip()
+    selected = effective_candidate(entry, current_save_path)
+    if selected is None:
+        continue
+    target_save_path = str(selected.get("path", "")).strip()
     if not target_save_path.startswith("/"):
         continue
     current_payload_root = str(entry.get("current_payload_root", "")).strip()
     if not current_payload_root:
-        baseline_row = baseline_by_hash.get(torrent_hash, {})
         current_payload_root = str(baseline_row.get("content_path", "")).strip()
-    target_payload_root = derive_target_payload_root(entry)
+    target_payload_root = str(selected.get("payload_root", "") or "").strip()
+    if not target_payload_root.startswith("/"):
+        target_payload_root = derive_target_payload_root(
+            {
+                **entry,
+                "best_candidate": target_save_path,
+            }
+        )
     row = {
         "hash": torrent_hash,
-        "name": str(entry.get("name", "") or baseline_by_hash.get(torrent_hash, {}).get("name", "")),
-        "state": str(entry.get("state", "") or baseline_by_hash.get(torrent_hash, {}).get("state", "")),
-        "category": str(entry.get("category", "") or baseline_by_hash.get(torrent_hash, {}).get("category", "")),
+        "name": str(entry.get("name", "") or baseline_row.get("name", "")),
+        "state": str(entry.get("state", "") or baseline_row.get("state", "")),
+        "category": str(entry.get("category", "") or baseline_row.get("category", "")),
         "tracker_key": str(entry.get("tracker_key", "")).strip(),
         "tracker_name": str(entry.get("tracker_name", "")).strip(),
-        "current_save_path": str(entry.get("save_path", "") or baseline_by_hash.get(torrent_hash, {}).get("save_path", "")),
+        "current_save_path": current_save_path,
         "current_payload_root": current_payload_root,
         "target_save_path": target_save_path,
         "target_payload_root": target_payload_root,
+        "selected_rank": int(selected.get("rank", 0) or 0),
+        "selected_score": int(selected.get("score", 0) or 0),
         "best_score": int(entry.get("best_score", 0) or 0),
         "conflicts": [],
         "conflict_detail": [],
@@ -288,6 +365,7 @@ summary = {
     "generated_at": datetime.now().isoformat(timespec="seconds"),
     "input_entries": len(entries),
     "audited_entries": len(audited),
+    "candidate_top_n": int(candidate_top_n),
     "conflict_count": len(conflict_hashes),
     "shared_target_payload_conflicts": int(counts.get("shared_target_payload", 0)),
     "target_owned_by_other_hash_conflicts": int(counts.get("target_owned_by_other_hash", 0)),
@@ -311,6 +389,8 @@ fieldnames = [
     "current_payload_root",
     "target_save_path",
     "target_payload_root",
+    "selected_rank",
+    "selected_score",
     "best_score",
     "conflicts",
     "conflict_detail",

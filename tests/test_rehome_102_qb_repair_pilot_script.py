@@ -21,6 +21,8 @@ def test_rehome_102_help_lists_options() -> None:
     assert "--baseline-json" in result.stdout
     assert "--mode MODE" in result.stdout
     assert "--timeout-s" in result.stdout
+    assert "--batch-size" in result.stdout
+    assert "--selection-mode MODE" in result.stdout
     assert "--candidate-top-n" in result.stdout
     assert "--candidate-fallback" in result.stdout
     assert "--ownership-audit-json" in result.stdout
@@ -142,3 +144,102 @@ def test_rehome_102_dryrun_preserves_ranked_candidates(tmp_path: Path) -> None:
     assert len(plan["candidates"]) == 2
     assert plan["candidates"][0]["path"] == str(target1)
     assert plan["candidates"][1]["path"] == str(target2)
+
+
+def test_rehome_102_dryrun_keeps_same_path_candidate_as_recheck_only(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    current_save = tmp_path / "pool" / "cross-seed" / "OnlyEncodes (API)"
+    current_save.mkdir(parents=True, exist_ok=True)
+
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text(
+        json.dumps(
+            {
+                "summary": {},
+                "entries": [
+                    {
+                        "hash": "b" * 40,
+                        "confidence": "confident",
+                        "recoverable": True,
+                        "save_path": str(current_save),
+                        "best_candidate": str(current_save),
+                        "best_payload_root": str(current_save / "Episode.mkv"),
+                        "best_score": 140,
+                        "best_reason": "payload_root_path_exists",
+                        "best_evidence": ["expected_name_exists"],
+                        "best_expected_matches": ["Episode.mkv"],
+                        "candidates": [
+                            {
+                                "rank": 1,
+                                "path": str(current_save),
+                                "payload_root": str(current_save / "Episode.mkv"),
+                                "score": 140,
+                                "reason": "payload_root_path_exists",
+                            }
+                        ],
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "summary": {},
+                "entries": [
+                    {
+                        "hash": "b" * 40,
+                        "name": "Episode.mkv",
+                        "state": "stoppedDL",
+                        "save_path": str(current_save),
+                        "size": 1234,
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--mode",
+            "dryrun",
+            "--limit",
+            "1",
+            "--candidate-top-n",
+            "1",
+            "--mapping-json",
+            str(mapping),
+            "--baseline-json",
+            str(baseline),
+            "--output-prefix",
+            "t102-same-path",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "HASHALL_QB_HTTP_TIMEOUT": "0.2",
+            "HASHALL_QB_HTTP_RETRIES": "1",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    plan_json = _extract_stdout_path(result.stdout, "plan_json")
+    payload = json.loads(plan_json.read_text(encoding="utf-8"))
+    assert payload["summary"]["selected"] == 1
+    plan = payload["plan"][0]
+    assert plan["target_save_path"] == str(current_save)
+    assert plan["candidates"][0]["mode"] == "recheck_only"

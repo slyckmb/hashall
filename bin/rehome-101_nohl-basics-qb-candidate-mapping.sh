@@ -17,6 +17,9 @@ Options:
   --limit N                Limit baseline entries (default: 0 = all)
   --tracker-aware          Enable tracker/category-aware candidate scoring
   --tracker-registry PATH  Tracker registry YAML for alias normalization
+  --manifest-aware         Use qB file manifest samples for candidate scoring (default: on)
+  --no-manifest-aware      Disable qB file manifest sample scoring
+  --manifest-sample N      Max manifest sample files per torrent (default: 6)
   --candidate-top-n N      Persist top N ranked candidates per hash (default: 6)
   --fast                   Fast mode annotation
   --debug                  Debug mode annotation
@@ -37,6 +40,8 @@ OUTPUT_PREFIX="${OUTPUT_PREFIX:-nohl}"
 LIMIT="${LIMIT:-0}"
 TRACKER_AWARE="${TRACKER_AWARE:-0}"
 TRACKER_REGISTRY_PATH="${TRACKER_REGISTRY_PATH:-/home/michael/dev/tools/traktor/config/tracker-registry.yml}"
+MANIFEST_AWARE="${MANIFEST_AWARE:-1}"
+MANIFEST_SAMPLE="${MANIFEST_SAMPLE:-6}"
 CANDIDATE_TOP_N="${CANDIDATE_TOP_N:-6}"
 FAST="${FAST:-1}"
 DEBUG="${DEBUG:-1}"
@@ -50,6 +55,9 @@ while [[ $# -gt 0 ]]; do
     --tracker-aware) TRACKER_AWARE=1; shift ;;
     --no-tracker-aware) TRACKER_AWARE=0; shift ;;
     --tracker-registry) TRACKER_REGISTRY_PATH="${2:-}"; shift 2 ;;
+    --manifest-aware) MANIFEST_AWARE=1; shift ;;
+    --no-manifest-aware) MANIFEST_AWARE=0; shift ;;
+    --manifest-sample) MANIFEST_SAMPLE="${2:-}"; shift 2 ;;
     --candidate-top-n) CANDIDATE_TOP_N="${2:-}"; shift 2 ;;
     --fast) FAST=1; shift ;;
     --debug) DEBUG=1; shift ;;
@@ -77,6 +85,10 @@ if ! [[ "$CANDIDATE_TOP_N" =~ ^[0-9]+$ ]] || [[ "$CANDIDATE_TOP_N" -lt 1 ]]; the
   echo "Invalid --candidate-top-n: $CANDIDATE_TOP_N" >&2
   exit 2
 fi
+if ! [[ "$MANIFEST_SAMPLE" =~ ^[0-9]+$ ]] || [[ "$MANIFEST_SAMPLE" -lt 1 ]]; then
+  echo "Invalid --manifest-sample: $MANIFEST_SAMPLE" >&2
+  exit 2
+fi
 
 log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
@@ -94,7 +106,7 @@ hr
 echo "Phase 101: qB candidate mapping"
 echo "What this does: rank target roots per hash from live filesystem and catalog evidence."
 hr
-echo "run_id=${stamp} step=basics-qb-candidate-mapping baseline_json=${BASELINE_JSON} db=${DB_PATH} output_prefix=${OUTPUT_PREFIX} limit=${LIMIT} tracker_aware=${TRACKER_AWARE} tracker_registry=${TRACKER_REGISTRY_PATH} candidate_top_n=${CANDIDATE_TOP_N} fast=${FAST} debug=${DEBUG}"
+echo "run_id=${stamp} step=basics-qb-candidate-mapping baseline_json=${BASELINE_JSON} db=${DB_PATH} output_prefix=${OUTPUT_PREFIX} limit=${LIMIT} tracker_aware=${TRACKER_AWARE} tracker_registry=${TRACKER_REGISTRY_PATH} manifest_aware=${MANIFEST_AWARE} manifest_sample=${MANIFEST_SAMPLE} candidate_top_n=${CANDIDATE_TOP_N} fast=${FAST} debug=${DEBUG}"
 
 PYTHONPATH=src \
 MAP_BASELINE_JSON="$BASELINE_JSON" \
@@ -102,6 +114,8 @@ MAP_DB_PATH="$DB_PATH" \
 MAP_LIMIT="$LIMIT" \
 MAP_TRACKER_AWARE="$TRACKER_AWARE" \
 MAP_TRACKER_REGISTRY_PATH="$TRACKER_REGISTRY_PATH" \
+MAP_MANIFEST_AWARE="$MANIFEST_AWARE" \
+MAP_MANIFEST_SAMPLE="$MANIFEST_SAMPLE" \
 MAP_CANDIDATE_TOP_N="$CANDIDATE_TOP_N" \
 MAP_JSON_OUT="$json_out" \
 MAP_TSV_OUT="$tsv_out" \
@@ -118,10 +132,14 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from hashall.qbittorrent import get_qbittorrent_client
+
 baseline_json = Path(os.environ["MAP_BASELINE_JSON"])
 db_path = Path(os.environ["MAP_DB_PATH"])
 limit = int(os.environ.get("MAP_LIMIT", "0") or 0)
 tracker_aware = os.environ.get("MAP_TRACKER_AWARE", "0").strip().lower() in {"1", "true", "yes", "on"}
+manifest_aware = os.environ.get("MAP_MANIFEST_AWARE", "1").strip().lower() in {"1", "true", "yes", "on"}
+manifest_sample = max(1, int(os.environ.get("MAP_MANIFEST_SAMPLE", "6") or 6))
 candidate_top_n = max(1, int(os.environ.get("MAP_CANDIDATE_TOP_N", "6") or 6))
 tracker_registry_path = Path(os.environ.get("MAP_TRACKER_REGISTRY_PATH", "").strip()).expanduser()
 json_out = Path(os.environ["MAP_JSON_OUT"])
@@ -561,6 +579,96 @@ else:
     )
 
 
+qb_manifest_client = None
+qb_manifest_enabled = False
+qb_manifest_cache: dict[str, dict] = {}
+qb_manifest_fetches = 0
+qb_manifest_fetch_errors = 0
+qb_manifest_hits = 0
+if manifest_aware:
+    try:
+        qb_manifest_client = get_qbittorrent_client(
+            base_url=os.getenv("QBIT_URL", "http://localhost:9003"),
+            username=os.getenv("QBIT_USER", "admin"),
+            password=os.getenv("QBIT_PASS", "adminpass"),
+        )
+        qb_manifest_enabled = bool(qb_manifest_client.login())
+    except Exception:
+        qb_manifest_enabled = False
+        qb_manifest_client = None
+
+
+def select_manifest_samples(rows: list[dict], limit_n: int) -> list[dict]:
+    if len(rows) <= limit_n:
+        return rows
+    selected = []
+    used = set()
+
+    def add_idx(i: int):
+        if i < 0 or i >= len(rows):
+            return
+        key = (rows[i]["name"], rows[i]["size"])
+        if key in used:
+            return
+        used.add(key)
+        selected.append(rows[i])
+
+    add_idx(0)
+    add_idx(len(rows) // 2)
+    add_idx(len(rows) - 1)
+    for idx, _ in sorted(
+        enumerate(rows),
+        key=lambda pair: (-int(pair[1].get("size", 0) or 0), pair[1].get("name", "")),
+    ):
+        if len(selected) >= limit_n:
+            break
+        add_idx(idx)
+    return selected[:limit_n]
+
+
+def manifest_for_hash(torrent_hash: str) -> dict:
+    global qb_manifest_fetches, qb_manifest_fetch_errors, qb_manifest_hits
+    key = str(torrent_hash or "").lower().strip()
+    if not key:
+        return {}
+    if key in qb_manifest_cache:
+        return qb_manifest_cache[key]
+    if not qb_manifest_enabled or qb_manifest_client is None:
+        qb_manifest_cache[key] = {}
+        return {}
+    qb_manifest_fetches += 1
+    try:
+        files = qb_manifest_client.get_torrent_files(key)
+    except Exception:
+        files = []
+    if not files:
+        qb_manifest_fetch_errors += 1
+        qb_manifest_cache[key] = {}
+        return {}
+    parsed = []
+    for f in files:
+        name = str(getattr(f, "name", "") or "").strip().lstrip("/")
+        if not name:
+            continue
+        size = int(getattr(f, "size", 0) or 0)
+        parsed.append({"name": name, "size": size})
+    if not parsed:
+        qb_manifest_fetch_errors += 1
+        qb_manifest_cache[key] = {}
+        return {}
+    qb_manifest_hits += 1
+    sample_rows = select_manifest_samples(parsed, manifest_sample)
+    manifest = {
+        "file_count": len(parsed),
+        "total_bytes": int(sum(int(x["size"]) for x in parsed)),
+        "single_file": len(parsed) == 1,
+        "single_file_name": clean_name(Path(parsed[0]["name"]).name) if len(parsed) == 1 else "",
+        "samples": sample_rows,
+    }
+    qb_manifest_cache[key] = manifest
+    return manifest
+
+
 mapped = []
 confident_hashes = []
 unresolved_hashes = []
@@ -588,6 +696,19 @@ for e in entries:
     root_name_hint = expected_names[0] if expected_names else clean_name(Path(content_path).name)
     if not root_name_hint:
         root_name_hint = clean_name(str(e.get("name", "")))
+    manifest = manifest_for_hash(torrent_hash) if manifest_aware else {}
+    manifest_file_count = int(manifest.get("file_count", 0) or 0)
+    manifest_total_bytes = int(manifest.get("total_bytes", 0) or 0)
+    manifest_samples = list(manifest.get("samples", []) or [])
+    if not root_name_hint:
+        root_name_hint = clean_name(str(manifest.get("single_file_name", "")))
+    root_hint_candidates = [x for x in [root_name_hint] + expected_names if clean_name(x)]
+    if manifest.get("single_file_name"):
+        sf = str(manifest.get("single_file_name") or "")
+        if sf and sf not in root_hint_candidates:
+            root_hint_candidates.insert(0, sf)
+    if not root_hint_candidates and root_name_hint:
+        root_hint_candidates = [root_name_hint]
     candidates = {}
     rejected = []
 
@@ -779,6 +900,19 @@ for e in entries:
                         evidence,
                     )
 
+    root_hint_set = {clean_name(x) for x in root_hint_candidates if clean_name(x)}
+    for path, meta in list(candidates.items()):
+        tail = clean_name(Path(path).name)
+        if not tail or tail not in root_hint_set:
+            continue
+        parent_path = str(Path(path).parent)
+        add_candidate(
+            parent_path,
+            max(20, int(meta.get("base_score", 0)) - 6),
+            "candidate_parent_of_expected_root",
+            [f"candidate_tail_matches_root:{tail}"],
+        )
+
     for cand in candidates.values():
         cand["score"] = int(cand["base_score"])
         cand["score_breakdown"] = {"base_score": int(cand["base_score"])}
@@ -789,6 +923,48 @@ for e in entries:
         if cand["expected_matches"]:
             apply_score_delta(cand, "expected_name_bonus", 25 + min(10, 2 * len(cand["expected_matches"])))
             cand["evidence"].add("expected_name_exists")
+        cand["manifest_match_count"] = 0
+        cand["manifest_size_match_count"] = 0
+        if manifest_samples:
+            best_match = 0
+            best_size_match = 0
+            hint_pool = root_hint_candidates if root_hint_candidates else [""]
+            for root_hint in hint_pool:
+                match_count = 0
+                size_match_count = 0
+                for sample in manifest_samples:
+                    rel_name = str(sample.get("name", "") or "").strip().lstrip("/")
+                    if not rel_name:
+                        continue
+                    expected_size = int(sample.get("size", 0) or 0)
+                    if manifest.get("single_file"):
+                        sample_path = cpath / rel_name
+                    else:
+                        if root_hint:
+                            sample_path = cpath / root_hint / rel_name
+                        else:
+                            sample_path = cpath / rel_name
+                    if not sample_path.exists():
+                        continue
+                    match_count += 1
+                    try:
+                        if sample_path.is_file() and expected_size > 0 and sample_path.stat().st_size == expected_size:
+                            size_match_count += 1
+                    except OSError:
+                        pass
+                if (match_count, size_match_count) > (best_match, best_size_match):
+                    best_match = match_count
+                    best_size_match = size_match_count
+
+            cand["manifest_match_count"] = best_match
+            cand["manifest_size_match_count"] = best_size_match
+            if best_match > 0:
+                apply_score_delta(cand, "manifest_sample_match_bonus", 12 + min(24, best_match * 7))
+                if best_size_match > 0:
+                    apply_score_delta(cand, "manifest_sample_size_match_bonus", min(14, best_size_match * 4))
+                cand["evidence"].add(f"manifest_samples_match:{best_match}/{len(manifest_samples)}")
+            elif not cand["expected_matches"]:
+                apply_score_delta(cand, "manifest_sample_miss_penalty", -12)
         if tracker_aware:
             is_cross_seed = category.lower() in {"cross-seed", "cross_seed", "crossseed"}
             tail_key = canonical_tracker_key(Path(cand["path"]).name)
@@ -885,6 +1061,9 @@ for e in entries:
             "save_path": save_path,
             "content_path": content_path,
             "current_payload_root": current_payload_root,
+            "manifest_file_count": manifest_file_count,
+            "manifest_total_bytes": manifest_total_bytes,
+            "manifest_sample_count": len(manifest_samples),
             "db_root_path": db_root_path,
             "db_save_path": db_save_path,
             "expected_names": expected_names,
@@ -907,6 +1086,8 @@ for e in entries:
             "best_reason": ",".join(best["reasons"]) if best else "",
             "best_score_breakdown": best.get("score_breakdown", {}) if best else {},
             "best_tracker_match": int(best.get("tracker_match", 0)) if best else 0,
+            "best_manifest_match_count": int(best.get("manifest_match_count", 0)) if best else 0,
+            "best_manifest_size_match_count": int(best.get("manifest_size_match_count", 0)) if best else 0,
             "candidate_count": len(ordered),
             "invalid_candidate_count": len(rejected),
             "confidence": confidence,
@@ -921,6 +1102,8 @@ for e in entries:
                     "evidence": sorted(c["evidence"]),
                     "expected_matches": sorted(c["expected_matches"]),
                     "tracker_match": int(c.get("tracker_match", 0)),
+                    "manifest_match_count": int(c.get("manifest_match_count", 0)),
+                    "manifest_size_match_count": int(c.get("manifest_size_match_count", 0)),
                 }
                 for idx, c in enumerate(ordered[:candidate_top_n])
             ],
@@ -944,6 +1127,11 @@ summary = {
     "tracker_aware": bool(tracker_aware),
     "tracker_registry_path": str(tracker_registry_path),
     "tracker_alias_count": len(tracker_alias_map),
+    "manifest_aware": bool(manifest_aware),
+    "manifest_sample": int(manifest_sample),
+    "manifest_fetches": int(qb_manifest_fetches),
+    "manifest_hits": int(qb_manifest_hits),
+    "manifest_fetch_errors": int(qb_manifest_fetch_errors),
     "candidate_top_n": int(candidate_top_n),
     "policy": "no_manual_queue_under_known_roots",
 }
@@ -962,6 +1150,8 @@ fieldnames = [
     "best_score",
     "best_score_breakdown",
     "best_tracker_match",
+    "best_manifest_match_count",
+    "best_manifest_size_match_count",
     "best_reason",
     "best_candidate",
     "best_payload_root",
@@ -970,6 +1160,9 @@ fieldnames = [
     "save_path",
     "content_path",
     "current_payload_root",
+    "manifest_file_count",
+    "manifest_total_bytes",
+    "manifest_sample_count",
     "db_root_path",
     "payload_hash",
     "category",
@@ -1002,6 +1195,8 @@ print(
     f"ambiguous={summary['ambiguous']} manual_only={summary['manual_only']} "
     f"unresolved={summary['unresolved']} "
     f"tracker_aware={int(summary['tracker_aware'])} "
+    f"manifest_aware={int(summary['manifest_aware'])} "
+    f"manifest_hits={summary['manifest_hits']}/{summary['manifest_fetches']} "
     f"candidate_top_n={summary['candidate_top_n']}"
 )
 print(f"json_output={json_out}")
