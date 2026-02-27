@@ -1,10 +1,10 @@
 # Next Agent Prompt (Living)
 
-Date context: 2026-02-26
+Date context: 2026-02-27
 
 ## Mission
 
-Continue the qbit-repair campaign from the current db-refresh stage, then run nohl-basics repair pipeline in guarded batches.
+Continue the qB repair campaign with route-first execution, then pivot remaining hashes into sibling-build workflow if route lane is exhausted.
 
 ## Non-Negotiables
 
@@ -14,49 +14,34 @@ Continue the qbit-repair campaign from the current db-refresh stage, then run no
 
 ## Current State
 
-- Link dedup apply plans complete: 30 (`data`), 31 (`stash`), 32 (`spare`).
-- No failed actions in those plans.
-- Ownership-safe repair upgrade is implemented:
-  - `rehome-100` includes tracker and payload-root metadata.
-  - `rehome-101` supports tracker-aware ranking and top-N candidate export.
-  - `rehome-102` supports ranked fallback attempts.
-  - `rehome-103` blocks apply if payload ownership conflicts are found.
+- Latest route-first autoloop completed:
+  - `~/.logs/hashall/reports/rehome-normalize/nohl-autoloop-v2-autoloop-20260227-102535.log`
+- Rounds:
+  - `r1 apply: selected=15 ok=1 errors=14`
+  - `r2 apply: selected=7 ok=0 errors=7`
+  - `r3 dryrun: selected=0 (no_preflight_eligible_candidates)`
+- Dominant failure modes in latest run:
+  - `candidate_budget_exceeded`
+  - `content_path_mismatch_post_move`
 
-## Ordered Commands
+## Primary Command (Next Run)
 
 ```bash
-# Step 4
-bin/db-refresh-step4-payload-sync.sh
-
-# Safety gate
-bin/rehome-89_nohl-basics-qb-automation-audit.sh
-# If risks flagged:
-bin/rehome-89_nohl-basics-qb-automation-audit.sh --mode apply
-
-# Baseline + mapping
-bin/rehome-100_nohl-basics-qb-repair-baseline.sh
-bin/rehome-101_nohl-basics-qb-candidate-mapping.sh --tracker-aware --candidate-top-n 10
-# Optional deeper discovery if unresolved volume is high:
-MAP_ENABLE_DISCOVERY_SCAN=1 bin/rehome-101_nohl-basics-qb-candidate-mapping.sh --tracker-aware --candidate-top-n 10
-
-# Ownership gate (must be clean before apply)
-bin/rehome-103_nohl-basics-qb-payload-ownership-audit.sh
-
-# Pilot
-bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode dryrun --limit 10 --candidate-top-n 3 --candidate-fallback
-bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 10 --candidate-top-n 3 --candidate-fallback
-
-# Scale
-bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 100 --candidate-top-n 3 --candidate-fallback
-# Post-batch ownership verification
-bin/rehome-103_nohl-basics-qb-payload-ownership-audit.sh
+APPLY_MODE=apply MAX_ROUNDS=8 BATCH_LIMIT=12 PHASE102_BATCH_SIZE=2 PHASE102_SELECTION_MODE=throughput CANDIDATE_TOP_N=2 MAPPING_TOP_N=10 CONFLICT_BLOCK_MODE=ownership-only LANE_MODE=route-found LANE_ROUTE_TOP_N=3 CANDIDATE_FAILURE_CACHE_THRESHOLD=2 PHASE102_CANDIDATE_MAX_SECONDS=420 PHASE102_ITEM_MAX_SECONDS=1500 bin/codex-says-run-this-next.sh
 ```
 
-## Validate After Each Step
+## Why This Tuning
 
-- Capture command output.
-- Capture emitted log path.
-- Confirm no background mutating hashall/rehome task is still running before next step.
+- `PHASE102_CANDIDATE_MAX_SECONDS=420` and `PHASE102_ITEM_MAX_SECONDS=1500` reduce timeout-driven false failures.
+- `CANDIDATE_FAILURE_CACHE_THRESHOLD=2` prevents immediate quarantine on first failure.
+- `PHASE102_BATCH_SIZE=2` lowers concurrent check pressure and contention.
+- `LANE_MODE=route-found` keeps high-risk sibling routes out of this pass.
+
+## Post-Run Checklist
+
+1. Extract `r*-apply` summaries from the new autoloop log.
+2. Count failure buckets from new `*-apply-qb-repair-pilot-result-*.json`.
+3. If route lane drains again with low yield, run lane plan for sibling-build path and stop route-only retries.
 
 ## Open TODOs
 

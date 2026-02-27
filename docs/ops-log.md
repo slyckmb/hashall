@@ -1,6 +1,6 @@
 # Hashall Ops Log (Living)
 
-Last updated: 2026-02-26
+Last updated: 2026-02-27
 
 ## Execution Model
 
@@ -10,48 +10,53 @@ Last updated: 2026-02-26
 
 ## Current Snapshot
 
-- qbit-repair script line: `bin/qbit-repair-batch.sh` v1.6.1.
-- T1/T2 campaign moved into db-refresh/rehome pipeline.
-- Latest T2 run (`--limit 30 --apply`) returned `0 candidates` with `26 blacklisted`.
-- DB UUID migration completed (`dev-XX` -> `zfs-*`) before rescans.
-- DB refresh scan steps completed for stash/pool/hotspare.
-- New repair safety + ranking features implemented:
-  - Phase 100 emits `tracker_key`, `tracker_name`, `normalized_tags`, `current_payload_root`.
-  - Phase 101 supports tracker-aware scoring (`--tracker-aware`) and tracker alias normalization via `tracker-registry.yml`.
-  - Phase 101 now persists ranked candidates with payload roots and score breakdown.
-  - Phase 102 supports ranked candidate attempts (`--candidate-top-n`) and optional fallback (`--candidate-fallback`).
-  - Phase 102 has a hard apply gate for Phase 103 ownership conflicts (override: `--allow-ownership-conflicts`).
-  - New Phase 103 script: `bin/rehome-103_nohl-basics-qb-payload-ownership-audit.sh`.
-- Link dedup apply plans completed:
-  - Plan 30 (`data`): 54 completed, 56 skipped, 0 failed, ~123.6 GB saved
-  - Plan 31 (`stash`): 984 completed, 154 skipped, 0 failed, ~2.28 TB saved
-  - Plan 32 (`spare`): 409 completed, 2 skipped, 0 failed, ~216.1 GB saved
-  - Aggregate saved: ~2.62 TB
+- Active repair path is route-first nohl pipeline:
+  - `rehome-100` baseline
+  - `rehome-101 --tracker-aware --manifest-aware`
+  - `rehome-103` ownership audit
+  - `rehome-105` autoloop with `lane_mode=route-found`
+- Latest autoloop run:
+  - Log: `~/.logs/hashall/reports/rehome-normalize/nohl-autoloop-v2-autoloop-20260227-102535.log`
+  - Round 1: `selected=15 ok=1 errors=14 fallback_used=1`
+  - Round 2: `selected=7 ok=0 errors=7 fallback_used=1`
+  - Round 3 dryrun: `selected=0 reason=no_preflight_eligible_candidates`
+  - Autoloop exited cleanly after route-found candidates were exhausted.
+- Queue moved from `179` to `178` in this run (`missingFiles=10`, `stoppedDL=168` at final baseline).
+- Route-found lane filtering is working and prevents broad churn:
+  - Round 1 lane-filtered entries: `21`
+  - Round 2 lane-filtered entries: `13`
+  - Round 3 lane-filtered entries: `6`, then preflight rejected remaining entries.
+
+## This Run: Failure Mix
+
+- `candidate_budget_exceeded`: 11
+- `content_path_mismatch_post_move`: 8
+- `item_budget_exceeded`: 1
+- `recheck_only_stuck_terminal`: 1
+- Confirmed success in run: hash `83c53ae8` reached `final_state=stoppedup`.
 
 ## Known Issues / TODO
 
 - `qbit-repair-batch`: investigate hash tracking around `checkUP -> pausedDL/stoppedDL` transitions.
   - Example: `a047ce7c` observed at ~83% in qB while script still treated it as persistent `stoppedDL`.
-- `link_plans` summary row for plan 30 may show stale counters; `link_actions` is the source of truth.
+- High `content_path_mismatch_post_move` indicates target-root mismatch for a subset of route-found picks.
+- `candidate_budget_exceeded` dominates remaining route-found work when budgets are too tight.
 - SQLite lock contention still appears under concurrent heavy operations; keep single-writer discipline.
-- Device identity hardening TODO: prefer stable filesystem identity over transient numeric `device_id` for long-lived references.
+- Device identity hardening TODO: prefer stable filesystem identity over transient numeric `device_id`.
 
 ## Next Ordered Steps
 
-1. `bin/db-refresh-step4-payload-sync.sh`
-2. `bin/rehome-89_nohl-basics-qb-automation-audit.sh`
-3. `bin/rehome-89_nohl-basics-qb-automation-audit.sh --mode apply` (only if audit flags risks)
-4. `bin/rehome-100_nohl-basics-qb-repair-baseline.sh`
-5. `bin/rehome-101_nohl-basics-qb-candidate-mapping.sh --tracker-aware --candidate-top-n 10`
-6. `bin/rehome-103_nohl-basics-qb-payload-ownership-audit.sh` (must be clean before Phase 102 apply)
-7. `bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode dryrun --limit 10 --candidate-top-n 3 --candidate-fallback`
-8. `bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 10 --candidate-top-n 3 --candidate-fallback`
-9. `bin/rehome-103_nohl-basics-qb-payload-ownership-audit.sh` (post-apply verification)
-10. `bin/rehome-102_nohl-basics-qb-repair-pilot.sh --mode apply --limit 100 --candidate-top-n 3 --candidate-fallback` (repeat until drained)
+1. Re-run route-first autoloop with larger wait budgets and higher failure-cache threshold:
+   - `CANDIDATE_FAILURE_CACHE_THRESHOLD=2`
+   - `PHASE102_CANDIDATE_MAX_SECONDS=420`
+   - `PHASE102_ITEM_MAX_SECONDS=1500`
+   - Smaller wave size (`PHASE102_BATCH_SIZE=2`)
+2. Re-check error mix after run; if `content_path_mismatch_post_move` remains dominant, shift unresolved hashes to sibling-build lane workflow.
+3. Keep `CONFLICT_BLOCK_MODE=ownership-only` and `LANE_MODE=route-found` until route lane is fully drained.
 
 ## Log Locations
 
 - qbit triage logs: `~/.logs/hashall/reports/qbit-triage/`
+- nohl pipeline logs: `~/.logs/hashall/reports/rehome-normalize/`
 - db-refresh logs: `~/.logs/hashall/reports/db-refresh/`
 - hashall runtime log: `~/.logs/hashall/hashall.log`
-- jdupes per-plan logs: `~/.logs/hashall/jdupes/`
