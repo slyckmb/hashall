@@ -398,14 +398,17 @@ for e in confident:
             continue
         if not Path(cpath).exists():
             continue
+        is_current_save_candidate = bool(current_save and cpath == current_save)
         cached_failures = candidate_cached_failure_count(h, cpath)
-        if cached_failures >= candidate_failure_cache_threshold:
+        if cached_failures >= candidate_failure_cache_threshold and not is_current_save_candidate:
             skipped_by_cache += 1
             cache_skipped_candidates += 1
             continue
         cand_row = dict(cand)
-        cand_row["mode"] = "recheck_only" if current_save and cpath == current_save else "move"
+        cand_row["mode"] = "recheck_only" if is_current_save_candidate else "move"
         cand_row["cached_failures"] = int(cached_failures)
+        if is_current_save_candidate and cached_failures >= candidate_failure_cache_threshold:
+            cand_row["cache_override"] = 1
         valid_candidates.append(cand_row)
     if not valid_candidates:
         if skipped_by_cache and skipped_by_cache >= len(candidate_rows):
@@ -694,6 +697,39 @@ def fetch_infos(hashes: list[str]) -> dict[str, object]:
 
 def clean_attempt_output(attempt: dict) -> dict:
     return {k: v for k, v in attempt.items() if not k.startswith("_")}
+
+
+def inject_current_save_fallback_candidate(h: str, reason: str) -> bool:
+    row = row_by_hash.get(h)
+    if row is None:
+        return False
+    current_save = str(row.get("_current_save", "") or "").strip()
+    if not current_save.startswith("/"):
+        return False
+    if not Path(current_save).exists():
+        return False
+    candidates = list(row.get("_candidates", []))
+    current_idx = int(row.get("_next_candidate_idx", 0) or 0)
+    for idx, cand in enumerate(candidates):
+        path = str(cand.get("path", "")).strip()
+        if path == current_save and idx > current_idx:
+            return True
+    insert_idx = min(len(candidates), current_idx + 1)
+    candidates.insert(
+        insert_idx,
+        {
+            "rank": insert_idx + 1,
+            "path": current_save,
+            "payload_root": "",
+            "score": 0,
+            "reason": reason,
+            "mode": "recheck_only",
+        },
+    )
+    for idx, cand in enumerate(candidates, start=1):
+        cand["rank"] = idx
+    row["_candidates"] = candidates
+    return True
 
 
 def should_cache_candidate_failure(error_text: str) -> bool:
@@ -1044,6 +1080,17 @@ while queue:
         target = str(attempts[h].get("target_save_path", "") or "")
         content_path_after_move = str(getattr(info, "content_path", "") or "")
         if content_path_after_move and not content_path_after_move.startswith(target):
+            current_save = str(row_by_hash[h].get("_current_save", "") or "").strip()
+            if (
+                candidate_fallback_enabled
+                and current_save
+                and content_path_after_move.startswith(current_save)
+                and inject_current_save_fallback_candidate(h, "post_move_content_path_prefers_current_save")
+            ):
+                print(
+                    f"pilot_hint hash={h[:8]} phase=post_move "
+                    f"inject_current_save_fallback target={current_save}"
+                )
             mismatch_error = f"content_path_mismatch_post_move:{content_path_after_move}"
             print(
                 f"pilot_failfast hash={h[:8]} phase=post_move "
