@@ -167,14 +167,18 @@ hashall payload siblings <torrent_hash>
 
 ### Core Documentation
 - **[Architecture](docs/architecture/architecture.md)** - How the unified catalog works
-- **[Unified Catalog Design](docs/architecture/architecture.md)** - Comprehensive design document
 - **[CLI Reference](docs/tooling/cli.md)** - All commands and options
 - **[Database Schema](docs/architecture/schema.md)** - Concise schema summary (source of truth in migrations)
+- **[Theory of Operations](docs/theory-of-operations.md)** - Operator mental model and safety flow
+- **[Docs Index](docs/README.md)** - Active docs map for CLI agents
 
 ### Guides
 - **[Link Guide](docs/tooling/link-guide.md)** - Deduplication workflow and best practices
 - **[Symlinks & Bind Mounts](docs/tooling/symlinks-and-bind-mounts.md)** - How hashall handles them correctly
 - **[Quick Reference](docs/tooling/quick-reference.md)** - Cheat sheet for common operations
+- **[Ops Log](docs/ops-log.md)** - Living campaign status + known issues
+- **[Handoff](docs/handoff.md)** - Current operator handoff
+- **[Next Agent](docs/next-agent.md)** - Minimal prompt for continuation
 
 ### Historical
 - **[Archive](docs/archive/)** - Obsolete docs, session summaries, validation reports

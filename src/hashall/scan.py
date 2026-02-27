@@ -11,7 +11,7 @@ import unicodedata
 import sys
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
-from typing import Dict, Set, Tuple, Optional, Callable
+from typing import Dict, Set, Tuple, Optional, Callable, TypeVar
 from dataclasses import dataclass
 from datetime import datetime
 from tqdm import tqdm
@@ -23,6 +23,58 @@ from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 
 BATCH_SIZE = 500
+
+T = TypeVar("T")
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    """Parse int environment variables with safe fallback."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
+def _is_sqlite_db_locked_error(exc: Exception) -> bool:
+    """Return True if the sqlite error indicates lock contention."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database table is locked" in msg
+
+
+def _run_with_db_lock_retry(
+    fn: Callable[[], T],
+    *,
+    quiet: bool = True,
+    label: str = "db-op",
+) -> T:
+    """
+    Run sqlite work with lock-aware retries.
+
+    Configurable via env:
+    - HASHALL_DB_LOCK_RETRY_SECS (default 30)
+    - HASHALL_DB_LOCK_MAX_RETRIES (default 0 = unlimited)
+    """
+    retry_secs = max(1, _parse_int_env("HASHALL_DB_LOCK_RETRY_SECS", 30))
+    max_retries = max(0, _parse_int_env("HASHALL_DB_LOCK_MAX_RETRIES", 0))
+    attempt = 0
+
+    while True:
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_db_locked_error(exc):
+                raise
+            attempt += 1
+            if max_retries and attempt > max_retries:
+                raise
+            if not quiet:
+                print(f"  [lock-wait] {label} attempt={attempt} sleep={retry_secs}s")
+            time.sleep(retry_secs)
 
 
 @dataclass
@@ -188,6 +240,33 @@ def compute_full_hashes(
     return h1.hexdigest(), h256.hexdigest()
 
 
+def _format_bytes_short(num_bytes: int) -> str:
+    """Human-readable byte formatter for progress output."""
+    size = float(max(0, int(num_bytes or 0)))
+    units = ("B", "KB", "MB", "GB", "TB", "PB")
+    idx = 0
+    while size >= 1024.0 and idx < len(units) - 1:
+        size /= 1024.0
+        idx += 1
+    if idx == 0:
+        return f"{int(size)}{units[idx]}"
+    return f"{size:.1f}{units[idx]}"
+
+
+def _format_eta_short(seconds: float | None) -> str:
+    """Compact ETA formatter."""
+    if seconds is None:
+        return "?"
+    total = max(0, int(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m"
+    if m > 0:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
 def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]:
     """
     Find collision groups where multiple files share the same quick_hash.
@@ -213,43 +292,121 @@ def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]
     ensure_files_table(cursor, device_id)
     table_name = f"files_{device_id}"
 
-    # Find all quick_hash values with multiple files
-    cursor.execute(f"""
-        SELECT quick_hash, COUNT(*) as file_count
-        FROM {table_name}
-        WHERE status = 'active'
-          AND quick_hash IS NOT NULL
-        GROUP BY quick_hash
-        HAVING COUNT(*) > 1
-        ORDER BY file_count DESC
-    """)
-
-    collision_hashes = [row[0] for row in cursor.fetchall()]
-
-    # For each collision hash, get all files
-    collisions = {}
-    for quick_hash in collision_hashes:
-        cursor.execute(f"""
+    # Pull all collision rows in one query (avoid one query per quick_hash).
+    rows = _run_with_db_lock_retry(
+        lambda: cursor.execute(f"""
             SELECT path, size, mtime, quick_hash, sha1, sha256
             FROM {table_name}
-            WHERE quick_hash = ? AND status = 'active'
-            ORDER BY path
-        """, (quick_hash,))
+            WHERE status = 'active'
+              AND quick_hash IS NOT NULL
+              AND quick_hash IN (
+                  SELECT quick_hash
+                  FROM {table_name}
+                  WHERE status = 'active'
+                    AND quick_hash IS NOT NULL
+                  GROUP BY quick_hash
+                  HAVING COUNT(*) > 1
+              )
+            ORDER BY quick_hash, path
+        """).fetchall(),
+        quiet=True,
+        label=f"{table_name}:find-collisions",
+    )
 
-        files = []
-        for row in cursor.fetchall():
-            files.append({
-                'path': row[0],
-                'size': row[1],
-                'mtime': row[2],
-                'quick_hash': row[3],
-                'sha1': row[4],
-                'sha256': row[5]
-            })
-        collisions[quick_hash] = files
+    collisions = {}
+    for row in rows:
+        quick_hash = row[3]
+        files = collisions.setdefault(quick_hash, [])
+        files.append({
+            'path': row[0],
+            'size': row[1],
+            'mtime': row[2],
+            'quick_hash': row[3],
+            'sha1': row[4],
+            'sha256': row[5]
+        })
 
     conn.close()
     return collisions
+
+
+def count_quick_hash_collision_groups(device_id: int, db_path: Path) -> int:
+    """Count quick-hash collision groups for a device."""
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    ensure_files_table(cursor, device_id)
+    table_name = f"files_{device_id}"
+
+    row = _run_with_db_lock_retry(
+        lambda: cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT quick_hash
+                FROM {table_name}
+                WHERE status = 'active'
+                  AND quick_hash IS NOT NULL
+                GROUP BY quick_hash
+                HAVING COUNT(*) > 1
+            )
+        """).fetchone(),
+        quiet=True,
+        label=f"{table_name}:count-collision-groups",
+    )
+
+    conn.close()
+    return int(row[0] if row else 0)
+
+
+def count_quick_hash_distinct_inode_collision_groups(device_id: int, db_path: Path) -> int:
+    """Count quick-hash collision groups with 2+ distinct inode/path keys."""
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    ensure_files_table(cursor, device_id)
+    table_name = f"files_{device_id}"
+
+    row = _run_with_db_lock_retry(
+        lambda: cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT quick_hash
+                FROM {table_name}
+                WHERE status = 'active'
+                  AND quick_hash IS NOT NULL
+                GROUP BY quick_hash
+                HAVING COUNT(DISTINCT COALESCE(inode, path)) > 1
+            )
+        """).fetchone(),
+        quiet=True,
+        label=f"{table_name}:count-distinct-inode-collision-groups",
+    )
+
+    conn.close()
+    return int(row[0] if row else 0)
+
+
+def count_quick_hash_pending_upgrade_groups(device_id: int, db_path: Path) -> int:
+    """Count collision groups that still need full-hash upgrade."""
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    ensure_files_table(cursor, device_id)
+    table_name = f"files_{device_id}"
+
+    row = _run_with_db_lock_retry(
+        lambda: cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT quick_hash
+                FROM {table_name}
+                WHERE status = 'active'
+                  AND quick_hash IS NOT NULL
+                GROUP BY quick_hash
+                HAVING COUNT(DISTINCT COALESCE(inode, path)) > 1
+                   AND SUM(CASE WHEN (sha1 IS NULL OR sha256 IS NULL) THEN 1 ELSE 0 END) > 0
+            )
+        """).fetchone(),
+        quiet=True,
+        label=f"{table_name}:count-pending-upgrade-groups",
+    )
+
+    conn.close()
+    return int(row[0] if row else 0)
 
 
 def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, mount_point: Path) -> list:
@@ -275,14 +432,18 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
     table_name = f"files_{device_id}"
 
     # Get all files with this quick_hash (include inode for deduplication)
-    cursor.execute(f"""
-        SELECT path, size, mtime, quick_hash, sha1, sha256, inode
-        FROM {table_name}
-        WHERE quick_hash = ? AND status = 'active'
-    """, (quick_hash,))
+    rows = _run_with_db_lock_retry(
+        lambda: cursor.execute(f"""
+            SELECT path, size, mtime, quick_hash, sha1, sha256, inode
+            FROM {table_name}
+            WHERE quick_hash = ? AND status = 'active'
+        """, (quick_hash,)).fetchall(),
+        quiet=False,
+        label=f"{table_name}:load-collision-group {quick_hash[:8]}",
+    )
 
     files = []
-    for row in cursor.fetchall():
+    for row in rows:
         file_record = {
             'path': row[0],
             'size': row[1],
@@ -321,11 +482,15 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
             full_sha1, full_sha256 = compute_full_hashes(abs_path)
 
             # Update ALL files in this inode group
-            cursor.execute(f"""
-                UPDATE {table_name}
-                SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
-                WHERE inode = ? AND size = ? AND status = 'active'
-            """, (full_sha1, full_sha256, inode, size))
+            _run_with_db_lock_retry(
+                lambda: cursor.execute(f"""
+                    UPDATE {table_name}
+                    SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                    WHERE inode = ? AND size = ? AND status = 'active'
+                """, (full_sha1, full_sha256, inode, size)),
+                quiet=False,
+                label=f"{table_name}:update-inode-group {quick_hash[:8]}",
+            )
 
             # Update all file records in memory
             for file_record in group_files:
@@ -342,11 +507,15 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
             full_sha1, full_sha256 = compute_full_hashes(abs_path)
 
             # Update by path
-            cursor.execute(f"""
-                UPDATE {table_name}
-                SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
-                WHERE path = ?
-            """, (full_sha1, full_sha256, file_record['path']))
+            _run_with_db_lock_retry(
+                lambda: cursor.execute(f"""
+                    UPDATE {table_name}
+                    SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                    WHERE path = ?
+                """, (full_sha1, full_sha256, file_record['path'])),
+                quiet=False,
+                label=f"{table_name}:update-path {quick_hash[:8]}",
+            )
 
             file_record['sha1'] = full_sha1
             file_record['sha256'] = full_sha256
@@ -354,7 +523,11 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
         except Exception as e:
             print(f"⚠️  Could not upgrade {abs_path}: {e}")
 
-    conn.commit()
+    _run_with_db_lock_retry(
+        lambda: conn.commit(),
+        quiet=False,
+        label=f"{table_name}:commit-upgrade-collision-group",
+    )
     conn.close()
 
     return files  # Return all files (updated and already had full hashes)
@@ -389,37 +562,28 @@ def find_duplicates(device_id: int, db_path: Path, auto_upgrade: bool = True) ->
     """
     from collections import defaultdict
 
-    conn = connect_db(db_path)
-    cursor = conn.cursor()
-
-    # Get mount point for path resolution
-    cursor.execute("""
-        SELECT mount_point FROM devices WHERE device_id = ?
-    """, (device_id,))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return {}
-
-    mount_point = Path(row[0])
-    conn.close()
-
-    # Find collision groups
-    collisions = find_quick_hash_collisions(device_id, db_path)
-
-    if not collisions:
-        return {}  # No collisions, no duplicates
-
-    print(f"🔍 Found {len(collisions)} collision groups")
-
-    # Auto-upgrade collision groups if requested
     if auto_upgrade:
-        print("⚡ Upgrading collision groups to full SHA256...")
-        for quick_hash in collisions.keys():
-            upgrade_collision_group(quick_hash, device_id, db_path, mount_point)
-
-        # Re-query collisions to get updated SHA256 values
+        collision_count = count_quick_hash_collision_groups(device_id, db_path)
+        if collision_count == 0:
+            return {}  # No collisions, no duplicates
+        distinct_inode_count = count_quick_hash_distinct_inode_collision_groups(device_id, db_path)
+        pending_upgrade_count = count_quick_hash_pending_upgrade_groups(device_id, db_path)
+        print(
+            f"🔍 Found {collision_count} collision groups "
+            f"(cross-inode={distinct_inode_count}, pending-upgrade={pending_upgrade_count})"
+        )
+        if pending_upgrade_count > 0:
+            print("⚡ Upgrading pending collision groups to full SHA256...")
+            upgraded = upgrade_quick_hash_collisions(device_id, db_path, quiet=False)
+            print(f"⚡ Collision upgrade complete: upgraded_groups={upgraded}")
+        else:
+            print("⚡ No pending collision groups require SHA256 upgrade.")
         collisions = find_quick_hash_collisions(device_id, db_path)
+    else:
+        collisions = find_quick_hash_collisions(device_id, db_path)
+        if not collisions:
+            return {}  # No collisions, no duplicates
+        print(f"🔍 Found {len(collisions)} collision groups")
 
     # Group by full SHA256
     by_sha256 = defaultdict(list)
@@ -460,10 +624,14 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
     ensure_files_table(cursor, device_id)
     table_name = f"files_{device_id}"
 
-    row = cursor.execute(
-        "SELECT preferred_mount_point, mount_point FROM devices WHERE device_id = ?",
-        (device_id,),
-    ).fetchone()
+    row = _run_with_db_lock_retry(
+        lambda: cursor.execute(
+            "SELECT preferred_mount_point, mount_point FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone(),
+        quiet=quiet,
+        label=f"{table_name}:load-device-mounts",
+    )
     if not row:
         conn.close()
         return 0
@@ -472,15 +640,20 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
     mount_point = Path(row[1]) if row[1] else None
     base_mounts = [p for p in (preferred_mount, mount_point) if p is not None]
 
-    cursor.execute(f"""
-        SELECT quick_hash
-        FROM {table_name}
-        WHERE status = 'active'
-          AND quick_hash IS NOT NULL
-        GROUP BY quick_hash
-        HAVING COUNT(DISTINCT COALESCE(inode, path)) > 1
-    """)
-    quick_hashes = [row[0] for row in cursor.fetchall()]
+    quick_hashes_rows = _run_with_db_lock_retry(
+        lambda: cursor.execute(f"""
+            SELECT quick_hash
+            FROM {table_name}
+            WHERE status = 'active'
+              AND quick_hash IS NOT NULL
+            GROUP BY quick_hash
+            HAVING COUNT(DISTINCT COALESCE(inode, path)) > 1
+               AND SUM(CASE WHEN (sha1 IS NULL OR sha256 IS NULL) THEN 1 ELSE 0 END) > 0
+        """).fetchall(),
+        quiet=quiet,
+        label=f"{table_name}:list-pending-collision-groups",
+    )
+    quick_hashes = [row[0] for row in quick_hashes_rows]
 
     if not quick_hashes:
         conn.close()
@@ -496,34 +669,128 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
             mininterval=0.5,
         )
 
+    total_groups = len(quick_hashes)
+    row = _run_with_db_lock_retry(
+        lambda: cursor.execute(f"""
+            WITH collision_hashes AS (
+                SELECT quick_hash
+                FROM {table_name}
+                WHERE status = 'active'
+                  AND quick_hash IS NOT NULL
+                GROUP BY quick_hash
+                HAVING COUNT(DISTINCT COALESCE(inode, path)) > 1
+            ),
+            pending AS (
+                SELECT quick_hash,
+                       COALESCE(CAST(inode AS TEXT), path) AS inode_key,
+                       MAX(size) AS size
+                FROM {table_name}
+                WHERE status = 'active'
+                  AND quick_hash IN (SELECT quick_hash FROM collision_hashes)
+                  AND (sha1 IS NULL OR sha256 IS NULL)
+                GROUP BY quick_hash, inode_key
+            )
+            SELECT COALESCE(SUM(size), 0) FROM pending
+        """).fetchone(),
+        quiet=quiet,
+        label=f"{table_name}:sum-pending-bytes",
+    )
+    total_pending_bytes = int(row[0] if row and row[0] is not None else 0)
+    commit_every_groups = max(1, _parse_int_env("HASHALL_COLLISION_COMMIT_GROUPS", 10))
+
+    start_ts = time.monotonic()
+    last_heartbeat_ts = start_ts
+    heartbeat_interval_s = 20.0
+    processed_groups = 0
+    hashed_bytes = 0
+    last_path = ""
+    upgraded_since_commit = 0
+    has_uncommitted_writes = False
+
+    def _log_line(msg: str) -> None:
+        if quiet:
+            return
+        if progress is not None:
+            tqdm.write(msg)
+        else:
+            print(msg)
+
+    def _emit_heartbeat(current_group_bytes_done: int = 0, force: bool = False) -> None:
+        nonlocal last_heartbeat_ts
+        if quiet:
+            return
+        now = time.monotonic()
+        if not force and (now - last_heartbeat_ts) < heartbeat_interval_s:
+            return
+        elapsed = max(0.001, now - start_ts)
+        done_groups = min(total_groups, processed_groups)
+        groups_rate = done_groups / elapsed
+        eta_groups = ((total_groups - done_groups) / groups_rate) if groups_rate > 0 else None
+
+        done_bytes = max(0, hashed_bytes + current_group_bytes_done)
+        done_bytes = min(done_bytes, total_pending_bytes) if total_pending_bytes > 0 else done_bytes
+        eta_bytes = None
+        if total_pending_bytes > 0 and done_bytes > 0:
+            bytes_rate = done_bytes / elapsed
+            remaining_bytes = max(0, total_pending_bytes - done_bytes)
+            eta_bytes = (remaining_bytes / bytes_rate) if bytes_rate > 0 else None
+
+        eta = eta_bytes if eta_bytes is not None else eta_groups
+        _log_line(
+            "  [heartbeat] "
+            f"groups={done_groups}/{total_groups} "
+            f"upgraded={upgraded_groups} "
+            f"hashed={_format_bytes_short(done_bytes)}"
+            + (
+                f"/{_format_bytes_short(total_pending_bytes)} "
+                if total_pending_bytes > 0 else " "
+            )
+            + f"elapsed={int(elapsed)}s eta={_format_eta_short(eta)} "
+            + (f"last={last_path}" if last_path else "")
+        )
+        last_heartbeat_ts = now
+
     upgraded_groups = 0
     for quick_hash in quick_hashes:
-        cursor.execute(f"""
-            SELECT path, inode, sha1, sha256
-            FROM {table_name}
-            WHERE quick_hash = ? AND status = 'active'
-        """, (quick_hash,))
-        rows = cursor.fetchall()
+        rows = _run_with_db_lock_retry(
+            lambda qh=quick_hash: cursor.execute(f"""
+                SELECT path, inode, size, sha1, sha256
+                FROM {table_name}
+                WHERE quick_hash = ? AND status = 'active'
+            """, (qh,)).fetchall(),
+            quiet=quiet,
+            label=f"{table_name}:load-group {quick_hash[:8]}",
+        )
 
         pending = []
         seen = set()
         for row in rows:
-            path, inode, sha1, sha256 = row[0], row[1], row[2], row[3]
+            path, inode, size, sha1, sha256 = row[0], row[1], row[2], row[3], row[4]
             if sha1 is not None and sha256 is not None:
                 continue
             key = (inode, ) if inode is not None else ("path", path)
             if key in seen:
                 continue
             seen.add(key)
-            pending.append((path, inode))
+            pending.append((path, inode, int(size or 0)))
 
         if not pending:
+            processed_groups += 1
+            _emit_heartbeat()
             if progress is not None:
                 progress.update(1)
             continue
 
+        if not quiet:
+            preview_path = str(pending[0][0])
+            _log_line(
+                f"  [group] {processed_groups + 1}/{total_groups} "
+                f"pending_files={len(pending)} first={preview_path}"
+            )
+            _emit_heartbeat(force=True)
+
         group_hashed = False
-        for path, inode in pending:
+        for path, inode, file_size in pending:
             abs_path = None
             if path.startswith("/"):
                 abs_path = Path(path)
@@ -536,34 +803,73 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
                 if abs_path is None and base_mounts:
                     abs_path = base_mounts[0] / path
 
+            last_path = str(abs_path)
             try:
-                sha1, sha256 = compute_full_hashes(str(abs_path))
+                def _chunk_progress(done_bytes: int, _total_bytes: int, _abs_path: str) -> None:
+                    _emit_heartbeat(current_group_bytes_done=min(int(done_bytes or 0), max(0, file_size)))
+
+                sha1, sha256 = compute_full_hashes(
+                    str(abs_path),
+                    progress_cb=_chunk_progress,
+                    progress_step_bytes=16 * 1024 * 1024,
+                )
             except Exception as e:
-                if not quiet:
-                    print(f"⚠️  Could not upgrade {abs_path}: {e}")
+                _log_line(f"⚠️  Could not upgrade {abs_path}: {e}")
                 continue
 
             if inode is None:
-                cursor.execute(f"""
-                    UPDATE {table_name}
-                    SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
-                    WHERE path = ? AND status = 'active'
-                """, (sha1, sha256, path))
+                _run_with_db_lock_retry(
+                    lambda p=path, s1=sha1, s256=sha256: cursor.execute(f"""
+                        UPDATE {table_name}
+                        SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                        WHERE path = ? AND status = 'active'
+                    """, (s1, s256, p)),
+                    quiet=quiet,
+                    label=f"{table_name}:update-path {quick_hash[:8]}",
+                )
             else:
-                cursor.execute(f"""
-                    UPDATE {table_name}
-                    SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
-                    WHERE inode = ? AND status = 'active'
-                """, (sha1, sha256, inode))
+                _run_with_db_lock_retry(
+                    lambda ino=inode, s1=sha1, s256=sha256: cursor.execute(f"""
+                        UPDATE {table_name}
+                        SET sha1 = ?, sha256 = ?, last_modified_at = datetime('now')
+                        WHERE inode = ? AND status = 'active'
+                    """, (s1, s256, ino)),
+                    quiet=quiet,
+                    label=f"{table_name}:update-inode {quick_hash[:8]}",
+                )
             group_hashed = True
+            hashed_bytes += max(0, file_size)
+            has_uncommitted_writes = True
         if group_hashed:
             upgraded_groups += 1
+            upgraded_since_commit += 1
+        processed_groups += 1
+        if has_uncommitted_writes and upgraded_since_commit >= commit_every_groups:
+            _run_with_db_lock_retry(
+                lambda: conn.commit(),
+                quiet=quiet,
+                label=f"{table_name}:checkpoint-commit",
+            )
+            has_uncommitted_writes = False
+            upgraded_since_commit = 0
+            if not quiet:
+                _log_line(
+                    f"  [checkpoint] committed upgraded={upgraded_groups} "
+                    f"processed={processed_groups}/{total_groups}"
+                )
+        _emit_heartbeat()
         if progress is not None:
             if group_hashed:
                 progress.set_postfix(upgraded=upgraded_groups)
             progress.update(1)
 
-    conn.commit()
+    if has_uncommitted_writes:
+        _run_with_db_lock_retry(
+            lambda: conn.commit(),
+            quiet=quiet,
+            label=f"{table_name}:commit-upgrades",
+        )
+    _emit_heartbeat(force=True)
     if progress is not None:
         progress.close()
     conn.close()

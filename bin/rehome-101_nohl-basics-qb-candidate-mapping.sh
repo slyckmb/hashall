@@ -15,6 +15,12 @@ Options:
   --db PATH                Catalog DB path (default: ~/.hashall/catalog.db)
   --output-prefix NAME     Output prefix (default: nohl)
   --limit N                Limit baseline entries (default: 0 = all)
+  --tracker-aware          Enable tracker/category-aware candidate scoring
+  --tracker-registry PATH  Tracker registry YAML for alias normalization
+  --manifest-aware         Use qB file manifest samples for candidate scoring (default: on)
+  --no-manifest-aware      Disable qB file manifest sample scoring
+  --manifest-sample N      Max manifest sample files per torrent (default: 6)
+  --candidate-top-n N      Persist top N ranked candidates per hash (default: 6)
   --fast                   Fast mode annotation
   --debug                  Debug mode annotation
   -h, --help               Show help
@@ -32,6 +38,11 @@ BASELINE_JSON=""
 DB_PATH="${DB_PATH:-$HOME/.hashall/catalog.db}"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-nohl}"
 LIMIT="${LIMIT:-0}"
+TRACKER_AWARE="${TRACKER_AWARE:-0}"
+TRACKER_REGISTRY_PATH="${TRACKER_REGISTRY_PATH:-/home/michael/dev/tools/traktor/config/tracker-registry.yml}"
+MANIFEST_AWARE="${MANIFEST_AWARE:-1}"
+MANIFEST_SAMPLE="${MANIFEST_SAMPLE:-6}"
+CANDIDATE_TOP_N="${CANDIDATE_TOP_N:-6}"
 FAST="${FAST:-1}"
 DEBUG="${DEBUG:-1}"
 
@@ -41,6 +52,13 @@ while [[ $# -gt 0 ]]; do
     --db) DB_PATH="${2:-}"; shift 2 ;;
     --output-prefix) OUTPUT_PREFIX="${2:-}"; shift 2 ;;
     --limit) LIMIT="${2:-}"; shift 2 ;;
+    --tracker-aware) TRACKER_AWARE=1; shift ;;
+    --no-tracker-aware) TRACKER_AWARE=0; shift ;;
+    --tracker-registry) TRACKER_REGISTRY_PATH="${2:-}"; shift 2 ;;
+    --manifest-aware) MANIFEST_AWARE=1; shift ;;
+    --no-manifest-aware) MANIFEST_AWARE=0; shift ;;
+    --manifest-sample) MANIFEST_SAMPLE="${2:-}"; shift 2 ;;
+    --candidate-top-n) CANDIDATE_TOP_N="${2:-}"; shift 2 ;;
     --fast) FAST=1; shift ;;
     --debug) DEBUG=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -63,6 +81,14 @@ if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
   echo "Invalid --limit: $LIMIT" >&2
   exit 2
 fi
+if ! [[ "$CANDIDATE_TOP_N" =~ ^[0-9]+$ ]] || [[ "$CANDIDATE_TOP_N" -lt 1 ]]; then
+  echo "Invalid --candidate-top-n: $CANDIDATE_TOP_N" >&2
+  exit 2
+fi
+if ! [[ "$MANIFEST_SAMPLE" =~ ^[0-9]+$ ]] || [[ "$MANIFEST_SAMPLE" -lt 1 ]]; then
+  echo "Invalid --manifest-sample: $MANIFEST_SAMPLE" >&2
+  exit 2
+fi
 
 log_dir="$HOME/.logs/hashall/reports/rehome-normalize"
 mkdir -p "$log_dir"
@@ -80,12 +106,17 @@ hr
 echo "Phase 101: qB candidate mapping"
 echo "What this does: rank target roots per hash from live filesystem and catalog evidence."
 hr
-echo "run_id=${stamp} step=basics-qb-candidate-mapping baseline_json=${BASELINE_JSON} db=${DB_PATH} output_prefix=${OUTPUT_PREFIX} limit=${LIMIT} fast=${FAST} debug=${DEBUG}"
+echo "run_id=${stamp} step=basics-qb-candidate-mapping baseline_json=${BASELINE_JSON} db=${DB_PATH} output_prefix=${OUTPUT_PREFIX} limit=${LIMIT} tracker_aware=${TRACKER_AWARE} tracker_registry=${TRACKER_REGISTRY_PATH} manifest_aware=${MANIFEST_AWARE} manifest_sample=${MANIFEST_SAMPLE} candidate_top_n=${CANDIDATE_TOP_N} fast=${FAST} debug=${DEBUG}"
 
 PYTHONPATH=src \
 MAP_BASELINE_JSON="$BASELINE_JSON" \
 MAP_DB_PATH="$DB_PATH" \
 MAP_LIMIT="$LIMIT" \
+MAP_TRACKER_AWARE="$TRACKER_AWARE" \
+MAP_TRACKER_REGISTRY_PATH="$TRACKER_REGISTRY_PATH" \
+MAP_MANIFEST_AWARE="$MANIFEST_AWARE" \
+MAP_MANIFEST_SAMPLE="$MANIFEST_SAMPLE" \
+MAP_CANDIDATE_TOP_N="$CANDIDATE_TOP_N" \
 MAP_JSON_OUT="$json_out" \
 MAP_TSV_OUT="$tsv_out" \
 MAP_CONFIDENT_OUT="$confident_out" \
@@ -95,14 +126,22 @@ python - <<'PY'
 import csv
 import json
 import os
+import re
 import sqlite3
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from hashall.qbittorrent import get_qbittorrent_client
+
 baseline_json = Path(os.environ["MAP_BASELINE_JSON"])
 db_path = Path(os.environ["MAP_DB_PATH"])
 limit = int(os.environ.get("MAP_LIMIT", "0") or 0)
+tracker_aware = os.environ.get("MAP_TRACKER_AWARE", "0").strip().lower() in {"1", "true", "yes", "on"}
+manifest_aware = os.environ.get("MAP_MANIFEST_AWARE", "1").strip().lower() in {"1", "true", "yes", "on"}
+manifest_sample = max(1, int(os.environ.get("MAP_MANIFEST_SAMPLE", "6") or 6))
+candidate_top_n = max(1, int(os.environ.get("MAP_CANDIDATE_TOP_N", "6") or 6))
+tracker_registry_path = Path(os.environ.get("MAP_TRACKER_REGISTRY_PATH", "").strip()).expanduser()
 json_out = Path(os.environ["MAP_JSON_OUT"])
 tsv_out = Path(os.environ["MAP_TSV_OUT"])
 confident_out = Path(os.environ["MAP_CONFIDENT_OUT"])
@@ -207,6 +246,116 @@ def clean_name(raw: str) -> str:
     if "/" in val or val in {".", ".."}:
         return ""
     return val
+
+
+def split_tags(raw: str) -> list[str]:
+    return [tag.strip() for tag in str(raw or "").split(",") if tag and tag.strip()]
+
+
+def normalize_tracker_key(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("(api)", " ")
+    text = re.sub(r"[^a-z0-9]+", "", text)
+    return text
+
+
+def load_tracker_aliases(path: Path) -> dict[str, str]:
+    alias_map: dict[str, str] = {}
+    if not path or not path.exists():
+        return alias_map
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return alias_map
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return alias_map
+    trackers = payload.get("trackers", {}) if isinstance(payload, dict) else {}
+    if not isinstance(trackers, dict):
+        return alias_map
+
+    def _add_alias(raw_value: str, canonical_key: str):
+        key = normalize_tracker_key(raw_value)
+        if key and canonical_key:
+            alias_map[key] = canonical_key
+
+    for key, info in trackers.items():
+        canonical_key = normalize_tracker_key(key)
+        if not canonical_key:
+            continue
+        _add_alias(key, canonical_key)
+        if isinstance(info, dict):
+            _add_alias(str(info.get("display_name", "")), canonical_key)
+            qbm = info.get("qbitmanage", {})
+            if isinstance(qbm, dict):
+                _add_alias(str(qbm.get("category", "")), canonical_key)
+            qb = info.get("qbittorrent", {})
+            if isinstance(qb, dict):
+                _add_alias(str(qb.get("category", "")), canonical_key)
+    return alias_map
+
+
+tracker_alias_map = load_tracker_aliases(tracker_registry_path)
+
+
+def canonical_tracker_key(value: str) -> str:
+    key = normalize_tracker_key(value)
+    if not key:
+        return ""
+    return tracker_alias_map.get(key, key)
+
+
+def tracker_component_from_path(path: str) -> str:
+    parts = list(Path(str(path or "").strip()).parts)
+    for idx, part in enumerate(parts):
+        lowered = str(part).lower()
+        if lowered in {"cross-seed", "cross_seed", "crossseed"} and idx + 1 < len(parts):
+            return str(parts[idx + 1]).strip()
+    return ""
+
+
+def normalized_tags_for_entry(entry: dict) -> list[str]:
+    raw = entry.get("normalized_tags", [])
+    if isinstance(raw, list):
+        vals = [normalize_tracker_key(x) for x in raw if normalize_tracker_key(x)]
+        if vals:
+            return vals
+    vals = [canonical_tracker_key(x) for x in split_tags(str(entry.get("tags", "")))]
+    return [v for v in vals if v]
+
+
+def tracker_key_for_entry(entry: dict) -> str:
+    explicit = canonical_tracker_key(entry.get("tracker_key", ""))
+    if explicit:
+        return explicit
+    tracker_name = str(entry.get("tracker_name", "")).strip()
+    if tracker_name:
+        val = canonical_tracker_key(tracker_name)
+        if val:
+            return val
+    for raw in (entry.get("save_path", ""), entry.get("content_path", "")):
+        val = canonical_tracker_key(tracker_component_from_path(str(raw)))
+        if val:
+            return val
+    category = str(entry.get("category", "")).strip()
+    category_l = category.lower()
+    if category and category_l not in {"cross-seed", "cross_seed", "crossseed"}:
+        val = canonical_tracker_key(category)
+        if val:
+            return val
+    for tag_key in normalized_tags_for_entry(entry):
+        if tag_key not in {
+            "crossseed",
+            "rehome",
+            "rehomeverifypending",
+            "rehomeverifyok",
+            "rehomeverifyfailed",
+        }:
+            return tag_key
+    return ""
 
 
 def expected_names_for(entry: dict, db_entry: dict) -> list[str]:
@@ -430,6 +579,96 @@ else:
     )
 
 
+qb_manifest_client = None
+qb_manifest_enabled = False
+qb_manifest_cache: dict[str, dict] = {}
+qb_manifest_fetches = 0
+qb_manifest_fetch_errors = 0
+qb_manifest_hits = 0
+if manifest_aware:
+    try:
+        qb_manifest_client = get_qbittorrent_client(
+            base_url=os.getenv("QBIT_URL", "http://localhost:9003"),
+            username=os.getenv("QBIT_USER", "admin"),
+            password=os.getenv("QBIT_PASS", "adminpass"),
+        )
+        qb_manifest_enabled = bool(qb_manifest_client.login())
+    except Exception:
+        qb_manifest_enabled = False
+        qb_manifest_client = None
+
+
+def select_manifest_samples(rows: list[dict], limit_n: int) -> list[dict]:
+    if len(rows) <= limit_n:
+        return rows
+    selected = []
+    used = set()
+
+    def add_idx(i: int):
+        if i < 0 or i >= len(rows):
+            return
+        key = (rows[i]["name"], rows[i]["size"])
+        if key in used:
+            return
+        used.add(key)
+        selected.append(rows[i])
+
+    add_idx(0)
+    add_idx(len(rows) // 2)
+    add_idx(len(rows) - 1)
+    for idx, _ in sorted(
+        enumerate(rows),
+        key=lambda pair: (-int(pair[1].get("size", 0) or 0), pair[1].get("name", "")),
+    ):
+        if len(selected) >= limit_n:
+            break
+        add_idx(idx)
+    return selected[:limit_n]
+
+
+def manifest_for_hash(torrent_hash: str) -> dict:
+    global qb_manifest_fetches, qb_manifest_fetch_errors, qb_manifest_hits
+    key = str(torrent_hash or "").lower().strip()
+    if not key:
+        return {}
+    if key in qb_manifest_cache:
+        return qb_manifest_cache[key]
+    if not qb_manifest_enabled or qb_manifest_client is None:
+        qb_manifest_cache[key] = {}
+        return {}
+    qb_manifest_fetches += 1
+    try:
+        files = qb_manifest_client.get_torrent_files(key)
+    except Exception:
+        files = []
+    if not files:
+        qb_manifest_fetch_errors += 1
+        qb_manifest_cache[key] = {}
+        return {}
+    parsed = []
+    for f in files:
+        name = str(getattr(f, "name", "") or "").strip().lstrip("/")
+        if not name:
+            continue
+        size = int(getattr(f, "size", 0) or 0)
+        parsed.append({"name": name, "size": size})
+    if not parsed:
+        qb_manifest_fetch_errors += 1
+        qb_manifest_cache[key] = {}
+        return {}
+    qb_manifest_hits += 1
+    sample_rows = select_manifest_samples(parsed, manifest_sample)
+    manifest = {
+        "file_count": len(parsed),
+        "total_bytes": int(sum(int(x["size"]) for x in parsed)),
+        "single_file": len(parsed) == 1,
+        "single_file_name": clean_name(Path(parsed[0]["name"]).name) if len(parsed) == 1 else "",
+        "samples": sample_rows,
+    }
+    qb_manifest_cache[key] = manifest
+    return manifest
+
+
 mapped = []
 confident_hashes = []
 unresolved_hashes = []
@@ -446,8 +685,30 @@ for e in entries:
         or amount_left > 0
         or state_l in {"stoppeddl", "missingfiles", "downloading", "stalleddl"}
     )
+    category = str(e.get("category", "")).strip()
+    category_key = canonical_tracker_key(category)
+    normalized_tags = normalized_tags_for_entry(e)
+    tracker_key = tracker_key_for_entry(e)
+    tracker_name = str(e.get("tracker_name", "")).strip()
+    current_payload_root = str(e.get("current_payload_root", "")).strip()
     db = db_rows.get(torrent_hash, {})
     expected_names = expected_names_by_hash.get(torrent_hash, [])
+    root_name_hint = expected_names[0] if expected_names else clean_name(Path(content_path).name)
+    if not root_name_hint:
+        root_name_hint = clean_name(str(e.get("name", "")))
+    manifest = manifest_for_hash(torrent_hash) if manifest_aware else {}
+    manifest_file_count = int(manifest.get("file_count", 0) or 0)
+    manifest_total_bytes = int(manifest.get("total_bytes", 0) or 0)
+    manifest_samples = list(manifest.get("samples", []) or [])
+    if not root_name_hint:
+        root_name_hint = clean_name(str(manifest.get("single_file_name", "")))
+    root_hint_candidates = [x for x in [root_name_hint] + expected_names if clean_name(x)]
+    if manifest.get("single_file_name"):
+        sf = str(manifest.get("single_file_name") or "")
+        if sf and sf not in root_hint_candidates:
+            root_hint_candidates.insert(0, sf)
+    if not root_hint_candidates and root_name_hint:
+        root_hint_candidates = [root_name_hint]
     candidates = {}
     rejected = []
 
@@ -465,18 +726,27 @@ for e in entries:
         if cur is None:
             candidates[path] = {
                 "path": path,
+                "base_score": int(score),
                 "score": int(score),
+                "score_breakdown": {"base_score": int(score)},
                 "reasons": [reason],
                 "evidence": set(evidence or []),
                 "expected_matches": set(),
+                "tracker_match": 0,
             }
             return
-        if score > cur["score"]:
+        if score > cur["base_score"]:
+            cur["base_score"] = int(score)
             cur["score"] = int(score)
+            cur["score_breakdown"]["base_score"] = int(score)
         if reason not in cur["reasons"]:
             cur["reasons"].append(reason)
         for ev in evidence or []:
             cur["evidence"].add(ev)
+
+    def apply_score_delta(cand: dict, reason: str, delta: int):
+        cand["score"] += int(delta)
+        cand["score_breakdown"][reason] = cand["score_breakdown"].get(reason, 0) + int(delta)
 
     if save_path:
         add_candidate(save_path, 35, "current_save_path")
@@ -630,20 +900,110 @@ for e in entries:
                         evidence,
                     )
 
+    root_hint_set = {clean_name(x) for x in root_hint_candidates if clean_name(x)}
+    for path, meta in list(candidates.items()):
+        tail = clean_name(Path(path).name)
+        if not tail or tail not in root_hint_set:
+            continue
+        parent_path = str(Path(path).parent)
+        add_candidate(
+            parent_path,
+            max(20, int(meta.get("base_score", 0)) - 6),
+            "candidate_parent_of_expected_root",
+            [f"candidate_tail_matches_root:{tail}"],
+        )
+
     for cand in candidates.values():
+        cand["score"] = int(cand["base_score"])
+        cand["score_breakdown"] = {"base_score": int(cand["base_score"])}
         cpath = Path(cand["path"])
         for expected_name in expected_names:
             if (cpath / expected_name).exists():
                 cand["expected_matches"].add(expected_name)
         if cand["expected_matches"]:
-            cand["score"] += 25 + min(10, 2 * len(cand["expected_matches"]))
+            apply_score_delta(cand, "expected_name_bonus", 25 + min(10, 2 * len(cand["expected_matches"])))
             cand["evidence"].add("expected_name_exists")
+        cand["manifest_match_count"] = 0
+        cand["manifest_size_match_count"] = 0
+        if manifest_samples:
+            best_match = 0
+            best_size_match = 0
+            hint_pool = root_hint_candidates if root_hint_candidates else [""]
+            for root_hint in hint_pool:
+                match_count = 0
+                size_match_count = 0
+                for sample in manifest_samples:
+                    rel_name = str(sample.get("name", "") or "").strip().lstrip("/")
+                    if not rel_name:
+                        continue
+                    expected_size = int(sample.get("size", 0) or 0)
+                    if manifest.get("single_file"):
+                        sample_path = cpath / rel_name
+                    else:
+                        if root_hint:
+                            sample_path = cpath / root_hint / rel_name
+                        else:
+                            sample_path = cpath / rel_name
+                    if not sample_path.exists():
+                        continue
+                    match_count += 1
+                    try:
+                        if sample_path.is_file() and expected_size > 0 and sample_path.stat().st_size == expected_size:
+                            size_match_count += 1
+                    except OSError:
+                        pass
+                if (match_count, size_match_count) > (best_match, best_size_match):
+                    best_match = match_count
+                    best_size_match = size_match_count
+
+            cand["manifest_match_count"] = best_match
+            cand["manifest_size_match_count"] = best_size_match
+            if best_match > 0:
+                apply_score_delta(cand, "manifest_sample_match_bonus", 12 + min(24, best_match * 7))
+                if best_size_match > 0:
+                    apply_score_delta(cand, "manifest_sample_size_match_bonus", min(14, best_size_match * 4))
+                cand["evidence"].add(f"manifest_samples_match:{best_match}/{len(manifest_samples)}")
+            elif not cand["expected_matches"]:
+                apply_score_delta(cand, "manifest_sample_miss_penalty", -12)
+        if tracker_aware:
+            is_cross_seed = category.lower() in {"cross-seed", "cross_seed", "crossseed"}
+            tail_key = canonical_tracker_key(Path(cand["path"]).name)
+            cross_key = canonical_tracker_key(tracker_component_from_path(cand["path"]))
+            if is_cross_seed:
+                if cross_key:
+                    if tracker_key and cross_key == tracker_key:
+                        apply_score_delta(cand, "tracker_cross_seed_exact_bonus", 34)
+                        cand["tracker_match"] = max(cand["tracker_match"], 2)
+                    elif tracker_key and cross_key != tracker_key:
+                        apply_score_delta(cand, "tracker_cross_seed_mismatch_penalty", -36)
+                        cand["tracker_match"] = min(cand["tracker_match"], -1)
+                    else:
+                        apply_score_delta(cand, "tracker_cross_seed_structure_bonus", 6)
+                        cand["tracker_match"] = max(cand["tracker_match"], 1)
+                else:
+                    apply_score_delta(cand, "tracker_cross_seed_missing_penalty", -14)
+            else:
+                if tracker_key:
+                    if tail_key == tracker_key:
+                        apply_score_delta(cand, "tracker_folder_exact_bonus", 24)
+                        cand["tracker_match"] = max(cand["tracker_match"], 2)
+                    elif tail_key:
+                        apply_score_delta(cand, "tracker_folder_mismatch_penalty", -14)
+                        cand["tracker_match"] = min(cand["tracker_match"], -1)
+                if category_key and category.lower() not in {"cross-seed", "cross_seed", "crossseed"}:
+                    if tail_key == category_key:
+                        apply_score_delta(cand, "category_folder_exact_bonus", 14)
+                    elif tail_key:
+                        apply_score_delta(cand, "category_folder_mismatch_penalty", -8)
+                if tail_key and tail_key in normalized_tags:
+                    apply_score_delta(cand, "tag_folder_bonus", 8)
+                    cand["tracker_match"] = max(cand["tracker_match"], 1)
         if cand["path"] == save_path and is_incomplete:
             if cand["expected_matches"]:
-                cand["score"] -= 10
+                apply_score_delta(cand, "same_save_path_incomplete_penalty", -10)
                 cand["reasons"].append("same_save_path_incomplete_penalty")
             else:
-                cand["score"] -= 50
+                apply_score_delta(cand, "same_save_path_no_expected_root_penalty", -50)
                 cand["reasons"].append("same_save_path_no_expected_root_penalty")
 
     valid = []
@@ -660,14 +1020,17 @@ for e in entries:
                 {
                     "path": cand["path"],
                     "score": cand["score"],
+                    "payload_root": str(Path(cand["path"]) / root_name_hint) if root_name_hint else "",
                     "reason": ",".join(cand["reasons"]),
                     "rejected": ",".join(reject_reasons),
+                    "score_breakdown": cand["score_breakdown"],
                 }
             )
             continue
+        cand["payload_root"] = str(Path(cand["path"]) / root_name_hint) if root_name_hint else ""
         valid.append(cand)
 
-    ordered = sorted(valid, key=lambda c: (-c["score"], c["path"]))
+    ordered = sorted(valid, key=lambda c: (-c["score"], -int(c.get("tracker_match", 0)), c["path"]))
     best = ordered[0] if ordered else None
     decision = "UNRESOLVED"
     confidence = "unresolved"
@@ -697,9 +1060,19 @@ for e in entries:
             "amount_left": amount_left,
             "save_path": save_path,
             "content_path": content_path,
+            "current_payload_root": current_payload_root,
+            "manifest_file_count": manifest_file_count,
+            "manifest_total_bytes": manifest_total_bytes,
+            "manifest_sample_count": len(manifest_samples),
             "db_root_path": db_root_path,
             "db_save_path": db_save_path,
             "expected_names": expected_names,
+            "root_name_hint": root_name_hint,
+            "category": category,
+            "tags": str(e.get("tags", "")),
+            "normalized_tags": normalized_tags,
+            "tracker_name": tracker_name,
+            "tracker_key": tracker_key,
             "recoverable": bool(best is not None),
             "same_as_save_path": bool(best and best["path"] == save_path),
             "decision": decision,
@@ -708,22 +1081,33 @@ for e in entries:
             "best_expected_matches": sorted(best["expected_matches"]) if best else [],
             "payload_hash": db.get("payload_hash", ""),
             "best_candidate": best["path"] if best else "",
+            "best_payload_root": best.get("payload_root", "") if best else "",
             "best_score": best["score"] if best else 0,
             "best_reason": ",".join(best["reasons"]) if best else "",
+            "best_score_breakdown": best.get("score_breakdown", {}) if best else {},
+            "best_tracker_match": int(best.get("tracker_match", 0)) if best else 0,
+            "best_manifest_match_count": int(best.get("manifest_match_count", 0)) if best else 0,
+            "best_manifest_size_match_count": int(best.get("manifest_size_match_count", 0)) if best else 0,
             "candidate_count": len(ordered),
             "invalid_candidate_count": len(rejected),
             "confidence": confidence,
             "candidates": [
                 {
+                    "rank": idx + 1,
                     "path": c["path"],
+                    "payload_root": c.get("payload_root", ""),
                     "score": c["score"],
                     "reason": ",".join(c["reasons"]),
+                    "score_breakdown": c.get("score_breakdown", {}),
                     "evidence": sorted(c["evidence"]),
                     "expected_matches": sorted(c["expected_matches"]),
+                    "tracker_match": int(c.get("tracker_match", 0)),
+                    "manifest_match_count": int(c.get("manifest_match_count", 0)),
+                    "manifest_size_match_count": int(c.get("manifest_size_match_count", 0)),
                 }
-                for c in ordered[:6]
+                for idx, c in enumerate(ordered[:candidate_top_n])
             ],
-            "rejected_candidates": rejected[:6],
+            "rejected_candidates": rejected[:candidate_top_n],
         }
     )
 
@@ -740,6 +1124,15 @@ summary = {
     "manual_only": 0,
     "unresolved": sum(1 for m in mapped if m["confidence"] == "unresolved"),
     "allowed_roots": allowed_root_strs,
+    "tracker_aware": bool(tracker_aware),
+    "tracker_registry_path": str(tracker_registry_path),
+    "tracker_alias_count": len(tracker_alias_map),
+    "manifest_aware": bool(manifest_aware),
+    "manifest_sample": int(manifest_sample),
+    "manifest_fetches": int(qb_manifest_fetches),
+    "manifest_hits": int(qb_manifest_hits),
+    "manifest_fetch_errors": int(qb_manifest_fetch_errors),
+    "candidate_top_n": int(candidate_top_n),
     "policy": "no_manual_queue_under_known_roots",
 }
 
@@ -755,14 +1148,26 @@ fieldnames = [
     "candidate_count",
     "invalid_candidate_count",
     "best_score",
+    "best_score_breakdown",
+    "best_tracker_match",
+    "best_manifest_match_count",
+    "best_manifest_size_match_count",
     "best_reason",
     "best_candidate",
+    "best_payload_root",
     "same_as_save_path",
     "recoverable",
     "save_path",
     "content_path",
+    "current_payload_root",
+    "manifest_file_count",
+    "manifest_total_bytes",
+    "manifest_sample_count",
     "db_root_path",
     "payload_hash",
+    "category",
+    "tracker_name",
+    "tracker_key",
 ]
 with tsv_out.open("w", encoding="utf-8", newline="") as fh:
     writer = csv.DictWriter(fh, fieldnames=fieldnames, delimiter="\t")
@@ -788,7 +1193,11 @@ print(
     f"mapped={summary['mapped_entries']} "
     f"confident={summary['confident']} likely={summary['likely']} "
     f"ambiguous={summary['ambiguous']} manual_only={summary['manual_only']} "
-    f"unresolved={summary['unresolved']}"
+    f"unresolved={summary['unresolved']} "
+    f"tracker_aware={int(summary['tracker_aware'])} "
+    f"manifest_aware={int(summary['manifest_aware'])} "
+    f"manifest_hits={summary['manifest_hits']}/{summary['manifest_fetches']} "
+    f"candidate_top_n={summary['candidate_top_n']}"
 )
 print(f"json_output={json_out}")
 print(f"tsv_output={tsv_out}")

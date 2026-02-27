@@ -148,6 +148,58 @@ class TestQBittorrentRelocation:
         assert mock_session.post.call_args_list[0].args[0].endswith("/api/v2/torrents/pause")
         assert mock_session.post.call_args_list[1].args[0].endswith("/api/v2/torrents/stop")
 
+    def test_get_torrents_by_hashes_uses_single_info_request(self):
+        """Batch hash lookup should issue one torrents/info request and return hash map."""
+        mock_session = Mock()
+
+        ok = Mock()
+        ok.raise_for_status = Mock()
+        ok.json.return_value = [
+            {
+                "hash": "abc123",
+                "name": "A",
+                "save_path": "/save/a",
+                "content_path": "/save/a/A.mkv",
+                "category": "cross-seed",
+                "tags": "tag1",
+                "state": "stoppedUP",
+                "size": 10,
+                "progress": 1.0,
+                "auto_tmm": False,
+                "amount_left": 0,
+                "completed": 10,
+                "downloaded": 10,
+                "completion_on": 0,
+            },
+            {
+                "hash": "def456",
+                "name": "B",
+                "save_path": "/save/b",
+                "content_path": "/save/b/B.mkv",
+                "category": "cross-seed",
+                "tags": "tag2",
+                "state": "stoppedDL",
+                "size": 20,
+                "progress": 0.5,
+                "auto_tmm": False,
+                "amount_left": 10,
+                "completed": 10,
+                "downloaded": 10,
+                "completion_on": 0,
+            },
+        ]
+        mock_session.get.return_value = ok
+
+        client = QBittorrentClient()
+        client.session = mock_session
+        client._authenticated = True
+
+        out = client.get_torrents_by_hashes(["abc123", "def456"])
+        assert set(out.keys()) == {"abc123", "def456"}
+        args, kwargs = mock_session.get.call_args
+        assert args[0].endswith("/api/v2/torrents/info")
+        assert kwargs["params"]["hashes"] == "abc123|def456"
+
     def test_resume_falls_back_to_start_on_404(self):
         """qB variants without resume endpoint should use start endpoint."""
         mock_session = Mock()

@@ -1142,6 +1142,7 @@ def execute_plan(
     total_actions = len(actions)
     processed = 0
     status_updates: list[tuple[str, int, Optional[str], int]] = []
+    refresh_actions: list[ActionInfo] = []
     status_flush_threshold = 200
 
     jdupes_cmd = None
@@ -1170,6 +1171,41 @@ def execute_plan(
             f"samples={history_stats.invoked_samples}/{history_stats.total_samples}"
         )
 
+    def flush_action_updates() -> None:
+        """Persist batched action/refresh updates and release write transaction."""
+        if dry_run:
+            return
+        if not status_updates and not refresh_actions:
+            return
+
+        for refresh_action in refresh_actions:
+            _maybe_refresh_files_for_action(conn, refresh_action, plan.mount_point)
+        refresh_actions.clear()
+
+        if status_updates:
+            conn.executemany("""
+                UPDATE link_actions
+                SET status = ?,
+                    bytes_saved = ?,
+                    error_message = ?,
+                    executed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, status_updates)
+            status_updates.clear()
+
+        # Keep plan counters reasonably fresh so interrupted runs are observable.
+        update_plan_progress(
+            conn,
+            plan_id,
+            start_execution=True,
+            executed=executed,
+            failed=failed,
+            skipped=skipped,
+            total_saved=total_bytes_saved,
+            commit=False,
+        )
+        conn.commit()
+
     def record(action: ActionInfo, status: str, bytes_saved: int = 0, error_message: Optional[str] = None) -> None:
         nonlocal executed, failed, skipped, total_bytes_saved, processed
         processed += 1
@@ -1190,7 +1226,7 @@ def execute_plan(
             if status == "completed" or (
                 status == "skipped" and (error_message or "").lower().startswith("files are already hardlinked")
             ):
-                _maybe_refresh_files_for_action(conn, action, plan.mount_point)
+                refresh_actions.append(action)
             if status == 'completed':
                 status_updates.append(('completed', bytes_saved, None, action.id))
             elif status == 'failed':
@@ -1199,26 +1235,7 @@ def execute_plan(
                 status_updates.append(('skipped', 0, None, action.id))
 
             if len(status_updates) >= status_flush_threshold:
-                conn.executemany("""
-                    UPDATE link_actions
-                    SET status = ?,
-                        bytes_saved = ?,
-                        error_message = ?,
-                        executed_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                """, status_updates)
-                status_updates.clear()
-                update_plan_progress(
-                    conn,
-                    plan_id,
-                    start_execution=True,
-                    executed=executed,
-                    failed=failed,
-                    skipped=skipped,
-                    total_saved=total_bytes_saved,
-                    commit=False,
-                )
-                conn.commit()
+                flush_action_updates()
 
     if not dry_run:
         update_plan_progress(
@@ -1242,6 +1259,7 @@ def execute_plan(
 
         group_total = len(groups)
         for group_index, (hash_val, group_actions) in enumerate(groups.items(), start=1):
+            flush_action_updates()
             valid = []
             log_lines = []
             stamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -1316,6 +1334,7 @@ def execute_plan(
                 )
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
+                flush_action_updates()
                 continue
 
             canonical_counts = Counter(str(entry[1]) for entry in valid)
@@ -1340,6 +1359,7 @@ def execute_plan(
                 )
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
+                flush_action_updates()
                 continue
 
             if zfs_expected_dataset:
@@ -1398,6 +1418,7 @@ def execute_plan(
                 )
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
+                flush_action_updates()
                 continue
 
             if dry_run:
@@ -1424,6 +1445,7 @@ def execute_plan(
                     record(action, 'completed', bytes_saved=action.bytes_to_save)
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
+                flush_action_updates()
                 continue
 
             list_path, list_count = _write_jdupes_list(paths)
@@ -1451,6 +1473,7 @@ def execute_plan(
                 log_lines.append("group_status: insufficient_unique_paths")
                 log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
                 _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
+                flush_action_updates()
                 continue
             run_started = time.monotonic()
             try:
@@ -1512,6 +1535,7 @@ def execute_plan(
                 )
             log_name = f"plan-{plan_id}_sha256-{hash_val[:12]}.log"
             _write_jdupes_log(jdupes_log_dir, log_name, "\n".join(log_lines) + "\n")
+            flush_action_updates()
 
     else:
         for action in actions:
@@ -1533,17 +1557,7 @@ def execute_plan(
 
     # Final progress update
     if not dry_run:
-        if status_updates:
-            conn.executemany("""
-                UPDATE link_actions
-                SET status = ?,
-                    bytes_saved = ?,
-                    error_message = ?,
-                    executed_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, status_updates)
-            status_updates.clear()
-            conn.commit()
+        flush_action_updates()
 
         # Check if all actions are done
         cursor.execute("""

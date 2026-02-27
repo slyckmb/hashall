@@ -14,6 +14,99 @@ from datetime import datetime
 from typing import Optional
 
 
+def _quote_ident(name: str) -> str:
+    """Return a safely quoted SQLite identifier."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _files_index_specs(table_name: str) -> dict[str, str]:
+    """Return expected index_name -> column mapping for a files_* table."""
+    return {
+        f"idx_{table_name}_quick_hash": "quick_hash",
+        f"idx_{table_name}_sha1": "sha1",
+        f"idx_{table_name}_sha256": "sha256",
+        f"idx_{table_name}_inode": "inode",
+        f"idx_{table_name}_status": "status",
+    }
+
+
+def ensure_files_indexes(cursor: sqlite3.Cursor, table_name: str, verbose: bool = False) -> dict:
+    """
+    Ensure a files_* table has the expected index set and ownership.
+
+    Repairs two failure modes:
+    - index-name conflicts where idx_files_<id>_* points at another files table
+    - stale renamed indexes left behind on this table (idx_files_<oldid>_*)
+    """
+    expected = _files_index_specs(table_name)
+    dropped_stale = 0
+    dropped_conflicts = 0
+    recreated = 0
+
+    # Remove stale hashall index names attached to this table but not expected.
+    stale_rows = cursor.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type='index'
+          AND tbl_name=?
+          AND name LIKE 'idx_files_%'
+          AND sql IS NOT NULL
+        """,
+        (table_name,),
+    ).fetchall()
+    for row in stale_rows:
+        idx_name = row[0]
+        if idx_name in expected:
+            continue
+        cursor.execute(f"DROP INDEX IF EXISTS {_quote_ident(idx_name)}")
+        dropped_stale += 1
+        if verbose:
+            print(f"⚠️  Dropped stale index {idx_name} on {table_name}")
+
+    # Ensure each expected index name belongs to this table and uses the right column.
+    for idx_name, col_name in expected.items():
+        row = cursor.execute(
+            """
+            SELECT tbl_name
+            FROM sqlite_master
+            WHERE type='index' AND name=?
+            """,
+            (idx_name,),
+        ).fetchone()
+
+        if row and row[0] != table_name:
+            cursor.execute(f"DROP INDEX IF EXISTS {_quote_ident(idx_name)}")
+            dropped_conflicts += 1
+            if verbose:
+                print(f"⚠️  Dropped conflicting index {idx_name} from table {row[0]}")
+            row = None
+
+        if row and row[0] == table_name:
+            # Validate index column definition; rebuild if drifted.
+            cols = [r[2] for r in cursor.execute(f"PRAGMA index_info({_quote_ident(idx_name)})").fetchall()]
+            if cols != [col_name]:
+                cursor.execute(f"DROP INDEX IF EXISTS {_quote_ident(idx_name)}")
+                if verbose:
+                    print(f"⚠️  Rebuilding malformed index {idx_name} (cols={cols})")
+                row = None
+
+        if row is None:
+            cursor.execute(
+                f"CREATE INDEX IF NOT EXISTS {_quote_ident(idx_name)} "
+                f"ON {_quote_ident(table_name)}({_quote_ident(col_name)})"
+            )
+            recreated += 1
+
+    return {
+        "table": table_name,
+        "expected": len(expected),
+        "dropped_stale": dropped_stale,
+        "dropped_conflicts": dropped_conflicts,
+        "recreated": recreated,
+    }
+
+
 def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
     """
     Create files_{device_id} table if not exists. Returns table name.
@@ -47,10 +140,11 @@ def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
         The table and indexes will only be created if they don't already exist.
     """
     table_name = f"files_{device_id}"
+    table_ident = _quote_ident(table_name)
 
     # Create the table
     cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
+        CREATE TABLE IF NOT EXISTS {table_ident} (
             path TEXT PRIMARY KEY,
             size INTEGER NOT NULL,
             mtime REAL NOT NULL,
@@ -69,50 +163,27 @@ def ensure_files_table(cursor: sqlite3.Cursor, device_id: int) -> str:
 
     # Migrate existing tables: add quick_hash column if missing
     try:
-        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN quick_hash TEXT")
+        cursor.execute(f"ALTER TABLE {table_ident} ADD COLUMN quick_hash TEXT")
     except Exception:
         # Column already exists, ignore
         pass
 
     # Migrate existing tables: add sha256 column if missing
     try:
-        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN sha256 TEXT")
+        cursor.execute(f"ALTER TABLE {table_ident} ADD COLUMN sha256 TEXT")
     except Exception:
         # Column already exists, ignore
         pass
 
     # Migrate existing tables: add hash_source column if missing
     try:
-        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN hash_source TEXT")
+        cursor.execute(f"ALTER TABLE {table_ident} ADD COLUMN hash_source TEXT")
     except Exception:
         # Column already exists, ignore
         pass
 
-    # Create indexes for efficient querying
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_quick_hash
-        ON {table_name}(quick_hash)
-    """)
-
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_sha1
-        ON {table_name}(sha1)
-    """)
-
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_sha256
-        ON {table_name}(sha256)
-    """)
-
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_inode
-        ON {table_name}(inode)
-    """)
-
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_status
-        ON {table_name}(status)
-    """)
+    # Ensure expected index set is present and attached to the right table.
+    ensure_files_indexes(cursor, table_name, verbose=False)
 
     return table_name
 
@@ -165,8 +236,48 @@ def rename_files_table(cursor: sqlite3.Cursor, old_device_id: int, new_device_id
 
     # Rename the table (quoted to handle negative or unusual device_ids)
     cursor.execute(f'ALTER TABLE "{old_table_name}" RENAME TO "{new_table_name}"')
+    # Rebuild indexes so names/ownership match the new table id.
+    ensure_files_indexes(cursor, new_table_name, verbose=False)
 
     print(f"✅ Renamed table: files_{old_device_id} → files_{new_device_id}")
+
+
+def repair_all_files_table_indexes(cursor: sqlite3.Cursor, verbose: bool = True) -> dict:
+    """
+    One-shot repair for files_* table indexes in an existing DB.
+
+    Returns summary counters and per-table details.
+    """
+    rows = cursor.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type='table' AND name LIKE 'files_%'
+        ORDER BY name
+        """
+    ).fetchall()
+
+    repaired = []
+    totals = {
+        "tables": 0,
+        "dropped_stale": 0,
+        "dropped_conflicts": 0,
+        "recreated": 0,
+    }
+
+    for row in rows:
+        table_name = str(row[0] or "").strip()
+        if not table_name:
+            continue
+        stats = ensure_files_indexes(cursor, table_name, verbose=verbose)
+        repaired.append(stats)
+        totals["tables"] += 1
+        totals["dropped_stale"] += int(stats["dropped_stale"])
+        totals["dropped_conflicts"] += int(stats["dropped_conflicts"])
+        totals["recreated"] += int(stats["recreated"])
+
+    totals["details"] = repaired
+    return totals
 
 
 def suggest_device_alias(path: Path, cursor: sqlite3.Cursor) -> str:

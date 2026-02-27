@@ -316,6 +316,100 @@ class QBittorrentClient:
                 time.sleep(delay)
         return []
 
+    def get_torrents_by_hashes(self, torrent_hashes: List[str]) -> Dict[str, QBitTorrent]:
+        """
+        Fetch torrent info for a specific set of hashes in one API request.
+
+        Args:
+            torrent_hashes: Iterable of infohash strings
+
+        Returns:
+            Mapping of lowercased hash -> QBitTorrent
+        """
+        self._ensure_authenticated()
+        clean_hashes = sorted({str(h or "").strip().lower() for h in torrent_hashes if str(h or "").strip()})
+        if not clean_hashes:
+            return {}
+
+        response: Optional[requests.Response] = None
+        hashes_arg = "|".join(clean_hashes)
+        for attempt in range(1, self.request_retries + 1):
+            try:
+                response = self.session.get(
+                    f"{self.base_url}/api/v2/torrents/info",
+                    params={"hashes": hashes_arg},
+                    timeout=self.request_timeout,
+                )
+                response.raise_for_status()
+                torrents_data = response.json()
+                out: Dict[str, QBitTorrent] = {}
+                for t in torrents_data:
+                    h = str(t.get("hash", "") or "").lower().strip()
+                    if not h:
+                        continue
+                    out[h] = QBitTorrent(
+                        hash=t.get('hash', ''),
+                        name=t.get('name', ''),
+                        save_path=t.get('save_path', ''),
+                        content_path=t.get('content_path', ''),
+                        category=t.get('category', ''),
+                        tags=t.get('tags', ''),
+                        state=t.get('state', ''),
+                        size=t.get('size', 0),
+                        progress=t.get('progress', 0.0),
+                        auto_tmm=bool(t.get('auto_tmm', False)),
+                        amount_left=t.get('amount_left', 0),
+                        completed=t.get('completed', 0),
+                        downloaded=t.get('downloaded', 0),
+                        completion_on=t.get('completion_on', 0),
+                    )
+                self.last_error = None
+                return out
+            except requests.Timeout as e:
+                self.last_error = str(e)
+                if attempt < self.request_retries:
+                    delay = self._retry_delay_seconds(attempt)
+                    print(
+                        f"⚠️ qB info batch timeout hashes={len(clean_hashes)} "
+                        f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f} "
+                        f"timeout_s={self.request_timeout}: {e}"
+                    )
+                    time.sleep(delay)
+                    continue
+                print(f"⚠️ Failed to get batch info for {len(clean_hashes)} torrents: {e}")
+                return {}
+            except requests.HTTPError as e:
+                status = self._status_from_error(e, response)
+                self.last_error = f"HTTP {status}" if status is not None else str(e)
+                if (
+                    status in self.retryable_http_statuses
+                    and attempt < self.request_retries
+                ):
+                    delay = self._retry_delay_seconds(attempt)
+                    print(
+                        f"⚠️ qB info batch retry hashes={len(clean_hashes)} "
+                        f"attempt={attempt + 1}/{self.request_retries} "
+                        f"status={status} retry_in_s={delay:.1f}"
+                    )
+                    time.sleep(delay)
+                    continue
+                print(f"⚠️ Failed to get batch info for {len(clean_hashes)} torrents: {e}")
+                return {}
+            except requests.RequestException as e:
+                self.last_error = str(e)
+                if attempt < self.request_retries:
+                    delay = self._retry_delay_seconds(attempt)
+                    if self.debug_http:
+                        print(
+                            f"⚠️ qB info batch retry hashes={len(clean_hashes)} "
+                            f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f} error={e}"
+                        )
+                    time.sleep(delay)
+                    continue
+                print(f"⚠️ Failed to get batch info for {len(clean_hashes)} torrents: {e}")
+                return {}
+        return {}
+
     def get_torrent_root_path(self, torrent: QBitTorrent,
                              files: Optional[List[QBitFile]] = None) -> str:
         """
@@ -348,71 +442,103 @@ class QBittorrentClient:
             # Multi-file torrent: save_path/torrent_name/
             return str(save_path / torrent.name)
 
-    def pause_torrent(self, torrent_hash: str) -> bool:
-        """
-        Pause a torrent.
+    def _normalize_hashes(self, torrent_hashes: List[str]) -> List[str]:
+        """Normalize and deduplicate hashes while preserving order."""
+        out: List[str] = []
+        seen = set()
+        for raw in torrent_hashes:
+            h = str(raw or "").strip()
+            if not h or h in seen:
+                continue
+            seen.add(h)
+            out.append(h)
+        return out
 
-        Args:
-            torrent_hash: Torrent infohash
-
-        Returns:
-            True if successful, False otherwise
-
-        Note:
-            Follows tracker-ctl pattern from qbit_migrate_paths.sh
-            Uses qBittorrent API: POST /api/v2/torrents/pause
-        """
+    def _post_hashes_action(
+        self,
+        endpoint: str,
+        torrent_hashes: List[str],
+        action_name: str,
+        fallback_endpoint: Optional[str] = None,
+    ) -> bool:
+        """POST a hashes payload to a qB endpoint with retries and optional 404 fallback."""
+        hashes = self._normalize_hashes(torrent_hashes)
+        if not hashes:
+            return True
         self._ensure_authenticated()
+        hashes_arg = "|".join(hashes)
+        scope = hashes[0][:16] if len(hashes) == 1 else f"{len(hashes)} hashes"
 
         response: Optional[requests.Response] = None
         for attempt in range(1, self.request_retries + 1):
             try:
                 response = self.session.post(
-                    f"{self.base_url}/api/v2/torrents/pause",
-                    data={"hashes": torrent_hash},
+                    f"{self.base_url}{endpoint}",
+                    data={"hashes": hashes_arg},
                     timeout=self.request_timeout,
                 )
-                try:
-                    response.raise_for_status()
-                    self.last_error = None
-                    return True
-                except requests.HTTPError as e:
-                    status = self._status_from_error(e, response)
-                    if status == 404:
-                        # Some qB builds expose stop/start instead of pause/resume.
-                        fallback = self.session.post(
-                            f"{self.base_url}/api/v2/torrents/stop",
-                            data={"hashes": torrent_hash},
-                            timeout=self.request_timeout,
-                        )
-                        fallback.raise_for_status()
-                        self.last_error = None
-                        return True
-                    self.last_error = f"HTTP {status}" if status is not None else str(e)
-                    if (
-                        status in self.retryable_http_statuses
-                        and attempt < self.request_retries
-                    ):
-                        delay = self._retry_delay_seconds(attempt)
-                        print(
-                            f"⚠️ qB pause retry hash={torrent_hash[:16]} "
-                            f"attempt={attempt + 1}/{self.request_retries} "
-                            f"status={status} retry_in_s={delay:.1f}"
-                        )
-                        time.sleep(delay)
-                        continue
-                    raise
+                response.raise_for_status()
+                self.last_error = None
+                return True
             except requests.Timeout as e:
                 self.last_error = str(e)
                 if attempt < self.request_retries:
                     delay = self._retry_delay_seconds(attempt)
                     print(
-                        f"⚠️ qB pause timeout hash={torrent_hash[:16]} "
+                        f"⚠️ qB {action_name} timeout hash={scope} "
                         f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f}"
                     )
                     time.sleep(delay)
                     continue
-                print(f"⚠️ Failed to pause torrent {torrent_hash}: {e}")
+                print(f"⚠️ Failed to {action_name} torrent(s) {scope}: {e}")
+                return False
+            except requests.HTTPError as e:
+                status = self._status_from_error(e, response)
+                if status == 404 and fallback_endpoint:
+                    try:
+                        fallback = self.session.post(
+                            f"{self.base_url}{fallback_endpoint}",
+                            data={"hashes": hashes_arg},
+                            timeout=self.request_timeout,
+                        )
+                        fallback.raise_for_status()
+                        self.last_error = None
+                        return True
+                    except requests.RequestException as fallback_exc:
+                        self.last_error = str(fallback_exc)
+                        if attempt < self.request_retries:
+                            delay = self._retry_delay_seconds(attempt)
+                            print(
+                                f"⚠️ qB {action_name} fallback retry hash={scope} "
+                                f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f}"
+                            )
+                            time.sleep(delay)
+                            continue
+                        print(f"⚠️ Failed to {action_name} torrent(s) {scope}: {fallback_exc}")
+                        return False
+                body = self._response_body_snippet(
+                    e.response if e.response is not None else response
+                )
+                self.last_error = f"HTTP {status}" if status is not None else str(e)
+                if (
+                    status in self.retryable_http_statuses
+                    and attempt < self.request_retries
+                ):
+                    delay = self._retry_delay_seconds(attempt)
+                    print(
+                        f"⚠️ qB {action_name} retry hash={scope} "
+                        f"attempt={attempt + 1}/{self.request_retries} "
+                        f"status={status} retry_in_s={delay:.1f}"
+                    )
+                    time.sleep(delay)
+                    continue
+                msg = (
+                    f"⚠️ Failed to {action_name} torrent(s) {scope}: "
+                    f"HTTP {status if status is not None else '?'}"
+                )
+                if body:
+                    msg += f" body={body}"
+                print(msg)
                 return False
             except requests.RequestException as e:
                 self.last_error = str(e)
@@ -420,95 +546,50 @@ class QBittorrentClient:
                     delay = self._retry_delay_seconds(attempt)
                     if self.debug_http:
                         print(
-                            f"⚠️ qB pause retry hash={torrent_hash[:16]} "
+                            f"⚠️ qB {action_name} retry hash={scope} "
                             f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f} error={e}"
                         )
                     time.sleep(delay)
                     continue
-                print(f"⚠️ Failed to pause torrent {torrent_hash}: {e}")
+                print(f"⚠️ Failed to {action_name} torrent(s) {scope}: {e}")
                 return False
         return False
+
+    def pause_torrents(self, torrent_hashes: List[str]) -> bool:
+        """
+        Pause one or more torrents.
+
+        Uses qBittorrent API: POST /api/v2/torrents/pause
+        Falls back to /api/v2/torrents/stop on 404.
+        """
+        return self._post_hashes_action(
+            endpoint="/api/v2/torrents/pause",
+            torrent_hashes=torrent_hashes,
+            action_name="pause",
+            fallback_endpoint="/api/v2/torrents/stop",
+        )
+
+    def pause_torrent(self, torrent_hash: str) -> bool:
+        """Pause a single torrent."""
+        return self.pause_torrents([torrent_hash])
+
+    def resume_torrents(self, torrent_hashes: List[str]) -> bool:
+        """
+        Resume one or more torrents.
+
+        Uses qBittorrent API: POST /api/v2/torrents/resume
+        Falls back to /api/v2/torrents/start on 404.
+        """
+        return self._post_hashes_action(
+            endpoint="/api/v2/torrents/resume",
+            torrent_hashes=torrent_hashes,
+            action_name="resume",
+            fallback_endpoint="/api/v2/torrents/start",
+        )
 
     def resume_torrent(self, torrent_hash: str) -> bool:
-        """
-        Resume a paused torrent.
-
-        Args:
-            torrent_hash: Torrent infohash
-
-        Returns:
-            True if successful, False otherwise
-
-        Note:
-            Follows tracker-ctl pattern from qbit_migrate_paths.sh
-            Uses qBittorrent API: POST /api/v2/torrents/resume
-        """
-        self._ensure_authenticated()
-
-        response: Optional[requests.Response] = None
-        for attempt in range(1, self.request_retries + 1):
-            try:
-                response = self.session.post(
-                    f"{self.base_url}/api/v2/torrents/resume",
-                    data={"hashes": torrent_hash},
-                    timeout=self.request_timeout,
-                )
-                try:
-                    response.raise_for_status()
-                    self.last_error = None
-                    return True
-                except requests.HTTPError as e:
-                    status = self._status_from_error(e, response)
-                    if status == 404:
-                        # Some qB builds expose stop/start instead of pause/resume.
-                        fallback = self.session.post(
-                            f"{self.base_url}/api/v2/torrents/start",
-                            data={"hashes": torrent_hash},
-                            timeout=self.request_timeout,
-                        )
-                        fallback.raise_for_status()
-                        self.last_error = None
-                        return True
-                    self.last_error = f"HTTP {status}" if status is not None else str(e)
-                    if (
-                        status in self.retryable_http_statuses
-                        and attempt < self.request_retries
-                    ):
-                        delay = self._retry_delay_seconds(attempt)
-                        print(
-                            f"⚠️ qB resume retry hash={torrent_hash[:16]} "
-                            f"attempt={attempt + 1}/{self.request_retries} "
-                            f"status={status} retry_in_s={delay:.1f}"
-                        )
-                        time.sleep(delay)
-                        continue
-                    raise
-            except requests.Timeout as e:
-                self.last_error = str(e)
-                if attempt < self.request_retries:
-                    delay = self._retry_delay_seconds(attempt)
-                    print(
-                        f"⚠️ qB resume timeout hash={torrent_hash[:16]} "
-                        f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f}"
-                    )
-                    time.sleep(delay)
-                    continue
-                print(f"⚠️ Failed to resume torrent {torrent_hash}: {e}")
-                return False
-            except requests.RequestException as e:
-                self.last_error = str(e)
-                if attempt < self.request_retries:
-                    delay = self._retry_delay_seconds(attempt)
-                    if self.debug_http:
-                        print(
-                            f"⚠️ qB resume retry hash={torrent_hash[:16]} "
-                            f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f} error={e}"
-                        )
-                    time.sleep(delay)
-                    continue
-                print(f"⚠️ Failed to resume torrent {torrent_hash}: {e}")
-                return False
-        return False
+        """Resume a single torrent."""
+        return self.resume_torrents([torrent_hash])
 
 
     def set_location(self, torrent_hash: str, new_location: str) -> bool:
@@ -590,78 +671,21 @@ class QBittorrentClient:
                 return False
         return False
 
+    def recheck_torrents(self, torrent_hashes: List[str]) -> bool:
+        """
+        Trigger force recheck for one or more torrents.
+
+        Uses qBittorrent API: POST /api/v2/torrents/recheck
+        """
+        return self._post_hashes_action(
+            endpoint="/api/v2/torrents/recheck",
+            torrent_hashes=torrent_hashes,
+            action_name="recheck",
+        )
+
     def recheck_torrent(self, torrent_hash: str) -> bool:
-        """
-        Trigger a force recheck for a torrent.
-
-        Args:
-            torrent_hash: Torrent infohash
-
-        Returns:
-            True if request accepted, False otherwise
-        """
-        self._ensure_authenticated()
-
-        response: Optional[requests.Response] = None
-        for attempt in range(1, self.request_retries + 1):
-            try:
-                response = self.session.post(
-                    f"{self.base_url}/api/v2/torrents/recheck",
-                    data={"hashes": torrent_hash},
-                    timeout=self.request_timeout,
-                )
-                response.raise_for_status()
-                self.last_error = None
-                return True
-            except requests.Timeout as e:
-                self.last_error = str(e)
-                if attempt < self.request_retries:
-                    delay = self._retry_delay_seconds(attempt)
-                    print(
-                        f"⚠️ qB recheck timeout hash={torrent_hash[:16]} "
-                        f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f}"
-                    )
-                    time.sleep(delay)
-                    continue
-                print(f"⚠️ Failed to recheck torrent {torrent_hash}: {e}")
-                return False
-            except requests.HTTPError as e:
-                status = self._status_from_error(e, response)
-                body = self._response_body_snippet(
-                    e.response if e.response is not None else response
-                )
-                self.last_error = f"HTTP {status}" if status is not None else str(e)
-                if (
-                    status in self.retryable_http_statuses
-                    and attempt < self.request_retries
-                ):
-                    delay = self._retry_delay_seconds(attempt)
-                    print(
-                        f"⚠️ qB recheck retry hash={torrent_hash[:16]} "
-                        f"attempt={attempt + 1}/{self.request_retries} "
-                        f"status={status} retry_in_s={delay:.1f}"
-                    )
-                    time.sleep(delay)
-                    continue
-                msg = f"⚠️ Failed to recheck torrent {torrent_hash}: HTTP {status if status is not None else '?'}"
-                if body:
-                    msg += f" body={body}"
-                print(msg)
-                return False
-            except requests.RequestException as e:
-                self.last_error = str(e)
-                if attempt < self.request_retries:
-                    delay = self._retry_delay_seconds(attempt)
-                    if self.debug_http:
-                        print(
-                            f"⚠️ qB recheck retry hash={torrent_hash[:16]} "
-                            f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f} error={e}"
-                        )
-                    time.sleep(delay)
-                    continue
-                print(f"⚠️ Failed to recheck torrent {torrent_hash}: {e}")
-                return False
-        return False
+        """Trigger force recheck for a single torrent."""
+        return self.recheck_torrents([torrent_hash])
 
     def set_auto_management(self, torrent_hash: str, enabled: bool) -> bool:
         """

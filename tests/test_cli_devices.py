@@ -36,6 +36,13 @@ class TestDevicesCLI(unittest.TestCase):
         # Command should run successfully
         self.assertEqual(result.exit_code, 0)
 
+    def test_devices_repair_indexes_command_exists(self):
+        """Test that 'devices repair-indexes' command exists and runs."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ['devices', 'repair-indexes', '--db', str(self.db_path)])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("index_repair", result.output)
+
     def test_devices_list_empty_database(self):
         """Test 'devices list' with no devices registered."""
         runner = CliRunner()

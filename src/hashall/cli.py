@@ -3253,6 +3253,31 @@ def devices_list(db):
         click.echo(row_line)
 
 
+@devices.command("repair-indexes")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--quiet", is_flag=True, help="Reduce per-index repair output.")
+def devices_repair_indexes(db, quiet):
+    """
+    Repair files_* index ownership and naming drift after device-id table renames.
+    """
+    from hashall.model import connect_db
+    from hashall.device import repair_all_files_table_indexes
+
+    conn = connect_db(Path(db))
+    cursor = conn.cursor()
+    summary = repair_all_files_table_indexes(cursor, verbose=not quiet)
+    conn.commit()
+    conn.close()
+
+    click.echo(
+        "index_repair "
+        f"tables={summary['tables']} "
+        f"dropped_stale={summary['dropped_stale']} "
+        f"dropped_conflicts={summary['dropped_conflicts']} "
+        f"recreated={summary['recreated']}"
+    )
+
+
 @devices.command('alias')
 @click.argument('current_name')
 @click.argument('new_alias')
