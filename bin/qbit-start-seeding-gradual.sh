@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.1.1
-# Date:    2026-02-24
+# Version: 1.1.3
+# Date:    2026-02-26
 #
 # After each batch waits for state to settle, then checks no torrent flipped
 # to a downloading/broken state. On any bad state: immediately stops the
@@ -19,8 +19,8 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.1.1"
-SCRIPT_DATE="2026-02-24"
+SCRIPT_VERSION="1.1.3"
+SCRIPT_DATE="2026-02-26"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
@@ -89,6 +89,22 @@ qb_login() {
     --data-urlencode "password=$QB_PASS" >/dev/null
 }
 
+fetch_torrents_info() {
+  local attempts="${1:-3}"
+  local delay_s="${2:-2}"
+  local i=1
+  while [[ "$i" -le "$attempts" ]]; do
+    if curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPJSON" 2>>"$LOG"; then
+      return 0
+    fi
+    log "  warn: failed to fetch torrent states (attempt $i/$attempts)"
+    qb_login 2>/dev/null || true
+    sleep "$delay_s"
+    i=$(( i + 1 ))
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # run_ramp_start — batch ramp logic. Uses global LOG (caller sets per-run path).
 # Returns 0 on clean completion, 1 if halted due to downloading detection.
@@ -107,7 +123,10 @@ run_ramp_start() {
   log "════════════════════════════════════════════════════════════"
 
   # Fetch all torrents into temp file (avoids stdin conflicts with Python heredocs)
-  curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPJSON"
+  if ! fetch_torrents_info 3 1; then
+    log "ERROR: unable to fetch initial torrent list from qB API"
+    return 1
+  fi
 
   # Collect stoppedUP hashes (100% progress, not seeding yet)
   CANDIDATES=$(python3 - "$TMPJSON" "$resume_flag" << 'PYEOF'
@@ -188,10 +207,25 @@ PYEOF
       qb_login 2>/dev/null || true
 
       # Check all started torrents for bad states (read watch list from file, not arg)
-      curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPJSON"
-      CHECK=$(python3 - "$TMPJSON" "$TMPWATCH" << 'PYEOF'
+      if ! fetch_torrents_info 3 2; then
+        log "  ERROR: unable to fetch state after settle window; stopping batch and halting."
+        PIPE=$(IFS='|'; echo "${batch[*]}")
+        curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
+            --data-urlencode "hashes=$PIPE" >/dev/null 2>&1 || true
+        log "  stop HTTP sent for batch: $PIPE"
+        echo "safety_check_failed:fetch_torrents_info:$PIPE" > "$TMPHALT"
+        failures=$(( failures + bsize ))
+        ramp_halted=true
+        break
+      fi
+
+      if ! CHECK=$(python3 - "$TMPJSON" "$TMPWATCH" << 'PYEOF'
 import json, sys
-data = json.load(open(sys.argv[1]))
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"state_json_parse_error:{e}", file=sys.stderr)
+    raise SystemExit(2)
 watch = set(open(sys.argv[2]).read().split())
 download_bad = {'checkingDL','downloading','stalledDL'}
 other_bad    = {'missingFiles','error'}
@@ -211,12 +245,39 @@ for t in data:
         results['ok'].append(h)
 print(json.dumps(results))
 PYEOF
-)
+      ); then
+        log "  ERROR: failed to parse state-check payload; stopping batch and halting."
+        PIPE=$(IFS='|'; echo "${batch[*]}")
+        curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
+            --data-urlencode "hashes=$PIPE" >/dev/null 2>&1 || true
+        log "  stop HTTP sent for batch: $PIPE"
+        echo "safety_check_failed:parse_state_payload:$PIPE" > "$TMPHALT"
+        failures=$(( failures + bsize ))
+        ramp_halted=true
+        break
+      fi
 
-      N_OK=$(echo "$CHECK" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['ok']))")
-      N_DL=$(echo "$CHECK" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['downloading']))")
-      N_BAD=$(echo "$CHECK" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['other_bad']))")
-      N_STOP=$(echo "$CHECK" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['still_stopped']))")
+      if ! COUNTS=$(python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception as e:
+    print(f"state_counts_parse_error:{e}", file=sys.stderr)
+    raise SystemExit(2)
+print(len(d.get("ok", [])), len(d.get("downloading", [])), len(d.get("other_bad", [])), len(d.get("still_stopped", [])))
+' "$CHECK"
+      ); then
+        log "  ERROR: failed to summarize state-check payload; stopping batch and halting."
+        PIPE=$(IFS='|'; echo "${batch[*]}")
+        curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
+            --data-urlencode "hashes=$PIPE" >/dev/null 2>&1 || true
+        log "  stop HTTP sent for batch: $PIPE"
+        echo "safety_check_failed:parse_state_counts:$PIPE" > "$TMPHALT"
+        failures=$(( failures + bsize ))
+        ramp_halted=true
+        break
+      fi
+      read -r N_OK N_DL N_BAD N_STOP <<< "$COUNTS"
 
       log "  check: ok=$N_OK  downloading=$N_DL  other_bad=$N_BAD  still_stoppedUP=$N_STOP"
 
@@ -316,7 +377,7 @@ while true; do
       rm -f "$DAEMON_HALT_RESET"
     else
       TS="$(date '+%F %T')"
-      echo "error ts=$TS HALT: downloading detected hashes=$HALT_HASHES — create $DAEMON_HALT_RESET to resume" | tee -a "$DAEMON_LOG"
+      echo "error ts=$TS HALT: safety gate triggered detail=$HALT_HASHES — create $DAEMON_HALT_RESET to resume" | tee -a "$DAEMON_LOG"
       sleep "$POLL"
       continue
     fi
@@ -356,7 +417,7 @@ PYEOF
     else
       HALT_HASHES="$(cat "$TMPHALT" 2>/dev/null || echo 'unknown')"
       DAEMON_HALTED=true
-      echo "$(date '+%F %T') [daemon] Ramp HALTED (downloading detected) hashes=$HALT_HASHES — log: $LOG" | tee -a "$DAEMON_LOG"
+      echo "$(date '+%F %T') [daemon] Ramp HALTED (safety gate) detail=$HALT_HASHES — log: $LOG" | tee -a "$DAEMON_LOG"
       echo "$(date '+%F %T') [daemon] Create $DAEMON_HALT_RESET to resume after investigating" | tee -a "$DAEMON_LOG"
     fi
   fi
