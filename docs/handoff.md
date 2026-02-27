@@ -4,50 +4,46 @@ Last updated: 2026-02-27
 
 ## Scope
 
-This handoff tracks the active qB repair campaign and qB seeding guard tooling.
-Use this as the current state, not dated session prompts.
+This handoff tracks the active qB torrent repair campaign for unresolved `stoppedDL` / `missingFiles` items.
 
-## Execution Model
+## Status
 
-- User executes CLI locally for live monitoring.
-- Agent provides commands, expected outcomes, analysis, and targeted patches.
-- Agent only runs mutating commands with explicit approval from user.
-- Do not run concurrent mutating commands against qB/catalog DB.
+- New repair strategy is implemented in standalone tools (`qb-repair-v2`, `qb-repair-fresh`, `qb-fastresume-retarget`).
+- Pilot path proved end-to-end mechanics:
+  - candidate planning from live qB manifests
+  - unique hardlink reconstruction
+  - fastresume patching
+  - `setLocation` + `recheck`
+- Current operator instruction is to wait while qB checking backlog drains before next mutation batch.
 
-## Current Status
+## Safety Constraints
 
-- Shared qB polling cache is now available and wired into two tools:
-  - `bin/qbit-cache-daemon.py` (lease-based daemon, exits after idle grace)
-  - `bin/qbit-cache-agent.py` (lease renew + `--ensure-daemon` + `--status`)
-  - `bin/qbit-start-seeding-gradual.sh --cache --cache-max-age N`
-  - `bin/rehome-99_qb-checking-watch.sh --cache --cache-max-age N`
-- `qbit-start-seeding-gradual.sh` is patched for two live issues:
-  - Removed argv-size failure (`Argument list too long`) by reading large JSON payload from temp files.
-  - Safety gate changed to flip-only behavior:
-    - HALT only on newly flipped downloading-like hashes after a batch.
-    - Pre-existing downloading-like hashes are logged but do not trigger HALT.
-- `qbit-start-seeding-gradual.sh` version is now `1.3.1`.
+- One mutating qB workflow at a time.
+- Preserve no-download policy during repairs.
+- Treat `/data/media` and `/stash/media` as equivalent aliases.
+- Keep per-hash unique payload roots when rebuilding.
+- If a target root is exclusive to one hash and rejected, quarantine via `<root>.bad.<timestamp>.<hash>` before rebuild.
 
 ## What Worked
 
-- Shared cache mode reduced direct qB polling contention across scripts.
-- Flip-only safety gate matches operational intent: "do not allow new flips to downloading."
-- Guard scripts remain fail-closed on parsing/fetch errors.
+- Strict manifest-first matching improved confidence vs legacy heuristics.
+- Fastresume alignment removed a major source of save-path reversion.
+- Unique-root rebuild approach avoids accidental cross-seed root reuse.
 
-## Current Risks
+## What Remains
 
-- Pre-existing downloading-like hashes in protected scope are still present and must be handled in repair flow.
-- Remaining unresolved queue objective remains:
-  - `stoppedDL=168`
-  - `missingFiles=10`
-- `--resume` flag in `qbit-start-seeding-gradual.sh` is currently a no-op and should be cleaned up or implemented.
+- Continue batch repair for remaining unresolved hashes after checking queue stabilizes.
+- Re-run classification and close out failure categories:
+  - no-live-candidate
+  - ambiguous/multiple sibling roots
+  - cross-seed variants requiring parent-derived hardlink reconstruction
 
 ## Next Ordered Steps
 
-1. Restart seeding daemon command on patched script version:
-   - `bin/qbit-start-seeding-gradual.sh --daemon --apply --min-batch 1 --poll 15 --cache --cache-max-age 15`
-2. Confirm daemon logs show:
-   - `downloading_new=<N>` and `downloading_preexisting=<N>`
-   - HALT only when `downloading_new > 0`
-3. Continue phase-2 relink workflow for unresolved hashes while monitoring with cache-enabled watchdog:
-   - `bin/rehome-99_qb-checking-watch.sh --enforce-paused-dl --cache --cache-max-age 5 --interval 15`
+1. Wait for checking queue to settle (per operator instruction).
+2. Snapshot live unresolved set (`missingFiles`, `stoppedDL`) and export working hash list.
+3. Run `qb-repair-v2 plan` against current live set.
+4. Run `prepare --apply` for low-risk candidates.
+5. Patch fastresume for prepared hashes.
+6. Run `recheck --apply` with download-protection monitor.
+7. Reclassify remaining failures and stage phase-3 strategy.
