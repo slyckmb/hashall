@@ -1,10 +1,10 @@
 # Next Agent Prompt (Living)
 
-Date context: 2026-02-27
+Date context: 2026-02-28
 
 ## Mission
 
-Finish phase-2 repair for unresolved qB torrents using the standalone v2 flow (no legacy script dependency).
+Drive stoppedDL count down using the bucket/drain/apply loop with high-precision matching and minimal repeat verification.
 
 ## Non-Negotiables
 
@@ -13,49 +13,55 @@ Finish phase-2 repair for unresolved qB torrents using the standalone v2 flow (n
 - One mutating qB workflow at a time.
 - Treat `/data/media` and `/stash/media` as equivalent aliases.
 - Keep payload roots unique per hash when rebuilding.
+- Never allow repaired hashes to remain in active download states.
 
 ## Current State
 
-- Standalone tools now available:
-  - `bin/qb-repair-v2.py`
-  - `bin/qb-repair-fresh.py`
-  - `bin/qb-fastresume-retarget.py`
-- Pilot repairs completed with prepare + fastresume patch + recheck flow.
-- Operator requested pause while qB checking backlog drains (`checking ~= 103`).
+- Active tooling:
+  - `bin/qb-stoppeddl-bucket.py` (`0.1.2`)
+  - `bin/qb-stoppeddl-drain.py` (`0.1.10`)
+  - `bin/qb-stoppeddl-apply.py` (`0.2.3`)
+  - `bin/qb-stoppeddl-apply-watch.sh` (`0.1.2`)
+  - `bin/qb-stoppeddl-roundloop.sh` (`0.1.3`)
+  - `bin/qb-libtorrent-verify.py`
+- qB API helper includes torrent export (`src/hashall/qbittorrent.py`).
+- Drain logic now narrows weak global DB candidates and stops candidate testing after first class `a`.
+- Apply writes completion marker used by wrappers: `reports/apply-last-completion.json`.
 
 ## Standard Flow
 
-1. `plan`
-2. `prepare --apply`
-3. `patch-fastresume --apply`
-4. `recheck --apply`
-5. verify no download flips and update unresolved counts
+1. Refresh bucket (`stoppedDL` + torrent exports).
+2. Drain once (grade hashes `a/b/c/d/e`).
+3. Apply only `a/b/c` for active hashes.
+4. Wait for checking queue to clear.
+5. Repeat until stoppedDL converges.
 
 ## Primary Commands (Next Run)
 
 ```bash
-bin/qb-repair-v2.py plan --report-json /tmp/qb-repair-v2-plan.json
+bin/qb-stoppeddl-roundloop.sh \
+  --bucket-dir /tmp/qb-stoppeddl-bucket-live \
+  --max-candidates 1 \
+  --verify-timeout 2400 \
+  --ops-mode auto
 ```
 
 ```bash
-bin/qb-repair-v2.py prepare --plan /tmp/qb-repair-v2-plan.json --apply --report-json /tmp/qb-repair-v2-prepare.json
-```
-
-```bash
-bin/qb-repair-v2.py patch-fastresume --report /tmp/qb-repair-v2-prepare.json --allow-status prepared --apply
-```
-
-```bash
-bin/qb-repair-v2.py recheck --report /tmp/qb-repair-v2-prepare.json --allow-status prepared --apply --monitor-seconds 300 --poll 5
+bin/qb-stoppeddl-apply-watch.sh \
+  --bucket-dir /tmp/qb-stoppeddl-bucket-live \
+  --poll 20 \
+  -- --ops-mode auto --no-wait-recheck
 ```
 
 ## Validation Checklist
 
-1. No repaired hashes transition into active downloading states.
-2. `save_path` / `content_path` align with rebuilt unique roots.
-3. Recheck progresses to seeding-safe terminal states.
-4. Remaining failures are recategorized for next wave.
+1. No repaired hashes transition into sustained downloading states.
+2. `setLocation`/fastresume values align with selected content roots.
+3. Apply completion markers are fresh for each applied drain report.
+4. Drain reports show decreasing `remaining` and no repeated verify of already-scored candidates.
 
 ## Fastresume Note
 
-If qB retains internal download-location values in fastresume, `setLocation` can be ignored on restart. Always patch fastresume for prepared hashes before starting recheck wave.
+Default apply behavior is automatic:
+- if any selected hash needs fastresume changes, perform one offline batch patch/restart pass;
+- otherwise use API no-wait flow (`setLocation` + recheck dispatch).
