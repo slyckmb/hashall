@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SEMVER="0.1.3"
+SEMVER="0.1.4"
 SCRIPT_NAME="$(basename "$0")"
 
 usage() {
@@ -21,6 +21,8 @@ Defaults are set for unattended operation.
 Options:
   --bucket-dir PATH           Bucket directory (default: /tmp/qb-stoppeddl-bucket-live)
   --states CSV                Bucket states (default: stoppedDL)
+  --ignore-hashes CSV         Hashes/prefixes to ignore (pipe/comma/space separated)
+  --ignore-hashes-file PATH   Ignore hash file (default: <bucket>/download-whitelist-hashes.txt if present)
   --max-rounds N              Max rounds (0 = unlimited, default: 0)
   --max-no-progress N         Stop after N rounds with no stoppedDL reduction (default: 3)
   --round-sleep N             Sleep seconds between rounds (default: 5)
@@ -51,6 +53,8 @@ cd "$repo_root"
 
 BUCKET_DIR="${BUCKET_DIR:-/tmp/qb-stoppeddl-bucket-live}"
 STATES="${STATES:-stoppedDL}"
+IGNORE_HASHES="${IGNORE_HASHES:-}"
+IGNORE_HASHES_FILE="${IGNORE_HASHES_FILE:-}"
 MAX_ROUNDS="${MAX_ROUNDS:-0}"
 MAX_NO_PROGRESS="${MAX_NO_PROGRESS:-3}"
 ROUND_SLEEP="${ROUND_SLEEP:-5}"
@@ -78,6 +82,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --bucket-dir) BUCKET_DIR="${2:-}"; shift 2 ;;
     --states) STATES="${2:-}"; shift 2 ;;
+    --ignore-hashes) IGNORE_HASHES="${2:-}"; shift 2 ;;
+    --ignore-hashes-file) IGNORE_HASHES_FILE="${2:-}"; shift 2 ;;
     --max-rounds) MAX_ROUNDS="${2:-}"; shift 2 ;;
     --max-no-progress) MAX_NO_PROGRESS="${2:-}"; shift 2 ;;
     --round-sleep) ROUND_SLEEP="${2:-}"; shift 2 ;;
@@ -216,18 +222,38 @@ eligible_in_report() {
 }
 
 run_bucket_refresh() {
-  python3 bin/qb-stoppeddl-bucket.py \
+  local cmd
+  cmd=(
+    python3 bin/qb-stoppeddl-bucket.py
     --bucket-dir "$BUCKET_DIR" \
     --states "$STATES" \
     --prune-absent
+  )
+  if [[ -n "${IGNORE_HASHES}" ]]; then
+    cmd+=(--ignore-hashes "$IGNORE_HASHES")
+  fi
+  if [[ -n "${IGNORE_HASHES_FILE}" ]]; then
+    cmd+=(--ignore-hashes-file "$IGNORE_HASHES_FILE")
+  fi
+  "${cmd[@]}"
 }
 
 run_bucket_resync() {
-  python3 bin/qb-stoppeddl-bucket.py \
+  local cmd
+  cmd=(
+    python3 bin/qb-stoppeddl-bucket.py
     --bucket-dir "$BUCKET_DIR" \
     --states "$STATES" \
     --no-export-torrents \
     --prune-absent
+  )
+  if [[ -n "${IGNORE_HASHES}" ]]; then
+    cmd+=(--ignore-hashes "$IGNORE_HASHES")
+  fi
+  if [[ -n "${IGNORE_HASHES_FILE}" ]]; then
+    cmd+=(--ignore-hashes-file "$IGNORE_HASHES_FILE")
+  fi
+  "${cmd[@]}"
 }
 
 run_drain_once() {
@@ -243,6 +269,12 @@ run_drain_once() {
   )
   if [[ "$SHOW_VERIFY_PROGRESS" == "true" ]]; then
     cmd+=(--show-verify-progress)
+  fi
+  if [[ -n "${IGNORE_HASHES}" ]]; then
+    cmd+=(--ignore-hashes "$IGNORE_HASHES")
+  fi
+  if [[ -n "${IGNORE_HASHES_FILE}" ]]; then
+    cmd+=(--ignore-hashes-file "$IGNORE_HASHES_FILE")
   fi
   "${cmd[@]}"
 }
@@ -279,6 +311,12 @@ run_apply_once() {
     --timeout "$APPLY_TIMEOUT"
     --completion-file "$COMPLETION_FILE"
   )
+  if [[ -n "${IGNORE_HASHES}" ]]; then
+    cmd+=(--ignore-hashes "$IGNORE_HASHES")
+  fi
+  if [[ -n "${IGNORE_HASHES_FILE}" ]]; then
+    cmd+=(--ignore-hashes-file "$IGNORE_HASHES_FILE")
+  fi
   if [[ "$WAIT_RECHECK" == "true" ]]; then
     cmd+=(--wait-recheck)
   fi
@@ -303,6 +341,7 @@ echo "start ts=$(ts) script=${SCRIPT_NAME} semver=${SEMVER} bucket_dir=${BUCKET_
 echo "config max_rounds=${MAX_ROUNDS} max_no_progress=${MAX_NO_PROGRESS} round_sleep=${ROUND_SLEEP}s checking_poll=${CHECKING_POLL}s checking_timeout=${CHECKING_TIMEOUT}s"
 echo "config drain_limit=${DRAIN_LIMIT} max_candidates=${MAX_CANDIDATES} verify_timeout=${VERIFY_TIMEOUT}s verify_poll=${VERIFY_POLL}s show_verify_progress=${SHOW_VERIFY_PROGRESS}"
 echo "config apply_mode=${APPLY_MODE} allow_class=${ALLOW_CLASS} min_ratio=${MIN_RATIO} ops_mode=${OPS_MODE} apply_poll=${APPLY_POLL}s apply_timeout=${APPLY_TIMEOUT}s wait_recheck=${WAIT_RECHECK}"
+echo "config ignore_hashes=${IGNORE_HASHES:-<none>} ignore_hashes_file=${IGNORE_HASHES_FILE:-<default_if_present>}"
 echo "paths reports_dir=${REPORTS_DIR} active_hashes=${ACTIVE_HASHES_FILE} completion_file=${COMPLETION_FILE} stop_file=${STOP_FILE} clear_stop_file=${CLEAR_STOP_FILE}"
 
 round=0

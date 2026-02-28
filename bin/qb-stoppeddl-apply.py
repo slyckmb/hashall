@@ -20,7 +20,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import get_qbittorrent_client
 
-SEMVER = "0.2.3"
+SEMVER = "0.2.4"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
@@ -144,6 +144,19 @@ def parse_hash_tokens(text: str) -> List[str]:
         seen.add(h)
         out.append(h)
     return out
+
+
+def hash_matches_filters(torrent_hash: str, filters: Set[str]) -> bool:
+    h = str(torrent_hash or "").strip().lower()
+    if not h:
+        return False
+    for f in filters:
+        token = str(f or "").strip().lower()
+        if not token:
+            continue
+        if h == token or h.startswith(token):
+            return True
+    return False
 
 
 def read_hash_file(path: str) -> List[str]:
@@ -506,6 +519,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--hashes", default="", help="Optional explicit hashes filter")
     p.add_argument("--hashes-file", default="", help="Optional hash file filter")
+    p.add_argument(
+        "--ignore-hashes",
+        default="",
+        help="Optional hashes/prefixes to ignore (pipe/comma/space separated)",
+    )
+    p.add_argument(
+        "--ignore-hashes-file",
+        default="",
+        help=(
+            "Optional ignore hash file (one per line, # comments allowed). "
+            "If omitted, <bucket>/download-whitelist-hashes.txt is used when present."
+        ),
+    )
     p.add_argument("--limit", type=int, default=0, help="Max rows to process (0 = all)")
     p.add_argument(
         "--require-verified",
@@ -658,6 +684,14 @@ def main() -> int:
 
     allow_classes = parse_classes(args.allow_class)
     allow_hashes = set(parse_hash_tokens(args.hashes) + read_hash_file(args.hashes_file))
+    default_ignore_file = bucket_dir / "download-whitelist-hashes.txt"
+    ignore_hashes = parse_hash_tokens(args.ignore_hashes)
+    if str(args.ignore_hashes_file or "").strip():
+        ignore_hashes.extend(read_hash_file(args.ignore_hashes_file))
+    elif default_ignore_file.exists():
+        ignore_hashes.extend(read_hash_file(str(default_ignore_file)))
+    ignore_hashes = list(dict.fromkeys(ignore_hashes))
+    ignore_set = set(ignore_hashes)
     plan = build_plan(
         drain_obj=drain_obj,
         allow_classes=allow_classes,
@@ -665,12 +699,18 @@ def main() -> int:
         require_verified=bool(args.require_verified),
         min_ratio=float(args.min_ratio),
     )
+    ignored_plan = 0
+    if ignore_set:
+        before_ignore = len(plan)
+        plan = [row for row in plan if not hash_matches_filters(row.torrent_hash, ignore_set)]
+        ignored_plan = max(0, before_ignore - len(plan))
     if args.limit > 0:
         plan = plan[: args.limit]
 
     print(
         f"plan report={drain_path} apply={bool(args.apply)} "
-        f"selected={len(plan)} allow_class={','.join(sorted(allow_classes))} min_ratio={float(args.min_ratio):.4f}"
+        f"selected={len(plan)} allow_class={','.join(sorted(allow_classes))} min_ratio={float(args.min_ratio):.4f} "
+        f"ignored={ignored_plan}"
     , flush=True)
 
     fr_dir = Path(args.fastresume_dir).expanduser()
@@ -727,6 +767,7 @@ def main() -> int:
         "blocked": 0,
         "recheck_dispatched": 0,
         "skipped_live_state": 0,
+        "skipped_ignored": int(ignored_plan),
         "fr_needed": fr_needed,
         "fr_patched": 0,
         "fr_patch_failed": 0,
@@ -745,6 +786,7 @@ def main() -> int:
             "blocked": 0,
             "recheck_dispatched": 0,
             "skipped_live_state": 0,
+            "skipped_ignored": int(counts["skipped_ignored"]),
             "fr_needed": int(counts["fr_needed"]),
             "fr_patched": 0,
             "fr_patch_failed": 0,
@@ -976,6 +1018,7 @@ def main() -> int:
             "blocked": int(counts["blocked"]),
             "recheck_dispatched": int(counts["recheck_dispatched"]),
             "skipped_live_state": int(counts["skipped_live_state"]),
+            "skipped_ignored": int(counts["skipped_ignored"]),
             "fr_needed": int(counts["fr_needed"]),
             "fr_patched": int(counts["fr_patched"]),
             "fr_patch_failed": int(counts["fr_patch_failed"]),
@@ -987,6 +1030,8 @@ def main() -> int:
         "generated_at": started,
         "drain_report": str(drain_path),
         "bucket_dir": str(bucket_dir),
+        "ignored_hashes": ignore_hashes,
+        "ignore_hashes_file": str(Path(args.ignore_hashes_file).expanduser()) if str(args.ignore_hashes_file or "").strip() else (str(default_ignore_file) if default_ignore_file.exists() else ""),
         "args": vars(args),
         "summary": summary,
         "entries": out_rows,
@@ -1018,6 +1063,7 @@ def main() -> int:
         f"summary mode={summary.get('mode','unknown')} planned={summary['planned']} applied={summary['applied']} "
         f"dispatched={summary.get('recheck_dispatched',0)} ok={summary['ok']} failed={summary['failed']} "
         f"skipped_live_state={summary.get('skipped_live_state',0)} "
+        f"skipped_ignored={summary.get('skipped_ignored',0)} "
         f"blocked={summary['blocked']} fr_needed={summary.get('fr_needed',0)} "
         f"fr_patched={summary.get('fr_patched',0)} fr_patch_failed={summary.get('fr_patch_failed',0)}"
     , flush=True)

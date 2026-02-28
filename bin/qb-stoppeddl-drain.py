@@ -22,7 +22,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.1.10"
+SEMVER = "0.1.11"
 SCRIPT_NAME = Path(__file__).name
 
 
@@ -109,6 +109,19 @@ def parse_hash_tokens(text: str) -> List[str]:
         seen.add(h)
         out.append(h)
     return out
+
+
+def hash_matches_filters(torrent_hash: str, filters: Set[str]) -> bool:
+    h = str(torrent_hash or "").strip().lower()
+    if not h:
+        return False
+    for f in filters:
+        token = str(f or "").strip().lower()
+        if not token:
+            continue
+        if h == token or h.startswith(token):
+            return True
+    return False
 
 
 def read_hash_file(path: str) -> List[str]:
@@ -685,6 +698,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hashes", default="", help="Optional explicit hashes")
     p.add_argument("--hashes-file", default="", help="Optional hash file")
     p.add_argument(
+        "--ignore-hashes",
+        default="",
+        help="Optional hashes/prefixes to ignore (pipe/comma/space separated)",
+    )
+    p.add_argument(
+        "--ignore-hashes-file",
+        default="",
+        help=(
+            "Optional ignore hash file (one per line, # comments allowed). "
+            "If omitted, <bucket>/download-whitelist-hashes.txt is used when present."
+        ),
+    )
+    p.add_argument(
         "--limit",
         type=int,
         default=1,
@@ -875,6 +901,7 @@ def main() -> int:
     solved_hashes_skipped = 0
     live_state_skipped = 0
     quick_prefilter_skipped = 0
+    ignored_hashes_skipped = 0
 
     entries_by_hash = load_bucket_entries(index_path)
     if not entries_by_hash:
@@ -885,12 +912,24 @@ def main() -> int:
     selected_hashes = parse_hash_tokens(args.hashes)
     selected_hashes.extend(read_hash_file(args.hashes_file))
     selected_hashes = list(dict.fromkeys(selected_hashes))
+    default_ignore_file = bucket_dir / "download-whitelist-hashes.txt"
+    ignore_hashes = parse_hash_tokens(args.ignore_hashes)
+    if str(args.ignore_hashes_file or "").strip():
+        ignore_hashes.extend(read_hash_file(args.ignore_hashes_file))
+    elif default_ignore_file.exists():
+        ignore_hashes.extend(read_hash_file(str(default_ignore_file)))
+    ignore_hashes = list(dict.fromkeys(ignore_hashes))
+    ignore_set = set(ignore_hashes)
     if not selected_hashes:
         selected_hashes = [
             h
             for h, e in sorted(entries_by_hash.items(), key=lambda kv: (str(kv[1].get("first_seen", "")), str(kv[0])))
             if str(e.get("state", "")).lower() == "stoppeddl"
         ]
+    if ignore_set:
+        before_ignore = len(selected_hashes)
+        selected_hashes = [h for h in selected_hashes if not hash_matches_filters(h, ignore_set)]
+        ignored_hashes_skipped = max(0, before_ignore - len(selected_hashes))
     if args.limit > 0:
         selected_hashes = selected_hashes[: args.limit]
 
@@ -943,6 +982,7 @@ def main() -> int:
             "solved_hashes_skipped": int(solved_hashes_skipped),
             "live_state_skipped": int(live_state_skipped),
             "quick_prefilter_skipped": int(quick_prefilter_skipped),
+            "ignored_hashes_skipped": int(ignored_hashes_skipped),
         }
         payload = {
             "tool": "qb-stoppeddl-drain",
@@ -955,6 +995,8 @@ def main() -> int:
             "index_json": str(index_path),
             "bad_cache_json": str(bad_cache_path),
             "tested_cache_json": str(tested_cache_path),
+            "ignored_hashes": ignore_hashes,
+            "ignore_hashes_file": str(Path(args.ignore_hashes_file).expanduser()) if str(args.ignore_hashes_file or "").strip() else (str(default_ignore_file) if default_ignore_file.exists() else ""),
             "args": vars(args),
             "summary": summary,
             "entries": out_entries,
@@ -1496,7 +1538,8 @@ def main() -> int:
         f"tested_hashes={summary['tested_cache_hashes']} tested_paths={summary['tested_cache_paths']} "
         f"tested_updates={summary['tested_cache_updates']} tested_skipped={summary['tested_candidates_skipped']} "
         f"solved_skipped={summary['solved_hashes_skipped']} live_skipped={summary['live_state_skipped']} "
-        f"quick_prefilter_skipped={summary['quick_prefilter_skipped']}"
+        f"quick_prefilter_skipped={summary['quick_prefilter_skipped']} "
+        f"ignored_hashes_skipped={summary['ignored_hashes_skipped']}"
     )
     print(f"report_json={report_path}")
     print(f"latest_json={latest_report_path}")

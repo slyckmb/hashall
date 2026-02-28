@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.3.2
+# Version: 1.3.3
 # Date:    2026-02-28
 #
 # After each batch waits for state to settle, then checks the protected watch
@@ -10,7 +10,7 @@
 # Idempotent: only targets stoppedUP (100%) torrents; already-started ones
 # are stalledUP/uploading and are skipped automatically.
 #
-# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N]
+# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
 #   --apply        Execute changes (dry-run if omitted)
 #   --resume       Skip torrents already in stalledUP/uploading/queuedUP
 #   --daemon       Continuous watch loop: poll QB, run ramp when stoppedUP >= --min-batch
@@ -18,10 +18,12 @@
 #   --poll N       Daemon poll interval in seconds (default: 60)
 #   --cache        Use shared qB cache agent for torrents/info reads
 #   --cache-max-age N  Max cache age seconds when --cache is enabled (default: 15)
+#   --ignore-hashes CSV  Hashes/prefixes to ignore in watch/candidate checks
+#   --ignore-hashes-file PATH  Ignore hash file (default: /tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt if present)
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.3.3"
 SCRIPT_DATE="2026-02-28"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -42,10 +44,13 @@ USE_CACHE=false
 CACHE_MAX_AGE=15
 CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qbit-cache-agent.py}"
 CACHE_CLIENT_ID="${SCRIPT_NAME}:$$"
+IGNORE_HASHES=""
+IGNORE_HASHES_FILE=""
+DEFAULT_IGNORE_HASHES_FILE="${QBIT_IGNORE_HASHES_FILE:-/tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt}"
 
 usage_short() {
   cat <<EOF
-Usage: $SCRIPT_NAME [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [-h|--help]
+Usage: $SCRIPT_NAME [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--ignore-hashes CSV] [--ignore-hashes-file PATH] [-h|--help]
 Try '$SCRIPT_NAME --help' for details.
 EOF
 }
@@ -92,6 +97,15 @@ Options:
       Smaller values request a fresher snapshot.
       Default: 15
 
+  --ignore-hashes CSV
+      Hashes/prefixes to exclude from watch and candidate logic.
+
+  --ignore-hashes-file PATH
+      Ignore hash file (one hash/prefix per line; # comments allowed).
+      If omitted, defaults to:
+      /tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt
+      when that file exists.
+
   -h, --help
       Show this detailed help and exit.
 
@@ -107,6 +121,9 @@ Examples:
 
   # Same, but read qB state via shared cache (max age 5s)
   bin/qbit-start-seeding-gradual.sh --daemon --apply --min-batch 1 --poll 60 --cache --cache-max-age 5
+
+  # Ignore a known legacy downloader by hash prefix
+  bin/qbit-start-seeding-gradual.sh --daemon --apply --ignore-hashes 102b7bf38155
 EOF
 }
 
@@ -125,6 +142,8 @@ while [[ $# -gt 0 ]]; do
     --poll)       POLL="$2"; shift 2 ;;
     --cache)      USE_CACHE=true; shift ;;
     --cache-max-age) CACHE_MAX_AGE="$2"; shift 2 ;;
+    --ignore-hashes) IGNORE_HASHES="$2"; shift 2 ;;
+    --ignore-hashes-file) IGNORE_HASHES_FILE="$2"; shift 2 ;;
     *)
       echo "unknown: $1" >&2
       usage_short >&2
@@ -154,6 +173,7 @@ TMPCHECK=$(mktemp /tmp/qb_sg_check.XXXXXX)   # JSON state-check payload
 TMPBASE_DL=$(mktemp /tmp/qb_sg_base_dl.XXXXXX) # baseline downloading-like hashes in watch scope
 TMPCURR_DL=$(mktemp /tmp/qb_sg_curr_dl.XXXXXX) # current downloading-like hashes in watch scope
 TMPFLIP_DL=$(mktemp /tmp/qb_sg_flip_dl.XXXXXX) # newly flipped hashes (current - baseline)
+TMPIGNORE=$(mktemp /tmp/qb_sg_ignore.XXXXXX)   # normalized ignore hashes/prefixes
 
 # Persistent daemon log (only used when --daemon is active)
 DAEMON_LOG="$LOGDIR/daemon.log"
@@ -165,7 +185,7 @@ LOG="$LOGDIR/start-seeding-gradual-$(date +%Y%m%d-%H%M%S).log"
 _DAEMON_EXIT=false
 
 _cleanup() {
-  rm -f "$COOKIE" "$TMPJSON" "$TMPWATCH" "$TMPHALT" "$TMPCHECK" "$TMPBASE_DL" "$TMPCURR_DL" "$TMPFLIP_DL"
+  rm -f "$COOKIE" "$TMPJSON" "$TMPWATCH" "$TMPHALT" "$TMPCHECK" "$TMPBASE_DL" "$TMPCURR_DL" "$TMPFLIP_DL" "$TMPIGNORE"
 }
 trap '_cleanup' EXIT
 
@@ -218,17 +238,26 @@ fetch_torrents_info() {
 
 build_watch_scope_before_today() {
   local data_file="$1"
-  python3 - "$data_file" << 'PYEOF'
+  local ignore_file="$2"
+  python3 - "$data_file" "$ignore_file" << 'PYEOF'
 import json, sys
 from datetime import datetime
 
 data = json.load(open(sys.argv[1]))
+ignore = [line.strip().lower() for line in open(sys.argv[2]).read().splitlines() if line.strip()]
+def ignored(h):
+    h = str(h or "").strip().lower()
+    if not h:
+        return False
+    return any(h == p or h.startswith(p) for p in ignore)
 today = datetime.now()
 today_start = int(datetime(today.year, today.month, today.day).timestamp())
 
 for t in data:
     h = str(t.get("hash", "")).strip()
     if not h:
+        continue
+    if ignored(h):
         continue
     added_raw = t.get("added_on", 0)
     try:
@@ -238,6 +267,53 @@ for t in data:
     # Unknown added_on is treated as protected for fail-closed safety.
     if added_on <= 0 or added_on < today_start:
         print(h)
+PYEOF
+}
+
+build_ignore_hashes() {
+  python3 - "$IGNORE_HASHES" "$IGNORE_HASHES_FILE" "$DEFAULT_IGNORE_HASHES_FILE" << 'PYEOF'
+import sys
+from pathlib import Path
+
+def parse_tokens(text: str):
+    if not text:
+        return []
+    for ch in ("|", ",", "\n", "\t"):
+        text = text.replace(ch, " ")
+    out = []
+    seen = set()
+    for tok in text.split():
+        h = tok.strip().lower()
+        if not h or h in seen:
+            continue
+        seen.add(h)
+        out.append(h)
+    return out
+
+inline, explicit_file, default_file = sys.argv[1], sys.argv[2], sys.argv[3]
+vals = []
+vals.extend(parse_tokens(inline))
+src = ""
+if explicit_file:
+    src = explicit_file
+elif Path(default_file).exists():
+    src = default_file
+if src and Path(src).exists():
+    lines = []
+    for line in Path(src).read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        lines.append(s)
+    vals.extend(parse_tokens(" ".join(lines)))
+
+# De-dup stable order
+seen = set()
+for h in vals:
+    if h in seen:
+        continue
+    seen.add(h)
+    print(h)
 PYEOF
 }
 
@@ -263,8 +339,18 @@ run_ramp_start() {
     return 1
   fi
 
+  build_ignore_hashes > "$TMPIGNORE" || true
+  IGNORE_COUNT=$(grep -c . "$TMPIGNORE" 2>/dev/null || true)
+  if [[ "$IGNORE_COUNT" -gt 0 ]]; then
+    local ignore_src="$IGNORE_HASHES_FILE"
+    if [[ -z "$ignore_src" && -f "$DEFAULT_IGNORE_HASHES_FILE" ]]; then
+      ignore_src="$DEFAULT_IGNORE_HASHES_FILE"
+    fi
+    log "  ignore hash filters loaded: $IGNORE_COUNT source=${ignore_src:-inline}"
+  fi
+
   # Build protected watch scope: all torrents added before today (fail-closed on unknown added_on).
-  if ! build_watch_scope_before_today "$TMPJSON" > "$TMPWATCH"; then
+  if ! build_watch_scope_before_today "$TMPJSON" "$TMPIGNORE" > "$TMPWATCH"; then
     log "ERROR: unable to derive protected watch scope"
     return 1
   fi
@@ -295,10 +381,16 @@ PYEOF
   fi
 
   # Collect stoppedUP hashes (100% progress, not seeding yet)
-  CANDIDATES=$(python3 - "$TMPJSON" "$resume_flag" << 'PYEOF'
+  CANDIDATES=$(python3 - "$TMPJSON" "$resume_flag" "$TMPIGNORE" << 'PYEOF'
 import json, sys
 
 data_file, resume_flag = sys.argv[1], sys.argv[2] == "true"
+ignore = [line.strip().lower() for line in open(sys.argv[3]).read().splitlines() if line.strip()]
+def ignored(h):
+    h = str(h or "").strip().lower()
+    if not h:
+        return False
+    return any(h == p or h.startswith(p) for p in ignore)
 data = json.load(open(data_file))
 
 good_seeding = {"stalledUP", "uploading", "queuedUP", "forcedUP"}
@@ -306,10 +398,13 @@ good_seeding = {"stalledUP", "uploading", "queuedUP", "forcedUP"}
 hashes = []
 already_seeding = 0
 for t in data:
+    h = str(t.get("hash", "")).strip()
+    if not h or ignored(h):
+        continue
     s = t.get("state", "")
     p = t.get("progress", 0)
     if s == "stoppedUP" and abs(p - 1.0) < 0.0001:
-        hashes.append(t["hash"])
+        hashes.append(h)
     elif s in good_seeding:
         already_seeding += 1
 
@@ -551,7 +646,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "════════════════════════════════════════════════════════════"
 echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-echo "daemon mode  apply=$APPLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s"
+echo "daemon mode  apply=$APPLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
 echo "daemon log: $DAEMON_LOG"
 echo "reset file:  $DAEMON_HALT_RESET"
 echo "════════════════════════════════════════════════════════════"
@@ -559,7 +654,7 @@ echo "════════════════════════�
 {
   echo "════════════════════════════════════════════════════════════"
   echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-  echo "daemon mode  apply=$APPLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s"
+  echo "daemon mode  apply=$APPLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
   echo "════════════════════════════════════════════════════════════"
 } >> "$DAEMON_LOG"
 

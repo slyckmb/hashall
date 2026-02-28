@@ -18,7 +18,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.1.2"
+SEMVER = "0.1.3"
 SCRIPT_NAME = Path(__file__).name
 
 
@@ -46,6 +46,19 @@ def parse_hash_tokens(text: str) -> List[str]:
         seen.add(h)
         out.append(h)
     return out
+
+
+def hash_matches_filters(torrent_hash: str, filters: Set[str]) -> bool:
+    h = str(torrent_hash or "").strip().lower()
+    if not h:
+        return False
+    for f in filters:
+        token = str(f or "").strip().lower()
+        if not token:
+            continue
+        if h == token or h.startswith(token):
+            return True
+    return False
 
 
 def parse_states(text: str) -> Set[str]:
@@ -120,6 +133,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--hashes-file",
         default="",
         help="Optional file containing hashes (one per line, # comments allowed)",
+    )
+    p.add_argument(
+        "--ignore-hashes",
+        default="",
+        help="Optional hashes/prefixes to ignore (pipe/comma/space separated)",
+    )
+    p.add_argument(
+        "--ignore-hashes-file",
+        default="",
+        help=(
+            "Optional ignore hash file (one per line, # comments allowed). "
+            "If omitted, <bucket>/download-whitelist-hashes.txt is used when present."
+        ),
     )
     p.add_argument(
         "--limit",
@@ -198,12 +224,32 @@ def main() -> int:
     explicit_hashes.extend(read_hash_file(args.hashes_file))
     # Keep order, dedupe.
     explicit_hashes = list(dict.fromkeys(explicit_hashes))
+    default_ignore_file = bucket_dir / "download-whitelist-hashes.txt"
+    ignore_hashes = parse_hash_tokens(args.ignore_hashes)
+    if str(args.ignore_hashes_file or "").strip():
+        ignore_hashes.extend(read_hash_file(args.ignore_hashes_file))
+    elif default_ignore_file.exists():
+        ignore_hashes.extend(read_hash_file(str(default_ignore_file)))
+    ignore_hashes = list(dict.fromkeys(ignore_hashes))
+    ignore_set = set(ignore_hashes)
     states = parse_states(args.states)
     if not explicit_hashes and not states:
         print("ERROR no states or hashes selected")
         return 2
 
+    if explicit_hashes and ignore_set:
+        explicit_hashes = [h for h in explicit_hashes if not hash_matches_filters(h, ignore_set)]
     rows, missing_in_qb = fetch_torrents(explicit_hashes, states)
+    ignored = 0
+    if ignore_set:
+        kept: List[QBitTorrent] = []
+        for r in rows:
+            h = str(r.hash or "").lower().strip()
+            if h and hash_matches_filters(h, ignore_set):
+                ignored += 1
+                continue
+            kept.append(r)
+        rows = kept
     rows.sort(key=lambda r: (str(r.name or "").lower(), str(r.hash or "").lower()))
     if args.limit > 0:
         rows = rows[: args.limit]
@@ -293,6 +339,8 @@ def main() -> int:
         "bucket_dir": str(bucket_dir),
         "states": sorted(states),
         "explicit_hashes": explicit_hashes,
+        "ignored_hashes": ignore_hashes,
+        "ignore_hashes_file": str(Path(args.ignore_hashes_file).expanduser()) if str(args.ignore_hashes_file or "").strip() else (str(default_ignore_file) if default_ignore_file.exists() else ""),
         "active_count": len(active_hashes),
         "total_entries": len(out_entries),
         "entries": out_entries,
@@ -325,6 +373,7 @@ def main() -> int:
             "skipped_export": result.skipped_export,
             "missing_in_qb": result.missing_in_qb,
             "pruned": result.pruned,
+            "ignored": int(ignored),
         },
     }
     report_path.write_text(json.dumps(report_payload, indent=2) + "\n", encoding="utf-8")
@@ -334,7 +383,7 @@ def main() -> int:
         f"active={len(active_hashes)} total_entries={len(out_entries)} "
         f"exported={result.exported} existing={result.existing} "
         f"export_failed={result.export_failed} skipped_export={result.skipped_export} "
-        f"missing_in_qb={result.missing_in_qb} pruned={result.pruned}"
+        f"missing_in_qb={result.missing_in_qb} pruned={result.pruned} ignored={int(ignored)}"
     )
     print(f"index_json={index_path}")
     print(f"hashes_txt={hashes_path}")
