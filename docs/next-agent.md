@@ -18,15 +18,19 @@ Drive stoppedDL count down using the bucket/drain/apply loop with high-precision
 ## Current State
 
 - Active tooling:
-  - `bin/qb-stoppeddl-bucket.py` (`0.1.2`)
-  - `bin/qb-stoppeddl-drain.py` (`0.1.10`)
-  - `bin/qb-stoppeddl-apply.py` (`0.2.3`)
+  - `bin/qb-stoppeddl-bucket.py` (`0.1.3`)
+  - `bin/qb-stoppeddl-drain.py` (`0.1.11`)
+  - `bin/qb-stoppeddl-apply.py` (`0.2.4`)
   - `bin/qb-stoppeddl-apply-watch.sh` (`0.1.2`)
-  - `bin/qb-stoppeddl-roundloop.sh` (`0.1.3`)
+  - `bin/qb-stoppeddl-roundloop.sh` (`0.1.4`)
   - `bin/qb-libtorrent-verify.py`
+- Gradual seeding watchdog:
+  - `bin/qbit-start-seeding-gradual.sh` (`1.3.3`)
 - qB API helper includes torrent export (`src/hashall/qbittorrent.py`).
 - Drain logic now narrows weak global DB candidates and stops candidate testing after first class `a`.
 - Apply writes completion marker used by wrappers: `reports/apply-last-completion.json`.
+- Ignore whitelist is supported across bucket/drain/apply/roundloop and watchdog.
+- Default ignore file: `/tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt`.
 
 ## Standard Flow
 
@@ -53,12 +57,17 @@ bin/qb-stoppeddl-apply-watch.sh \
   -- --ops-mode auto --no-wait-recheck
 ```
 
+```bash
+printf '%s\n' 102b7bf38155 > /tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt
+```
+
 ## Validation Checklist
 
 1. No repaired hashes transition into sustained downloading states.
 2. `setLocation`/fastresume values align with selected content roots.
 3. Apply completion markers are fresh for each applied drain report.
 4. Drain reports show decreasing `remaining` and no repeated verify of already-scored candidates.
+5. Ignore whitelist hashes are absent from remediation plans and remain unmanaged downloaders.
 
 ## Fastresume Note
 

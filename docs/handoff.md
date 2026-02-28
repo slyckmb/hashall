@@ -16,6 +16,7 @@ This handoff covers the stoppedDL recovery campaign using the bucket/drain/apply
   - `qb-stoppeddl-roundloop.sh` (bucket -> drain -> apply -> wait-checking loop)
 - qB API helper now supports `.torrent` export via `QBitTorrent.export_torrent_file()`.
 - Gradual seeding watchdog was patched to avoid false halts from `checkingDL`.
+- Hash ignore whitelist support was added across bucket/drain/apply/roundloop and gradual seeding watchdog.
 
 ## Safety Constraints
 
@@ -38,6 +39,10 @@ This handoff covers the stoppedDL recovery campaign using the bucket/drain/apply
   - apply-watch and roundloop use completion freshness checks
   - roundloop startup handling for stale stop file
   - default apply mode: if any hash needs fastresume patch, do one offline batch for entire selection
+- Ignore whitelist behavior:
+  - hash exact/prefix matching (e.g. `102b7bf38155`)
+  - default ignore file for stoppedDL flow: `/tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt`
+  - ignored hashes are excluded from remediation selection and skipped in summary counters
 
 ## Remaining Work
 
@@ -50,5 +55,6 @@ This handoff covers the stoppedDL recovery campaign using the bucket/drain/apply
 1. Keep `roundloop` running with `--max-candidates 1` for conservative first-pass yield.
 2. Review each completed drain summary (`a/b/c/d/e`) and apply completion report.
 3. Re-sync bucket periodically with `--prune-absent`.
-4. For hashes still `d/e`, inspect candidate notes and run targeted reconstruction.
-5. Re-run until stoppedDL converges, then finalize unresolved categories for phase-3.
+4. Maintain ignore whitelist for known intentional downloaders before loop runs.
+5. For hashes still `d/e`, inspect candidate notes and run targeted reconstruction.
+6. Re-run until stoppedDL converges, then finalize unresolved categories for phase-3.
