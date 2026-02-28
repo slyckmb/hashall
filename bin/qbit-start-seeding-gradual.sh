@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.3.1
-# Date:    2026-02-27
+# Version: 1.3.2
+# Date:    2026-02-28
 #
 # After each batch waits for state to settle, then checks the protected watch
 # scope (all torrents added before today) for downloading/broken flips. On any
@@ -21,8 +21,8 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.1"
-SCRIPT_DATE="2026-02-27"
+SCRIPT_VERSION="1.3.2"
+SCRIPT_DATE="2026-02-28"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -274,7 +274,7 @@ run_ramp_start() {
 import json, sys
 data = json.load(open(sys.argv[1]))
 watch = set(open(sys.argv[2]).read().split())
-download_bad = {'checkingDL','downloading','stalledDL'}
+download_bad = {'downloading','stalledDL'}
 for t in data:
     h = str(t.get("hash", "")).strip()
     if not h or h not in watch:
@@ -391,7 +391,7 @@ except Exception as e:
     print(f"state_json_parse_error:{e}", file=sys.stderr)
     raise SystemExit(2)
 watch = set(open(sys.argv[2]).read().split())
-download_bad = {'checkingDL','downloading','stalledDL'}
+download_bad = {'downloading','stalledDL'}
 other_bad    = {'missingFiles','error'}
 results = {'ok':[], 'downloading':[], 'other_bad':[], 'still_stopped':[]}
 for t in data:
