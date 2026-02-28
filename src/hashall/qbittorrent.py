@@ -316,6 +316,91 @@ class QBittorrentClient:
                 time.sleep(delay)
         return []
 
+    def export_torrent_file(self, torrent_hash: str, out_path: Optional[Path] = None) -> Optional[bytes]:
+        """
+        Export a .torrent file from qBittorrent by hash.
+
+        Args:
+            torrent_hash: Torrent infohash.
+            out_path: Optional path to write exported bytes.
+
+        Returns:
+            Raw torrent bytes on success, otherwise None.
+        """
+        self._ensure_authenticated()
+
+        response: Optional[requests.Response] = None
+        for attempt in range(1, self.request_retries + 1):
+            try:
+                response = self.session.get(
+                    f"{self.base_url}/api/v2/torrents/export",
+                    params={"hash": str(torrent_hash or "").strip()},
+                    timeout=self.request_timeout,
+                )
+                response.raise_for_status()
+                blob = response.content or b""
+                if not blob:
+                    self.last_error = "empty_export_payload"
+                    return None
+                if out_path is not None:
+                    target = Path(out_path)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(blob)
+                self.last_error = None
+                return blob
+            except requests.Timeout as e:
+                self.last_error = str(e)
+                if attempt < self.request_retries:
+                    delay = self._retry_delay_seconds(attempt)
+                    print(
+                        f"⚠️ qB export timeout hash={str(torrent_hash)[:16]} "
+                        f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f}"
+                    )
+                    time.sleep(delay)
+                    continue
+                print(f"⚠️ Failed to export torrent {torrent_hash}: {e}")
+                return None
+            except requests.HTTPError as e:
+                status = self._status_from_error(e, response)
+                body = self._response_body_snippet(
+                    e.response if e.response is not None else response
+                )
+                self.last_error = f"HTTP {status}" if status is not None else str(e)
+                if (
+                    status in self.retryable_http_statuses
+                    and attempt < self.request_retries
+                ):
+                    delay = self._retry_delay_seconds(attempt)
+                    print(
+                        f"⚠️ qB export retry hash={str(torrent_hash)[:16]} "
+                        f"attempt={attempt + 1}/{self.request_retries} "
+                        f"status={status} retry_in_s={delay:.1f}"
+                    )
+                    time.sleep(delay)
+                    continue
+                msg = (
+                    f"⚠️ Failed to export torrent {torrent_hash}: "
+                    f"HTTP {status if status is not None else '?'}"
+                )
+                if body:
+                    msg += f" body={body}"
+                print(msg)
+                return None
+            except requests.RequestException as e:
+                self.last_error = str(e)
+                if attempt < self.request_retries:
+                    delay = self._retry_delay_seconds(attempt)
+                    if self.debug_http:
+                        print(
+                            f"⚠️ qB export retry hash={str(torrent_hash)[:16]} "
+                            f"attempt={attempt}/{self.request_retries} retry_in_s={delay:.1f} error={e}"
+                        )
+                    time.sleep(delay)
+                    continue
+                print(f"⚠️ Failed to export torrent {torrent_hash}: {e}")
+                return None
+        return None
+
     def get_torrents_by_hashes(self, torrent_hashes: List[str]) -> Dict[str, QBitTorrent]:
         """
         Fetch torrent info for a specific set of hashes in one API request.
