@@ -1,7 +1,6 @@
 # Moved
 
-Use `docs/handoff.md` (living document).
+Use `docs/operations/RUN-STATE.md` (canonical living operations state).
 
 Historical snapshot preserved at:
-`docs/archive/2026-doc-cleanup/qbit-repair-handoff.md`
-
+`docs/archive/2026-doc-reduction/snapshot/docs/qbit-repair-handoff.md`

@@ -1,3 +1,3 @@
 # Moved
 
-Use `docs/project/TODO.md` for the active backlog.
+Use `docs/project/PLAN.md` for active roadmap + backlog.
