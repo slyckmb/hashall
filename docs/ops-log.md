@@ -13,13 +13,15 @@ Last updated: 2026-02-28
 
 - Active workflow is the standalone stoppedDL toolchain:
   - `bin/qb-stoppeddl-bucket.py` (`0.1.3`)
-  - `bin/qb-stoppeddl-drain.py` (`0.1.11`)
+  - `bin/qb-stoppeddl-drain.py` (`0.1.12`)
   - `bin/qb-stoppeddl-apply.py` (`0.2.4`)
   - `bin/qb-stoppeddl-apply-watch.sh` (`0.1.2`)
-  - `bin/qb-stoppeddl-roundloop.sh` (`0.1.4`)
+  - `bin/qb-stoppeddl-roundloop.sh` (`0.1.5`)
   - `bin/qb-libtorrent-verify.py`
 - Supporting qB API change:
   - `src/hashall/qbittorrent.py` now includes `export_torrent_file(...)`.
+- Payload group repair compatibility:
+  - `bin/qbit-repair-payload-group.sh` now falls back from `/torrents/resume` to `/torrents/start` when needed.
 - Download-protection watchdog change:
   - `bin/qbit-start-seeding-gradual.sh` now `1.3.3`, no longer halts on `checkingDL` flips, and supports ignore hash filters.
 
@@ -30,6 +32,8 @@ Last updated: 2026-02-28
 - Drain can skip stale hashes if qB already shows seeding/checking-safe live states.
 - Apply now writes a completion marker (`apply-last-completion.json`) for wrappers.
 - Roundloop now uses completion freshness checks and can clear stale stop files at startup.
+- Roundloop now passes `--stop-file` into drain; drain checks this file before each hash, before each candidate verify, and during in-flight verify subprocess.
+- When stop is requested mid-drain, verifier subprocess is terminated and report progress reason is written as `stop_file_exists`.
 - Global DB candidate narrowing was tightened to reduce weak/noisy name matches before expensive verify.
 - Bucket/drain/apply/roundloop now support hash ignore lists (exact or prefix matching).
 - Default ignore file path for stoppedDL flow: `/tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt`.

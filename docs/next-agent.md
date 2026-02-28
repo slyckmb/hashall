@@ -19,15 +19,17 @@ Drive stoppedDL count down using the bucket/drain/apply loop with high-precision
 
 - Active tooling:
   - `bin/qb-stoppeddl-bucket.py` (`0.1.3`)
-  - `bin/qb-stoppeddl-drain.py` (`0.1.11`)
+  - `bin/qb-stoppeddl-drain.py` (`0.1.12`)
   - `bin/qb-stoppeddl-apply.py` (`0.2.4`)
   - `bin/qb-stoppeddl-apply-watch.sh` (`0.1.2`)
-  - `bin/qb-stoppeddl-roundloop.sh` (`0.1.4`)
+  - `bin/qb-stoppeddl-roundloop.sh` (`0.1.5`)
   - `bin/qb-libtorrent-verify.py`
 - Gradual seeding watchdog:
   - `bin/qbit-start-seeding-gradual.sh` (`1.3.3`)
 - qB API helper includes torrent export (`src/hashall/qbittorrent.py`).
 - Drain logic now narrows weak global DB candidates and stops candidate testing after first class `a`.
+- Roundloop now forwards stop-file to drain (`--stop-file`) so `touch /tmp/qb-stoppeddl-bucket-live/STOP_ROUNDLOOP` can interrupt long verify work mid-pass.
+- Drain now writes interrupted reports with `progress_reason=stop_file_exists`.
 - Apply writes completion marker used by wrappers: `reports/apply-last-completion.json`.
 - Ignore whitelist is supported across bucket/drain/apply/roundloop and watchdog.
 - Default ignore file: `/tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt`.

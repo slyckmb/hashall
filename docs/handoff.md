@@ -10,13 +10,14 @@ This handoff covers the stoppedDL recovery campaign using the bucket/drain/apply
 
 - Active toolchain is now:
   - `qb-stoppeddl-bucket.py` (sync + `.torrent` export)
-  - `qb-stoppeddl-drain.py` (candidate ranking + libtorrent verify + grading)
+  - `qb-stoppeddl-drain.py` (candidate ranking + libtorrent verify + grading, `0.1.12`)
   - `qb-stoppeddl-apply.py` (setLocation/recheck + optional fastresume batch patch)
   - `qb-stoppeddl-apply-watch.sh` (daemon/loop apply on completed drains)
-  - `qb-stoppeddl-roundloop.sh` (bucket -> drain -> apply -> wait-checking loop)
+  - `qb-stoppeddl-roundloop.sh` (bucket -> drain -> apply -> wait-checking loop, `0.1.5`)
 - qB API helper now supports `.torrent` export via `QBitTorrent.export_torrent_file()`.
 - Gradual seeding watchdog was patched to avoid false halts from `checkingDL`.
 - Hash ignore whitelist support was added across bucket/drain/apply/roundloop and gradual seeding watchdog.
+- Payload-group repair script now falls back from qB `/torrents/resume` to `/torrents/start` for compatibility.
 
 ## Safety Constraints
 
@@ -38,7 +39,12 @@ This handoff covers the stoppedDL recovery campaign using the bucket/drain/apply
   - apply completion marker output
   - apply-watch and roundloop use completion freshness checks
   - roundloop startup handling for stale stop file
+  - roundloop propagates stop-file to drain for mid-pass interruption
   - default apply mode: if any hash needs fastresume patch, do one offline batch for entire selection
+- Stop handling improvements:
+  - drain checks stop-file before each hash and candidate
+  - drain can terminate in-flight verifier subprocess on stop request
+  - drain writes `progress_reason=stop_file_exists` when interrupted
 - Ignore whitelist behavior:
   - hash exact/prefix matching (e.g. `102b7bf38155`)
   - default ignore file for stoppedDL flow: `/tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt`
