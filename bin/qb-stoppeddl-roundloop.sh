@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SEMVER="0.1.4"
+SEMVER="0.1.5"
 SCRIPT_NAME="$(basename "$0")"
 
 usage() {
@@ -262,6 +262,7 @@ run_drain_once() {
     python3
     bin/qb-stoppeddl-drain.py
     --bucket-dir "$BUCKET_DIR"
+    --stop-file "$STOP_FILE"
     --limit "$DRAIN_LIMIT"
     --max-candidates "$MAX_CANDIDATES"
     --verify-timeout "$VERIFY_TIMEOUT"

@@ -9,6 +9,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,7 +23,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.1.11"
+SEMVER = "0.1.12"
 SCRIPT_NAME = Path(__file__).name
 
 
@@ -791,6 +792,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional report path (default: <bucket>/reports/drain-<ts>.json)",
     )
     p.add_argument(
+        "--stop-file",
+        default="",
+        help=(
+            "Optional stop-file path. If this file exists, drain exits early and "
+            "terminates any in-flight verifier subprocess."
+        ),
+    )
+    p.add_argument(
         "--no-update-latest",
         dest="update_latest",
         action="store_false",
@@ -891,6 +900,11 @@ def main() -> int:
         Path(args.tested_cache_json).expanduser()
         if str(args.tested_cache_json or "").strip()
         else bucket_dir / "tested-candidates.json"
+    )
+    stop_file_path = (
+        Path(args.stop_file).expanduser()
+        if str(args.stop_file or "").strip()
+        else None
     )
     bad_cache = load_bad_cache(bad_cache_path)
     tested_cache = load_tested_cache(tested_cache_path)
@@ -1014,8 +1028,17 @@ def main() -> int:
         write_tested_cache(tested_cache_path, tested_cache)
 
     write_progress_report("started")
+    stop_requested_global = False
+
+    def stop_requested() -> bool:
+        return bool(stop_file_path and stop_file_path.exists())
 
     for idx, h in enumerate(selected_hashes, start=1):
+        if stop_requested():
+            stop_requested_global = True
+            print(f"status action=stop reason=stop_file_exists stop_file={stop_file_path}")
+            write_progress_report("stop_file_exists")
+            break
         entry = dict(entries_by_hash.get(h, {}))
         row_qb = by_hash_qb.get(h)
         name = str(entry.get("name") or (row_qb.name if row_qb else ""))
@@ -1357,8 +1380,17 @@ def main() -> int:
         verify_stdout_lines: List[str] = []
         verify_stderr_lines: List[str] = []
         stop_on_a_hit = False
+        stop_requested_hash = False
 
         for cidx, p in enumerate(existing_paths, start=1):
+            if stop_requested():
+                stop_requested_hash = True
+                stop_requested_global = True
+                print(
+                    f"status action=stop reason=stop_file_exists "
+                    f"hash={h} candidate={cidx}/{len(existing_paths)} stop_file={stop_file_path}"
+                )
+                break
             verify_json_one = reports_dir / f"verify-{h}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{cidx:03d}.json"
             cmd = [
                 str(verifier_python),
@@ -1379,15 +1411,45 @@ def main() -> int:
                 cmd.append("--show-progress")
 
             if args.show_verify_progress:
-                proc = subprocess.run(cmd, text=True)
+                proc = subprocess.Popen(cmd)
             else:
-                proc = subprocess.run(cmd, capture_output=True, text=True)
-                out = str(proc.stdout or "").strip()
-                err = str(proc.stderr or "").strip()
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            terminated_for_stop = False
+            poll_sleep = max(0.2, float(args.verify_poll))
+            while proc.poll() is None:
+                if stop_requested():
+                    terminated_for_stop = True
+                    stop_requested_hash = True
+                    stop_requested_global = True
+                    print(
+                        f"status action=stop reason=stop_file_exists "
+                        f"hash={h} candidate={cidx}/{len(existing_paths)} stop_file={stop_file_path} "
+                        "detail=terminating_verify_subprocess"
+                    )
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            pass
+                    break
+                time.sleep(poll_sleep)
+
+            if not args.show_verify_progress:
+                out, err = proc.communicate()
+                out = str(out or "").strip()
+                err = str(err or "").strip()
                 if out:
                     verify_stdout_lines.append(out)
                 if err:
                     verify_stderr_lines.append(err)
+
+            if terminated_for_stop:
+                break
 
             if not verify_json_one.exists():
                 continue
@@ -1412,6 +1474,20 @@ def main() -> int:
                         f"path={compact_path(one_path)}"
                     )
                     break
+
+        if stop_requested_hash:
+            row_out["status"] = "stop_requested"
+            row_out["detail"] = f"stop_file_exists:{stop_file_path}"
+            row_out["verify_stdout"] = "\n".join(verify_stdout_lines)
+            row_out["verify_stderr"] = "\n".join(verify_stderr_lines)
+            row_out["verify_report_json"] = str(verify_json)
+            row_out["verify_stop_on_a_hit"] = bool(stop_on_a_hit)
+            row_out["verify_candidates_selected"] = int(len(existing_paths))
+            row_out["verify_candidates_tested"] = int(len(verify_results))
+            out_entries.append(row_out)
+            write_progress_report(f"stop_file_exists:hash:{h}")
+            flush_caches()
+            break
 
         row_out["verify_stdout"] = "\n".join(verify_stdout_lines)
         row_out["verify_stderr"] = "\n".join(verify_stderr_lines)
@@ -1529,7 +1605,7 @@ def main() -> int:
     conn.close()
     flush_caches()
 
-    summary = write_progress_report("final")
+    summary = write_progress_report("stop_file_exists" if stop_requested_global else "final")
     print(
         f"summary selected={summary['selected']} processed={summary['processed']} "
         f"a={summary['a']} b={summary['b']} c={summary['c']} d={summary['d']} e={summary['e']} "
