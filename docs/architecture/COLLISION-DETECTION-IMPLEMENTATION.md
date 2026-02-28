@@ -85,7 +85,7 @@ hashall dupes --device pool --show-paths       # Show file paths
 
 ### 3. Test Suite
 
-**`test-collision-detection.py`**
+**`tests/manual/test-collision-detection.py`**
 - Creates synthetic collision scenario:
   - 2 files with same first 1MB but different content (false collision)
   - 2 files with identical content (true duplicate)
@@ -210,7 +210,7 @@ unique.dat: [RANDOM_2MB]
 ```
 src/hashall/scan.py                     # Added 3 collision detection functions
 src/hashall/cli.py                      # Extended scan/stats, added dupes command
-test-collision-detection.py             # Test suite (184 lines)
+tests/manual/test-collision-detection.py  # Test suite (184 lines)
 out/COLLISION-DETECTION-IMPLEMENTATION.md  # This file
 ```
 

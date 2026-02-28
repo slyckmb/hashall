@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+"""
+iowatch - Real-time I/O and system monitoring dashboard
+Monitors disk I/O, CPU usage, and hashall scan processes with colors!
+"""
+
+__version__ = "1.4.3"
+
+import sys
+import time
+import subprocess
+import re
+import math
+import os
+from collections import defaultdict
+from pathlib import Path
+
+# ANSI Color Codes
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    BLINK = '\033[5m'
+
+    # Foreground colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+    ORANGE = '\033[38;5;208m'
+
+    # Bright colors
+    BRIGHT_BLACK = '\033[90m'
+    BRIGHT_RED = '\033[91m'
+    BRIGHT_GREEN = '\033[92m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_BLUE = '\033[94m'
+    BRIGHT_MAGENTA = '\033[95m'
+    BRIGHT_CYAN = '\033[96m'
+    BRIGHT_WHITE = '\033[97m'
+
+    # Background colors
+    BG_BLACK = '\033[40m'
+    BG_RED = '\033[41m'
+    BG_GREEN = '\033[42m'
+    BG_YELLOW = '\033[43m'
+    BG_BLUE = '\033[44m'
+    BG_MAGENTA = '\033[45m'
+    BG_CYAN = '\033[46m'
+    BG_WHITE = '\033[47m'
+
+# Configuration
+PERSISTENCE_SECONDS = 60
+WIDTH = 57 
+UPDATE_INTERVAL = 2
+
+# Disk Mapping (Serial to Friendly Name)
+DRIVE_MAP = {
+    # ZFS stash pool (raidz2) drives — slots in ZFS listing order
+    'sdc': 's1-ZYD4E0KX',
+    'sdd': 's2-ZYD4SAR6',
+    'sde': 's3-ZYD5WTGH',
+    'sdf': 's4-ZYD6202W',
+    'sda': 's5-ZYD6HT07',
+    # ZFS pool pool (raidz1) drives — slots in ZFS listing order
+    'sdg': 'p1-Z4D3LES1',
+    'sdh': 'p2-D38DLYEJ',
+    'sdi': 'p3-D38DL453',
+    # Not in any ZFS pool
+    'sdb': 'spare-Z4D3LETT',
+    # System / non-ZFS
+    'nvme0n1': 'n0-30801662'
+}
+
+# Drives that belong to a ZFS pool (always shown in disk I/O section even at zero activity)
+POOL_DRIVES = {dev for dev, label in DRIVE_MAP.items() if label.startswith(('p', 's'))}
+
+def clear_screen():
+    """Clear terminal screen."""
+    print("\033[2J\033[H", end="")
+
+def colorize(text, color):
+    """Colorize text."""
+    return f"{color}{text}{Colors.RESET}"
+
+def get_color_for_percentage(pct, low=50, mid=80):
+    """Get color based on percentage (green=low, yellow=medium, red=high)."""
+    if pct < low:
+        return Colors.GREEN
+    elif pct < mid:
+        return Colors.ORANGE
+    else:
+        return Colors.RED
+
+def format_bytes(b):
+    """Format bytes to human readable."""
+    for unit in ['B', 'K', 'M', 'G', 'T', 'P']:
+        if b < 1024: return f"{b:.1f}{unit}"
+        b /= 1024
+    return f"{b:.1f}E"
+
+def get_disk_stats():
+    """Get disk I/O statistics."""
+    try:
+        stats = {}
+        with open('/proc/diskstats', 'r') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 14:
+                    device = parts[2]
+                    if device.startswith('nvme'):
+                        if re.search(r'p\d+$', device): continue
+                    elif re.search(r'\d+$', device): continue
+                    
+                    if device.startswith(('sd', 'nvme', 'vd', 'hd')):
+                        stats[device] = {
+                            'read_sectors': int(parts[5]),
+                            'write_sectors': int(parts[9]),
+                            'io_ms': int(parts[12])
+                        }
+        return stats
+    except Exception:
+        return {}
+
+def get_cpu_stats():
+    """Get CPU usage statistics."""
+    try:
+        cpu_stats = {}
+        with open('/proc/stat', 'r') as f:
+            for line in f:
+                if line.startswith('cpu'):
+                    parts = line.split()
+                    cpu_name = parts[0]
+                    values = [int(x) for x in parts[1:8]]
+                    cpu_stats[cpu_name] = {
+                        'total': sum(values),
+                        'idle': values[3],
+                        'iowait': values[4]
+                    }
+        return cpu_stats
+    except Exception:
+        return {}
+
+def _parse_pressure_line(line):
+    try:
+        parts = dict(item.split("=") for item in line.strip().split()[1:])
+        return {
+            "avg10": float(parts.get("avg10", 0.0)),
+            "avg60": float(parts.get("avg60", 0.0)),
+            "avg300": float(parts.get("avg300", 0.0)),
+            "total": int(parts.get("total", 0)),
+        }
+    except Exception:
+        return None
+
+def get_pressure_stats():
+    """Get PSI pressure stats for IO and CPU."""
+    stats = {}
+    for name in ("io", "cpu"):
+        try:
+            with open(f"/proc/pressure/{name}", "r") as f:
+                lines = f.read().strip().splitlines()
+            if not lines:
+                continue
+            stats[name] = {}
+            for line in lines:
+                if line.startswith("some"):
+                    stats[name]["some"] = _parse_pressure_line(line)
+                elif line.startswith("full"):
+                    stats[name]["full"] = _parse_pressure_line(line)
+        except Exception:
+            continue
+    return stats
+
+def get_process_io():
+    """Get I/O statistics for all processes."""
+    p_io = {}
+    for pid_dir in Path('/proc').glob('[0-9]*'):
+        try:
+            pid = pid_dir.name
+            io_file = pid_dir / 'io'
+            # /proc entries can disappear between listing and open/stat; treat as normal churn.
+            with open(io_file, 'r') as f:
+                data = f.read()
+                r_match = re.search(r'read_bytes:\s+(\d+)', data)
+                w_match = re.search(r'write_bytes:\s+(\d+)', data)
+                if r_match or w_match:
+                    p_io[pid] = {
+                        'read': int(r_match.group(1)) if r_match else 0,
+                        'write': int(w_match.group(1)) if w_match else 0
+                    }
+        except (PermissionError, FileNotFoundError, ProcessLookupError, OSError):
+            continue
+    return p_io
+
+def get_process_info(pid):
+    """Get command line and friendly name for a PID."""
+    try:
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            raw_cmd = f.read()
+            cmdline = raw_cmd.replace(b'\x00', b' ').decode('utf-8', 'replace').strip()
+        
+        name = "unknown"
+        if not cmdline:
+            with open(f'/proc/{pid}/comm', 'r') as f:
+                name = f.read().strip()
+        else:
+            parts = cmdline.split()
+            if 'python' in parts[0]:
+                for part in parts[1:]:
+                    if part.startswith('-'): continue
+                    name = Path(part).name
+                    break
+                if name == "unknown" and '-m' in parts:
+                    idx = parts.index('-m')
+                    if idx + 1 < len(parts):
+                        name = parts[idx+1]
+            else:
+                name = Path(parts[0]).name
+
+        return {'name': name, 'cmdline': cmdline, 'raw_cmd': raw_cmd}
+    except Exception:
+        return {'name': 'dead', 'cmdline': '', 'raw_cmd': b''}
+
+def get_zfs_pool_stats():
+    """Get ZFS pool statistics via zpool iostat -p."""
+    try:
+        # Get raw numbers (-p)
+        result = subprocess.run(['zpool', 'iostat', '-p'], capture_output=True, text=True)
+        stats = {}
+        for line in result.stdout.strip().split('\n'):
+            parts = line.split()
+            # Skip empty lines or separator lines
+            if not parts or parts[0] == '----------' or parts[0] == 'capacity': continue
+            
+            # Header check: 'pool' is a header ONLY if the next col isn't a digit
+            if parts[0] == 'pool':
+                # If we have enough parts and the second part is NOT a digit, it's the header
+                if len(parts) > 1 and not parts[1].isdigit():
+                    continue
+            
+            # Format: name alloc free ops_read ops_write bw_read bw_write
+            if len(parts) >= 7:
+                pool_name = parts[0]
+                try:
+                    stats[pool_name] = {
+                        'alloc': int(parts[1]),
+                        'free': int(parts[2]),
+                        'ops_r': int(parts[3]),
+                        'ops_w': int(parts[4]),
+                        'bw_r': int(parts[5]),
+                        'bw_w': int(parts[6])
+                    }
+                except ValueError:
+                    pass
+        return stats
+    except Exception:
+        return {}
+
+def get_zfs_health_status():
+    """Get ZFS health status via zpool status (cached)."""
+    try:
+        result = subprocess.run(['zpool', 'status'], capture_output=True, text=True)
+        pools = {}
+        current_pool = None
+        for line in result.stdout.split('\n'):
+            line = line.strip()
+            if line.startswith('pool:'):
+                current_pool = line.split(':')[1].strip()
+                pools[current_pool] = {'state': 'UNKNOWN', 'errors': []}
+            elif line.startswith('state:') and current_pool:
+                pools[current_pool]['state'] = line.split(':')[1].strip()
+            elif line.startswith('errors:') and current_pool:
+                if 'No known data errors' not in line:
+                    pools[current_pool]['errors'].append(line)
+        return pools
+    except Exception:
+        return {}
+
+def get_zfs_arc_stats():
+    """Get ZFS ARC statistics."""
+    try:
+        arcstats_path = Path('/proc/spl/kstat/zfs/arcstats')
+        if not arcstats_path.exists(): return None
+        stats = {}
+        with open(arcstats_path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    name = parts[0]
+                    value = parts[2]
+                    if name in ['size', 'c_max', 'hits', 'misses']:
+                        stats[name] = int(value)
+        if stats:
+            size_gb = stats.get('size', 0) / (1024**3)
+            max_gb = stats.get('c_max', 0) / (1024**3)
+            hits = stats.get('hits', 0)
+            misses = stats.get('misses', 0)
+            total = hits + misses
+            hit_rate = (hits / total * 100) if total > 0 else 0
+            return {'size_gb': size_gb, 'max_gb': max_gb, 'hit_rate': hit_rate}
+    except Exception: pass
+    return None
+
+def format_bar(percentage, width=20, color=Colors.GREEN):
+    """Format a progress bar."""
+    filled = int(width * min(100, percentage) / 100)
+    empty = width - filled
+    return f"[{colorize('█' * filled, color)}{Colors.BRIGHT_BLACK}{'░' * empty}{Colors.RESET}]"
+
+def format_stacked_log_bar(read_mb, write_mb, width=15, max_val=500):
+    """Format a logarithmic stacked R/W bar."""
+    total = read_mb + write_mb
+    if total <= 0: return f"[{Colors.BRIGHT_BLACK}{'░' * width}{Colors.RESET}]"
+    
+    log_total = math.log10(max(1, total))
+    log_max = math.log10(max_val)
+    
+    filled_total = int(width * (log_total / log_max))
+    filled_total = max(1, min(width, filled_total))
+    
+    read_ratio = read_mb / total
+    filled_read = int(filled_total * read_ratio)
+    filled_write = filled_total - filled_read
+    empty = width - filled_total
+    
+    bar = (colorize('█' * filled_read, Colors.GREEN) + 
+           colorize('█' * filled_write, Colors.YELLOW) + 
+           colorize('░' * empty, Colors.BRIGHT_BLACK))
+    return f"[{bar}]"
+
+def main():
+    """Main dashboard loop."""
+    prev_disk_stats = get_disk_stats()
+    prev_cpu_stats = get_cpu_stats()
+    prev_proc_io = get_process_io()
+    prev_zfs_stats = get_zfs_pool_stats()
+    prev_time = time.time()
+    
+    device_last_seen = {} 
+    zfs_health_cache = {}
+    last_health_check = 0
+
+    try:
+        while True:
+            time.sleep(UPDATE_INTERVAL)
+            now = time.time()
+            elapsed = now - prev_time
+
+            disk_stats = get_disk_stats()
+            cpu_stats = get_cpu_stats()
+            proc_io = get_process_io()
+            arc_stats = get_zfs_arc_stats()
+            zfs_stats = get_zfs_pool_stats()
+            pressure_stats = get_pressure_stats()
+            
+            # Update health occasionally
+            if now - last_health_check > 10:
+                zfs_health_cache = get_zfs_health_status()
+                last_health_check = now
+
+            clear_screen()
+
+            # Header
+            print(colorize("=" * WIDTH, Colors.BRIGHT_CYAN))
+            header_text = f"⚡ iowatch - I/O & System Monitor ⚡ v{__version__} ⚡"
+            print(colorize(f"{header_text:^{WIDTH}}", Colors.BOLD + Colors.BRIGHT_YELLOW))
+            print(colorize(f"{'(Press Ctrl+C to exit)':^{WIDTH}}", Colors.BRIGHT_CYAN))
+            print(colorize("=" * WIDTH, Colors.BRIGHT_CYAN))
+            print()
+
+            # CPU & ARC
+            if prev_cpu_stats and cpu_stats and 'cpu' in cpu_stats:
+                p, c = prev_cpu_stats['cpu'], cpu_stats['cpu']
+                total_diff = c['total'] - p['total']
+                if total_diff > 0:
+                    wait_pct = ((c['iowait'] - p['iowait']) / total_diff) * 100
+                    busy_pct = ((total_diff - (c['idle'] - p['idle']) - (c['iowait'] - p['iowait'])) / total_diff) * 100
+                    wait_color = get_color_for_percentage(wait_pct, low=10, mid=30)
+                    print(f"  CPU Processing: {format_bar(busy_pct, 16, Colors.GREEN)}  {busy_pct:5.1f}%")
+                    print(f"  Disk I/O Wait:  {format_bar(wait_pct, 16, wait_color)}  {wait_pct:5.1f}%")
+            if pressure_stats:
+                io_some = pressure_stats.get("io", {}).get("some")
+                io_full = pressure_stats.get("io", {}).get("full")
+                cpu_some = pressure_stats.get("cpu", {}).get("some")
+                if io_some:
+                    io_color = get_color_for_percentage(io_some["avg10"], low=10, mid=30)
+                    line = (
+                        f"  PSI IO avg10:   {format_bar(io_some['avg10'], 16, io_color)}"
+                        f"  {io_some['avg10']:5.1f}%"
+                    )
+                    if io_full:
+                        line += f" full: {io_full['avg10']:5.1f}%"
+                    print(line)
+                if cpu_some:
+                    cpu_color = get_color_for_percentage(cpu_some["avg10"], low=5, mid=15)
+                    print(
+                        f"  PSI CPU avg10:  {format_bar(cpu_some['avg10'], 16, cpu_color)}"
+                        f"  {cpu_some['avg10']:5.1f}%"
+                    )
+
+            if arc_stats:
+                print(f"  ZFS ARC Hits:   {format_bar(arc_stats['hit_rate'], 16, Colors.BRIGHT_CYAN)}  {arc_stats['hit_rate']:5.1f}% ({arc_stats['size_gb']:.1f}G)")
+
+            # ZFS KPCs Section
+            if zfs_stats and prev_zfs_stats:
+                print()
+                print(colorize("💾 ZFS POOLS & HEALTH", Colors.BOLD + Colors.BRIGHT_GREEN))
+                print(colorize("-" * WIDTH, Colors.BRIGHT_BLACK))
+                
+                for pool_name, curr in zfs_stats.items():
+                    if pool_name not in prev_zfs_stats: continue
+                    prev = prev_zfs_stats[pool_name]
+                    
+                    # Calculate Deltas (MB/s)
+                    # Note: zpool iostat -p returns cumulative bytes since boot
+                    # But wait, 'zpool iostat -p' output is essentially an average since boot 
+                    # unless we pass an interval.
+                    # CRITICAL FIX: 'zpool iostat' without interval gives snapshot since boot.
+                    # We can't trust the delta of two 'since boot' averages easily without
+                    # the absolute bytes counter.
+                    # Actually, 'bandwidth' cols in -p are BYTES PER SECOND (average), not total bytes.
+                    # Ah, documentation says: "bandwidth ... stats are average values per second"
+                    # So we cannot calc delta from them. They ARE the rate (averaged since boot).
+                    # TO GET REALTIME: We must parse /proc/diskstats (which we do) OR
+                    # use zpool iostat with interval, which is slow.
+                    # 
+                    # RE-STRATEGY: Since we want per-pool aggregate, we can sum the disk_stats 
+                    # of the drives we know belong to the pool! 
+                    # We already have that data in 'active_io'.
+                    # Let's rely on health from here and sum throughput from the disk section.
+                    
+                    pass # We will render this using the aggregated disk stats below instead to be accurate
+            
+            # Calculate Per-Pool Aggregates from Disk Stats
+            pool_aggregates = defaultdict(lambda: {'rd': 0, 'wr': 0, 'util_sum': 0, 'count': 0})
+            
+            active_io = {}
+            if prev_disk_stats and disk_stats:
+                for dev, curr in disk_stats.items():
+                    if dev in prev_disk_stats:
+                        prev = prev_disk_stats[dev]
+                        rd_mb = ((curr['read_sectors'] - prev['read_sectors']) * 512) / (1024*1024) / elapsed
+                        wr_mb = ((curr['write_sectors'] - prev['write_sectors']) * 512) / (1024*1024) / elapsed
+                        util_pct = ((curr['io_ms'] - prev['io_ms']) / (elapsed * 1000)) * 100
+                        util_pct = min(100, max(0, util_pct))
+                        
+                        friendly = DRIVE_MAP.get(dev, dev)
+                        pool_key = None
+                        if friendly.startswith('p'): pool_key = 'pool'
+                        elif friendly.startswith('s'): pool_key = 'stash'
+                        
+                        if pool_key:
+                            pool_aggregates[pool_key]['rd'] += rd_mb
+                            pool_aggregates[pool_key]['wr'] += wr_mb
+                            pool_aggregates[pool_key]['util_sum'] += util_pct
+                            pool_aggregates[pool_key]['count'] += 1
+
+                        if rd_mb > 0.1 or wr_mb > 0.1 or util_pct > 1: device_last_seen[dev] = now
+                        if dev in device_last_seen and (now - device_last_seen[dev] < PERSISTENCE_SECONDS):
+                            active_io[dev] = {'rd': rd_mb, 'wr': wr_mb, 'util': util_pct}
+
+            # Render ZFS Section with Aggregated Data
+            if pool_aggregates:
+                # We already printed the header above
+                for pool_name in sorted(pool_aggregates.keys()):
+                    data = pool_aggregates[pool_name]
+                    health = zfs_health_cache.get(pool_name, {'state': 'Unknown'})
+                    
+                    state_color = Colors.GREEN
+                    if health['state'] != 'ONLINE': state_color = Colors.RED
+                    
+                    # Capacity (from zfs_stats if available)
+                    cap_str = ""
+                    if pool_name in zfs_stats:
+                        alloc = zfs_stats[pool_name]['alloc']
+                        free = zfs_stats[pool_name]['free']
+                        total_cap = alloc + free
+                        cap_pct = (alloc / total_cap * 100) if total_cap > 0 else 0
+                        cap_bar = format_bar(cap_pct, 10, get_color_for_percentage(cap_pct))
+                        cap_str = f"Cap: {cap_bar} {cap_pct:.0f}%"
+
+                    print(f" {colorize(f'[{pool_name.upper()}]', Colors.BOLD + Colors.WHITE)} {colorize(health['state'], state_color)} {cap_str}")
+                    
+                    # Throughput
+                    bar = format_stacked_log_bar(data['rd'], data['wr'], width=20, max_val=2000) # Higher max for pool
+                    total = data['rd'] + data['wr']
+                    print(f"  Throughput: {bar}    {total:3.1f} MB/s")
+                    
+                    # Avg Util
+                    avg_util = data['util_sum'] / max(1, data['count'])
+                    util_bar = format_bar(avg_util, 20, get_color_for_percentage(avg_util))
+                    print(f"  Avg Util:   {util_bar}   {avg_util:4.1f}%")
+                    print()
+            else:
+                # If no aggregates yet (first tick), print placeholder
+                if not prev_zfs_stats: # Only if completely empty
+                     print(colorize("  Initializing ZFS stats...", Colors.BRIGHT_BLACK))
+                     print()
+
+            # Process Attribution
+            stack_top_proc = {'POOL': (None, 0), 'STASH': (None, 0)}
+            if prev_proc_io and proc_io:
+                for pid, current in proc_io.items():
+                    if pid in prev_proc_io:
+                        rd_delta = (current['read'] - prev_proc_io[pid]['read']) / elapsed / (1024*1024)
+                        wr_delta = (current['write'] - prev_proc_io[pid]['write']) / elapsed / (1024*1024)
+                        total_delta = rd_delta + wr_delta
+                        
+                        if total_delta > 0.5:
+                            info = get_process_info(pid)
+                            cmd = info['raw_cmd'].lower()
+                            stack = None
+                            if b'/pool' in cmd: stack = 'POOL'
+                            elif b'/stash' in cmd or b'/data/media' in cmd: stack = 'STASH'
+                            else:
+                                try:
+                                    cwd = os.readlink(f'/proc/{pid}/cwd')
+                                    if cwd.startswith('/pool'): stack = 'POOL'
+                                    elif cwd.startswith(('/stash', '/data/media')): stack = 'STASH'
+                                except: pass
+                            if stack:
+                                if total_delta > stack_top_proc[stack][1]:
+                                    stack_top_proc[stack] = (f"{info['name']} ({pid})", total_delta)
+
+            # Disk I/O Section
+            print(colorize("📊 DISK I/O & HEALTH", Colors.BOLD + Colors.BRIGHT_MAGENTA))
+            print(colorize("-" * WIDTH, Colors.BRIGHT_BLACK))
+            
+            # Build display_io: always include pool/stash drives; others only when active
+            display_io = dict(active_io)  # copy active (already-seen) drives
+            for dev in POOL_DRIVES:
+                if dev not in display_io:
+                    # Include pool/stash drive even if idle
+                    if dev in disk_stats and dev in prev_disk_stats:
+                        curr_d = disk_stats[dev]
+                        prev_d = prev_disk_stats[dev]
+                        rd_mb = ((curr_d['read_sectors'] - prev_d['read_sectors']) * 512) / (1024*1024) / elapsed
+                        wr_mb = ((curr_d['write_sectors'] - prev_d['write_sectors']) * 512) / (1024*1024) / elapsed
+                        util_pct = min(100, max(0, ((curr_d['io_ms'] - prev_d['io_ms']) / (elapsed * 1000)) * 100))
+                        display_io[dev] = {'rd': rd_mb, 'wr': wr_mb, 'util': util_pct}
+                    else:
+                        display_io[dev] = {'rd': 0.0, 'wr': 0.0, 'util': 0.0}
+
+            if display_io:
+                print(f"     Device      R/W [log(MB/s)]   Total        Util")
+                print(f"  -----------   -----------------  -----   --------------") 
+                
+                groups = {'POOL': [], 'STASH': [], 'OTHER': []}
+                for dev, data in display_io.items():
+                    friendly = DRIVE_MAP.get(dev, dev)
+                    if friendly.startswith('p'): groups['POOL'].append((friendly, data))
+                    elif friendly.startswith('s'): groups['STASH'].append((friendly, data))
+                    else: groups['OTHER'].append((friendly, data))
+                
+                for g_name in ['POOL', 'STASH', 'OTHER']:
+                    if groups[g_name]:
+                        print(colorize(f" [{g_name}]", Colors.BRIGHT_WHITE))
+                        for friendly, data in sorted(groups[g_name]):
+                            total = data['rd'] + data['wr']
+                            bar = format_stacked_log_bar(data['rd'], data['wr'], width=14)
+                            util_color = get_color_for_percentage(data['util'], low=70, mid=90)
+                            if data['util'] > 80 and total < 5 and 'p1' in friendly: util_color = Colors.BLINK + Colors.RED
+                            util_bar = format_bar(data['util'], 7, util_color) 
+                            print(f"  {friendly:<13} {bar}   {total:4.1f} | {util_bar} {data['util']:2.0f}%")
+            else:
+                print(colorize("  No disk activity detected", Colors.BRIGHT_BLACK))
+
+            print()
+            print(colorize("=" * WIDTH, Colors.BRIGHT_CYAN))
+
+            prev_disk_stats, prev_cpu_stats, prev_proc_io, prev_zfs_stats, prev_time = disk_stats, cpu_stats, proc_io, zfs_stats, now
+
+    except KeyboardInterrupt:
+        print("\nExiting...")
+
+if __name__ == "__main__":
+    main()
