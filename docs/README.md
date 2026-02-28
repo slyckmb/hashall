@@ -22,6 +22,9 @@ Purpose: minimal active documentation for CLI agents.
 - `docs/tooling/payload-orphan-audit-automation.md` - Payload-orphan automation runbook.
 - `docs/tooling/symlinks-and-bind-mounts.md` - Path canonicalization behavior.
 - `docs/project/DEVELOPMENT-ROADMAP.md` - Remaining staged work.
+- `docs/project/REPO-LAYOUT.md` - Repo organization policy and placement rules.
+- `docs/project/ROOT-INVENTORY.md` - Root-level file classification and cleanup decisions.
+- `docs/project/TODO.md` - Current backlog (root `TODO.md` is a compatibility stub).
 
 ## Compatibility Stubs
 
