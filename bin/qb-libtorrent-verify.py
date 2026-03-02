@@ -309,6 +309,12 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
     last_emitted_pct_tenths = -1
     last_emit_ts = 0.0
 
+    queued_for_checking = int(lt.torrent_status.queued_for_checking)
+    checking_resume_data = int(lt.torrent_status.checking_resume_data)
+    checking_files = int(lt.torrent_status.checking_files)
+    pending_states = {queued_for_checking, checking_resume_data}
+    recheck_start_grace = max(3.0, min(30.0, float(poll_s) * 8.0))
+
     while True:
         status = handle.status()
         state_value = int(getattr(status, "state", -1))
@@ -317,7 +323,7 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
         done = int(getattr(status, "total_wanted_done", getattr(status, "total_done", 0)) or 0)
         ratio = float(done / wanted) if wanted > 0 else float(getattr(status, "progress", 0.0) or 0.0)
         last_state = state_name
-        if state_value == int(lt.torrent_status.checking_files):
+        if state_value == checking_files:
             seen_checking_files = True
 
         now = time.monotonic()
@@ -352,28 +358,23 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
                 last_emit_ts = float(now)
             next_print = now + max(0.2, poll_s)
 
-        pending_states = {
-            int(lt.torrent_status.queued_for_checking),
-            int(lt.torrent_status.checking_resume_data),
-            int(lt.torrent_status.checking_files),
-        }
-        if wanted > 0 and done >= wanted and state_value != int(lt.torrent_status.checking_files):
+        if now - start >= timeout_s:
+            timed_out = True
             break
-        if state_value in pending_states:
-            if now - start >= timeout_s:
-                timed_out = True
-                break
+        if state_value in pending_states or state_value == checking_files:
             time.sleep(max(0.1, poll_s))
             continue
         if seen_checking_files:
             break
-        if now - start >= timeout_s:
-            timed_out = True
-            break
+        # Do not trust preloaded resume-data completion until we have seen a
+        # real checking_files transition from force_recheck().
+        if now - start < recheck_start_grace:
+            time.sleep(max(0.1, poll_s))
+            continue
         break
 
     elapsed = float(time.monotonic() - start)
-    verified = bool(wanted > 0 and done >= wanted and not timed_out)
+    verified = bool(wanted > 0 and done >= wanted and not timed_out and seen_checking_files)
     if timed_out:
         verify_reason = "timeout"
     elif seen_checking_files:
@@ -381,7 +382,7 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
     elif done <= 0 and last_state in {"downloading", "downloading_metadata"}:
         verify_reason = "fast_fail_no_data"
     else:
-        verify_reason = "state_exit"
+        verify_reason = "no_recheck_transition"
     if show_progress:
         final_eta = 0.0 if wanted > 0 and done >= wanted else None
         _ = emit_progress_line(

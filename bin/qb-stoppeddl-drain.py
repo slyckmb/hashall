@@ -23,7 +23,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.1.12"
+SEMVER = "0.1.16"
 SCRIPT_NAME = Path(__file__).name
 
 
@@ -502,6 +502,7 @@ def load_tested_cache(path: Path) -> Dict[str, dict]:
                 paths_norm[p] = dict(pmeta)
         out[h] = {
             "solved_a": bool(meta.get("solved_a", False)),
+            "solved_a_trusted": bool(meta.get("solved_a_trusted", False)),
             "solved_a_path": str(meta.get("solved_a_path") or ""),
             "solved_a_seen": str(meta.get("solved_a_seen") or ""),
             "paths": paths_norm,
@@ -516,6 +517,7 @@ def write_tested_cache(path: Path, cache: Dict[str, dict]) -> None:
         "entries": {
             h: {
                 "solved_a": bool(cache[h].get("solved_a", False)),
+                "solved_a_trusted": bool(cache[h].get("solved_a_trusted", False)),
                 "solved_a_path": str(cache[h].get("solved_a_path") or ""),
                 "solved_a_seen": str(cache[h].get("solved_a_seen") or ""),
                 "paths": {
@@ -916,6 +918,8 @@ def main() -> int:
     live_state_skipped = 0
     quick_prefilter_skipped = 0
     ignored_hashes_skipped = 0
+    untrusted_verified_retests = 0
+    tested_cache_fallback_retests = 0
 
     entries_by_hash = load_bucket_entries(index_path)
     if not entries_by_hash:
@@ -997,6 +1001,8 @@ def main() -> int:
             "live_state_skipped": int(live_state_skipped),
             "quick_prefilter_skipped": int(quick_prefilter_skipped),
             "ignored_hashes_skipped": int(ignored_hashes_skipped),
+            "untrusted_verified_retests": int(untrusted_verified_retests),
+            "tested_cache_fallback_retests": int(tested_cache_fallback_retests),
         }
         payload = {
             "tool": "qb-stoppeddl-drain",
@@ -1067,6 +1073,7 @@ def main() -> int:
             "tested_cache": {
                 "path": str(tested_cache_path),
                 "skipped_candidates": [],
+                "retest_candidates": [],
                 "hash_skip_reason": "",
             },
             "quick_prefilter": {
@@ -1077,7 +1084,9 @@ def main() -> int:
         }
 
         prior_tested_hash = tested_cache.get(h, {})
-        if args.skip_hash_if_a and bool(prior_tested_hash.get("solved_a", False)):
+        prior_solved_a = bool(prior_tested_hash.get("solved_a", False))
+        prior_solved_a_trusted = bool(prior_tested_hash.get("solved_a_trusted", False))
+        if args.skip_hash_if_a and prior_solved_a and prior_solved_a_trusted:
             row_out["status"] = "skip_solved_a_cached"
             row_out["classification"] = "a"
             row_out["tested_cache"]["hash_skip_reason"] = "solved_a_cached"
@@ -1087,6 +1096,8 @@ def main() -> int:
             write_progress_report(f"hash:{h}:skip_solved_a_cached")
             print("  skip solved_a_cached")
             continue
+        if args.skip_hash_if_a and prior_solved_a and not prior_solved_a_trusted:
+            row_out["tested_cache"]["hash_skip_reason"] = "retest_untrusted_solved_a"
 
         if args.skip_live_active and row_qb is not None:
             reason = live_skip_reason(row_qb)
@@ -1184,7 +1195,7 @@ def main() -> int:
             if sh == h:
                 continue
             st = str(sib.state or "").lower()
-            base_score = 80.0 if st in TRUSTED_STATES else 35.0
+            base_score = 150.0 if live_seed_ready(sib) else (120.0 if st in TRUSTED_STATES else 45.0)
             add_candidate(
                 cands,
                 str(sib.content_path or ""),
@@ -1192,21 +1203,97 @@ def main() -> int:
                 base_score,
                 "qB same name+size content_path",
             )
-            add_candidate(
-                cands,
-                str(sib.save_path or ""),
-                f"qb_same_name_size_save:{st}",
-                base_score - 10.0,
-                "qB same name+size save_path",
-            )
             if sib.save_path and sib.name:
                 add_candidate(
                     cands,
                     str(Path(sib.save_path) / sib.name),
                     f"qb_same_name_size_save_name:{st}",
-                    base_score - 5.0,
+                    base_score - 3.0,
                     "qB same name+size save_path + name",
                 )
+
+        # Strong fallback: exact same qB name, even when size metadata is slightly off.
+        target_name = str(name or "")
+        if target_name:
+            seen_exact_name_hashes: Set[str] = set()
+            for sib in by_hash_qb.values():
+                sh = str(sib.hash or "").lower()
+                if not sh or sh == h or sh in seen_exact_name_hashes:
+                    continue
+                if str(sib.name or "") != target_name:
+                    continue
+                seen_exact_name_hashes.add(sh)
+                st = str(sib.state or "").lower()
+                sib_size = int(sib.size or 0)
+                target_size = int(size or 0)
+                size_ratio = 0.0
+                if target_size > 0 and sib_size > 0:
+                    size_ratio = float(min(sib_size, target_size)) / float(max(sib_size, target_size))
+                base_score = 165.0 if live_seed_ready(sib) else (132.0 if st in TRUSTED_STATES else 55.0)
+                base_score += (size_ratio * 8.0)
+                note = "qB exact same name sibling"
+                add_candidate(
+                    cands,
+                    str(sib.content_path or ""),
+                    f"qb_same_name_exact:{st}",
+                    base_score,
+                    note,
+                )
+                if sib.save_path and sib.name:
+                    add_candidate(
+                        cands,
+                        str(Path(sib.save_path) / sib.name),
+                        f"qb_same_name_exact_save_name:{st}",
+                        base_score - 2.0,
+                        note + " save_path + name",
+                    )
+
+        # Fallback: same normalized name with near-size tolerance.
+        # qB display rounds sizes, and some sibling torrents differ slightly in
+        # metadata/padding while still being high-value candidates.
+        target_name_norm = normalize_name(name)
+        if target_name_norm:
+            seen_nearsize_hashes: Set[str] = set()
+            for sib in by_hash_qb.values():
+                sh = str(sib.hash or "").lower()
+                if not sh or sh == h or sh in seen_nearsize_hashes:
+                    continue
+                sib_name_norm = normalize_name(str(sib.name or ""))
+                if not sib_name_norm or sib_name_norm != target_name_norm:
+                    continue
+
+                sib_size = int(sib.size or 0)
+                target_size = int(size or 0)
+                if target_size > 0 and sib_size > 0:
+                    size_delta = abs(sib_size - target_size)
+                    size_tol = max(64 * 1024 * 1024, int(target_size * 0.02))
+                    if size_delta > size_tol:
+                        continue
+                    size_ratio = float(min(sib_size, target_size)) / float(max(sib_size, target_size))
+                else:
+                    size_delta = abs(sib_size - target_size)
+                    size_ratio = 0.0
+
+                seen_nearsize_hashes.add(sh)
+                st = str(sib.state or "").lower()
+                base_score = 112.0 if live_seed_ready(sib) else (86.0 if st in TRUSTED_STATES else 36.0)
+                base_score += (size_ratio * 8.0)
+                note = f"qB same normalized name near-size delta={size_delta}"
+                add_candidate(
+                    cands,
+                    str(sib.content_path or ""),
+                    f"qb_same_name_nearsize:{st}",
+                    base_score,
+                    note,
+                )
+                if sib.save_path and sib.name:
+                    add_candidate(
+                        cands,
+                        str(Path(sib.save_path) / sib.name),
+                        f"qb_same_name_nearsize_save_name:{st}",
+                        base_score - 2.0,
+                        note + " save_path + name",
+                    )
 
         for extra_root in args.extra_root:
             root = str(extra_root or "").strip()
@@ -1239,10 +1326,19 @@ def main() -> int:
             else {}
         )
         ranked: List[Tuple[float, float, str, Candidate, int, str]] = []
+        tested_skipped_ranked: List[Tuple[float, float, str, Candidate, int, str]] = []
         for cand in cands.values():
             key = canonical_alias(cand.path)
             prior_tested_meta = per_hash_tested.get(key, {})
-            if args.skip_tested_candidates and prior_tested_meta:
+            bad_meta = per_hash_bad.get(key, {})
+            fail_count = int(bad_meta.get("fail_count", 0) or 0)
+            last_cls = str(bad_meta.get("last_classification", "") or "")
+            adjusted = float(cand.score) - (float(args.bad_penalty) * float(fail_count))
+            prior_verified = bool(prior_tested_meta.get("last_verified", False))
+            prior_seen_checking = bool(prior_tested_meta.get("last_seen_checking_files", False))
+            skip_due_to_tested = (not prior_verified) or prior_seen_checking
+            if args.skip_tested_candidates and prior_tested_meta and skip_due_to_tested:
+                tested_skipped_ranked.append((adjusted, float(cand.score), cand.path, cand, fail_count, last_cls))
                 tested_candidates_skipped += 1
                 row_out["tested_cache"]["skipped_candidates"].append(
                     {
@@ -1255,9 +1351,18 @@ def main() -> int:
                     }
                 )
                 continue
-            bad_meta = per_hash_bad.get(key, {})
-            fail_count = int(bad_meta.get("fail_count", 0) or 0)
-            last_cls = str(bad_meta.get("last_classification", "") or "")
+            if args.skip_tested_candidates and prior_tested_meta and not skip_due_to_tested:
+                untrusted_verified_retests += 1
+                row_out["tested_cache"]["retest_candidates"].append(
+                    {
+                        "path": cand.path,
+                        "source": cand.source,
+                        "last_classification": str(prior_tested_meta.get("last_classification") or ""),
+                        "last_ratio": float(prior_tested_meta.get("last_ratio", 0.0) or 0.0),
+                        "last_seen": str(prior_tested_meta.get("last_seen") or ""),
+                        "reason": "retest_untrusted_verified",
+                    }
+                )
             if args.skip_known_bad and fail_count >= int(args.bad_threshold):
                 bad_candidates_skipped += 1
                 row_out["bad_cache"]["skipped_candidates"].append(
@@ -1270,8 +1375,13 @@ def main() -> int:
                     }
                 )
                 continue
-            adjusted = float(cand.score) - (float(args.bad_penalty) * float(fail_count))
             ranked.append((adjusted, float(cand.score), cand.path, cand, fail_count, last_cls))
+
+        if not ranked and tested_skipped_ranked:
+            tested_cache_fallback_retests += 1
+            row_out["tested_cache"]["hash_skip_reason"] = "fallback_retest_all_tested"
+            ranked = tested_skipped_ranked
+            print(f"  fallback retest_all_tested candidates={len(ranked)}")
 
         ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
         existing_ranked = [item for item in ranked if Path(item[3].path).exists()]
@@ -1321,6 +1431,19 @@ def main() -> int:
                                 "quick_ratio": quick_ratio,
                                 "size_overlap_ratio": size_overlap,
                                 "reason": "drop_global_zero_signal",
+                            }
+                        )
+                        continue
+                    source = str(cand.source or "")
+                    if source.startswith("qb_same_name") and "_save:" in source and not exact_tree and quick_ratio < 0.05:
+                        quick_prefilter_skipped += 1
+                        row_out["quick_prefilter"]["skipped_candidates"].append(
+                            {
+                                "path": cand.path,
+                                "source": cand.source,
+                                "quick_ratio": quick_ratio,
+                                "size_overlap_ratio": size_overlap,
+                                "reason": "drop_qb_save_root_low_signal",
                             }
                         )
                         continue
@@ -1528,6 +1651,8 @@ def main() -> int:
                 "last_ratio": float(vr.get("verify_ratio", 0.0) or 0.0),
                 "last_state": str(vr.get("verify_state") or ""),
                 "last_verified": bool(vr.get("verified")),
+                "last_verify_reason": str(vr.get("verify_reason") or ""),
+                "last_seen_checking_files": bool(vr.get("seen_checking_files", False)),
                 "last_seen": ts_iso(),
             }
             if prior_tested != next_tested:
@@ -1587,6 +1712,7 @@ def main() -> int:
 
         if letter == "a" and bool(best.get("verified")):
             tested_hash_meta["solved_a"] = True
+            tested_hash_meta["solved_a_trusted"] = bool(best.get("seen_checking_files", False))
             tested_hash_meta["solved_a_path"] = best_path
             tested_hash_meta["solved_a_seen"] = ts_iso()
         if tested_cache.get(h) != tested_hash_meta:
@@ -1615,7 +1741,9 @@ def main() -> int:
         f"tested_updates={summary['tested_cache_updates']} tested_skipped={summary['tested_candidates_skipped']} "
         f"solved_skipped={summary['solved_hashes_skipped']} live_skipped={summary['live_state_skipped']} "
         f"quick_prefilter_skipped={summary['quick_prefilter_skipped']} "
-        f"ignored_hashes_skipped={summary['ignored_hashes_skipped']}"
+        f"ignored_hashes_skipped={summary['ignored_hashes_skipped']} "
+        f"untrusted_verified_retests={summary['untrusted_verified_retests']} "
+        f"tested_cache_fallback_retests={summary['tested_cache_fallback_retests']}"
     )
     print(f"report_json={report_path}")
     print(f"latest_json={latest_report_path}")
