@@ -19,7 +19,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBitFile, QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.2.1"
+SEMVER = "0.2.2"
 SCRIPT_NAME = Path(__file__).name
 VERIFY_TOOL = REPO_ROOT / "bin" / "qb-libtorrent-verify.py"
 DEFAULT_SAFE_STATES = {
@@ -46,6 +46,9 @@ class VerifyAttempt:
     sibling_state: str
     path: str
     source: str
+    signature_exact: bool
+    path_exists: bool
+    path_name_matches_target: bool
     letter: str
     result: dict
     json_report: str
@@ -307,6 +310,24 @@ def classify_letter(result: dict) -> str:
     if ratio > 0.0:
         return "d"
     return "e"
+
+
+def is_strict_recoverable(attempt: VerifyAttempt) -> Tuple[bool, str]:
+    result = dict(attempt.result or {})
+    ratio = float(result.get("verify_ratio", 0.0) or 0.0)
+    if attempt.letter != "a":
+        return False, "best_letter_not_a"
+    if not bool(result.get("verified", False)):
+        return False, "not_verified"
+    if not bool(result.get("exact_tree", False)):
+        return False, "exact_tree_false"
+    if ratio < 0.999999:
+        return False, "ratio_below_1"
+    if not attempt.signature_exact:
+        return False, "candidate_signature_not_exact"
+    if not attempt.path_exists:
+        return False, "candidate_path_missing"
+    return True, "strict_exact_twin"
 
 
 def ensure_torrent_file(qb, target_hash: str, torrent_file: Path) -> bool:
@@ -580,6 +601,8 @@ def main() -> int:
             "verify_report_json": "",
             "verify_stdout": "",
             "verify_stderr": "",
+            "strict_recoverable": False,
+            "strict_recoverable_reason": "",
             "detail": "",
         }
 
@@ -729,6 +752,9 @@ def main() -> int:
                     sibling_state=sstate,
                     path=candidate_path,
                     source=source,
+                    signature_exact=bool(meta["signature_exact"]),
+                    path_exists=bool(meta["path_exists"]),
+                    path_name_matches_target=bool(meta["path_name_matches_target"]),
                     letter=letter,
                     result=result,
                     json_report=verify_json,
@@ -761,11 +787,17 @@ def main() -> int:
         best_result = dict(best_attempt.result)
         best_result["source_hash"] = best_attempt.sibling_hash
         best_result["source_state"] = best_attempt.sibling_state
+        best_result["candidate_signature_exact"] = bool(best_attempt.signature_exact)
+        best_result["candidate_path_exists"] = bool(best_attempt.path_exists)
+        best_result["candidate_path_name_matches_target"] = bool(best_attempt.path_name_matches_target)
 
         row_out["recommended_source"] = best_attempt.source
         row_out["recommended_path"] = best_attempt.path
         row_out["best_result"] = best_result
         row_out["verify_report_json"] = best_attempt.json_report
+        strict_ok, strict_reason = is_strict_recoverable(best_attempt)
+        row_out["strict_recoverable"] = bool(strict_ok)
+        row_out["strict_recoverable_reason"] = str(strict_reason)
 
         ratio = float(best_result.get("verify_ratio", 0.0) or 0.0)
         if best_attempt.letter == "a":
@@ -829,6 +861,22 @@ def main() -> int:
         "targets_no_exact_signature": int(targets_no_exact_signature),
         "targets_no_existing_paths": int(targets_no_existing_paths),
         "targets_no_verify_attempts": int(targets_no_verify_attempts),
+        "strict_recoverable": int(sum(1 for e in entries if bool(e.get("strict_recoverable")))),
+        "weak_recoverable": int(
+            sum(
+                1
+                for e in entries
+                if not bool(e.get("strict_recoverable"))
+                and str(e.get("classification") or "").lower() in {"a", "b", "c"}
+            )
+        ),
+        "not_recoverable": int(
+            sum(
+                1
+                for e in entries
+                if str(e.get("classification") or "").lower() in {"d", "e"}
+            )
+        ),
     }
 
     report_obj = {
@@ -866,6 +914,8 @@ def main() -> int:
         f"summary selected={summary['selected']} processed={summary['processed']} "
         f"a={summary['a']} c={summary['c']} d={summary['d']} e={summary['e']} "
         f"matched_pairs={summary['matched_pairs']} verify_attempts={summary['verify_attempts']} "
+        f"strict_recoverable={summary['strict_recoverable']} weak_recoverable={summary['weak_recoverable']} "
+        f"not_recoverable={summary['not_recoverable']} "
         f"ignored_hashes_skipped={summary['ignored_hashes_skipped']} "
         f"candidate_considered={summary['candidate_considered']} signature_compared={summary['signature_compared']}"
     )
