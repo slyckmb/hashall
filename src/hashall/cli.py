@@ -764,8 +764,14 @@ def payload_sync(
 
 
 def _payload_table_has_column(conn, table_name: str, column_name: str) -> bool:
-    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    table_ident = _quote_sql_identifier(table_name)
+    rows = conn.execute(f"PRAGMA table_info({table_ident})").fetchall()
     return any(row[1] == column_name for row in rows)
+
+
+def _quote_sql_identifier(name: str) -> str:
+    """Quote a SQLite identifier so dynamic table names stay syntactically safe."""
+    return f'"{name.replace("\"", "\"\"")}"'
 
 
 def _payload_root_relpath_for_device(root_path: str, mount_point: str | None, preferred_mount: str | None) -> str | None:
@@ -810,6 +816,7 @@ def _batch_count_active_payload_roots(conn, keys: list[tuple[int, str]]) -> dict
 
     for device_id, root_paths in by_device.items():
         table_name = f"files_{device_id}"
+        table_ident = _quote_sql_identifier(table_name)
         if not conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
             (table_name,),
@@ -832,7 +839,7 @@ def _batch_count_active_payload_roots(conn, keys: list[tuple[int, str]]) -> dict
 
         if all_roots:
             row = conn.execute(
-                f"SELECT COUNT(*) FROM {table_name} f WHERE {status_clause}1=1"
+                f"SELECT COUNT(*) FROM {table_ident} f WHERE {status_clause}1=1"
             ).fetchone()
             count_all = int(row[0] or 0)
             for root_path in all_roots:
@@ -842,7 +849,7 @@ def _batch_count_active_payload_roots(conn, keys: list[tuple[int, str]]) -> dict
             rel_root_counts: dict[str, int] = {rel_root: 0 for rel_root in rel_to_roots.keys()}
             rel_root_lookup = set(rel_root_counts.keys())
             path_rows = conn.execute(
-                f"SELECT path FROM {table_name} f WHERE {status_clause}1=1"
+                f"SELECT path FROM {table_ident} f WHERE {status_clause}1=1"
             ).fetchall()
 
             for row in path_rows:
@@ -1808,6 +1815,7 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
         for device in devices:
             device_id = device['device_id']
             table_name = f"files_{device_id}"
+            table_ident = _quote_sql_identifier(table_name)
 
             # Check if table exists
             table_exists = conn.execute("""
@@ -1818,7 +1826,7 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
             if table_exists:
                 result = conn.execute(f"""
                     SELECT COUNT(*) as count
-                    FROM {table_name}
+                    FROM {table_ident}
                     WHERE status='deleted'
                 """).fetchone()
                 total_deleted += result['count'] if result else 0
@@ -1933,6 +1941,7 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
         for device in devices:
             device_id = device['device_id']
             table_name = f"files_{device_id}"
+            table_ident = _quote_sql_identifier(table_name)
 
             # Check if table exists
             table_exists = conn.execute("""
@@ -1942,7 +1951,7 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
 
             if table_exists:
                 # Detect available columns (sha256 may not exist yet)
-                columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")}
+                columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_ident})")}
                 has_sha256_col = "sha256" in columns
 
                 # Get hash coverage for this device
@@ -1953,7 +1962,7 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
                             SUM(CASE WHEN quick_hash IS NOT NULL THEN 1 ELSE 0 END) as has_quick,
                             SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_sha1,
                             SUM(CASE WHEN sha256 IS NOT NULL THEN 1 ELSE 0 END) as has_sha256
-                        FROM {table_name}
+                        FROM {table_ident}
                         WHERE status = 'active'
                     """).fetchone()
                 else:
@@ -1962,7 +1971,7 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
                             COUNT(*) as total,
                             SUM(CASE WHEN quick_hash IS NOT NULL THEN 1 ELSE 0 END) as has_quick,
                             SUM(CASE WHEN sha1 IS NOT NULL THEN 1 ELSE 0 END) as has_sha1
-                        FROM {table_name}
+                        FROM {table_ident}
                         WHERE status = 'active'
                     """).fetchone()
 
@@ -1981,7 +1990,7 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
                         SELECT COUNT(DISTINCT quick_hash) as collision_count
                         FROM (
                             SELECT quick_hash
-                            FROM {table_name}
+                            FROM {table_ident}
                             WHERE status = 'active' AND quick_hash IS NOT NULL
                             GROUP BY quick_hash
                             HAVING COUNT(*) > 1
@@ -3411,10 +3420,11 @@ def devices_show(device, db):
 
     # Get deleted files count
     table_name = f"files_{device_id}"
+    table_ident = _quote_sql_identifier(table_name)
     deleted_count = 0
     try:
         cursor.execute(f"""
-            SELECT COUNT(*) FROM {table_name} WHERE status = 'deleted'
+            SELECT COUNT(*) FROM {table_ident} WHERE status = 'deleted'
         """)
         result = cursor.fetchone()
         if result:
