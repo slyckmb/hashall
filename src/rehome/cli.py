@@ -3,6 +3,7 @@ Command-line interface for rehome.
 """
 
 import click
+import fcntl
 import json
 import os
 import sqlite3
@@ -28,6 +29,34 @@ DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
 def _debug_enabled() -> bool:
     return os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _acquire_rehome_lock() -> "file":
+    """
+    Acquire an exclusive process-level lock for rehome apply operations.
+
+    Returns an open file handle that holds the lock.  The caller MUST close
+    it (or use try/finally) to release the lock on exit.
+
+    Raises SystemExit if the lock is held by another process.
+    """
+    lock_dir = Path.home() / ".hashall"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "rehome.lock"
+    lock_fh = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_fh.close()
+        click.echo(
+            "❌ Another rehome apply is already running "
+            f"(lock held: {lock_path}). Aborting.",
+            err=True,
+        )
+        raise SystemExit(1)
+    lock_fh.write(f"pid={os.getpid()}\n")
+    lock_fh.flush()
+    return lock_fh
 
 
 def _emit_banner() -> None:
@@ -796,6 +825,13 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
         click.echo(f"debug_module rehome.view_builder={Path(rehome_view_builder.__file__).resolve()}")
         click.echo(f"debug_version rehome={__version__}")
 
+    # Acquire exclusive lock for execute mode — dry-run is read-only and does
+    # not need a lock.  Two concurrent execute runs corrupt each other's state
+    # (confirmed amplifying factor in Feb-2026 incident).
+    lock_fh = None
+    if not dryrun:
+        lock_fh = _acquire_rehome_lock()
+
     try:
         for i, plan in enumerate(plans_to_apply, 1):
             if len(plans_to_apply) > 1:
@@ -830,6 +866,9 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
             click.echo(traceback.format_exc(), err=True)
             click.echo("debug_traceback_end", err=True)
         raise click.Abort()
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
 
     click.echo()
     if dryrun:
