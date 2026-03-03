@@ -30,10 +30,22 @@ class FakeQbitClient:
         return True
 
     def get_torrent_info(self, torrent_hash: str):
-        return SimpleNamespace(save_path=self.save_paths.get(torrent_hash, self.default_path))
+        return SimpleNamespace(
+            save_path=self.save_paths.get(torrent_hash, self.default_path),
+            state="stalledup",
+            progress=1.0,
+            amount_left=0,
+            auto_tmm=False,
+        )
 
     def get_torrent_files(self, torrent_hash: str):
         return []
+
+    def add_tags(self, torrent_hash: str, tags) -> bool:
+        return True
+
+    def remove_tags(self, torrent_hash: str, tags) -> bool:
+        return True
 
 
 def _setup_db_and_plan(tmp_path: Path):
