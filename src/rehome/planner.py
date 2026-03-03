@@ -39,7 +39,9 @@ def _build_view_targets(
     """
     Build per-torrent view targets using a source→target root mapping.
 
-    Returns empty list if source/target roots are not provided.
+    Returns empty list if source/target roots are not provided.  Callers that
+    require view targets (i.e. when pool_seeding_root is configured) must check
+    that the returned list is non-empty when torrents were expected.
     """
     if not target_root:
         return []
@@ -766,6 +768,34 @@ class DemotionPlanner:
                     "total_bytes": source_payload.total_bytes
                 }
 
+            # Guard H4: if pool_seeding_root IS configured but _build_view_targets
+            # produced no targets, the executor will fall back to the parent path
+            # which is wrong/bare.  BLOCK rather than silently proceed.
+            if self.pool_seeding_root is not None and not view_targets and sibling_hashes:
+                return {
+                    "version": "1.0",
+                    "direction": "demote",
+                    "decision": "BLOCK",
+                    "torrent_hash": torrent_hash,
+                    "payload_id": source_payload.payload_id,
+                    "payload_hash": source_payload.payload_hash,
+                    "reasons": [
+                        f"pool_seeding_root={self.pool_seeding_root} is configured but "
+                        f"_build_view_targets produced no view targets for {len(sibling_hashes)} "
+                        f"sibling(s) — torrent save_paths may not be under any configured "
+                        f"seeding root. Verify stash_seeding_root and pool_seeding_root."
+                    ],
+                    "affected_torrents": sibling_hashes,
+                    "source_path": source_payload.root_path,
+                    "target_path": None,
+                    "source_device_id": self.stash_device,
+                    "target_device_id": self.pool_device,
+                    "seeding_roots": [str(r) for r in self.seeding_roots],
+                    "library_roots": [str(r) for r in self.library_roots],
+                    "file_count": source_payload.file_count,
+                    "total_bytes": source_payload.total_bytes
+                }
+
             # Build payload group metadata (all payloads with same hash)
             payload_group = [
                 {
@@ -940,16 +970,40 @@ class DemotionPlanner:
             payloads_seen = set()
             plans = []
 
+            # Build a set of all torrent hashes that carry the requested tag —
+            # used below to warn when payload-group atomicity pulls in untagged
+            # siblings.
+            tagged_hashes: Set[str] = {h for h, _ in matching_torrents}
+
             for torrent_hash, group_key in matching_torrents:
                 if group_key in payloads_seen:
                     continue  # Already planned this payload
 
                 payloads_seen.add(group_key)
 
-                # Generate plan for this payload
+                # Generate plan for this payload (includes ALL siblings).
                 plan = self.plan_demotion(torrent_hash, conn=conn)
                 plan['batch_mode'] = 'tag'
                 plan['batch_filter'] = tag
+
+                # Warn about untagged siblings being pulled in by group atomicity.
+                # All siblings must move together to maintain payload consistency,
+                # but this should be visible to the operator.
+                affected = plan.get("affected_torrents") or []
+                untagged = [h for h in affected if h not in tagged_hashes]
+                if untagged:
+                    payload_short = (plan.get("payload_hash") or "unknown")[:16]
+                    print(
+                        f"⚠️  batch_demotion_untagged_siblings "
+                        f"payload={payload_short} "
+                        f"tag={tag!r} "
+                        f"untagged_count={len(untagged)} "
+                        f"untagged_hashes={','.join(h[:16] for h in untagged)}"
+                    )
+                    print(
+                        f"   All {len(affected)} sibling(s) for this payload move as a "
+                        f"group — payload-group atomicity requires it."
+                    )
 
                 plans.append(plan)
 
