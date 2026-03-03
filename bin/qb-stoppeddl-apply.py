@@ -861,6 +861,13 @@ def main() -> int:
                     item["detail"] = f"docker_stop_failed:{stop_msg or 'unknown'}"
                 counts["failed"] = len(active_plan)
             else:
+                # Track successfully-patched files so we can roll them back if
+                # any patch fails mid-batch.  Restarting qBittorrent with
+                # partially-patched fastresume files causes partial state
+                # corruption (C10).
+                patched_backups: List[Tuple[Path, Path]] = []  # (fr_path, backup_path)
+                batch_failed = False
+
                 for idx, row in enumerate(active_plan, start=1):
                     item = item_by_hash[row.torrent_hash]
                     counts["applied"] += 1
@@ -889,72 +896,104 @@ def main() -> int:
                         counts["failed"] += 1
                         counts["fr_patch_failed"] += 1
                         print(f"  FAIL fastresume {patch_msg}", flush=True)
-                        continue
+                        batch_failed = True
+                        break  # Stop patching — do NOT restart qB with partial state
                     if changed:
                         counts["fr_patched"] += 1
+                        backup_path = fr_path.with_name(fr_path.name + backup_suffix)
+                        if backup_path.exists():
+                            patched_backups.append((fr_path, backup_path))
 
-                ok_start, start_msg = docker_ctl("start", str(args.qb_container))
-                print(
-                    f"qB start status={'ok' if ok_start else 'fail'} detail={start_msg or 'none'}",
-                    flush=True,
-                )
-                if not ok_start:
+                if batch_failed:
+                    # Roll back all patches applied before the failure.
+                    rollback_ok = 0
+                    rollback_fail = 0
+                    for fr_path_rb, backup_path_rb in patched_backups:
+                        try:
+                            backup_path_rb.replace(fr_path_rb)
+                            rollback_ok += 1
+                        except Exception as rb_err:
+                            rollback_fail += 1
+                            print(
+                                f"  ROLLBACK_FAIL path={fr_path_rb} error={rb_err}",
+                                flush=True,
+                            )
+                    print(
+                        f"fastresume_batch rollback rolled_back={rollback_ok} "
+                        f"rollback_fail={rollback_fail} "
+                        f"NOT restarting qBittorrent to prevent partial state",
+                        flush=True,
+                    )
+                    # Mark remaining unprocessed items as failed
                     for row in active_plan:
                         item = item_by_hash[row.torrent_hash]
-                        if item["status"] == "failed":
-                            continue
-                        item["status"] = "failed"
-                        item["detail"] = f"docker_start_failed:{start_msg or 'unknown'}"
-                        counts["failed"] += 1
-                elif not wait_qb_online(qb, float(args.restart_timeout)):
-                    for row in active_plan:
-                        item = item_by_hash[row.torrent_hash]
-                        if item["status"] == "failed":
-                            continue
-                        item["status"] = "failed"
-                        item["detail"] = "qb_online_timeout_after_restart"
-                        counts["failed"] += 1
-                    print("ERROR qB API did not return after restart timeout", flush=True)
-                else:
-                    for row in active_plan:
-                        item = item_by_hash[row.torrent_hash]
-                        if item["status"] == "failed":
-                            continue
-                        ok_recheck = qb.recheck_torrent(row.torrent_hash)
-                        item["steps"].append({"step": "recheck", "ok": bool(ok_recheck)})
-                        if not ok_recheck:
+                        if item["status"] not in {"failed", "ok"}:
                             item["status"] = "failed"
-                            item["detail"] = f"recheck_failed:{qb.last_error or 'unknown'}"
+                            item["detail"] = "batch_aborted_due_to_patch_failure"
                             counts["failed"] += 1
-                            print(f"  FAIL recheck error={qb.last_error or 'unknown'}", flush=True)
-                            continue
-                        counts["recheck_dispatched"] += 1
-                        if not bool(args.wait_recheck):
-                            item["status"] = "queued"
-                            item["detail"] = "recheck_dispatched:fastresume_batch"
-                            print("  OK recheck_dispatched (no-wait)", flush=True)
-                            continue
-                        status, detail = wait_recheck_terminal(
-                            qb=qb,
-                            torrent_hash=row.torrent_hash,
-                            poll_seconds=float(args.poll),
-                            timeout_seconds=float(args.timeout),
-                            show_progress=bool(args.show_poll_progress),
-                            progress_interval=float(args.progress_interval),
-                            protect_download=bool(args.protect_download),
-                            item=item,
-                        )
-                        item["status"] = status
-                        item["detail"] = detail
-                        if status == "ok":
-                            counts["ok"] += 1
-                            print(f"  OK {detail}", flush=True)
-                        elif status == "blocked":
-                            counts["blocked"] += 1
-                            print(f"  BLOCK {detail}", flush=True)
-                        else:
+                else:
+                    ok_start, start_msg = docker_ctl("start", str(args.qb_container))
+                    print(
+                        f"qB start status={'ok' if ok_start else 'fail'} detail={start_msg or 'none'}",
+                        flush=True,
+                    )
+                    if not ok_start:
+                        for row in active_plan:
+                            item = item_by_hash[row.torrent_hash]
+                            if item["status"] == "failed":
+                                continue
+                            item["status"] = "failed"
+                            item["detail"] = f"docker_start_failed:{start_msg or 'unknown'}"
                             counts["failed"] += 1
-                            print(f"  FAIL {detail}", flush=True)
+                    elif not wait_qb_online(qb, float(args.restart_timeout)):
+                        for row in active_plan:
+                            item = item_by_hash[row.torrent_hash]
+                            if item["status"] == "failed":
+                                continue
+                            item["status"] = "failed"
+                            item["detail"] = "qb_online_timeout_after_restart"
+                            counts["failed"] += 1
+                        print("ERROR qB API did not return after restart timeout", flush=True)
+                    else:
+                        for row in active_plan:
+                            item = item_by_hash[row.torrent_hash]
+                            if item["status"] == "failed":
+                                continue
+                            ok_recheck = qb.recheck_torrent(row.torrent_hash)
+                            item["steps"].append({"step": "recheck", "ok": bool(ok_recheck)})
+                            if not ok_recheck:
+                                item["status"] = "failed"
+                                item["detail"] = f"recheck_failed:{qb.last_error or 'unknown'}"
+                                counts["failed"] += 1
+                                print(f"  FAIL recheck error={qb.last_error or 'unknown'}", flush=True)
+                                continue
+                            counts["recheck_dispatched"] += 1
+                            if not bool(args.wait_recheck):
+                                item["status"] = "queued"
+                                item["detail"] = "recheck_dispatched:fastresume_batch"
+                                print("  OK recheck_dispatched (no-wait)", flush=True)
+                                continue
+                            status, detail = wait_recheck_terminal(
+                                qb=qb,
+                                torrent_hash=row.torrent_hash,
+                                poll_seconds=float(args.poll),
+                                timeout_seconds=float(args.timeout),
+                                show_progress=bool(args.show_poll_progress),
+                                progress_interval=float(args.progress_interval),
+                                protect_download=bool(args.protect_download),
+                                item=item,
+                            )
+                            item["status"] = status
+                            item["detail"] = detail
+                            if status == "ok":
+                                counts["ok"] += 1
+                                print(f"  OK {detail}", flush=True)
+                            elif status == "blocked":
+                                counts["blocked"] += 1
+                                print(f"  BLOCK {detail}", flush=True)
+                            else:
+                                counts["failed"] += 1
+                                print(f"  FAIL {detail}", flush=True)
         else:
             for idx, row in enumerate(active_plan, start=1):
                 item = item_by_hash[row.torrent_hash]
