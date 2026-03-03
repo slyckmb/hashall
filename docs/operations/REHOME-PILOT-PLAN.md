@@ -1,7 +1,7 @@
 # Rehome Crawl/Walk/Run Pilot Plan
 
 **Created:** 2026-03-03
-**Status:** Active — Phase 1 in progress
+**Status:** Active — Part 1 complete, Phase 0 pre-flight next
 **Scope:** (1) Archive dev/experimental tooling from the Feb 2026 repair effort, establishing a clean canonical code path. (2) Run the graduated rehome pilot using the hardened executor, fixing bugs that arise before advancing phases.
 
 ---
@@ -61,7 +61,7 @@ make rehome-followup → python -m rehome.cli followup
 
 ## Part 1: Tooling Cleanup
 
-### Status: Pending
+### Status: ✅ Complete (2026-03-03)
 
 ### 1A. Archive → `bin/archive/2026-02-repair/`
 
@@ -237,5 +237,8 @@ If a torrent is left in bad state: use qBittorrent UI or `qbit-repair-batch.sh` 
 
 - ✅ Hardening plan executed: 6 commits, 13 issues fixed (C1,C3,C6,C7,C8,H1,H2,H3,H4,H5,M3,M5,C10), version bumped to 0.4.0
 - ✅ Crawl/walk/run pilot plan written to repo (`docs/operations/REHOME-PILOT-PLAN.md`)
-- 🔲 Part 1 (tooling cleanup): not yet started
+- ✅ Part 1A: Archived 20 nohl-basics scripts → `bin/archive/2026-02-repair/`
+- ✅ Part 1B: Archived 20 legacy pipeline scripts → `bin/archive/legacy-pipeline/`
+- ✅ Part 1C: Renamed `rehome-106_nohl-basics-qb-hash-root-report.sh` → `bin/qb-hash-root-report.sh`, updated callers in codex-says-run-this-next.sh, full-hashall-db-refresh.sh, RUN-STATE.md
+- 🔲 Phase 0 pre-flight: not yet run
 - 🔲 Phase 1 (crawl): not yet started
