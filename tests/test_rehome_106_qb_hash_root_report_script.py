@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_ROOT / "bin" / "rehome-106_nohl-basics-qb-hash-root-report.sh"
+SCRIPT = REPO_ROOT / "bin" / "qb-hash-root-report.sh"
 
 
 def _extract_stdout_path(stdout: str, key: str) -> Path:
