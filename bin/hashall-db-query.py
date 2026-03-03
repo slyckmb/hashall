@@ -18,7 +18,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.model import connect_db
 
-SEMVER = "0.1.0"
+SEMVER = "0.1.8"
 SCRIPT_NAME = Path(__file__).name
 
 
@@ -33,6 +33,18 @@ def emit_start() -> str:
 
 
 def parse_scopes(text: str) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for part in str(text or "").replace("|", ",").split(","):
+        s = part.strip().lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def parse_csv_tokens(text: str) -> List[str]:
     out: List[str] = []
     seen = set()
     for part in str(text or "").replace("|", ",").split(","):
@@ -274,6 +286,8 @@ def query_files_tables(
     path: str,
     name: str,
     hash_token: str,
+    path_suffixes: Sequence[str],
+    exclude_torrent_sidecars: bool,
     include_deleted: bool,
     limit: int,
 ) -> List[Dict[str, Any]]:
@@ -284,12 +298,28 @@ def query_files_tables(
     if not needs_filter:
         return out
 
+    def _col_expr(cols: set, col: str, alias: str | None = None) -> str:
+        use_alias = alias or col
+        if col in cols:
+            return f"{col} AS {use_alias}" if use_alias != col else col
+        return f"NULL AS {use_alias}"
+
+    def _canon_sql(expr: str) -> str:
+        return (
+            "REPLACE(REPLACE(REPLACE(REPLACE("
+            f"{expr}, "
+            "'/stash/media/downloads/torrents/seeding', '/data/media/torrents/seeding'), "
+            "'/pool/data/seeds', '/data/media/torrents/seeding'), "
+            "'/pool/data/cross-seed-link', '/data/media/torrents/seeding/cross-seed-link'), "
+            "'/stash/media', '/data/media')"
+        )
+
     for table in tables:
-        if len(out) >= limit:
-            break
         if not safe_table_name(table):
             continue
         cols = set(get_table_columns(conn, table))
+        if "path" not in cols:
+            continue
         where_parts: List[str] = []
         params: List[Any] = []
 
@@ -300,6 +330,17 @@ def query_files_tables(
         if path_like and "path" in cols:
             where_parts.append("LOWER(path) LIKE ?")
             params.append(like_param(path_like))
+
+        suffixes = [str(s or "").strip().lower() for s in path_suffixes if str(s or "").strip()]
+        if suffixes and "path" in cols:
+            suffix_parts: List[str] = []
+            for sfx in suffixes:
+                suffix_parts.append("LOWER(path) LIKE ?")
+                params.append(f"%{sfx}")
+            where_parts.append("(" + " OR ".join(suffix_parts) + ")")
+
+        if exclude_torrent_sidecars and "path" in cols:
+            where_parts.append("LOWER(path) NOT LIKE '%.torrent'")
 
         if hash_token:
             ht = str(hash_token).strip().lower()
@@ -320,20 +361,249 @@ def query_files_tables(
 
         where_sql = " WHERE " + " AND ".join(where_parts)
         status_expr = "status" if "status" in cols else "'active'"
+        full_path_expr = (
+            "CASE "
+            "WHEN substr(path,1,1)='/' THEN path "
+            "WHEN COALESCE(discovered_under,'') != '' THEN discovered_under || '/' || path "
+            "ELSE path END"
+            if "discovered_under" in cols
+            else "path"
+        )
+        full_path_canon_expr = _canon_sql(full_path_expr)
+        payload_root_canon_expr = _canon_sql("p.root_path")
+        ti_root_expr = "CASE WHEN COALESCE(ti.root_name,'') != '' THEN ti.save_path || '/' || ti.root_name ELSE ti.save_path END"
+        ti_root_canon_expr = _canon_sql(ti_root_expr)
+        mtime_local_expr = (
+            "datetime(mtime,'unixepoch','localtime')"
+            if "mtime" in cols
+            else "NULL"
+        )
         order_prefix = "last_seen_at DESC, " if "last_seen_at" in cols else ""
         sql = (
-            f"SELECT path, size, {status_expr} AS status "
+            f"SELECT "
+            f"'{table}' AS table_name, "
+            f"path, "
+            f"{full_path_expr} AS full_path, "
+            f"{_col_expr(cols, 'size')}, "
+            f"{_col_expr(cols, 'inode')}, "
+            f"{_col_expr(cols, 'quick_hash')}, "
+            f"{_col_expr(cols, 'sha1')}, "
+            f"{_col_expr(cols, 'sha256')}, "
+            f"{_col_expr(cols, 'hash_source')}, "
+            f"{_col_expr(cols, 'mtime')}, "
+            f"{mtime_local_expr} AS mtime_local, "
+            f"{_col_expr(cols, 'first_seen_at')}, "
+            f"{_col_expr(cols, 'last_seen_at')}, "
+            f"{_col_expr(cols, 'last_modified_at')}, "
+            f"{status_expr} AS status, "
+            f"{_col_expr(cols, 'discovered_under')}, "
+            f"COALESCE(( "
+            f"  SELECT REPLACE(group_concat(DISTINCT z.torrent_hash), ',', '|') "
+            f"  FROM ( "
+            f"    SELECT ti.torrent_hash AS torrent_hash "
+            f"    FROM payloads p "
+            f"    JOIN torrent_instances ti ON ti.payload_id = p.payload_id "
+            f"    WHERE ({full_path_canon_expr}) = ({payload_root_canon_expr}) "
+            f"       OR ({full_path_canon_expr}) LIKE ({payload_root_canon_expr}) || '/%' "
+            f"    UNION "
+            f"    SELECT ti.torrent_hash AS torrent_hash "
+            f"    FROM torrent_instances ti "
+            f"    WHERE ({full_path_canon_expr}) = ({ti_root_canon_expr}) "
+            f"       OR ({full_path_canon_expr}) LIKE ({ti_root_canon_expr}) || '/%' "
+            f"  ) z "
+            f"), '') AS torrent_hashes "
             f"FROM {table}{where_sql} "
             f"ORDER BY {order_prefix}path "
             f"LIMIT ?"
         )
-        rows = fetch_rows(conn, sql, params + [max(1, int(limit - len(out)))])
+        rows = fetch_rows(conn, sql, params + [max(1, int(limit))])
         for row in rows:
             row["table"] = table
             row["scope"] = "files"
             out.append(row)
-        if len(out) >= limit:
-            break
+    out.sort(
+        key=lambda r: (
+            1 if r.get("inode") is None else 0,
+            int(r.get("inode") or 0),
+            str(r.get("full_path") or r.get("path") or ""),
+        )
+    )
+    return out[:limit]
+
+
+def _short_hash(val: Any) -> str:
+    s = str(val or "").strip()
+    return s[:8] if s else ("-" * 8)
+
+
+def _short_hash_list(val: Any, prefix_len: int = 12) -> str:
+    raw = str(val or "").strip()
+    if not raw:
+        return ""
+    for sep in (",", " ", "\t", "\n"):
+        raw = raw.replace(sep, "|")
+    tokens: List[str] = []
+    seen = set()
+    for tok in raw.split("|"):
+        h = tok.strip().lower()
+        if not h or h in seen:
+            continue
+        seen.add(h)
+        tokens.append(h[:prefix_len])
+    return "|".join(tokens)
+
+
+def _parse_hash_list(val: Any) -> List[str]:
+    raw = str(val or "").strip()
+    if not raw:
+        return []
+    for sep in (",", " ", "\t", "\n"):
+        raw = raw.replace(sep, "|")
+    out: List[str] = []
+    seen = set()
+    for tok in raw.split("|"):
+        h = tok.strip().lower()
+        if not h or h in seen:
+            continue
+        seen.add(h)
+        out.append(h)
+    return out
+
+
+def fetch_qb_progress_map(hashes: Sequence[str]) -> Dict[str, float]:
+    if not hashes:
+        return {}
+    try:
+        from hashall.qbittorrent import get_qbittorrent_client
+    except Exception:
+        return {}
+    try:
+        qb = get_qbittorrent_client()
+        if not qb.test_connection() or not qb.login():
+            return {}
+        info = qb.get_torrents_by_hashes(list(hashes))
+    except Exception:
+        return {}
+    out: Dict[str, float] = {}
+    for h, row in info.items():
+        try:
+            out[str(h).lower()] = float(row.progress or 0.0) * 100.0
+        except Exception:
+            continue
+    return out
+
+
+def format_torrent_refs(val: Any, progress_map: Dict[str, float], prefix_len: int = 12) -> str:
+    hashes = _parse_hash_list(val)
+    if not hashes:
+        return ""
+    refs: List[str] = []
+    for h in hashes:
+        p = progress_map.get(h)
+        if p is None:
+            refs.append(f"{h[:prefix_len]}:?")
+        else:
+            refs.append(f"{h[:prefix_len]}:{p:.2f}%")
+    return "|".join(refs)
+
+
+def compact_files_rows_for_table(rows: List[Dict[str, Any]], progress_map: Dict[str, float]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        size = row.get("size")
+        try:
+            size_gib = float(size) / (1024.0 ** 3)
+        except Exception:
+            size_gib = 0.0
+        mtime = row.get("mtime_local") or row.get("last_modified_at") or row.get("last_seen_at") or ""
+        out.append(
+            {
+                "inode": row.get("inode"),
+                "size_gib": f"{size_gib:.2f}",
+                "mtime": mtime,
+                "quick8": _short_hash(row.get("quick_hash")),
+                "sha1_8": _short_hash(row.get("sha1")),
+                "sha256_8": _short_hash(row.get("sha256")),
+                "torrent_hashes": format_torrent_refs(row.get("torrent_hashes"), progress_map, prefix_len=12),
+                "full_path": row.get("full_path") or row.get("path") or "",
+            }
+        )
+    out.sort(
+        key=lambda r: (
+            1 if r.get("inode") in (None, "") else 0,
+            int(r.get("inode") or 0),
+            str(r.get("full_path") or ""),
+        )
+    )
+    return out
+
+
+def _short_hash_len(val: Any, n: int) -> str:
+    s = str(val or "").strip()
+    return s[:n] if s else ("-" * max(1, int(n)))
+
+
+def _minimal_time(val: Any) -> str:
+    s = str(val or "").strip()
+    if not s:
+        return "-"
+    try:
+        return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").strftime("%m-%d %H:%M")
+    except Exception:
+        pass
+    try:
+        return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").strftime("%m-%d %H:%M")
+    except Exception:
+        pass
+    if len(s) >= 16 and s[4] == "-":
+        return s[5:16].replace("T", " ")
+    return s
+
+
+def _torrent_hashes_and_pct(val: Any, progress_map: Dict[str, float], prefix_len: int = 6) -> Tuple[str, str]:
+    hashes = _parse_hash_list(val)
+    if not hashes:
+        return "-" * max(1, int(prefix_len)), "-"
+    hs: List[str] = []
+    ps: List[str] = []
+    for h in hashes:
+        hs.append(h[:prefix_len])
+        p = progress_map.get(h)
+        ps.append(f"{p:.2f}%" if p is not None else "-")
+    return "|".join(hs) if hs else "-", "|".join(ps) if ps else "-"
+
+
+def compact_files_rows_for_tsv(rows: List[Dict[str, Any]], progress_map: Dict[str, float]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        size = row.get("size")
+        try:
+            size_gib = f"{float(size) / (1024.0 ** 3):.2f}"
+        except Exception:
+            size_gib = "-"
+        mtime_src = row.get("mtime_local") or row.get("last_modified_at") or row.get("last_seen_at")
+        tor_h, tor_pct = _torrent_hashes_and_pct(row.get("torrent_hashes"), progress_map, prefix_len=6)
+        inode = row.get("inode")
+        out.append(
+            {
+                "inode": str(inode) if inode not in (None, "") else "-",
+                "size_gib": size_gib,
+                "mtime": _minimal_time(mtime_src),
+                "quick6": _short_hash_len(row.get("quick_hash"), 6),
+                "sha1_6": _short_hash_len(row.get("sha1"), 6),
+                "sha256_6": _short_hash_len(row.get("sha256"), 6),
+                "tor_hash6": tor_h,
+                "tor_pct": tor_pct,
+                "full_path": str(row.get("full_path") or row.get("path") or "-"),
+            }
+        )
+    out.sort(
+        key=lambda r: (
+            1 if r.get("inode") in (None, "", "-") else 0,
+            int(r.get("inode") or 0) if str(r.get("inode")).isdigit() else 0,
+            str(r.get("full_path") or ""),
+        )
+    )
     return out
 
 
@@ -348,6 +618,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--category", default="", help="Category substring (torrent scope)")
     p.add_argument("--tag", default="", help="Tag substring (torrent scope)")
     p.add_argument("--payload-hash", default="", help="Payload hash token (prefix accepted)")
+    p.add_argument(
+        "--files-suffix",
+        default="",
+        help="Optional file suffix filter for files scope (comma-separated, e.g. .mkv,.mp3)",
+    )
+    p.add_argument(
+        "--exclude-torrent-sidecars",
+        action="store_true",
+        help="Exclude paths ending with .torrent in files scope",
+    )
     p.add_argument("--include-deleted", action="store_true", help="Include non-active rows when scanning files_*")
     p.add_argument("--limit", type=int, default=50, help="Max rows returned per run (default: 50)")
     p.add_argument("--format", choices=("table", "json", "tsv"), default="table", help="Output format")
@@ -422,6 +702,7 @@ def main() -> int:
         scopes = parse_scopes(args.scope)
         if not scopes:
             scopes = ["torrents", "payloads"]
+        file_suffixes = parse_csv_tokens(args.files_suffix)
 
         rows: List[Dict[str, Any]] = []
         limit = max(1, int(args.limit))
@@ -463,12 +744,29 @@ def main() -> int:
                     path=str(args.path or ""),
                     name=str(args.name or ""),
                     hash_token=str(args.hash or ""),
+                    path_suffixes=file_suffixes,
+                    exclude_torrent_sidecars=bool(args.exclude_torrent_sidecars),
                     include_deleted=bool(args.include_deleted),
                     limit=max(1, limit - len(rows)),
                 )
             )
 
         rows = rows[:limit]
+        if args.format in {"table", "tsv"} and scopes == ["files"] and rows:
+            all_hashes: List[str] = []
+            seen_hashes = set()
+            for row in rows:
+                for h in _parse_hash_list(row.get("torrent_hashes")):
+                    if h in seen_hashes:
+                        continue
+                    seen_hashes.add(h)
+                    all_hashes.append(h)
+            progress_map = fetch_qb_progress_map(all_hashes)
+            if args.format == "tsv":
+                rows = compact_files_rows_for_tsv(rows, progress_map)
+            else:
+                rows = compact_files_rows_for_table(rows, progress_map)
+
         if args.format == "json":
             print(json.dumps(rows, indent=2))
         elif args.format == "tsv":
