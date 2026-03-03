@@ -27,7 +27,7 @@ step "4. Payload sync (qB index refresh)" \
   "$repo_root/bin/db-refresh-step4-payload-sync.sh"
 
 step "Bonus. QB hash-root report" \
-  "$repo_root/bin/rehome-106_nohl-basics-qb-hash-root-report.sh"
+  "$repo_root/bin/qb-hash-root-report.sh"
 
 echo
 echo "Full refresh pipeline complete. Review each log under $HOME/.logs/hashall/reports for per-step detail."
