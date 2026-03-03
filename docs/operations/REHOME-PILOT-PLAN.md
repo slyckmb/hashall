@@ -240,5 +240,6 @@ If a torrent is left in bad state: use qBittorrent UI or `qbit-repair-batch.sh` 
 - ✅ Part 1A: Archived 20 nohl-basics scripts → `bin/archive/2026-02-repair/`
 - ✅ Part 1B: Archived 20 legacy pipeline scripts → `bin/archive/legacy-pipeline/`
 - ✅ Part 1C: Renamed `rehome-106_nohl-basics-qb-hash-root-report.sh` → `bin/qb-hash-root-report.sh`, updated callers in codex-says-run-this-next.sh, full-hashall-db-refresh.sh, RUN-STATE.md
-- 🔲 Phase 0 pre-flight: not yet run
+- ✅ Removed 17 test files for archived scripts; fixed test_rehome_106 to reference renamed script; 85 tests passing 0 failing
+- ⚠️  Phase 0 pre-flight: payload-sync ran (5135 processed, 4903 complete). Scans fresh from 2026-03-03 13:23:36 per stats. Full pipeline (scan→sha256→dedup→payload) not re-run this session — reviewing whether required before Phase 1.
 - 🔲 Phase 1 (crawl): not yet started
