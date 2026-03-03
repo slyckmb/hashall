@@ -8,7 +8,7 @@ hr() {
 usage() {
   cat <<'USAGE'
 Usage:
-  bin/rehome-106_nohl-basics-qb-hash-root-report.sh [options]
+  bin/qb-hash-root-report.sh [options]
 
 What this does:
   Build per-hash and per-root ownership reports from Phase 100/101 data,
@@ -78,11 +78,11 @@ if [[ -z "$BASELINE_JSON" ]]; then
   BASELINE_JSON="$(latest_baseline)"
 fi
 if [[ -z "$MAPPING_JSON" || ! -f "$MAPPING_JSON" ]]; then
-  echo "Missing mapping JSON; run bin/rehome-101_nohl-basics-qb-candidate-mapping.sh first." >&2
+  echo "Missing mapping JSON (from archived nohl-basics pipeline, no longer generated)." >&2
   exit 3
 fi
 if [[ -z "$BASELINE_JSON" || ! -f "$BASELINE_JSON" ]]; then
-  echo "Missing baseline JSON; run bin/rehome-100_nohl-basics-qb-repair-baseline.sh first." >&2
+  echo "Missing baseline JSON (from archived nohl-basics pipeline, no longer generated)." >&2
   exit 3
 fi
 if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
