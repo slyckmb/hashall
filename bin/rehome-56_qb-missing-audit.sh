@@ -384,10 +384,13 @@ for row in missing_rows:
     if content_exists:
         root_cause = "qb_false_missing_content_exists"
     elif alias_save_existing:
+        # Prefer re-asserting the currently configured save path when it exists.
+        # This avoids forcing equivalent stash/data alias rewrites that some qB setups reject.
+        alias_target = save_path if save_exists else alias_save_existing[0]
         root_cause = "alias_path_mismatch"
         proposed_action = {
             "action": "set_location",
-            "target_save_path": alias_save_existing[0],
+            "target_save_path": alias_target,
         }
         action_reason = "alias_path_mismatch"
         confidence = 0.95

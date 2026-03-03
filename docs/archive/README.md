@@ -43,6 +43,12 @@ Top-level documentation snapshots moved during the 2026-02-26 docs rationalizati
 - Preserves pre-consolidation versions of qbit handoff/ops/prompt docs
 - Preserves dated one-off planning and reporting docs removed from the active index
 
+### `2026-doc-reduction/`
+Canonical-doc reduction snapshots from 2026-02-28.
+
+- Preserves full pre-stub content of overlapping active docs
+- Records transition to minimal canonical docs optimized for CLI-agent workflows
+
 ---
 
 ## Why Documents Were Archived

@@ -4,7 +4,7 @@
 # Pause after this and paste tail of log to Claude before continuing.
 set -euo pipefail
 
-REPO="/home/michael/dev/work/hashall"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="/home/michael/.venvs/hashall/bin/python"
 export PYTHONPATH="$REPO/src"
 

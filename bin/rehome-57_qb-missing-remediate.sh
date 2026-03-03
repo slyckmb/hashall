@@ -263,6 +263,8 @@ for idx, action in enumerate(actions, start=1):
         paused = True
         if not qb.set_location(torrent_hash, to_save):
             raise RuntimeError("set_location_failed")
+        if not qb.recheck_torrent(torrent_hash):
+            raise RuntimeError("recheck_failed")
 
         expected = _norm(to_save)
         deadline = time.monotonic() + timeout_s
@@ -270,7 +272,9 @@ for idx, action in enumerate(actions, start=1):
         while time.monotonic() <= deadline:
             info = qb.get_torrent_info(torrent_hash)
             actual = _norm(str(getattr(info, "save_path", ""))) if info else ""
-            if actual == expected:
+            state = str(getattr(info, "state", "")) if info else ""
+            state_lower = state.lower()
+            if actual == expected and state_lower != "missingfiles":
                 verified = True
                 break
             now = time.monotonic()
@@ -278,7 +282,8 @@ for idx, action in enumerate(actions, start=1):
                 waited = int(now - start)
                 print(
                     f"heartbeat idx={idx}/{total} hash={torrent_hash[:16]} "
-                    f"waited_s={waited} expected={expected} actual={actual or 'unknown'}"
+                    f"waited_s={waited} expected={expected} actual={actual or 'unknown'} "
+                    f"state={state or 'unknown'}"
                 )
                 next_heartbeat = now + heartbeat_s
             time.sleep(poll_s)

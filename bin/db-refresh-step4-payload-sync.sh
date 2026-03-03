@@ -4,7 +4,7 @@
 # Paste full output to Claude — torrent count and any errors matter.
 set -euo pipefail
 
-REPO="/home/michael/dev/work/hashall"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="/home/michael/.venvs/hashall/bin/python"
 export PYTHONPATH="$REPO/src"
 

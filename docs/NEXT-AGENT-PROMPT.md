@@ -1,7 +1,6 @@
 # Moved
 
-Use `docs/next-agent.md` (living document).
-Current living prompt includes Phase 103 payload-ownership gate and tracker-aware Phase 101/102 flags.
+Use `docs/operations/RUN-STATE.md` (canonical living operations state).
 
 Historical snapshot preserved at:
-`docs/archive/2026-doc-cleanup/NEXT-AGENT-PROMPT.md`
+`docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

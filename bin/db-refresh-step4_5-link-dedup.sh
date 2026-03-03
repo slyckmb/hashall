@@ -9,11 +9,12 @@ PYTHON="/home/michael/.venvs/hashall/bin/python"
 export PYTHONPATH="$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
 
 APPLY=false
-DEVICES_CSV="${DEVICES_CSV:-stash,data,hotspare6tb}"
+DEVICES_CSV="${DEVICES_CSV:-stash,data,spare}"
 MIN_SIZE="${MIN_SIZE:-1048576}"   # 1 MiB default to avoid tiny-file churn
 EXEC_LIMIT="${EXEC_LIMIT:-0}"     # 0 = all planned actions
 LOCK_RETRY_SECS="${LOCK_RETRY_SECS:-30}"
 LOCK_MAX_RETRIES="${LOCK_MAX_RETRIES:-0}"  # 0 = retry forever on DB lock
+DB_PATH="${DB_PATH:-$HOME/.hashall/catalog.db}"
 ALIASES=()
 
 usage() {
@@ -22,7 +23,7 @@ Usage: bin/db-refresh-step4_5-link-dedup.sh [--apply] [--devices CSV | --alias N
 
 Options:
   --apply          Execute hardlink actions after dry-run (default: dry-run only)
-  --devices CSV    Comma-separated device aliases (default: stash,data,hotspare6tb)
+  --devices CSV    Comma-separated device aliases (default: stash,data,spare)
   --alias NAME     Repeatable alias selector (example: --alias data --alias stash)
   --min-size N     Min file size in bytes for plan candidates (default: 1048576)
   --limit N        Max actions for execute phase per device (default: 0 = all)
@@ -31,7 +32,7 @@ Options:
   -h, --help       Show help
 
 Environment overrides:
-  DEVICES_CSV, MIN_SIZE, EXEC_LIMIT, LOCK_RETRY_SECS, LOCK_MAX_RETRIES
+  DEVICES_CSV, MIN_SIZE, EXEC_LIMIT, LOCK_RETRY_SECS, LOCK_MAX_RETRIES, DB_PATH
 EOF
 }
 
@@ -70,9 +71,53 @@ echo "STEP 3.5: link dedup plan/execute — $(date '+%F %T')" | tee -a "$LOGFILE
 echo "log: $LOGFILE" | tee -a "$LOGFILE"
 echo "apply=${APPLY} devices=${DEVICES_CSV} min_size=${MIN_SIZE} limit=${EXEC_LIMIT}" | tee -a "$LOGFILE"
 echo "lock_retry_secs=${LOCK_RETRY_SECS} lock_max_retries=${LOCK_MAX_RETRIES}" | tee -a "$LOGFILE"
+echo "db=${DB_PATH}" | tee -a "$LOGFILE"
 echo "================================================================" | tee -a "$LOGFILE"
 
 IFS=',' read -r -a DEVICES <<< "$DEVICES_CSV"
+
+resolve_device_alias() {
+  local requested="$1"
+  "$PYTHON" - "$DB_PATH" "$requested" <<'PY'
+import sqlite3
+import sys
+
+db_path, requested = sys.argv[1], sys.argv[2]
+requested_lc = requested.lower()
+
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+
+def first(query, params=()):
+    row = cur.execute(query, params).fetchone()
+    return row[0] if row and row[0] else ""
+
+alias = first("SELECT device_alias FROM devices WHERE lower(device_alias)=lower(?) LIMIT 1", (requested,))
+if alias:
+    print(alias)
+    raise SystemExit(0)
+
+if requested_lc in {"spare", "hotspare6tb"}:
+    alias = first("SELECT device_alias FROM devices WHERE lower(device_alias)=lower('spare') LIMIT 1")
+    if alias:
+        print(alias)
+        raise SystemExit(0)
+    alias = first("SELECT device_alias FROM devices WHERE lower(device_alias)=lower('hotspare6tb') LIMIT 1")
+    if alias:
+        print(alias)
+        raise SystemExit(0)
+    alias = first(
+        "SELECT device_alias FROM devices "
+        "WHERE preferred_mount_point='/mnt/hotspare6tb' OR mount_point='/mnt/hotspare6tb' "
+        "ORDER BY device_alias LIMIT 1"
+    )
+    if alias:
+        print(alias)
+        raise SystemExit(0)
+
+print("")
+PY
+}
 
 run_hashall_with_retry() {
   local out_file="$1"
@@ -107,9 +152,31 @@ run_hashall_with_retry() {
   done
 }
 
+declare -A seen_devices=()
+declare -a resolved_devices=()
 for DEVICE in "${DEVICES[@]}"; do
   DEVICE="$(echo "$DEVICE" | xargs)"
   [[ -n "$DEVICE" ]] || continue
+  RESOLVED="$(resolve_device_alias "$DEVICE" | tr -d '\r\n' || true)"
+  if [[ -z "$RESOLVED" ]]; then
+    echo "WARN: device alias not found for requested='$DEVICE' (skipping)" | tee -a "$LOGFILE"
+    continue
+  fi
+  if [[ -z "${seen_devices[$RESOLVED]+x}" ]]; then
+    seen_devices[$RESOLVED]=1
+    resolved_devices+=("$RESOLVED")
+  fi
+done
+
+if [[ "${#resolved_devices[@]}" -eq 0 ]]; then
+  echo "ERROR: no valid devices resolved for step 3.5; requested=${DEVICES_CSV}" | tee -a "$LOGFILE"
+  exit 1
+fi
+
+echo "resolved_devices=$(IFS=,; echo "${resolved_devices[*]}")" | tee -a "$LOGFILE"
+
+run_device_plan() {
+  local DEVICE="$1"
 
   PLAN_NAME="db-refresh-step3_5-${DEVICE}-${STAMP}"
   TMP_OUT="$(mktemp /tmp/link-plan.${DEVICE}.XXXXXX)"
@@ -139,7 +206,7 @@ else:
 PY
 )"
 
-  [[ -n "$PLAN_ID" ]] || { echo "Could not parse plan id for device=${DEVICE}" | tee -a "$LOGFILE"; rm -f "$TMP_OUT"; exit 1; }
+  [[ -n "$PLAN_ID" ]] || { echo "Could not parse plan id for device=${DEVICE}" | tee -a "$LOGFILE"; rm -f "$TMP_OUT"; return 1; }
   echo "plan_id=${PLAN_ID}" | tee -a "$LOGFILE"
   rm -f "$TMP_OUT"
 
@@ -158,6 +225,14 @@ PY
     run_hashall_with_retry "$TMP_OUT" link execute "$PLAN_ID" --limit "$EXEC_LIMIT" --yes
     rm -f "$TMP_OUT"
   fi
+}
+
+failures=0
+for DEVICE in "${resolved_devices[@]}"; do
+  if ! run_device_plan "$DEVICE"; then
+    failures=$((failures + 1))
+    echo "ERROR: device run failed for ${DEVICE}" | tee -a "$LOGFILE"
+  fi
 done
 
 echo "" | tee -a "$LOGFILE"
@@ -173,4 +248,9 @@ if [[ "$APPLY" == "true" ]]; then
   echo ">>> Hardlink actions were applied. Review output before step 4. <<<" | tee -a "$LOGFILE"
 else
   echo ">>> Dry-run only. Re-run with --apply to execute before step 4. <<<" | tee -a "$LOGFILE"
+fi
+
+if [[ "$failures" -ne 0 ]]; then
+  echo "ERROR: step 3.5 completed with ${failures} failed device(s)." | tee -a "$LOGFILE"
+  exit 1
 fi

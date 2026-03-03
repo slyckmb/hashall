@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Version: 1.0.4
+# Version: 1.2.0
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.4"
+SCRIPT_VERSION="1.2.0"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QBIT_URL="${QBIT_URL:-http://localhost:9003}"
 QBIT_USER="${QBIT_USER:-admin}"
 QBIT_PASS="${QBIT_PASS:-adminpass}"
@@ -14,6 +15,10 @@ ALLOW_FILE=""
 EVENTS_JSONL=""
 MAX_ITERATIONS=0
 DASHBOARD=0
+USE_CACHE=0
+CACHE_MAX_AGE=15
+CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qbit-cache-agent.py}"
+CACHE_CLIENT_ID="$(basename "$0"):$$"
 declare -a ALLOW_HASHES=()
 
 usage() {
@@ -34,6 +39,8 @@ Options:
   --events-jsonl PATH     Write watchdog events as JSONL
   --max-iterations N      Exit after N polling iterations (default: 0 = infinite)
   --dashboard             Overwrite-in-place dashboard mode (like watch)
+  --cache                 Read qB torrents/info via shared cache agent
+  --cache-max-age N       Max cache age seconds when --cache is enabled (default: 15)
   -h, --help              Show help
 USAGE
 }
@@ -76,6 +83,14 @@ while [[ $# -gt 0 ]]; do
     DASHBOARD=1
     shift
     ;;
+  --cache)
+    USE_CACHE=1
+    shift
+    ;;
+  --cache-max-age)
+    CACHE_MAX_AGE="${2:-}"
+    shift 2
+    ;;
   -h | --help)
     usage
     exit 0
@@ -94,6 +109,14 @@ if ! [[ "$INTERVAL_S" =~ ^[0-9]+$ ]] || [[ "$INTERVAL_S" -lt 1 ]]; then
 fi
 if ! [[ "$MAX_ITERATIONS" =~ ^[0-9]+$ ]]; then
   echo "--max-iterations must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "$CACHE_MAX_AGE" =~ ^[0-9]+$ ]] || [[ "$CACHE_MAX_AGE" -lt 0 ]]; then
+  echo "--cache-max-age must be a non-negative integer" >&2
+  exit 2
+fi
+if [[ "$USE_CACHE" -eq 1 && ! -f "$CACHE_AGENT" ]]; then
+  echo "--cache enabled but cache agent not found: $CACHE_AGENT" >&2
   exit 2
 fi
 
@@ -127,8 +150,15 @@ if [[ "$ENFORCE_PAUSED_DL" -eq 1 && -z "$EVENTS_JSONL" ]]; then
 fi
 
 if [[ "$DASHBOARD" -eq 0 ]]; then
-  echo "watchdog_config interval_s=${INTERVAL_S} once=${ONCE} until_clear=${UNTIL_CLEAR} enforce_paused_dl=${ENFORCE_PAUSED_DL} allow_count=${#ALLOW_HASH_MAP[@]} events_jsonl=${EVENTS_JSONL:-none} max_iterations=${MAX_ITERATIONS}"
+  echo "watchdog_config interval_s=${INTERVAL_S} once=${ONCE} until_clear=${UNTIL_CLEAR} enforce_paused_dl=${ENFORCE_PAUSED_DL} allow_count=${#ALLOW_HASH_MAP[@]} events_jsonl=${EVENTS_JSONL:-none} max_iterations=${MAX_ITERATIONS} cache=${USE_CACHE} cache_max_age=${CACHE_MAX_AGE}"
 fi
+
+api_login() {
+  curl -sS -c "$COOKIE_FILE" \
+    --data-urlencode "username=${QBIT_USER}" \
+    --data-urlencode "password=${QBIT_PASS}" \
+    "${QBIT_URL}/api/v2/auth/login" >/dev/null
+}
 
 api_post_status() {
   local endpoint="$1"
@@ -142,6 +172,11 @@ api_post_status() {
 pause_with_fallback() {
   local hashes="$1"
   local code=""
+
+  if ! api_login >/dev/null 2>&1; then
+    PAUSE_ACTION_RESULT="pause_failed_login"
+    return 1
+  fi
 
   code="$(api_post_status "/api/v2/torrents/pause" "$hashes")"
   case "$code" in
@@ -212,22 +247,36 @@ while true; do
   iteration=$((iteration + 1))
 
   FETCH_ERROR=""
-  if ! curl -sS -c "$COOKIE_FILE" \
-      --data-urlencode "username=${QBIT_USER}" \
-      --data-urlencode "password=${QBIT_PASS}" \
-      "${QBIT_URL}/api/v2/auth/login" >/dev/null 2>&1; then
-    FETCH_ERROR="login_failed"
-  fi
-
   TORRENTS_JSON="[]"
-  if [[ -z "$FETCH_ERROR" ]]; then
+  if [[ "$USE_CACHE" -eq 1 ]]; then
     _raw=""
-    if ! _raw="$(curl -sS -b "$COOKIE_FILE" "${QBIT_URL}/api/v2/torrents/info" 2>&1)"; then
-      FETCH_ERROR="fetch_failed"
+    if ! _raw="$(QBIT_URL="$QBIT_URL" QBIT_USER="$QBIT_USER" QBIT_PASS="$QBIT_PASS" \
+      python3 "$CACHE_AGENT" \
+        --max-age "$CACHE_MAX_AGE" \
+        --requested-interval "$INTERVAL_S" \
+        --client-id "$CACHE_CLIENT_ID" \
+        --ensure-daemon \
+        2>/dev/null)"; then
+      FETCH_ERROR="cache_fetch_failed"
     elif ! jq -e . >/dev/null 2>&1 <<<"$_raw"; then
-      FETCH_ERROR="invalid_json"
+      FETCH_ERROR="cache_invalid_json"
     else
       TORRENTS_JSON="$_raw"
+    fi
+  else
+    if ! api_login >/dev/null 2>&1; then
+      FETCH_ERROR="login_failed"
+    fi
+
+    if [[ -z "$FETCH_ERROR" ]]; then
+      _raw=""
+      if ! _raw="$(curl -sS -b "$COOKIE_FILE" "${QBIT_URL}/api/v2/torrents/info" 2>&1)"; then
+        FETCH_ERROR="fetch_failed"
+      elif ! jq -e . >/dev/null 2>&1 <<<"$_raw"; then
+        FETCH_ERROR="invalid_json"
+      else
+        TORRENTS_JSON="$_raw"
+      fi
     fi
   fi
 

@@ -166,19 +166,17 @@ hashall payload siblings <torrent_hash>
 ## 📖 Documentation
 
 ### Core Documentation
-- **[Architecture](docs/architecture/architecture.md)** - How the unified catalog works
-- **[CLI Reference](docs/tooling/cli.md)** - All commands and options
-- **[Database Schema](docs/architecture/schema.md)** - Concise schema summary (source of truth in migrations)
-- **[Theory of Operations](docs/theory-of-operations.md)** - Operator mental model and safety flow
-- **[Docs Index](docs/README.md)** - Active docs map for CLI agents
+- **[Docs Index](docs/README.md)** - Canonical doc map for CLI agents
+- **[Requirements](docs/REQUIREMENTS.md)** - Product, safety, and operating constraints
+- **[System Architecture](docs/architecture/SYSTEM.md)** - Unified catalog and operational lanes
+- **[CLI Operations](docs/tooling/CLI-OPERATIONS.md)** - Core command workflows
+- **[Rehome Runbook](docs/tooling/REHOME-RUNBOOK.md)** - Rehome safety and apply flow
+- **[Run State](docs/operations/RUN-STATE.md)** - Current live operations status
+- **[Agent Playbook](docs/project/AGENT-PLAYBOOK.md)** - Agent read order and execution rules
+- **[Project Plan](docs/project/PLAN.md)** - Active roadmap and backlog
 
 ### Guides
-- **[Link Guide](docs/tooling/link-guide.md)** - Deduplication workflow and best practices
-- **[Symlinks & Bind Mounts](docs/tooling/symlinks-and-bind-mounts.md)** - How hashall handles them correctly
-- **[Quick Reference](docs/tooling/quick-reference.md)** - Cheat sheet for common operations
-- **[Ops Log](docs/ops-log.md)** - Living campaign status + known issues
-- **[Handoff](docs/handoff.md)** - Current operator handoff
-- **[Next Agent](docs/next-agent.md)** - Minimal prompt for continuation
+- Legacy doc names remain as compatibility stubs that point to canonical docs.
 
 ### Historical
 - **[Archive](docs/archive/)** - Obsolete docs, session summaries, validation reports

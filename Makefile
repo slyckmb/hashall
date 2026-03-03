@@ -11,11 +11,11 @@ HASHALL_IMG := hashall
 PYTHON := $(shell if [ -n "$$VIRTUAL_ENV" ]; then echo "$$VIRTUAL_ENV/bin/python"; else echo "python3"; fi)
 
 # Smart scan wrapper
-SMART_SCAN = $(PYTHON) ./hashall-smart-scan
+SMART_SCAN = ./bin/scan/hashall-smart-scan
 
 # Hierarchical scanners
-AUTO_SCAN = $(PYTHON) ./hashall-auto-scan
-PLAN_SCAN = $(PYTHON) ./hashall-plan-scan
+AUTO_SCAN = ./bin/scan/hashall-auto-scan
+PLAN_SCAN = ./bin/scan/hashall-plan-scan
 
 # Default scan path (override with PATH=/custom/path)
 PATH ?= .

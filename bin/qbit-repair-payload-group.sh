@@ -398,8 +398,15 @@ if [[ "$APPLY" == true ]]; then
   echo "▸ P6 start + verify"
   if [[ "$FINAL_STATE" == "stoppedUP" ]]; then
     qb_login 2>/dev/null || true
-    curl -sS -o /dev/null -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/resume" \
-      --data-urlencode "hashes=${BROKEN_HASH}"
+    RESUME_HTTP=$(curl -sS -o /dev/null -w "%{http_code}" \
+      -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/resume" \
+      --data-urlencode "hashes=${BROKEN_HASH}")
+    if [[ "$RESUME_HTTP" == "404" ]]; then
+      RESUME_HTTP=$(curl -sS -o /dev/null -w "%{http_code}" \
+        -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/start" \
+        --data-urlencode "hashes=${BROKEN_HASH}")
+    fi
+    echo "  resume/start HTTP $RESUME_HTTP"
     echo "  resumed — monitoring 90s for stable UP..."
     VERIFY_END=$(( $(date +%s) + 90 ))
     CLEAN=true

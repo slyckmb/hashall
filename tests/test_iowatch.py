@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 def _load_iowatch_module():
     repo_root = Path(__file__).resolve().parents[1]
-    script_path = repo_root / "iowatch"
+    script_path = repo_root / "bin" / "tools" / "iowatch"
     loader = SourceFileLoader("iowatch_module", str(script_path))
     spec = importlib.util.spec_from_loader("iowatch_module", loader)
     assert spec is not None and spec.loader is not None

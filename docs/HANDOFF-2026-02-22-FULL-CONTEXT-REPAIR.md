@@ -1,7 +1,6 @@
 # Moved
 
-Use `docs/handoff.md` (living document).
+Use `docs/operations/RUN-STATE.md` (canonical living operations state).
 
 Historical snapshot preserved at:
-`docs/archive/2026-doc-cleanup/HANDOFF-2026-02-22-FULL-CONTEXT-REPAIR.md`
-
+`docs/archive/2026-doc-reduction/snapshot/docs/HANDOFF-2026-02-22-FULL-CONTEXT-REPAIR.md`
