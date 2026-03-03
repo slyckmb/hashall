@@ -31,6 +31,85 @@ def _debug_enabled() -> bool:
     return os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _print_post_apply_summary(executor: "DemotionExecutor", plans: list) -> bool:
+    """
+    Query qBittorrent for the final state of all affected torrents and print
+    a summary table.
+
+    Returns True if all torrents are in acceptable seed-ready states.
+    Returns False if any torrent is in an unexpected/alarm state.
+    """
+    # Collect all affected hashes (deduplicated, preserving order).
+    all_hashes = []
+    seen: set = set()
+    for plan in plans:
+        for h in (plan.get("affected_torrents") or []):
+            if h not in seen:
+                seen.add(h)
+                all_hashes.append(h)
+
+    if not all_hashes:
+        return True
+
+    # States that are acceptable after a successful rehome.
+    good_states = {
+        "stalledup", "uploading", "queuedup", "forcedup",
+        "stoppedup",  # paused by operator (was seeding, user paused it)
+        "pausedup",
+        "checkingup",  # transient post-recheck
+    }
+    # States that are alarm-worthy.
+    alarm_states = {"stoppeddl", "pauseddl", "downloading", "stalleddl",
+                    "missingfiles", "error"}
+
+    click.echo()
+    click.echo("── Post-apply torrent state summary ──────────────────────────────")
+    click.echo(f"{'hash':<18}  {'state':<16}  {'progress':>8}  {'note'}")
+    click.echo(f"{'─'*18}  {'─'*16}  {'─'*8}  {'─'*16}")
+
+    alarm_count = 0
+    missing_count = 0
+
+    for h in all_hashes:
+        info = executor.qbit_client.get_torrent_info(h)
+        if not info:
+            click.echo(f"{h[:16]}..  {'not_found':<16}  {'?':>8}  ⚠️  NOT IN QB")
+            missing_count += 1
+            continue
+
+        state = str(getattr(info, "state", "") or "").strip().lower()
+        progress_raw = getattr(info, "progress", None)
+        try:
+            progress = float(progress_raw) if progress_raw is not None else 0.0
+        except (TypeError, ValueError):
+            progress = 0.0
+
+        if state in alarm_states:
+            note = "🚨 ALARM"
+            alarm_count += 1
+        elif state in good_states or ("check" in state and "up" in state):
+            note = "✓"
+        else:
+            note = "?"
+
+        click.echo(
+            f"{h[:16]}..  {state:<16}  {progress*100:>7.1f}%  {note}"
+        )
+
+    click.echo(f"{'─'*18}  {'─'*16}  {'─'*8}  {'─'*16}")
+    total = len(all_hashes)
+    alarm_total = alarm_count + missing_count
+    if alarm_total > 0:
+        click.echo(
+            f"⚠️  Summary: {total} torrent(s) checked, "
+            f"{alarm_count} alarm state(s), {missing_count} not found in qB"
+        )
+    else:
+        click.echo(f"✅ Summary: {total} torrent(s) checked, all in acceptable state")
+
+    return alarm_total == 0
+
+
 def _acquire_rehome_lock() -> "file":
     """
     Acquire an exclusive process-level lock for rehome apply operations.
@@ -876,6 +955,17 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
         click.echo(f"To execute: rehome apply {plan_file} --force")
     else:
         click.echo("✅ Plan executed successfully")
+        # Mandatory post-apply summary: query qBittorrent for final torrent states.
+        # Exit non-zero if any torrent is in an alarm/stoppedDL state so CI/scripts
+        # can detect silent failures without reading logs.
+        all_ok = _print_post_apply_summary(executor, plans_to_apply)
+        if not all_ok:
+            click.echo(
+                "❌ One or more torrents are in alarm state — "
+                "investigate before continuing.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
 
 
 @cli.command("followup")
