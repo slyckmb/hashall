@@ -103,25 +103,27 @@ def _expected_save_path(plan: dict[str, Any], torrent_hash: str) -> str:
 
 def _find_move_candidates(
     conn: sqlite3.Connection,
-    stash_device_id: int,
+    source_device_id: int,
     pool_device_id: int,
+    all_managed_ids: list[int],
     limit: int,
 ) -> list[dict]:
     """
-    Query the catalog for payloads safe to MOVE from stash to pool.
+    Query the catalog for payloads safe to MOVE from source_device to pool.
 
     Criteria:
-      - Complete payload on stash device with ≥1 torrent reference
+      - Complete payload on source device with ≥1 torrent reference
       - Complete payload on pool device (same payload_hash)
-      - No copies on any other device (no external consumers)
-      - total_bytes > 0 on stash
+      - No copies on any device outside the managed set (all_managed_ids)
+      - total_bytes > 0 on source
     """
+    placeholders = ",".join("?" * len(all_managed_ids))
     rows = conn.execute(
-        """
+        f"""
         SELECT
             p_s.payload_hash,
-            SUM(p_s.total_bytes)  AS stash_bytes,
-            SUM(p_s.file_count)   AS stash_files,
+            SUM(p_s.total_bytes)  AS source_bytes,
+            SUM(p_s.file_count)   AS source_files,
             (
                 SELECT COUNT(DISTINCT ti2.torrent_hash)
                 FROM torrent_instances ti2
@@ -147,20 +149,18 @@ def _find_move_candidates(
           AND NOT EXISTS (
               SELECT 1 FROM payloads p_o
               WHERE p_o.payload_hash = p_s.payload_hash
-                AND p_o.device_id   != ?
-                AND p_o.device_id   != ?
+                AND p_o.device_id NOT IN ({placeholders})
           )
         GROUP BY p_s.payload_hash
-        HAVING stash_bytes > 0
-        ORDER BY stash_bytes DESC
+        HAVING source_bytes > 0
+        ORDER BY source_bytes DESC
         LIMIT ?
         """,
         (
-            stash_device_id,  # torrent_count subquery
-            stash_device_id,  # WHERE p_s.device_id
-            pool_device_id,   # pool copy EXISTS
-            stash_device_id,  # NOT EXISTS other devices — exclude stash
-            pool_device_id,   # NOT EXISTS other devices — exclude pool
+            source_device_id,   # torrent_count subquery
+            source_device_id,   # WHERE p_s.device_id
+            pool_device_id,     # pool copy EXISTS
+            *all_managed_ids,   # NOT IN managed set
             limit,
         ),
     ).fetchall()
@@ -168,9 +168,10 @@ def _find_move_candidates(
     return [
         {
             "payload_hash": row[0],
-            "stash_bytes": int(row[1]),
-            "stash_files": int(row[2]),
+            "source_bytes": int(row[1]),
+            "source_files": int(row[2]),
             "torrent_count": int(row[3]),
+            "source_device_id": source_device_id,
         }
         for row in rows
     ]
@@ -286,7 +287,7 @@ def _inline_verify(
     qbit_client: Any,
     conn: sqlite3.Connection,
     plan: dict,
-    pool_device_id: int,
+    dest_device_id: int,
 ) -> tuple[bool, str]:
     """
     Verify a completed rehome.
@@ -318,7 +319,7 @@ def _inline_verify(
         if not _is_qb_ready_state(state) or progress < 0.9999:
             alarm_hashes.append(th[:8])
 
-    # Catalog check: all affected torrents' payload device_id should be pool
+    # Catalog check: all affected torrents' payload device_id should be dest
     for th in affected:
         row = conn.execute(
             """
@@ -329,9 +330,9 @@ def _inline_verify(
             ORDER BY p.device_id = ? DESC
             LIMIT 1
             """,
-            (th, pool_device_id),
+            (th, dest_device_id),
         ).fetchone()
-        if not row or int(row[1]) != pool_device_id:
+        if not row or int(row[1]) != dest_device_id:
             catalog_ok = False
             break
 
@@ -360,30 +361,44 @@ def _inline_verify(
 
 def run_refresh(
     catalog_path: Path,
-    seeding_root: str,
-    pool_payload_root: str,
-    stash_device: str,
-    pool_device: str,
+    active_root: str = "",
+    dest_root: str = "",
+    active_device: str = "",
+    dest_device: str = "",
     workers: int = 8,
     apply_dedup: bool = False,
     skip_dedup: bool = False,
-    extra_roots: list[tuple[str, str]] = [],
+    managed_roots: "list[tuple[str, str]]" = [],
+    # Backwards-compat params (old names)
+    seeding_root: "str | None" = None,
+    pool_payload_root: "str | None" = None,
+    stash_device: "str | None" = None,
+    pool_device: "str | None" = None,
+    extra_roots: "list[tuple[str, str]] | None" = None,
 ) -> int:
     """
-    Preflight refresh: scan stash+pool, upgrade SHA256 for collision groups,
+    Preflight refresh: scan all managed roots, upgrade SHA256 for collision groups,
     optionally dedup (plan + dry-run, or execute), then sync qBit payloads.
 
     Steps:
-      1. hashall scan <seeding_root> --parallel --workers N
-      2. hashall scan <pool_payload_root> --parallel --workers N  (skip if same path)
-      3a. hashall dupes --device <stash_device> --auto-upgrade
-      3b. hashall dupes --device <pool_device> --auto-upgrade
+      1. hashall scan <active_root> --parallel --workers N
+      2. hashall scan <dest_root> --parallel --workers N  (skip if same path)
+      3a. hashall dupes --device <active_device> --auto-upgrade
+      3b. hashall dupes --device <dest_device> --auto-upgrade
+      3c. (for each managed root) hashall dupes --device <alias> --auto-upgrade
       4a. hashall link plan <name> --device <alias> --min-size 1048576  (if not skip_dedup)
       4b. hashall link execute <plan_id> [--dry-run]                    (if not skip_dedup)
       5. hashall payload sync --upgrade-missing
 
     Returns exit code (0 = all steps succeeded, 1 = at least one failed).
     """
+    # Apply backwards-compat fallbacks
+    active_root = active_root or seeding_root or ""
+    dest_root = dest_root or pool_payload_root or ""
+    active_device = active_device or stash_device or ""
+    dest_device = dest_device or pool_device or ""
+    managed_roots = managed_roots or extra_roots or []
+
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     python = sys.executable
     db_args = ["--db", str(catalog_path)]
@@ -396,7 +411,6 @@ def run_refresh(
         print(f"  $ {' '.join(cmd)}")
         if capture:
             result = subprocess.run(cmd, capture_output=True, text=True)
-            # Always re-emit so the user sees output
             if result.stdout:
                 print(result.stdout, end="")
             if result.stderr:
@@ -411,15 +425,15 @@ def run_refresh(
         print(f"  elapsed {_fmt_elapsed(elapsed)}  {status}")
         return ok, stdout
 
-    # Build the full ordered root list for display + iteration
+    # Build the full ordered root list for display + preflight validation
     all_roots: list[tuple[str, str, str]] = [
-        (seeding_root, stash_device, "stash"),
-        (pool_payload_root, pool_device, "pool"),
+        (active_root, active_device, "active"),
+        (dest_root, dest_device, "dest"),
     ]
-    if seeding_root == pool_payload_root:
-        all_roots = all_roots[:1]  # deduped path
-    for p, a in (extra_roots or []):
-        all_roots.append((p, a, "extra"))
+    if active_root == dest_root:
+        all_roots = all_roots[:1]
+    for p, a in (managed_roots or []):
+        all_roots.append((p, a, "managed"))
 
     dedup_mode = "execute" if apply_dedup else ("plan+dry-run" if not skip_dedup else "off")
 
@@ -429,65 +443,65 @@ def run_refresh(
     print(f"  dedup    {dedup_mode}")
     print(f"\n  Scan roots ({len(all_roots)}):")
     for i, (path, alias, role) in enumerate(all_roots, 1):
-        print(f"    [{i}] {alias:<20} {role:<6}  {path}")
+        print(f"    [{i}] {alias:<20} {role:<7}  {path}")
 
     _validate_refresh_roots(catalog_path, all_roots)
 
-    # ── Step 1: scan seeding_root ─────────────────────────────────────────
+    # ── Step 1: scan active_root ──────────────────────────────────────────
     ok, _ = _run_step(
-        f"scan seeding_root ({seeding_root})",
-        [python, "-m", "hashall.cli", "scan", seeding_root,
+        f"scan active_root ({active_root})",
+        [python, "-m", "hashall.cli", "scan", active_root,
          "--parallel", "--workers", str(workers)] + db_args,
     )
     overall_ok = overall_ok and ok
 
-    # ── Step 2: scan pool_payload_root ────────────────────────────────────
-    if pool_payload_root != seeding_root:
+    # ── Step 2: scan dest_root ────────────────────────────────────────────
+    if dest_root != active_root:
         ok, _ = _run_step(
-            f"scan pool_payload_root ({pool_payload_root})",
-            [python, "-m", "hashall.cli", "scan", pool_payload_root,
+            f"scan dest_root ({dest_root})",
+            [python, "-m", "hashall.cli", "scan", dest_root,
              "--parallel", "--workers", str(workers)] + db_args,
         )
         overall_ok = overall_ok and ok
 
-    # ── Step 3a: dupes auto-upgrade for stash ────────────────────────────
+    # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
     ok, _ = _run_step(
-        f"dupes auto-upgrade (stash={stash_device})",
+        f"dupes auto-upgrade (active={active_device})",
         [python, "-m", "hashall.cli", "dupes",
-         "--device", stash_device, "--auto-upgrade"] + db_args,
+         "--device", active_device, "--auto-upgrade"] + db_args,
     )
     overall_ok = overall_ok and ok
 
-    # ── Step 3b: dupes auto-upgrade for pool ─────────────────────────────
+    # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
     ok, _ = _run_step(
-        f"dupes auto-upgrade (pool={pool_device})",
+        f"dupes auto-upgrade (dest={dest_device})",
         [python, "-m", "hashall.cli", "dupes",
-         "--device", pool_device, "--auto-upgrade"] + db_args,
+         "--device", dest_device, "--auto-upgrade"] + db_args,
     )
     overall_ok = overall_ok and ok
 
-    # ── Extra roots: scan + dupes (+ dedup if opted-in) ──────────────────
-    for extra_path, extra_alias in (extra_roots or []):
+    # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
+    for managed_path, managed_alias in (managed_roots or []):
         ok, _ = _run_step(
-            f"scan extra root ({extra_path})",
-            [python, "-m", "hashall.cli", "scan", extra_path,
+            f"scan managed root ({managed_path})",
+            [python, "-m", "hashall.cli", "scan", managed_path,
              "--parallel", "--workers", str(workers)] + db_args,
         )
         overall_ok = overall_ok and ok
 
         ok, _ = _run_step(
-            f"dupes auto-upgrade (extra={extra_alias})",
+            f"dupes auto-upgrade (managed={managed_alias})",
             [python, "-m", "hashall.cli", "dupes",
-             "--device", extra_alias, "--auto-upgrade"] + db_args,
+             "--device", managed_alias, "--auto-upgrade"] + db_args,
         )
         overall_ok = overall_ok and ok
 
         if not skip_dedup:
-            plan_name = f"refresh-{extra_alias}-{timestamp}"
+            plan_name = f"refresh-{managed_alias}-{timestamp}"
             ok, stdout = _run_step(
-                f"link plan ({extra_alias})",
+                f"link plan ({managed_alias})",
                 [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                 "--device", extra_alias, "--min-size", "1048576"] + db_args,
+                 "--device", managed_alias, "--min-size", "1048576"] + db_args,
                 capture=True,
             )
             overall_ok = overall_ok and ok
@@ -501,17 +515,17 @@ def run_refresh(
                     ] + db_args
                     if not apply_dedup:
                         execute_cmd.append("--dry-run")
-                    label = f"link execute plan_id={plan_id} ({extra_alias})" + (
+                    label = f"link execute plan_id={plan_id} ({managed_alias})" + (
                         "" if apply_dedup else " [dry-run]"
                     )
                     ok, _ = _run_step(label, execute_cmd)
                     overall_ok = overall_ok and ok
                 else:
-                    print(f"  [refresh] no plan_id found in link plan output for {extra_alias} — skipping execute")
+                    print(f"  [refresh] no plan_id in link plan output for {managed_alias} — skipping execute")
 
-    # ── Steps 4a/4b: dedup (opt-in) ──────────────────────────────────────
+    # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
     if not skip_dedup:
-        for dev_alias in (stash_device, pool_device):
+        for dev_alias in (active_device, dest_device):
             plan_name = f"refresh-{dev_alias}-{timestamp}"
             ok, stdout = _run_step(
                 f"link plan ({dev_alias})",
@@ -536,7 +550,7 @@ def run_refresh(
                     ok, _ = _run_step(label, execute_cmd)
                     overall_ok = overall_ok and ok
                 else:
-                    print(f"  [refresh] no plan_id found in link plan output for {dev_alias} — skipping execute")
+                    print(f"  [refresh] no plan_id in link plan output for {dev_alias} — skipping execute")
 
     # ── Step 5: payload sync --upgrade-missing ────────────────────────────
     ok, _ = _run_step(
@@ -561,25 +575,94 @@ def run_refresh(
 # Main run_auto
 # ---------------------------------------------------------------------------
 
+def _make_planner(
+    catalog_path: Path,
+    active_device_id: int,
+    dest_device_id: int,
+    source_id: int,
+    source_root: str,
+    dest_root: str,
+    content_root: str,
+    active_root: str,
+) -> Any:
+    """
+    Select and instantiate the appropriate planner for a source→dest move.
+
+    - Dest == active filesystem  →  PromotionPlanner (returning home)
+    - Dest != active filesystem  →  DemotionPlanner  (rehoming to storage)
+    """
+    from rehome.planner import DemotionPlanner, PromotionPlanner
+
+    if dest_device_id == active_device_id:
+        # Moving TO active device — PromotionPlanner
+        # In PromotionPlanner convention: stash_device=dest, pool_device=source
+        return PromotionPlanner(
+            catalog_path=catalog_path,
+            seeding_roots=[source_root],
+            library_roots=[content_root] if content_root else [],
+            stash_device=dest_device_id,
+            pool_device=source_id,
+            stash_seeding_root=active_root,
+            pool_seeding_root=source_root,
+        )
+    else:
+        # Moving FROM any device TO storage — DemotionPlanner
+        # Hardlink check applies: files outside source_root blocked if they have
+        # external hardlinks (consumed content affinity)
+        return DemotionPlanner(
+            catalog_path=catalog_path,
+            seeding_roots=[source_root],
+            library_roots=[content_root] if content_root else [],
+            stash_device=source_id,
+            pool_device=dest_device_id,
+            stash_seeding_root=source_root,
+            pool_payload_root=dest_root,
+        )
+
+
 def run_auto(
     catalog_path: Path,
-    stash_device_id: int,
-    pool_device_id: int,
-    pool_payload_root: str,
-    seeding_root: str,
-    library_root: str,
-    limit: int,
-    do_apply: bool,
-    plan_log_dir: Path,
-    run_log_dir: Path,
+    active_device_id: int = 0,
+    dest_device_id: int = 0,
+    dest_root: str = "",
+    active_root: str = "",
+    content_root: str = "",
+    limit: int = 5,
+    do_apply: bool = False,
+    plan_log_dir: Path = Path("."),
+    run_log_dir: Path = Path("."),
+    source_device_id: "int | None" = None,
+    extra_sources: "list[tuple[int, str, str]] | None" = None,
+    # Backwards-compat params (old names)
+    stash_device_id: "int | None" = None,
+    pool_device_id: "int | None" = None,
+    pool_payload_root: "str | None" = None,
+    seeding_root: "str | None" = None,
+    library_root: "str | None" = None,
+    extra_source_roots: "list[tuple[str, str]] | None" = None,
 ) -> int:
     """
-    Find safe MOVE candidates and rehome them.
+    Find safe MOVE candidates across all managed source filesystems and rehome them.
+
+    Sources queried:
+      - If source_device_id is given: only that device
+      - Otherwise: active_device + all extra_sources
+
+    Planner selection per source:
+      - dest == active device  →  PromotionPlanner (returning home)
+      - dest != active device  →  DemotionPlanner  (hardlink check applies for active source)
 
     Returns exit code (0 = success, 1 = partial/error).
     """
+    # Apply backwards-compat fallbacks
+    active_device_id = active_device_id or stash_device_id or 0
+    dest_device_id = dest_device_id or pool_device_id or 0
+    dest_root = dest_root or pool_payload_root or ""
+    active_root = active_root or seeding_root or ""
+    content_root = content_root or library_root or ""
+
     from hashall.model import connect_db
-    from rehome.planner import DemotionPlanner
+    from hashall.device import resolve_device_id
     from rehome.executor import DemotionExecutor
     from rehome.cli import _acquire_rehome_lock
 
@@ -592,65 +675,87 @@ def run_auto(
 
     conn = connect_db(catalog_path, read_only=not do_apply, apply_migrations=False)
     try:
-        stash_info = _device_info(conn, stash_device_id)
-        pool_info = _device_info(conn, pool_device_id)
-        print(f"  stash    {stash_info['alias']} (id={stash_device_id}, {stash_info['mount']})")
-        print(f"  pool     {pool_info['alias']} (id={pool_device_id}, {pool_info['mount']})")
+        dest_info = _device_info(conn, dest_device_id)
+        active_info = _device_info(conn, active_device_id)
+        is_promotion = (dest_device_id == active_device_id)
+
+        print(f"  dest     {dest_info['alias']} (id={dest_device_id}, {dest_info['mount']})"
+              + ("  active" if is_promotion else ""))
+
+        # Build source list
+        # Each entry: (device_id, alias, root_path)
+        if source_device_id is not None:
+            src_info = _device_info(conn, source_device_id)
+            src_root = active_root if source_device_id == active_device_id else ""
+            # Try to find root from extra_sources if available
+            if extra_sources:
+                for xid, _, xroot in extra_sources:
+                    if xid == source_device_id:
+                        src_root = xroot
+                        break
+            sources: list[tuple[int, str, str]] = [(source_device_id, src_info["alias"], src_root)]
+        else:
+            # Default: active device + all extra_sources
+            sources = [(active_device_id, active_info["alias"], active_root)]
+            for xid, xalias, xpath in (extra_sources or []):
+                sources.append((xid, xalias, xpath))
+
+        # Also resolve any old-style extra_source_roots (path, alias) pairs
+        if extra_source_roots and source_device_id is None:
+            for xpath, xalias in extra_source_roots:
+                try:
+                    xid = resolve_device_id(conn, xalias)
+                    if not any(s[0] == xid for s in sources):
+                        sources.append((xid, xalias, xpath))
+                except (ValueError, Exception) as e:
+                    print(f"  managed  {xalias} — WARNING: not in DB ({e}), skipping")
+
+        all_managed_ids = [dest_device_id] + [s[0] for s in sources]
+
+        # Print sources with role labels
+        for i, (sid, salias, _spath) in enumerate(sources, 1):
+            sinfo = _device_info(conn, sid)
+            role_label = "active — hardlink check applies" if sid == active_device_id else "storage"
+            if is_promotion:
+                role_label = "storage → active (promotion)"
+            print(f"  sources  [{i}] {salias:<20} (id={sid}, {sinfo['mount']})  {role_label}")
+
         print(f"  mode     {mode_label}" + (
             "" if do_apply else "  (add --apply to execute)"
         ))
         print()
 
-        # ── Candidate discovery ──────────────────────────────────────────────
+        # ── Candidate discovery across all source devices ────────────────────
         print("Scanning...", end=" ", flush=True)
-        candidates = _find_move_candidates(conn, stash_device_id, pool_device_id, limit)
-        # Count total available without limit
-        total_available = conn.execute(
-            """
-            SELECT COUNT(DISTINCT p_s.payload_hash)
-            FROM payloads p_s
-            WHERE p_s.device_id = ?
-              AND p_s.status = 'complete'
-              AND p_s.payload_hash IS NOT NULL
-              AND p_s.total_bytes > 0
-              AND EXISTS (
-                  SELECT 1 FROM payloads p_p
-                  WHERE p_p.payload_hash = p_s.payload_hash
-                    AND p_p.device_id = ?
-                    AND p_p.status = 'complete'
-              )
-              AND EXISTS (
-                  SELECT 1 FROM torrent_instances ti
-                  WHERE ti.payload_id = p_s.payload_id
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM payloads p_o
-                  WHERE p_o.payload_hash = p_s.payload_hash
-                    AND p_o.device_id != ?
-                    AND p_o.device_id != ?
-              )
-            """,
-            (stash_device_id, pool_device_id, stash_device_id, pool_device_id),
-        ).fetchone()[0]
+        all_candidates: list[dict] = []
+        source_counts: dict[str, int] = {}
+        for src_id, src_alias, src_path in sources:
+            cands = _find_move_candidates(conn, src_id, dest_device_id, all_managed_ids, limit * 10)
+            for c in cands:
+                c["source_root"] = src_path
+                c["source_alias"] = src_alias
+            all_candidates.extend(cands)
+            source_counts[src_alias] = len(cands)
 
+        # Merge, dedup by payload_hash, sort by size desc
+        seen_hashes: set[str] = set()
+        merged: list[dict] = []
+        for c in sorted(all_candidates, key=lambda x: x["source_bytes"], reverse=True):
+            if c["payload_hash"] not in seen_hashes:
+                seen_hashes.add(c["payload_hash"])
+                merged.append(c)
+        candidates = merged[:limit]
+
+        total_available = len(merged)
         taking = len(candidates)
-        print(f"{total_available} MOVE groups available, taking top {taking}")
+        counts_str = "  ".join(f"{a}:{n}" for a, n in source_counts.items())
+        print(f"{total_available} MOVE groups available ({counts_str}), taking top {taking}")
         print()
 
         if not candidates:
             print("No eligible candidates found.")
             return 0
 
-        # ── Planner and executor ─────────────────────────────────────────────
-        planner = DemotionPlanner(
-            catalog_path=catalog_path,
-            seeding_roots=[seeding_root],
-            library_roots=[library_root] if library_root else [],
-            stash_device=stash_device_id,
-            pool_device=pool_device_id,
-            stash_seeding_root=seeding_root,
-            pool_payload_root=pool_payload_root,
-        )
         executor = DemotionExecutor(catalog_path=catalog_path)
 
         # Acquire lock only for apply
@@ -668,16 +773,34 @@ def run_auto(
         try:
             for idx, cand in enumerate(candidates, 1):
                 phash = cand["payload_hash"]
-                stash_bytes = cand["stash_bytes"]
+                src_bytes = cand["source_bytes"]
                 torrent_count = cand["torrent_count"]
+                src_id = cand["source_device_id"]
+                src_root = cand.get("source_root", active_root)
+                src_alias = cand.get("source_alias", "?")
 
                 print(f"[{idx}/{taking}]  {phash[:16]}...  "
-                      f"{_fmt_bytes(stash_bytes)} · {torrent_count} torrent(s)")
+                      f"{_fmt_bytes(src_bytes)} · {torrent_count} torrent(s)"
+                      + (f"  [{src_alias}]" if len(sources) > 1 else ""))
+
+                # Build per-candidate planner (source may vary across candidates)
+                planner = _make_planner(
+                    catalog_path=catalog_path,
+                    active_device_id=active_device_id,
+                    dest_device_id=dest_device_id,
+                    source_id=src_id,
+                    source_root=src_root,
+                    dest_root=dest_root,
+                    content_root=content_root,
+                    active_root=active_root,
+                )
 
                 # ── Plan ────────────────────────────────────────────────────
-                t0 = datetime.now()
                 try:
-                    plan = planner.plan_batch_demotion_by_payload_hash(phash)
+                    if dest_device_id == active_device_id:
+                        plan = planner.plan_batch_promotion_by_payload_hash(phash)
+                    else:
+                        plan = planner.plan_batch_demotion_by_payload_hash(phash)
                 except Exception as e:
                     print(f"  plan    ERROR: {e}")
                     run_log.append({"payload_hash": phash, "stage": "plan", "error": str(e)})
@@ -687,8 +810,9 @@ def run_auto(
                 decision = plan.get("decision", "?")
                 target = plan.get("target_path") or "?"
                 target_display = (target[:60] + "...") if len(target) > 63 else target
-                if decision == "MOVE":
-                    print(f"  plan    MOVE → {target_display:<50}  OK")
+                if decision in ("MOVE", "REUSE"):
+                    arrow = "→" if decision == "MOVE" else "≡"
+                    print(f"  plan    {decision} {arrow} {target_display:<50}  OK")
                 elif decision == "BLOCK":
                     reasons = plan.get("reasons", [])
                     print(f"  plan    BLOCK: {reasons[0] if reasons else '?'}")
@@ -733,10 +857,10 @@ def run_auto(
                     try:
                         executor.execute(plan)
                         elapsed = (datetime.now() - t_apply).total_seconds()
-                        print(f"  apply   {_fmt_bytes(stash_bytes)} · {_fmt_elapsed(elapsed)} · source deleted"
+                        print(f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(elapsed)} · source deleted"
                               f"{'':>10}  OK")
                         applied_count += 1
-                        freed_bytes += stash_bytes
+                        freed_bytes += src_bytes
                     except Exception as e:
                         elapsed = (datetime.now() - t_apply).total_seconds()
                         print(f"  apply   FAIL after {_fmt_elapsed(elapsed)}: {e}")
@@ -752,7 +876,7 @@ def run_auto(
                             )
                             try:
                                 verify_ok, verify_summary = _inline_verify(
-                                    executor.qbit_client, verify_conn, plan, pool_device_id
+                                    executor.qbit_client, verify_conn, plan, dest_device_id
                                 )
                             finally:
                                 verify_conn.close()
@@ -791,14 +915,14 @@ def run_auto(
         print(
             f"applied  {applied_count}/{taking}   "
             f"verified  {verified_count}/{taking}   "
-            f"freed  {_fmt_bytes(freed_bytes)} from stash"
+            f"freed  {_fmt_bytes(freed_bytes)} from sources"
         )
         run_log_dir.mkdir(parents=True, exist_ok=True)
         log_file = run_log_dir / f"{timestamp}.json"
         log_file.write_text(json.dumps({
             "timestamp": timestamp,
-            "stash_device_id": stash_device_id,
-            "pool_device_id": pool_device_id,
+            "active_device_id": active_device_id,
+            "dest_device_id": dest_device_id,
             "limit": limit,
             "planned": planned_count,
             "applied": applied_count,
