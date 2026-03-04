@@ -199,7 +199,21 @@ def _refresh_catalog_from_qb(
 @click.group()
 @click.version_option(__version__)
 def cli():
-    """Rehome - Seed payload demotion orchestrator."""
+    """Seed payload demotion orchestrator.
+
+    \b
+    Everyday workflow:
+      rehome refresh                   scan all roots + dedup dry-run + sync qBit
+      rehome auto --limit 5            find top-5 MOVE candidates (dry-run)
+      rehome auto --limit 5 --apply    execute
+
+    \b
+    Config (persisted in ~/.hashall/rehome.toml):
+      rehome config show
+      rehome config set <key> <value>
+      rehome config add-root <path> <alias>
+      rehome config remove-root <path>
+    """
     _emit_banner()
 
 
