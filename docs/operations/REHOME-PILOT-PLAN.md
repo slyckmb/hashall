@@ -255,4 +255,16 @@ If a torrent is left in bad state: use qBittorrent UI or `qbit-repair-batch.sh` 
 - ✅ Fix 4 — `scripts/rehome_safe_workflow.py`: `--stash-device`/`--pool-device` now accept alias or integer; resolution happens on startup.
 - ✅ Makefile + bin scripts: updated all examples and defaults to use stable aliases ("stash", "pool") instead of volatile integers.
 - ✅ All `REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44` references replaced with aliases throughout docs.
-- 🔲 Phase 1 (crawl) apply: pending — dry-run passed, code fixes committed, ready to run with REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data
+- ✅ Phase 1 (crawl) apply: COMPLETE — West Wing S07 (payload 8277eae7, 140.3 GB, 2 torrents). Bugs found and fixed during run:
+  - Fix 5 — `src/rehome/executor.py`: added `"stoppedup"` to `_is_qb_seed_ready()` (qB v5+ uses "stoppedup" not "pausedup" for paused-seeding state)
+  - Fix 6 — `scripts/rehome_safe_workflow.py` + `Makefile`: added `--pool-payload-root` / `REHOME_SAFE_POOL_PAYLOAD_ROOT` (planner requires it for MOVE target path)
+  - Fix 7 — `src/rehome/planner.py`: `_payload_exists_on_pool()` now verifies pool path exists on disk (stale catalog entry caused false REUSE)
+  - Fix 8 — `src/hashall/cli.py`: payload-sync now writes `device_id=payload.device_id` to `torrent_instances` (was always NULL; executor set 231, payload-sync reset to NULL, verify failed)
+- ✅ Phase 1 verify: ALL GREEN — qb_ok=true db_ok=true source_ok=true, both torrents stalledUP at 100% on /pool/data/seeds
+- ✅ Phase 1 cleanup: complete (source deleted by executor during apply)
+
+### 2026-03-03 — Session 3
+
+- ✅ Phase 1 apply unblocked: torrent entered stoppedup state; added "stoppedup" to executor seed-ready set; started torrent via qB API `/torrents/start`
+- ✅ Fix 5–8 committed, 87 tests passing
+- 🔲 Phase 2 (walk-1, 5 torrents): ready — `make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=5 REHOME_SAFE_APPLY=1`
