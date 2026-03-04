@@ -1,4 +1,4 @@
-from scripts.rehome_safe_verify_cleanup import _expected_save_path, _is_qb_ready_state
+from rehome.auto import _expected_save_path, _is_qb_ready_state
 
 
 def test_qb_ready_state_rules():

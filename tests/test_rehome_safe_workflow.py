@@ -1,4 +1,4 @@
-from scripts.rehome_safe_workflow import _safe_candidates
+from rehome.auto import _safe_candidates
 
 
 def test_safe_candidates_filters_and_sorts():

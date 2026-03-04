@@ -1200,5 +1200,94 @@ def normalize_plan_cmd(
     click.echo(f"Next step: rehome apply {output_path} --dryrun")
 
 
+@cli.command("auto")
+@click.option("--limit", default=5, show_default=True, help="Max candidates to process")
+@click.option("--apply", "do_apply", is_flag=True, help="Execute (default: dry-run only)")
+@click.option("--stash-device", default=None, help="Override config stash device alias/id")
+@click.option("--pool-device", default=None, help="Override config pool device alias/id")
+@click.option("--pool-payload-root", default=None, help="Override config pool payload root")
+@click.option("--seeding-root", default=None, help="Override config seeding root")
+@click.option("--catalog", default=None, help="Override config catalog path")
+def auto_cmd(limit, do_apply, stash_device, pool_device, pool_payload_root, seeding_root, catalog):
+    """Find safe MOVE candidates and rehome them (dry-run by default)."""
+    from rehome.config import load_config
+    from rehome.auto import run_auto
+    from hashall.model import connect_db
+    from hashall.device import resolve_device_id
+
+    cfg = load_config()
+
+    catalog_str = catalog or cfg["catalog"]
+    catalog_path = Path(catalog_str).expanduser()
+    if not catalog_path.exists():
+        click.echo(f"❌ Catalog not found: {catalog_path}", err=True)
+        raise click.Abort()
+
+    stash_alias = stash_device or cfg["stash_device"]
+    pool_alias = pool_device or cfg["pool_device"]
+    ppr = pool_payload_root or cfg["pool_payload_root"]
+    sr = seeding_root or cfg["seeding_root"]
+    lr = cfg["library_root"]
+
+    try:
+        _conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            stash_id = resolve_device_id(_conn, stash_alias)
+            pool_id = resolve_device_id(_conn, pool_alias)
+        finally:
+            _conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+
+    log_base = Path.home() / ".logs" / "hashall" / "reports" / "rehome-runs"
+    plan_log_dir = log_base / "plans"
+    run_log_dir = log_base
+
+    exit_code = run_auto(
+        catalog_path=catalog_path,
+        stash_device_id=stash_id,
+        pool_device_id=pool_id,
+        pool_payload_root=ppr,
+        seeding_root=sr,
+        library_root=lr,
+        limit=limit,
+        do_apply=do_apply,
+        plan_log_dir=plan_log_dir,
+        run_log_dir=run_log_dir,
+    )
+    if exit_code != 0:
+        raise click.exceptions.Exit(exit_code)
+
+
+@cli.group("config")
+def config_group():
+    """Manage rehome defaults (~/.hashall/rehome.toml)."""
+
+
+@config_group.command("show")
+def config_show():
+    """Print current config (file + defaults)."""
+    from rehome.config import load_config, CONFIG_PATH
+    cfg = load_config()
+    click.echo(f"# {CONFIG_PATH}")
+    for key, value in sorted(cfg.items()):
+        click.echo(f"{key} = {value!r}")
+
+
+@config_group.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key, value):
+    """Set a config key (writes to ~/.hashall/rehome.toml)."""
+    from rehome.config import load_config, save_config_key, DEFAULTS
+    if key not in DEFAULTS:
+        known = ", ".join(sorted(DEFAULTS))
+        click.echo(f"❌ Unknown key '{key}'. Known keys: {known}", err=True)
+        raise click.Abort()
+    save_config_key(key, value)
+    click.echo(f"✅ {key} = {value!r}")
+
+
 if __name__ == "__main__":
     cli()

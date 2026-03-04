@@ -38,6 +38,7 @@ build-backend = "setuptools.build_meta"
 minversion = "7.0"
 addopts = "-v"
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.setuptools]
 packages = ["hashall", "rehome"]
