@@ -125,7 +125,7 @@ run_dupes() {
 
 declare -A seen_devices=()
 declare -a resolved_devices=()
-declare -a requested_devices=("stash" "data" "$HOTSPARE_DEVICE")
+declare -a requested_devices=("stash" "pool" "$HOTSPARE_DEVICE")
 
 for requested in "${requested_devices[@]}"; do
   resolved="$(resolve_device_alias "$requested" | tr -d '\r\n' || true)"

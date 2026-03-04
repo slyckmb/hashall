@@ -156,12 +156,12 @@ DB refresh (`./bin/codex-says-run-this-next.sh`) only needed if catalog > 24h st
 
 ```bash
 # Dry-run
-make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=1
+make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data REHOME_SAFE_LIMIT=1
 
 # Review output: decision=MOVE, source=/stash/media/..., target=/pool/data/seeds/..., no ALARM
 
 # Apply
-make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=1 REHOME_SAFE_APPLY=1
+make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data REHOME_SAFE_LIMIT=1 REHOME_SAFE_APPLY=1
 
 # Gate check
 make rehome-safe-verify
@@ -178,8 +178,8 @@ make rehome-safe-verify
 ### Phase 2 — Walk-1: 5 torrents | Status: Blocked on Phase 1
 
 ```bash
-make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=5
-make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=5 REHOME_SAFE_APPLY=1
+make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data REHOME_SAFE_LIMIT=5
+make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data REHOME_SAFE_LIMIT=5 REHOME_SAFE_APPLY=1
 make rehome-safe-verify
 make rehome-safe-cleanup
 ```
@@ -189,8 +189,8 @@ make rehome-safe-cleanup
 ### Phase 3 — Walk-2: 15 torrents | Status: Blocked on Phase 2
 
 ```bash
-make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=15
-make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=15 REHOME_SAFE_APPLY=1
+make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data REHOME_SAFE_LIMIT=15
+make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data REHOME_SAFE_LIMIT=15 REHOME_SAFE_APPLY=1
 make rehome-safe-verify
 make rehome-followup REHOME_FOLLOWUP_CLEANUP=1
 ```
@@ -200,8 +200,8 @@ make rehome-followup REHOME_FOLLOWUP_CLEANUP=1
 ```bash
 ./bin/codex-says-run-this-next.sh   # Full DB refresh before production run
 
-make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=50
-make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_LIMIT=50 REHOME_SAFE_APPLY=1
+make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data REHOME_SAFE_LIMIT=50
+make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data REHOME_SAFE_LIMIT=50 REHOME_SAFE_APPLY=1
 make rehome-safe-verify
 make rehome-safe-cleanup
 make rehome-followup REHOME_FOLLOWUP_CLEANUP=1
@@ -245,7 +245,7 @@ If a torrent is left in bad state: use qBittorrent UI or `qbit-repair-batch.sh` 
 
 ### 2026-03-03 — Session 2
 
-- ✅ Discovered correct device IDs: stash=44 (alias "stash"), pool=231 (alias "pool"). Plan doc was wrong (49/44 from pre-reboot IDs).
+- ✅ Discovered correct device IDs: stash=44 (alias "stash"), pool=231 (alias "pool"). Plan doc was wrong (49/44 from pre-reboot IDs). Renamed catalog alias "data" → "pool" to avoid confusion with /data/media.
 - ✅ Root-caused 0 MOVE candidates: 7,347 ghost payloads had device_id=49 (old stash) — `register_or_update_device()` renamed `files_49→files_44` but did NOT update `payloads.device_id`. Orphan GC blocked by spike-protection (7,331 > limit=1000).
 - ✅ Catalog cleanup (with backup): deleted 7,331 device-49 orphan payloads (no torrent refs). Deleted 249 device-44 /pool/ payloads (catalog inconsistency, no refs). Kept 16 device-49 + 3 device-44 entries with active torrent refs.
 - ✅ Phase 1 dry-run succeeded: West Wing S07 group, 2 stalledUP torrents, decision=REUSE, dryrun_ok=1/1, 0 ALARM rows.
@@ -253,6 +253,6 @@ If a torrent is left in bad state: use qBittorrent UI or `qbit-repair-batch.sh` 
 - ✅ Fix 2 — `src/hashall/device.py`: added `resolve_device_id(conn, value)` — accepts alias (e.g. "stash") or integer string, returns current `device_id`.
 - ✅ Fix 3 — `src/rehome/cli.py`: `plan`, `plan-batch`, `normalize-plan` now accept `--stash-device`/`--pool-device` as alias or integer (was `type=int` only).
 - ✅ Fix 4 — `scripts/rehome_safe_workflow.py`: `--stash-device`/`--pool-device` now accept alias or integer; resolution happens on startup.
-- ✅ Makefile: updated all examples and defaults to use "stash"/"pool" aliases instead of volatile integers.
+- ✅ Makefile + bin scripts: updated all examples and defaults to use stable aliases ("stash", "pool") instead of volatile integers.
 - ✅ All `REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44` references replaced with aliases throughout docs.
-- 🔲 Phase 1 (crawl) apply: pending — dry-run passed, code fixes committed, ready to run with REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool
+- 🔲 Phase 1 (crawl) apply: pending — dry-run passed, code fixes committed, ready to run with REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=data
