@@ -516,7 +516,7 @@ def payload_sync(
                 torrent_instance = TorrentInstance(
                     torrent_hash=torrent.hash,
                     payload_id=payload_id,
-                    device_id=None,  # Could be extracted from stat() if needed
+                    device_id=payload.device_id,
                     save_path=torrent.save_path,
                     root_name=torrent.name,
                     category=torrent.category,
