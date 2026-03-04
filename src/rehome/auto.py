@@ -300,7 +300,7 @@ def run_refresh(
     pool_device: str,
     workers: int = 8,
     apply_dedup: bool = False,
-    skip_dedup: bool = True,
+    skip_dedup: bool = False,
     extra_roots: list[tuple[str, str]] = [],
 ) -> int:
     """
@@ -345,18 +345,25 @@ def run_refresh(
         print(f"  elapsed {_fmt_elapsed(elapsed)}  {status}")
         return ok, stdout
 
-    print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"  catalog       {catalog_path}")
-    print(f"  seeding_root  {seeding_root}")
-    print(f"  pool_root     {pool_payload_root}")
-    print(f"  stash         {stash_device}")
-    print(f"  pool          {pool_device}")
-    if extra_roots:
-        for path, alias in extra_roots:
-            print(f"  extra         {path} ({alias})")
-    print(f"  workers       {workers}")
+    # Build the full ordered root list for display + iteration
+    all_roots: list[tuple[str, str, str]] = [
+        (seeding_root, stash_device, "stash"),
+        (pool_payload_root, pool_device, "pool"),
+    ]
+    if seeding_root == pool_payload_root:
+        all_roots = all_roots[:1]  # deduped path
+    for p, a in (extra_roots or []):
+        all_roots.append((p, a, "extra"))
+
     dedup_mode = "execute" if apply_dedup else ("plan+dry-run" if not skip_dedup else "off")
-    print(f"  dedup         {dedup_mode}")
+
+    print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"  catalog  {catalog_path}")
+    print(f"  workers  {workers}")
+    print(f"  dedup    {dedup_mode}")
+    print(f"\n  Scan roots ({len(all_roots)}):")
+    for i, (path, alias, role) in enumerate(all_roots, 1):
+        print(f"    [{i}] {alias:<20} {role:<6}  {path}")
 
     # ── Step 1: scan seeding_root ─────────────────────────────────────────
     ok, _ = _run_step(

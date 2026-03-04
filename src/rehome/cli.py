@@ -1284,19 +1284,23 @@ def auto_cmd(limit, do_apply, do_refresh, workers, stash_device, pool_device,
 
 @cli.command("refresh")
 @click.option("--workers", default=8, show_default=True, help="Scan worker threads")
-@click.option("--dedup", "do_dedup", is_flag=True,
-              help="Run link dedup plan + dry-run (no filesystem changes)")
+@click.option("--no-dedup", "skip_dedup", is_flag=True,
+              help="Skip dedup plan (dedup dry-run runs by default)")
 @click.option("--apply-dedup", is_flag=True,
-              help="Execute dedup link plan (modifies filesystem, implies --dedup)")
+              help="Execute dedup link plan (modifies filesystem)")
 @click.option("--stash-device", default=None, help="Override config stash device alias")
 @click.option("--pool-device", default=None, help="Override config pool device alias")
 @click.option("--seeding-root", default=None, help="Override config seeding root path")
 @click.option("--pool-payload-root", default=None, help="Override config pool payload root path")
 @click.option("--catalog", default=None, help="Override config catalog path")
-def refresh_cmd(workers, do_dedup, apply_dedup, stash_device, pool_device,
+def refresh_cmd(workers, skip_dedup, apply_dedup, stash_device, pool_device,
                 seeding_root, pool_payload_root, catalog):
-    """Scan stash+pool, upgrade SHA256, optionally dedup, then sync qBit payloads."""
-    from rehome.config import load_config
+    """Scan all roots, upgrade SHA256, run dedup dry-run, then sync qBit payloads.
+
+    Dedup (plan + dry-run) runs by default. Use --no-dedup to skip it.
+    Use --apply-dedup to execute the dedup plan (modifies filesystem).
+    """
+    from rehome.config import load_config, parse_extra_scan_roots
     from rehome.auto import run_refresh
 
     cfg = load_config()
@@ -1311,10 +1315,7 @@ def refresh_cmd(workers, do_dedup, apply_dedup, stash_device, pool_device,
     pool_alias = pool_device or cfg["pool_device"]
     sr = seeding_root or cfg["seeding_root"]
     ppr = pool_payload_root or cfg["pool_payload_root"]
-
-    from rehome.config import parse_extra_scan_roots
     extra_roots = parse_extra_scan_roots(cfg.get("extra_scan_roots") or [])
-    skip_dedup = not (do_dedup or apply_dedup)
 
     exit_code = run_refresh(
         catalog_path=catalog_path,
