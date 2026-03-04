@@ -1234,6 +1234,8 @@ def auto_cmd(limit, do_apply, do_refresh, workers, stash_device, pool_device,
     lr = cfg["library_root"]
 
     if do_refresh:
+        from rehome.config import parse_extra_scan_roots
+        extra_roots = parse_extra_scan_roots(cfg.get("extra_scan_roots") or [])
         refresh_code = run_refresh(
             catalog_path=catalog_path,
             seeding_root=sr,
@@ -1242,6 +1244,7 @@ def auto_cmd(limit, do_apply, do_refresh, workers, stash_device, pool_device,
             pool_device=pool_alias,
             workers=workers,
             skip_dedup=True,
+            extra_roots=extra_roots,
         )
         if refresh_code != 0:
             click.echo("❌ Refresh failed — aborting auto", err=True)
@@ -1309,6 +1312,8 @@ def refresh_cmd(workers, do_dedup, apply_dedup, stash_device, pool_device,
     sr = seeding_root or cfg["seeding_root"]
     ppr = pool_payload_root or cfg["pool_payload_root"]
 
+    from rehome.config import parse_extra_scan_roots
+    extra_roots = parse_extra_scan_roots(cfg.get("extra_scan_roots") or [])
     skip_dedup = not (do_dedup or apply_dedup)
 
     exit_code = run_refresh(
@@ -1320,6 +1325,7 @@ def refresh_cmd(workers, do_dedup, apply_dedup, stash_device, pool_device,
         workers=workers,
         apply_dedup=apply_dedup,
         skip_dedup=skip_dedup,
+        extra_roots=extra_roots,
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
@@ -1344,14 +1350,49 @@ def config_show():
 @click.argument("key")
 @click.argument("value")
 def config_set(key, value):
-    """Set a config key (writes to ~/.hashall/rehome.toml)."""
+    """Set a scalar config key (writes to ~/.hashall/rehome.toml)."""
     from rehome.config import load_config, save_config_key, DEFAULTS
-    if key not in DEFAULTS:
-        known = ", ".join(sorted(DEFAULTS))
-        click.echo(f"❌ Unknown key '{key}'. Known keys: {known}", err=True)
+    scalar_keys = {k for k, v in DEFAULTS.items() if not isinstance(v, list)}
+    if key not in scalar_keys:
+        known = ", ".join(sorted(scalar_keys))
+        click.echo(f"❌ Unknown scalar key '{key}'. Known keys: {known}", err=True)
+        click.echo("  (For list keys like extra_scan_roots use: rehome config add-root / remove-root)", err=True)
         raise click.Abort()
     save_config_key(key, value)
     click.echo(f"✅ {key} = {value!r}")
+
+
+@config_group.command("add-root")
+@click.argument("path")
+@click.argument("alias")
+def config_add_root(path, alias):
+    """Add (or update) an extra scan root with its device alias.
+
+    \b
+    Example:
+      rehome config add-root /mnt/hotspare6tb hotspare6tb
+    """
+    from rehome.config import add_scan_root
+    add_scan_root(path, alias)
+    click.echo(f"✅ added extra_scan_root: {path} → {alias}")
+
+
+@config_group.command("remove-root")
+@click.argument("path")
+def config_remove_root(path):
+    """Remove an extra scan root by path.
+
+    \b
+    Example:
+      rehome config remove-root /mnt/hotspare6tb
+    """
+    from rehome.config import remove_scan_root
+    removed = remove_scan_root(path)
+    if removed:
+        click.echo(f"✅ removed extra_scan_root: {path}")
+    else:
+        click.echo(f"⚠️  no entry found for path: {path}", err=True)
+        raise click.exceptions.Exit(1)
 
 
 if __name__ == "__main__":

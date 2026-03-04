@@ -301,6 +301,7 @@ def run_refresh(
     workers: int = 8,
     apply_dedup: bool = False,
     skip_dedup: bool = True,
+    extra_roots: list[tuple[str, str]] = [],
 ) -> int:
     """
     Preflight refresh: scan stash+pool, upgrade SHA256 for collision groups,
@@ -350,6 +351,9 @@ def run_refresh(
     print(f"  pool_root     {pool_payload_root}")
     print(f"  stash         {stash_device}")
     print(f"  pool          {pool_device}")
+    if extra_roots:
+        for path, alias in extra_roots:
+            print(f"  extra         {path} ({alias})")
     print(f"  workers       {workers}")
     dedup_mode = "execute" if apply_dedup else ("plan+dry-run" if not skip_dedup else "off")
     print(f"  dedup         {dedup_mode}")
@@ -386,6 +390,49 @@ def run_refresh(
          "--device", pool_device, "--auto-upgrade"] + db_args,
     )
     overall_ok = overall_ok and ok
+
+    # ── Extra roots: scan + dupes (+ dedup if opted-in) ──────────────────
+    for extra_path, extra_alias in (extra_roots or []):
+        ok, _ = _run_step(
+            f"scan extra root ({extra_path})",
+            [python, "-m", "hashall.cli", "scan", extra_path,
+             "--parallel", "--workers", str(workers)] + db_args,
+        )
+        overall_ok = overall_ok and ok
+
+        ok, _ = _run_step(
+            f"dupes auto-upgrade (extra={extra_alias})",
+            [python, "-m", "hashall.cli", "dupes",
+             "--device", extra_alias, "--auto-upgrade"] + db_args,
+        )
+        overall_ok = overall_ok and ok
+
+        if not skip_dedup:
+            plan_name = f"refresh-{extra_alias}-{timestamp}"
+            ok, stdout = _run_step(
+                f"link plan ({extra_alias})",
+                [python, "-m", "hashall.cli", "link", "plan", plan_name,
+                 "--device", extra_alias, "--min-size", "1048576"] + db_args,
+                capture=True,
+            )
+            overall_ok = overall_ok and ok
+
+            if ok:
+                m = re.search(r"plan_id=(\d+)", stdout)
+                if m:
+                    plan_id = m.group(1)
+                    execute_cmd = [
+                        python, "-m", "hashall.cli", "link", "execute", plan_id,
+                    ] + db_args
+                    if not apply_dedup:
+                        execute_cmd.append("--dry-run")
+                    label = f"link execute plan_id={plan_id} ({extra_alias})" + (
+                        "" if apply_dedup else " [dry-run]"
+                    )
+                    ok, _ = _run_step(label, execute_cmd)
+                    overall_ok = overall_ok and ok
+                else:
+                    print(f"  [refresh] no plan_id found in link plan output for {extra_alias} — skipping execute")
 
     # ── Steps 4a/4b: dedup (opt-in) ──────────────────────────────────────
     if not skip_dedup:
