@@ -201,6 +201,72 @@ def _fmt_bytes(num_bytes: int) -> str:
     return f"{num_bytes} B"
 
 
+def _validate_refresh_roots(
+    catalog_path: Path,
+    all_roots: list[tuple[str, str, str]],
+) -> None:
+    """
+    Validate each scan root before any subprocess is launched.
+
+    Checks:
+      - path exists on disk
+      - device alias exists in the catalog DB
+
+    Prints a table and calls sys.exit(1) if anything fails.
+    """
+    import sqlite3 as _sqlite3
+
+    print(f"\n[preflight] Validating {len(all_roots)} scan root(s)...")
+
+    db_rows: dict[str, tuple] = {}
+    conn = None
+    if catalog_path.exists():
+        try:
+            conn = _sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+            for row in conn.execute(
+                "SELECT device_alias, total_files, last_scanned_at FROM devices"
+            ).fetchall():
+                if row[0]:
+                    db_rows[str(row[0])] = row
+        except Exception:
+            pass
+        finally:
+            if conn:
+                conn.close()
+
+    col_alias = max((len(a) for _, a, _ in all_roots), default=5)
+    col_alias = max(col_alias, 5)
+    failures: list[str] = []
+
+    for path, alias, role in all_roots:
+        path_ok = Path(path).exists()
+        db_row = db_rows.get(alias)
+        db_ok = db_row is not None
+
+        if db_row:
+            files = int(db_row[1] or 0)
+            last = str(db_row[2] or "")[:10]
+            db_note = f"files={files:,}  {last}"
+        else:
+            db_note = "NOT IN DB"
+
+        exists_s = "YES" if path_ok else "NO "
+        db_s = "YES" if db_ok else "NO "
+        print(f"  {alias:<{col_alias}}  {role:<5}  exists={exists_s}  db={db_s} ({db_note})")
+
+        if not path_ok or not db_ok:
+            failures.append(alias)
+
+    if failures:
+        print(
+            f"\n[preflight] ABORT: {len(failures)} root(s) failed validation"
+            f" ({', '.join(failures)}) — fix config before running refresh."
+        )
+        sys.exit(1)
+
+    print(f"[preflight] OK — {len(all_roots)} root(s) validated")
+
+
 def _fmt_elapsed(seconds: float) -> str:
     s = int(seconds)
     if s < 60:
@@ -364,6 +430,8 @@ def run_refresh(
     print(f"\n  Scan roots ({len(all_roots)}):")
     for i, (path, alias, role) in enumerate(all_roots, 1):
         print(f"    [{i}] {alias:<20} {role:<6}  {path}")
+
+    _validate_refresh_roots(catalog_path, all_roots)
 
     # ── Step 1: scan seeding_root ─────────────────────────────────────────
     ok, _ = _run_step(

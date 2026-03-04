@@ -1346,19 +1346,83 @@ def refresh_cmd(workers, skip_dedup, apply_dedup, stash_device, pool_device,
         raise click.exceptions.Exit(exit_code)
 
 
+def _db_open_readonly(catalog_path: Path) -> Optional[sqlite3.Connection]:
+    """Open catalog read-only; return None (with note) if it doesn't exist."""
+    if not catalog_path.exists():
+        click.echo(f"  (catalog not found at {catalog_path} — skipping DB stats)", err=True)
+        return None
+    return sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+
+
+def _db_device_stats(conn: sqlite3.Connection, alias: str) -> Optional[tuple]:
+    """Return (total_files, total_bytes, last_scanned_at) for an alias, or None."""
+    return conn.execute(
+        "SELECT total_files, total_bytes, last_scanned_at"
+        " FROM devices WHERE device_alias = ?",
+        (alias,),
+    ).fetchone()
+
+
 @cli.group("config")
 def config_group():
     """Manage rehome defaults (~/.hashall/rehome.toml)."""
 
 
 @config_group.command("show")
-def config_show():
-    """Print current config (file + defaults)."""
-    from rehome.config import load_config, CONFIG_PATH
+@click.option("--catalog", default=None, help="Override config catalog path")
+def config_show(catalog):
+    """Print current config and DB stats for each configured device."""
+    from rehome.config import load_config, CONFIG_PATH, parse_extra_scan_roots
+    from rehome.auto import _fmt_bytes
+
     cfg = load_config()
-    click.echo(f"# {CONFIG_PATH}")
-    for key, value in sorted(cfg.items()):
-        click.echo(f"{key} = {value!r}")
+    catalog_str = catalog or cfg["catalog"]
+    catalog_path = Path(catalog_str).expanduser()
+
+    click.echo(f"# {CONFIG_PATH}\n")
+
+    scalar_keys = {k: v for k, v in cfg.items() if not isinstance(v, list)}
+    for key, value in sorted(scalar_keys.items()):
+        click.echo(f"  {key:<20} {value}")
+
+    # ── DB stats for stash + pool ─────────────────────────────────────────
+    conn = _db_open_readonly(catalog_path)
+    try:
+        click.echo("\nDevice DB stats:")
+        for alias_key, path_key in (("stash_device", "seeding_root"), ("pool_device", "pool_payload_root")):
+            alias = cfg.get(alias_key, "")
+            path = cfg.get(path_key, "")
+            if conn:
+                row = _db_device_stats(conn, alias)
+            else:
+                row = None
+            if row:
+                files, nbytes, last = row
+                stat = f"files={int(files or 0):>8,}  {_fmt_bytes(int(nbytes or 0)):<10}  last={str(last or '')[:10]}"
+            else:
+                stat = "(not found in DB)"
+            click.echo(f"  {alias:<20} {path}  {stat}")
+
+        # ── Extra scan roots ──────────────────────────────────────────────
+        extra_pairs = parse_extra_scan_roots(cfg.get("extra_scan_roots") or [])
+        if extra_pairs:
+            click.echo(f"\nExtra scan roots ({len(extra_pairs)}):")
+            for path, alias in extra_pairs:
+                if conn:
+                    row = _db_device_stats(conn, alias)
+                else:
+                    row = None
+                if row:
+                    files, nbytes, last = row
+                    stat = f"files={int(files or 0):>8,}  {_fmt_bytes(int(nbytes or 0)):<10}  last={str(last or '')[:10]}  [DB OK]"
+                else:
+                    stat = "(not found in DB)"
+                click.echo(f"  {alias:<20} {path}  {stat}")
+        else:
+            click.echo("\nExtra scan roots: (none — use: rehome config add-root <path> <alias>)")
+    finally:
+        if conn:
+            conn.close()
 
 
 @config_group.command("set")
@@ -1380,14 +1444,40 @@ def config_set(key, value):
 @config_group.command("add-root")
 @click.argument("path")
 @click.argument("alias")
-def config_add_root(path, alias):
+@click.option("--catalog", default=None, help="Override config catalog path")
+def config_add_root(path, alias, catalog):
     """Add (or update) an extra scan root with its device alias.
 
     \b
     Example:
-      rehome config add-root /mnt/hotspare6tb hotspare6tb
+      rehome config add-root /mnt/hotspare6tb spare
     """
-    from rehome.config import add_scan_root
+    from rehome.config import add_scan_root, load_config
+
+    cfg = load_config()
+    catalog_path = Path(catalog or cfg["catalog"]).expanduser()
+    conn = _db_open_readonly(catalog_path)
+    if conn:
+        try:
+            rows = conn.execute(
+                "SELECT device_alias, preferred_mount_point, mount_point, total_files"
+                " FROM devices ORDER BY total_files DESC"
+            ).fetchall()
+            known = {str(r[0]): r for r in rows if r[0]}
+        finally:
+            conn.close()
+
+        if alias not in known:
+            click.echo(f"  WARNING: alias '{alias}' not found in DB ({catalog_path})", err=True)
+            click.echo("  Known DB aliases:", err=True)
+            for da, (_, pmp, mp, tf) in known.items():
+                mount = pmp or mp or "?"
+                click.echo(f"    {da:<22} {mount}  files={int(tf or 0):,}", err=True)
+            click.echo(
+                "  (Config will still be written — alias may be pre-configured before first scan.)\n",
+                err=True,
+            )
+
     add_scan_root(path, alias)
     click.echo(f"✅ added extra_scan_root: {path} → {alias}")
 
@@ -1408,6 +1498,86 @@ def config_remove_root(path):
     else:
         click.echo(f"⚠️  no entry found for path: {path}", err=True)
         raise click.exceptions.Exit(1)
+
+
+@config_group.command("sync-roots")
+@click.option("--apply", "do_apply", is_flag=True,
+              help="Auto-add untracked DB devices to extra_scan_roots")
+@click.option("--min-files", default=1, show_default=True,
+              help="Exclude devices with fewer than N files")
+@click.option("--catalog", default=None, help="Override config catalog path")
+def config_sync_roots(do_apply, min_files, catalog):
+    """Show DB devices not tracked in rehome config; --apply adds them.
+
+    Compares the catalog devices table against what rehome.toml tracks
+    (stash_device, pool_device, extra_scan_roots) and surfaces any gap.
+    """
+    from rehome.config import load_config, parse_extra_scan_roots, add_scan_root
+    from rehome.auto import _fmt_bytes
+
+    cfg = load_config()
+    catalog_str = catalog or cfg["catalog"]
+    catalog_path = Path(catalog_str).expanduser()
+
+    click.echo(f"\nRehome Config Sync-Roots")
+    click.echo(f"  catalog  {catalog_path}")
+    click.echo(f"  config   {Path.home() / '.hashall' / 'rehome.toml'}\n")
+
+    conn = _db_open_readonly(catalog_path)
+    if not conn:
+        raise click.exceptions.Exit(1)
+
+    try:
+        rows = conn.execute(
+            "SELECT device_alias, preferred_mount_point, mount_point,"
+            "       total_files, total_bytes, last_scanned_at"
+            " FROM devices"
+            " WHERE total_files >= ?"
+            " ORDER BY total_files DESC",
+            (min_files,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Build tracked set from config
+    extra_pairs = parse_extra_scan_roots(cfg.get("extra_scan_roots") or [])
+    tracked_aliases: set[str] = {cfg.get("stash_device", ""), cfg.get("pool_device", "")}
+    for _, a in extra_pairs:
+        tracked_aliases.add(a)
+
+    tracked_rows = [r for r in rows if str(r[0] or "") in tracked_aliases]
+    untracked_rows = [r for r in rows if str(r[0] or "") not in tracked_aliases]
+
+    if tracked_rows:
+        click.echo(f"Already tracked ({len(tracked_rows)}):")
+        for alias, pmp, mp, tf, tb, last in tracked_rows:
+            mount = pmp or mp or "?"
+            click.echo(
+                f"  {str(alias):<20} {mount:<30} "
+                f"files={int(tf or 0):>8,}  {_fmt_bytes(int(tb or 0)):<10}  last={str(last or '')[:10]}"
+            )
+
+    if untracked_rows:
+        click.echo(f"\nUntracked in DB ({len(untracked_rows)}):")
+        added = 0
+        for alias, pmp, mp, tf, tb, last in untracked_rows:
+            mount = pmp or mp or "?"
+            click.echo(
+                f"  {str(alias):<20} {mount:<30} "
+                f"files={int(tf or 0):>8,}  {_fmt_bytes(int(tb or 0)):<10}  last={str(last or '')[:10]}"
+            )
+            click.echo(f"  → rehome config add-root {mount} {alias}")
+            if do_apply:
+                add_scan_root(mount, str(alias))
+                click.echo(f"  ✅ added")
+                added += 1
+
+        if do_apply:
+            click.echo(f"\nsync-roots complete: {added} added, {len(tracked_rows)} already tracked.")
+        else:
+            click.echo(f"\n(dry-run) Re-run with --apply to add automatically.")
+    else:
+        click.echo("\nAll DB devices are already tracked in rehome config.")
 
 
 if __name__ == "__main__":
