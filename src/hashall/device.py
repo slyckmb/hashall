@@ -469,6 +469,15 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
             # Rename our files table now that the target slot is guaranteed clear
             rename_files_table(cursor, old_device_id, device_id)
 
+            # Migrate payloads to new device_id so catalog stays consistent
+            cursor.execute(
+                "UPDATE payloads SET device_id = ? WHERE device_id = ?",
+                (device_id, old_device_id),
+            )
+            migrated = cursor.rowcount
+            if migrated > 0:
+                print(f"   Migrated {migrated} payload row(s) from device_id {old_device_id} → {device_id}")
+
             # Update device record with new device_id
             cursor.execute("""
                 UPDATE devices SET
@@ -590,6 +599,32 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
             'mount_point': mount_point,
             'preferred_mount_point': mount_point
         }
+
+
+def resolve_device_id(conn: sqlite3.Connection, value: str) -> int:
+    """Resolve a device alias or integer string to the current device_id.
+
+    Accepts either a decimal integer string (e.g. "44") or a device alias
+    (e.g. "stash", "pool") and returns the current integer device_id from the
+    devices table.  Raises ValueError if the alias is not found.
+
+    This insulates callers from volatile os.stat() device numbers — pass an
+    alias and the correct device_id is always returned regardless of reboots.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    row = conn.execute(
+        "SELECT device_id FROM devices WHERE device_alias = ?",
+        (str(value),),
+    ).fetchone()
+    if row:
+        return int(row[0])
+    raise ValueError(
+        f"No device found with alias {value!r}. "
+        "Run 'make devices' to list registered devices and their aliases."
+    )
 
 
 def _get_fs_type(mount_point: str) -> str:

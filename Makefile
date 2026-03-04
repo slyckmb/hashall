@@ -134,8 +134,8 @@ REHOME_NORMALIZE_PRINT_SKIPPED ?= 0
 REHOME_NORMALIZE_PAYLOAD_HASH ?=
 REHOME_NORMALIZE_OUTPUT ?=
 RECOVERY_WORKFLOW_PREFIX ?= /data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207
-RECOVERY_WORKFLOW_STASH_DEVICE ?= 49
-RECOVERY_WORKFLOW_POOL_DEVICE ?= 44
+RECOVERY_WORKFLOW_STASH_DEVICE ?= stash
+RECOVERY_WORKFLOW_POOL_DEVICE ?= pool
 RECOVERY_WORKFLOW_LIMIT ?= 20
 RECOVERY_WORKFLOW_APPLY ?= 0
 RECOVERY_WORKFLOW_OUTPUT_DIR ?= $(HOME)/.logs/hashall/reports/recovery-workflow
@@ -214,12 +214,12 @@ help:  ## Show this help message
 	@echo "  make payload-auto ROOTS='/pool/data,/stash/media'            # Run to completion"
 	@echo "  make recovery-auto RECOVERY_WORKFLOW_PREFIX='/data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207'  # Audit recovered content"
 	@echo "  make recovery-auto-apply RECOVERY_WORKFLOW_LIMIT=10  # Prune exact duplicate recovered units"
-	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44  # Top safe rehome dry-run batch"
-	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44 REHOME_SAFE_APPLY=1  # Execute safe rehomes"
+	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool  # Top safe rehome dry-run batch"
+	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_APPLY=1  # Execute safe rehomes"
 	@echo "  make rehome-safe-verify                    # Gate check latest safe run (qB+DB+source)"
 	@echo "  make rehome-safe-cleanup                   # Delete source paths only when gates pass"
 	@echo "  make rehome-followup                       # Process rehome_verify_pending + cleanup-required tags"
-	@echo "  make rehome-normalize-plan REHOME_POOL_DEVICE=44  # Build batch plan for misplaced pool payload roots"
+	@echo "  make rehome-normalize-plan REHOME_POOL_DEVICE=pool  # Build batch plan for misplaced pool payload roots"
 	@echo "  make rehome-normalize-apply REHOME_PLAN=rehome-plan-normalize-*.json  # Apply normalization + cleanup old roots"
 	@echo "  make rehome-checklist                     # Rehome checklist"
 	@echo "  make devices                             # List all registered devices"
@@ -671,7 +671,7 @@ payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' P
 rehome-safe-auto:  ## Run top safe stash->pool rehomes (MOVE + 100% movable-bytes), dry-run by default
 	@if [ -z "$(REHOME_STASH_DEVICE)" ] || [ -z "$(REHOME_POOL_DEVICE)" ]; then \
 		echo "❌ REHOME_STASH_DEVICE and REHOME_POOL_DEVICE are required"; \
-		echo "💡 Example: make rehome-safe-auto REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44"; \
+		echo "💡 Example: make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool"; \
 		exit 1; \
 	fi; \
 	set -- \
@@ -840,7 +840,7 @@ rehome-apply:  ## Execute a rehome plan (set REHOME_PLAN)
 .PHONY: rehome-checklist
 rehome-checklist:  ## Show rehome checklist
 	@echo "Rehome checklist"
-	@echo "  [ ] 1) Plan: make rehome-plan-demote REHOME_TORRENT_HASH=... REHOME_SEEDING_ROOTS=\"/stash/media\" REHOME_STASH_DEVICE=49 REHOME_POOL_DEVICE=44"
+	@echo "  [ ] 1) Plan: make rehome-plan-demote REHOME_TORRENT_HASH=... REHOME_SEEDING_ROOTS=\"/stash/media\" REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool"
 	@echo "  [ ] 2) Review plan JSON (make rehome-review-plan REHOME_PLAN=... or REHOME_OUTPUT=...)"
 	@echo "  [ ] 3) Dry-run: make rehome-apply-dry REHOME_PLAN=rehome-plan-...json"
 	@echo "  [ ] 4) Execute: make rehome-apply REHOME_PLAN=rehome-plan-...json"

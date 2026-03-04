@@ -224,10 +224,10 @@ def cli():
               help="Path to cross-seed config.js to import dataDirs")
 @click.option("--tracker-registry", type=click.Path(),
               help="Path to tracker-registry.yml to import qbittorrent.save_path")
-@click.option("--stash-device", type=int, required=True,
-              help="Device ID for stash storage")
-@click.option("--pool-device", type=int, required=True,
-              help="Device ID for pool storage")
+@click.option("--stash-device", type=str, required=True,
+              help="Device alias (e.g. 'stash') or integer device_id for stash storage")
+@click.option("--pool-device", type=str, required=True,
+              help="Device alias (e.g. 'pool') or integer device_id for pool storage")
 @click.option("--stash-seeding-root", type=click.Path(),
               help="Base seeding root on stash (for save_path mapping)")
 @click.option("--pool-seeding-root", type=click.Path(),
@@ -268,6 +268,20 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
 
     if not catalog_path.exists():
         click.echo(f"❌ Catalog not found: {catalog_path}", err=True)
+        raise click.Abort()
+
+    # Resolve device alias/integer to current device_id
+    try:
+        from hashall.model import connect_db
+        from hashall.device import resolve_device_id
+        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            stash_device = resolve_device_id(_resolve_conn, stash_device)
+            pool_device = resolve_device_id(_resolve_conn, pool_device)
+        finally:
+            _resolve_conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
         raise click.Abort()
 
     # Validate mapping roots
@@ -428,10 +442,10 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
               help="Path to cross-seed config.js to import dataDirs")
 @click.option("--tracker-registry", type=click.Path(),
               help="Path to tracker-registry.yml to import qbittorrent.save_path")
-@click.option("--stash-device", type=int, required=True,
-              help="Device ID for stash storage")
-@click.option("--pool-device", type=int, required=True,
-              help="Device ID for pool storage")
+@click.option("--stash-device", type=str, required=True,
+              help="Device alias (e.g. 'stash') or integer device_id for stash storage")
+@click.option("--pool-device", type=str, required=True,
+              help="Device alias (e.g. 'pool') or integer device_id for pool storage")
 @click.option("--stash-seeding-root", type=click.Path(),
               help="Base seeding root on stash (for save_path mapping)")
 @click.option("--pool-seeding-root", type=click.Path(),
@@ -486,6 +500,21 @@ def plan_batch_cmd(
         raise click.Abort()
 
     catalog_path = Path(catalog)
+
+    # Resolve device alias/integer to current device_id
+    try:
+        from hashall.model import connect_db
+        from hashall.device import resolve_device_id
+        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            stash_device = resolve_device_id(_resolve_conn, stash_device)
+            pool_device = resolve_device_id(_resolve_conn, pool_device)
+        finally:
+            _resolve_conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(manifest)
@@ -1052,8 +1081,8 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, 
 @cli.command("normalize-plan")
 @click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
               help="Path to hashall catalog database")
-@click.option("--pool-device", type=int, required=True,
-              help="Pool device_id in catalog")
+@click.option("--pool-device", type=str, required=True,
+              help="Device alias (e.g. 'pool') or integer device_id for pool storage")
 @click.option("--pool-seeding-root", type=click.Path(), required=True,
               help="Pool seeding root (example: /pool/data/seeds)")
 @click.option("--stash-seeding-root", type=click.Path(),
@@ -1093,6 +1122,19 @@ def normalize_plan_cmd(
 ):
     """Create batch plan(s) to normalize pool payload root paths."""
     catalog_path = Path(catalog)
+
+    # Resolve device alias/integer to current device_id
+    try:
+        from hashall.model import connect_db
+        from hashall.device import resolve_device_id
+        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            pool_device = resolve_device_id(_resolve_conn, pool_device)
+        finally:
+            _resolve_conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
 
     try:
         if refresh_before_plan:
