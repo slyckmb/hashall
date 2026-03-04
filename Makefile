@@ -114,6 +114,7 @@ REHOME_SAFE_LIMIT ?= 5
 REHOME_SAFE_APPLY ?= 0
 REHOME_SAFE_SEEDING_ROOT ?= /stash/media
 REHOME_SAFE_LIBRARY_ROOT ?= /stash/media
+REHOME_SAFE_POOL_PAYLOAD_ROOT ?= /pool/data/seeds
 REHOME_SAFE_RUN_LOG_DIR ?= $(HOME)/.logs/hashall/reports/rehome-safe-runs
 REHOME_SAFE_RUN_LOG ?=
 REHOME_SAFE_VERIFY_STRICT ?= 1
@@ -680,6 +681,7 @@ rehome-safe-auto:  ## Run top safe stash->pool rehomes (MOVE + 100% movable-byte
 		--limit "$(REHOME_SAFE_LIMIT)" \
 		--seeding-root "$(REHOME_SAFE_SEEDING_ROOT)" \
 		--library-root "$(REHOME_SAFE_LIBRARY_ROOT)" \
+		--pool-payload-root "$(REHOME_SAFE_POOL_PAYLOAD_ROOT)" \
 		--run-log-dir "$(REHOME_SAFE_RUN_LOG_DIR)" \
 		--stash-device "$(REHOME_STASH_DEVICE)" \
 		--pool-device "$(REHOME_POOL_DEVICE)"; \

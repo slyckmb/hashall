@@ -656,7 +656,7 @@ class DemotionExecutor:
             return False, "amount_left_nonzero"
         if not state:
             return True, "ok_no_state"
-        if state not in {"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}:
+        if state not in {"uploading", "stalledup", "queuedup", "forcedup", "pausedup", "stoppedup"}:
             return False, f"state_not_seed_ready:{state or 'unknown'}"
         return True, "ok"
 

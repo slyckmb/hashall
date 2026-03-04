@@ -150,6 +150,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=5, help="How many safe groups to process")
     parser.add_argument("--seeding-root", default="/stash/media")
     parser.add_argument("--library-root", default="/stash/media")
+    parser.add_argument("--pool-payload-root", default="/pool/data/seeds",
+                        help="Base directory on pool for MOVE target paths")
     parser.add_argument("--stash-device", required=True,
                         help="Device alias (e.g. 'stash') or integer device_id")
     parser.add_argument("--pool-device", required=True,
@@ -271,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
             str(args.stash_device),
             "--pool-device",
             str(args.pool_device),
+            "--pool-payload-root",
+            args.pool_payload_root,
             "--output",
             str(plan_path),
         ]
