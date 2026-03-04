@@ -1203,15 +1203,19 @@ def normalize_plan_cmd(
 @cli.command("auto")
 @click.option("--limit", default=5, show_default=True, help="Max candidates to process")
 @click.option("--apply", "do_apply", is_flag=True, help="Execute (default: dry-run only)")
+@click.option("--refresh", "do_refresh", is_flag=True,
+              help="Scan stash/pool roots and sync qBit payloads before finding candidates")
+@click.option("--workers", default=8, show_default=True, help="Scan worker threads (used with --refresh)")
 @click.option("--stash-device", default=None, help="Override config stash device alias/id")
 @click.option("--pool-device", default=None, help="Override config pool device alias/id")
 @click.option("--pool-payload-root", default=None, help="Override config pool payload root")
 @click.option("--seeding-root", default=None, help="Override config seeding root")
 @click.option("--catalog", default=None, help="Override config catalog path")
-def auto_cmd(limit, do_apply, stash_device, pool_device, pool_payload_root, seeding_root, catalog):
+def auto_cmd(limit, do_apply, do_refresh, workers, stash_device, pool_device,
+             pool_payload_root, seeding_root, catalog):
     """Find safe MOVE candidates and rehome them (dry-run by default)."""
     from rehome.config import load_config
-    from rehome.auto import run_auto
+    from rehome.auto import run_auto, run_refresh
     from hashall.model import connect_db
     from hashall.device import resolve_device_id
 
@@ -1228,6 +1232,21 @@ def auto_cmd(limit, do_apply, stash_device, pool_device, pool_payload_root, seed
     ppr = pool_payload_root or cfg["pool_payload_root"]
     sr = seeding_root or cfg["seeding_root"]
     lr = cfg["library_root"]
+
+    if do_refresh:
+        refresh_code = run_refresh(
+            catalog_path=catalog_path,
+            seeding_root=sr,
+            pool_payload_root=ppr,
+            stash_device=stash_alias,
+            pool_device=pool_alias,
+            workers=workers,
+            skip_dedup=True,
+        )
+        if refresh_code != 0:
+            click.echo("❌ Refresh failed — aborting auto", err=True)
+            raise click.exceptions.Exit(refresh_code)
+        print()
 
     try:
         _conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
@@ -1255,6 +1274,52 @@ def auto_cmd(limit, do_apply, stash_device, pool_device, pool_payload_root, seed
         do_apply=do_apply,
         plan_log_dir=plan_log_dir,
         run_log_dir=run_log_dir,
+    )
+    if exit_code != 0:
+        raise click.exceptions.Exit(exit_code)
+
+
+@cli.command("refresh")
+@click.option("--workers", default=8, show_default=True, help="Scan worker threads")
+@click.option("--dedup", "do_dedup", is_flag=True,
+              help="Run link dedup plan + dry-run (no filesystem changes)")
+@click.option("--apply-dedup", is_flag=True,
+              help="Execute dedup link plan (modifies filesystem, implies --dedup)")
+@click.option("--stash-device", default=None, help="Override config stash device alias")
+@click.option("--pool-device", default=None, help="Override config pool device alias")
+@click.option("--seeding-root", default=None, help="Override config seeding root path")
+@click.option("--pool-payload-root", default=None, help="Override config pool payload root path")
+@click.option("--catalog", default=None, help="Override config catalog path")
+def refresh_cmd(workers, do_dedup, apply_dedup, stash_device, pool_device,
+                seeding_root, pool_payload_root, catalog):
+    """Scan stash+pool, upgrade SHA256, optionally dedup, then sync qBit payloads."""
+    from rehome.config import load_config
+    from rehome.auto import run_refresh
+
+    cfg = load_config()
+
+    catalog_str = catalog or cfg["catalog"]
+    catalog_path = Path(catalog_str).expanduser()
+    if not catalog_path.exists():
+        click.echo(f"❌ Catalog not found: {catalog_path}", err=True)
+        raise click.Abort()
+
+    stash_alias = stash_device or cfg["stash_device"]
+    pool_alias = pool_device or cfg["pool_device"]
+    sr = seeding_root or cfg["seeding_root"]
+    ppr = pool_payload_root or cfg["pool_payload_root"]
+
+    skip_dedup = not (do_dedup or apply_dedup)
+
+    exit_code = run_refresh(
+        catalog_path=catalog_path,
+        seeding_root=sr,
+        pool_payload_root=ppr,
+        stash_device=stash_alias,
+        pool_device=pool_alias,
+        workers=workers,
+        apply_dedup=apply_dedup,
+        skip_dedup=skip_dedup,
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)

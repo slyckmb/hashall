@@ -7,7 +7,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sqlite3
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -284,6 +286,153 @@ def _inline_verify(
         summary += f" · ALARM({','.join(alarm_hashes)})"
 
     return ok, summary
+
+
+# ---------------------------------------------------------------------------
+# Preflight refresh
+# ---------------------------------------------------------------------------
+
+def run_refresh(
+    catalog_path: Path,
+    seeding_root: str,
+    pool_payload_root: str,
+    stash_device: str,
+    pool_device: str,
+    workers: int = 8,
+    apply_dedup: bool = False,
+    skip_dedup: bool = True,
+) -> int:
+    """
+    Preflight refresh: scan stash+pool, upgrade SHA256 for collision groups,
+    optionally dedup (plan + dry-run, or execute), then sync qBit payloads.
+
+    Steps:
+      1. hashall scan <seeding_root> --parallel --workers N
+      2. hashall scan <pool_payload_root> --parallel --workers N  (skip if same path)
+      3a. hashall dupes --device <stash_device> --auto-upgrade
+      3b. hashall dupes --device <pool_device> --auto-upgrade
+      4a. hashall link plan <name> --device <alias> --min-size 1048576  (if not skip_dedup)
+      4b. hashall link execute <plan_id> [--dry-run]                    (if not skip_dedup)
+      5. hashall payload sync --upgrade-missing
+
+    Returns exit code (0 = all steps succeeded, 1 = at least one failed).
+    """
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    python = sys.executable
+    db_args = ["--db", str(catalog_path)]
+    overall_ok = True
+
+    def _run_step(label: str, cmd: list[str], *, capture: bool = False) -> tuple[bool, str]:
+        """Run a subprocess step, print header + elapsed, return (ok, stdout)."""
+        t0 = datetime.now()
+        print(f"\n[refresh] {label}")
+        print(f"  $ {' '.join(cmd)}")
+        if capture:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            # Always re-emit so the user sees output
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
+            stdout = result.stdout
+        else:
+            result = subprocess.run(cmd)
+            stdout = ""
+        elapsed = (datetime.now() - t0).total_seconds()
+        ok = result.returncode == 0
+        status = "OK" if ok else f"FAILED (exit={result.returncode})"
+        print(f"  elapsed {_fmt_elapsed(elapsed)}  {status}")
+        return ok, stdout
+
+    print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"  catalog       {catalog_path}")
+    print(f"  seeding_root  {seeding_root}")
+    print(f"  pool_root     {pool_payload_root}")
+    print(f"  stash         {stash_device}")
+    print(f"  pool          {pool_device}")
+    print(f"  workers       {workers}")
+    dedup_mode = "execute" if apply_dedup else ("plan+dry-run" if not skip_dedup else "off")
+    print(f"  dedup         {dedup_mode}")
+
+    # ── Step 1: scan seeding_root ─────────────────────────────────────────
+    ok, _ = _run_step(
+        f"scan seeding_root ({seeding_root})",
+        [python, "-m", "hashall.cli", "scan", seeding_root,
+         "--parallel", "--workers", str(workers)] + db_args,
+    )
+    overall_ok = overall_ok and ok
+
+    # ── Step 2: scan pool_payload_root ────────────────────────────────────
+    if pool_payload_root != seeding_root:
+        ok, _ = _run_step(
+            f"scan pool_payload_root ({pool_payload_root})",
+            [python, "-m", "hashall.cli", "scan", pool_payload_root,
+             "--parallel", "--workers", str(workers)] + db_args,
+        )
+        overall_ok = overall_ok and ok
+
+    # ── Step 3a: dupes auto-upgrade for stash ────────────────────────────
+    ok, _ = _run_step(
+        f"dupes auto-upgrade (stash={stash_device})",
+        [python, "-m", "hashall.cli", "dupes",
+         "--device", stash_device, "--auto-upgrade"] + db_args,
+    )
+    overall_ok = overall_ok and ok
+
+    # ── Step 3b: dupes auto-upgrade for pool ─────────────────────────────
+    ok, _ = _run_step(
+        f"dupes auto-upgrade (pool={pool_device})",
+        [python, "-m", "hashall.cli", "dupes",
+         "--device", pool_device, "--auto-upgrade"] + db_args,
+    )
+    overall_ok = overall_ok and ok
+
+    # ── Steps 4a/4b: dedup (opt-in) ──────────────────────────────────────
+    if not skip_dedup:
+        for dev_alias in (stash_device, pool_device):
+            plan_name = f"refresh-{dev_alias}-{timestamp}"
+            ok, stdout = _run_step(
+                f"link plan ({dev_alias})",
+                [python, "-m", "hashall.cli", "link", "plan", plan_name,
+                 "--device", dev_alias, "--min-size", "1048576"] + db_args,
+                capture=True,
+            )
+            overall_ok = overall_ok and ok
+
+            if ok:
+                m = re.search(r"plan_id=(\d+)", stdout)
+                if m:
+                    plan_id = m.group(1)
+                    execute_cmd = [
+                        python, "-m", "hashall.cli", "link", "execute", plan_id,
+                    ] + db_args
+                    if not apply_dedup:
+                        execute_cmd.append("--dry-run")
+                    label = f"link execute plan_id={plan_id} ({dev_alias})" + (
+                        "" if apply_dedup else " [dry-run]"
+                    )
+                    ok, _ = _run_step(label, execute_cmd)
+                    overall_ok = overall_ok and ok
+                else:
+                    print(f"  [refresh] no plan_id found in link plan output for {dev_alias} — skipping execute")
+
+    # ── Step 5: payload sync --upgrade-missing ────────────────────────────
+    ok, _ = _run_step(
+        "payload sync --upgrade-missing",
+        [python, "-m", "hashall.cli", "payload", "sync",
+         "--upgrade-missing"] + db_args,
+    )
+    overall_ok = overall_ok and ok
+
+    # ── Summary ───────────────────────────────────────────────────────────
+    sep = "─" * 57
+    print(f"\n{sep}")
+    if overall_ok:
+        print("refresh  OK — all steps succeeded")
+    else:
+        print("refresh  PARTIAL — one or more steps failed (see above)")
+
+    return 0 if overall_ok else 1
 
 
 # ---------------------------------------------------------------------------
