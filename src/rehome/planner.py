@@ -578,7 +578,13 @@ class DemotionPlanner:
             LIMIT 1
         """, (payload_hash, self.pool_device)).fetchone()
 
-        return row[0] if row else None
+        if row is None:
+            return None
+        # Verify the path actually exists on disk (catalog may be stale)
+        root_path = row[0]
+        if not Path(root_path).exists():
+            return None
+        return root_path
 
     def plan_demotion(
         self,
