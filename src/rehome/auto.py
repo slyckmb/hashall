@@ -366,9 +366,10 @@ def run_refresh(
     active_device: str = "",
     dest_device: str = "",
     workers: int = 8,
-    apply_dedup: bool = False,
     skip_dedup: bool = False,
     managed_roots: "list[tuple[str, str]]" = [],
+    verbose: bool = False,
+    debug: bool = False,
     # Backwards-compat params (old names)
     seeding_root: "str | None" = None,
     pool_payload_root: "str | None" = None,
@@ -378,7 +379,7 @@ def run_refresh(
 ) -> int:
     """
     Preflight refresh: scan all managed roots, upgrade SHA256 for collision groups,
-    optionally dedup (plan + dry-run, or execute), then sync qBit payloads.
+    optionally dedup (plan + execute), then sync qBit payloads.
 
     Steps:
       1. hashall scan <active_root> --parallel --workers N
@@ -399,174 +400,184 @@ def run_refresh(
     dest_device = dest_device or pool_device or ""
     managed_roots = managed_roots or extra_roots or []
 
+    from rehome.runlog import RunLogger
+
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     python = sys.executable
     db_args = ["--db", str(catalog_path)]
     overall_ok = True
 
-    def _run_step(label: str, cmd: list[str], *, capture: bool = False) -> tuple[bool, str]:
-        """Run a subprocess step, print header + elapsed, return (ok, stdout)."""
-        t0 = datetime.now()
-        print(f"\n[refresh] {label}")
-        print(f"  $ {' '.join(cmd)}")
-        if capture:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.stdout:
-                print(result.stdout, end="")
-            if result.stderr:
-                print(result.stderr, end="", file=sys.stderr)
-            stdout = result.stdout
-        else:
-            result = subprocess.run(cmd)
-            stdout = ""
-        elapsed = (datetime.now() - t0).total_seconds()
-        ok = result.returncode == 0
-        status = "OK" if ok else f"FAILED (exit={result.returncode})"
-        print(f"  elapsed {_fmt_elapsed(elapsed)}  {status}")
-        return ok, stdout
+    log_dir = Path.home() / ".logs" / "hashall" / "rehome" / "refresh"
+    log_path = log_dir / f"{timestamp}.log"
+    json_path = log_dir / f"{timestamp}.json"
 
-    # Build the full ordered root list for display + preflight validation
-    all_roots: list[tuple[str, str, str]] = [
-        (active_root, active_device, "active"),
-        (dest_root, dest_device, "dest"),
-    ]
-    if active_root == dest_root:
-        all_roots = all_roots[:1]
-    for p, a in (managed_roots or []):
-        all_roots.append((p, a, "managed"))
+    with RunLogger(log_path, verbose=verbose, debug=debug) as logger:
 
-    dedup_mode = "execute" if apply_dedup else ("plan+dry-run" if not skip_dedup else "off")
+        def _run_step(label: str, cmd: list[str], *, capture: bool = False) -> tuple[bool, str]:
+            """Run a subprocess step, print header + elapsed, return (ok, stdout)."""
+            t0 = datetime.now()
+            print(f"\n[refresh] {label}")
+            print(f"  $ {' '.join(cmd)}")
+            should_capture = capture or logger.verbose
+            if should_capture:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.stdout:
+                    print(result.stdout, end="")
+                if result.stderr:
+                    # stderr goes to stderr; write_raw ensures it lands in the log too
+                    print(result.stderr, end="", file=sys.stderr)
+                    logger.write_raw(result.stderr)
+                stdout = result.stdout or ""
+            else:
+                result = subprocess.run(cmd)
+                stdout = ""
+            elapsed = (datetime.now() - t0).total_seconds()
+            ok = result.returncode == 0
+            status = "OK" if ok else f"FAILED (exit={result.returncode})"
+            print(f"  elapsed {_fmt_elapsed(elapsed)}  {status}")
+            logger.record_step(label, cmd, ok, elapsed, stdout=stdout)
+            return ok, stdout
 
-    print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"  catalog  {catalog_path}")
-    print(f"  workers  {workers}")
-    print(f"  dedup    {dedup_mode}")
-    print(f"\n  Scan roots ({len(all_roots)}):")
-    for i, (path, alias, role) in enumerate(all_roots, 1):
-        print(f"    [{i}] {alias:<20} {role:<7}  {path}")
+        # Build the full ordered root list for display + preflight validation
+        all_roots: list[tuple[str, str, str]] = [
+            (active_root, active_device, "active"),
+            (dest_root, dest_device, "dest"),
+        ]
+        if active_root == dest_root:
+            all_roots = all_roots[:1]
+        for p, a in (managed_roots or []):
+            all_roots.append((p, a, "managed"))
 
-    _validate_refresh_roots(catalog_path, all_roots)
+        dedup_mode = "execute" if not skip_dedup else "off"
 
-    # ── Step 1: scan active_root ──────────────────────────────────────────
-    ok, _ = _run_step(
-        f"scan active_root ({active_root})",
-        [python, "-m", "hashall.cli", "scan", active_root,
-         "--parallel", "--workers", str(workers)] + db_args,
-    )
-    overall_ok = overall_ok and ok
+        with logger.patch_stdout():
+            print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            print(f"  catalog  {catalog_path}")
+            print(f"  workers  {workers}")
+            print(f"  dedup    {dedup_mode}")
+            if logger.verbose:
+                print(f"  log      {log_path}")
+            print(f"\n  Scan roots ({len(all_roots)}):")
+            for i, (path, alias, role) in enumerate(all_roots, 1):
+                print(f"    [{i}] {alias:<20} {role:<7}  {path}")
 
-    # ── Step 2: scan dest_root ────────────────────────────────────────────
-    if dest_root != active_root:
-        ok, _ = _run_step(
-            f"scan dest_root ({dest_root})",
-            [python, "-m", "hashall.cli", "scan", dest_root,
-             "--parallel", "--workers", str(workers)] + db_args,
-        )
-        overall_ok = overall_ok and ok
+            _validate_refresh_roots(catalog_path, all_roots)
 
-    # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
-    ok, _ = _run_step(
-        f"dupes auto-upgrade (active={active_device})",
-        [python, "-m", "hashall.cli", "dupes",
-         "--device", active_device, "--auto-upgrade"] + db_args,
-    )
-    overall_ok = overall_ok and ok
-
-    # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
-    ok, _ = _run_step(
-        f"dupes auto-upgrade (dest={dest_device})",
-        [python, "-m", "hashall.cli", "dupes",
-         "--device", dest_device, "--auto-upgrade"] + db_args,
-    )
-    overall_ok = overall_ok and ok
-
-    # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
-    for managed_path, managed_alias in (managed_roots or []):
-        ok, _ = _run_step(
-            f"scan managed root ({managed_path})",
-            [python, "-m", "hashall.cli", "scan", managed_path,
-             "--parallel", "--workers", str(workers)] + db_args,
-        )
-        overall_ok = overall_ok and ok
-
-        ok, _ = _run_step(
-            f"dupes auto-upgrade (managed={managed_alias})",
-            [python, "-m", "hashall.cli", "dupes",
-             "--device", managed_alias, "--auto-upgrade"] + db_args,
-        )
-        overall_ok = overall_ok and ok
-
-        if not skip_dedup:
-            plan_name = f"refresh-{managed_alias}-{timestamp}"
-            ok, stdout = _run_step(
-                f"link plan ({managed_alias})",
-                [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                 "--device", managed_alias, "--min-size", "1048576"] + db_args,
-                capture=True,
+            # ── Step 1: scan active_root ──────────────────────────────────────────
+            ok, _ = _run_step(
+                f"scan active_root ({active_root})",
+                [python, "-m", "hashall.cli", "scan", active_root,
+                 "--parallel", "--workers", str(workers)] + db_args,
             )
             overall_ok = overall_ok and ok
 
-            if ok:
-                m = re.search(r"plan_id=(\d+)", stdout)
-                if m:
-                    plan_id = m.group(1)
-                    execute_cmd = [
-                        python, "-m", "hashall.cli", "link", "execute", plan_id,
-                    ] + db_args
-                    if not apply_dedup:
-                        execute_cmd.append("--dry-run")
-                    label = f"link execute plan_id={plan_id} ({managed_alias})" + (
-                        "" if apply_dedup else " [dry-run]"
-                    )
-                    ok, _ = _run_step(label, execute_cmd)
-                    overall_ok = overall_ok and ok
-                else:
-                    print(f"  [refresh] no plan_id in link plan output for {managed_alias} — skipping execute")
+            # ── Step 2: scan dest_root ────────────────────────────────────────────
+            if dest_root != active_root:
+                ok, _ = _run_step(
+                    f"scan dest_root ({dest_root})",
+                    [python, "-m", "hashall.cli", "scan", dest_root,
+                     "--parallel", "--workers", str(workers)] + db_args,
+                )
+                overall_ok = overall_ok and ok
 
-    # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
-    if not skip_dedup:
-        for dev_alias in (active_device, dest_device):
-            plan_name = f"refresh-{dev_alias}-{timestamp}"
-            ok, stdout = _run_step(
-                f"link plan ({dev_alias})",
-                [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                 "--device", dev_alias, "--min-size", "1048576"] + db_args,
-                capture=True,
+            # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
+            ok, _ = _run_step(
+                f"dupes auto-upgrade (active={active_device})",
+                [python, "-m", "hashall.cli", "dupes",
+                 "--device", active_device, "--auto-upgrade"] + db_args,
             )
             overall_ok = overall_ok and ok
 
-            if ok:
-                m = re.search(r"plan_id=(\d+)", stdout)
-                if m:
-                    plan_id = m.group(1)
-                    execute_cmd = [
-                        python, "-m", "hashall.cli", "link", "execute", plan_id,
-                    ] + db_args
-                    if not apply_dedup:
-                        execute_cmd.append("--dry-run")
-                    label = f"link execute plan_id={plan_id} ({dev_alias})" + (
-                        "" if apply_dedup else " [dry-run]"
+            # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
+            ok, _ = _run_step(
+                f"dupes auto-upgrade (dest={dest_device})",
+                [python, "-m", "hashall.cli", "dupes",
+                 "--device", dest_device, "--auto-upgrade"] + db_args,
+            )
+            overall_ok = overall_ok and ok
+
+            # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
+            for managed_path, managed_alias in (managed_roots or []):
+                ok, _ = _run_step(
+                    f"scan managed root ({managed_path})",
+                    [python, "-m", "hashall.cli", "scan", managed_path,
+                     "--parallel", "--workers", str(workers)] + db_args,
+                )
+                overall_ok = overall_ok and ok
+
+                ok, _ = _run_step(
+                    f"dupes auto-upgrade (managed={managed_alias})",
+                    [python, "-m", "hashall.cli", "dupes",
+                     "--device", managed_alias, "--auto-upgrade"] + db_args,
+                )
+                overall_ok = overall_ok and ok
+
+                if not skip_dedup:
+                    plan_name = f"refresh-{managed_alias}-{timestamp}"
+                    ok, stdout = _run_step(
+                        f"link plan ({managed_alias})",
+                        [python, "-m", "hashall.cli", "link", "plan", plan_name,
+                         "--device", managed_alias, "--min-size", "1048576"] + db_args,
+                        capture=True,
                     )
-                    ok, _ = _run_step(label, execute_cmd)
                     overall_ok = overall_ok and ok
-                else:
-                    print(f"  [refresh] no plan_id in link plan output for {dev_alias} — skipping execute")
 
-    # ── Step 5: payload sync --upgrade-missing ────────────────────────────
-    ok, _ = _run_step(
-        "payload sync --upgrade-missing",
-        [python, "-m", "hashall.cli", "payload", "sync",
-         "--upgrade-missing"] + db_args,
-    )
-    overall_ok = overall_ok and ok
+                    if ok:
+                        m = re.search(r"plan_id=(\d+)", stdout)
+                        if m:
+                            plan_id = m.group(1)
+                            execute_cmd = [
+                                python, "-m", "hashall.cli", "link", "execute", plan_id,
+                            ] + db_args
+                            label = f"link execute plan_id={plan_id} ({managed_alias})"
+                            ok, _ = _run_step(label, execute_cmd)
+                            overall_ok = overall_ok and ok
+                        else:
+                            print(f"  [refresh] no plan_id in link plan output for {managed_alias} — skipping execute")
 
-    # ── Summary ───────────────────────────────────────────────────────────
-    sep = "─" * 57
-    print(f"\n{sep}")
-    if overall_ok:
-        print("refresh  OK — all steps succeeded")
-    else:
-        print("refresh  PARTIAL — one or more steps failed (see above)")
+            # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
+            if not skip_dedup:
+                for dev_alias in (active_device, dest_device):
+                    plan_name = f"refresh-{dev_alias}-{timestamp}"
+                    ok, stdout = _run_step(
+                        f"link plan ({dev_alias})",
+                        [python, "-m", "hashall.cli", "link", "plan", plan_name,
+                         "--device", dev_alias, "--min-size", "1048576"] + db_args,
+                        capture=True,
+                    )
+                    overall_ok = overall_ok and ok
+
+                    if ok:
+                        m = re.search(r"plan_id=(\d+)", stdout)
+                        if m:
+                            plan_id = m.group(1)
+                            execute_cmd = [
+                                python, "-m", "hashall.cli", "link", "execute", plan_id,
+                            ] + db_args
+                            label = f"link execute plan_id={plan_id} ({dev_alias})"
+                            ok, _ = _run_step(label, execute_cmd)
+                            overall_ok = overall_ok and ok
+                        else:
+                            print(f"  [refresh] no plan_id in link plan output for {dev_alias} — skipping execute")
+
+            # ── Step 5: payload sync --upgrade-missing ────────────────────────────
+            ok, _ = _run_step(
+                "payload sync --upgrade-missing",
+                [python, "-m", "hashall.cli", "payload", "sync",
+                 "--upgrade-missing"] + db_args,
+            )
+            overall_ok = overall_ok and ok
+
+            # ── Summary ───────────────────────────────────────────────────────────
+            sep = "─" * 57
+            print(f"\n{sep}")
+            if overall_ok:
+                print("refresh  OK — all steps succeeded")
+            else:
+                print("refresh  PARTIAL — one or more steps failed (see above)")
+            print(f"log  {log_path}")
+
+        logger.dump_json(json_path)
 
     return 0 if overall_ok else 1
 
@@ -633,6 +644,8 @@ def run_auto(
     run_log_dir: Path = Path("."),
     source_device_id: "int | None" = None,
     extra_sources: "list[tuple[int, str, str]] | None" = None,
+    verbose: bool = False,
+    debug: bool = False,
     # Backwards-compat params (old names)
     stash_device_id: "int | None" = None,
     pool_device_id: "int | None" = None,
@@ -665,9 +678,17 @@ def run_auto(
     from hashall.device import resolve_device_id
     from rehome.executor import DemotionExecutor
     from rehome.cli import _acquire_rehome_lock
+    from rehome.runlog import RunLogger
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     mode_label = "apply" if do_apply else "dry-run"
+
+    log_dir = Path.home() / ".logs" / "hashall" / "rehome" / "auto"
+    log_path = log_dir / f"{timestamp}.log"
+    json_path = log_dir / f"{timestamp}.json"
+    _logger = RunLogger(log_path, verbose=verbose, debug=debug)
+    _stdout_ctx = _logger.patch_stdout()
+    _stdout_ctx.__enter__()
 
     # ── Header ──────────────────────────────────────────────────────────────
     print(f"\nRehome Auto  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -712,18 +733,38 @@ def run_auto(
 
         all_managed_ids = [dest_device_id] + [s[0] for s in sources]
 
-        # Print sources with role labels
+        # Print sources with role labels; also build source records for JSON
+        source_records = []
         for i, (sid, salias, _spath) in enumerate(sources, 1):
             sinfo = _device_info(conn, sid)
             role_label = "active — hardlink check applies" if sid == active_device_id else "storage"
             if is_promotion:
                 role_label = "storage → active (promotion)"
             print(f"  sources  [{i}] {salias:<20} (id={sid}, {sinfo['mount']})  {role_label}")
+            source_records.append({
+                "device_id": sid,
+                "alias": salias,
+                "mount": sinfo["mount"],
+                "role": "active" if sid == active_device_id else "storage",
+            })
 
         print(f"  mode     {mode_label}" + (
             "" if do_apply else "  (add --apply to execute)"
         ))
         print()
+
+        # ── Build run_record skeleton ─────────────────────────────────────────
+        run_record: dict = {
+            "mode": mode_label,
+            "catalog": str(catalog_path),
+            "active_device": {"id": active_device_id, "alias": active_info["alias"], "mount": active_info["mount"]},
+            "dest_device":   {"id": dest_device_id,   "alias": dest_info["alias"],   "mount": dest_info["mount"]},
+            "limit": limit,
+            "sources": source_records,
+            "discovery": {},
+            "candidates": [],
+            "summary": {},
+        }
 
         # ── Candidate discovery across all source devices ────────────────────
         print("Scanning...", end=" ", flush=True)
@@ -752,8 +793,19 @@ def run_auto(
         print(f"{total_available} MOVE groups available ({counts_str}), taking top {taking}")
         print()
 
+        run_record["discovery"] = {
+            "total_available": total_available,
+            "taking": taking,
+            "source_counts": source_counts,
+        }
+
         if not candidates:
             print("No eligible candidates found.")
+            run_record["summary"] = {"planned": 0, "blocked": 0, "applied": 0, "verified": 0, "freed_bytes": 0, "exit_code": 0}
+            print(f"log  {log_path}")
+            _stdout_ctx.__exit__(None, None, None)
+            _logger.dump_json(json_path, extra=run_record)
+            _logger.close()
             return 0
 
         executor = DemotionExecutor(catalog_path=catalog_path)
@@ -763,8 +815,8 @@ def run_auto(
         if do_apply:
             lock_fh = _acquire_rehome_lock()
 
-        run_log: list[dict] = []
         planned_count = 0
+        blocked_count = 0
         applied_count = 0
         verified_count = 0
         freed_bytes = 0
@@ -783,6 +835,18 @@ def run_auto(
                       f"{_fmt_bytes(src_bytes)} · {torrent_count} torrent(s)"
                       + (f"  [{src_alias}]" if len(sources) > 1 else ""))
 
+                cand_rec: dict = {
+                    "payload_hash": phash,
+                    "source_alias": src_alias,
+                    "source_device_id": src_id,
+                    "source_bytes": src_bytes,
+                    "torrent_count": torrent_count,
+                    "plan": None,
+                    "check": None,
+                    "apply": None,
+                    "verify": None,
+                }
+
                 # Build per-candidate planner (source may vary across candidates)
                 planner = _make_planner(
                     catalog_path=catalog_path,
@@ -796,57 +860,82 @@ def run_auto(
                 )
 
                 # ── Plan ────────────────────────────────────────────────────
+                t_plan = datetime.now()
                 try:
                     if dest_device_id == active_device_id:
                         plan = planner.plan_batch_promotion_by_payload_hash(phash)
                     else:
                         plan = planner.plan_batch_demotion_by_payload_hash(phash)
                 except Exception as e:
+                    plan_elapsed = (datetime.now() - t_plan).total_seconds()
                     print(f"  plan    ERROR: {e}")
-                    run_log.append({"payload_hash": phash, "stage": "plan", "error": str(e)})
+                    cand_rec["plan"] = {"decision": "ERROR", "ok": False, "elapsed_s": round(plan_elapsed, 3), "error": str(e)}
+                    run_record["candidates"].append(cand_rec)
                     exit_code = 1
                     continue
 
+                plan_elapsed = (datetime.now() - t_plan).total_seconds()
                 decision = plan.get("decision", "?")
                 target = plan.get("target_path") or "?"
+                reasons = plan.get("reasons", [])
                 target_display = (target[:60] + "...") if len(target) > 63 else target
+
                 if decision in ("MOVE", "REUSE"):
                     arrow = "→" if decision == "MOVE" else "≡"
                     print(f"  plan    {decision} {arrow} {target_display:<50}  OK")
+                    # Save plan JSON
+                    plan_log_dir.mkdir(parents=True, exist_ok=True)
+                    plan_file = plan_log_dir / f"{timestamp}-{phash[:16]}.json"
+                    plan_file.write_text(json.dumps(plan, indent=2))
+                    cand_rec["plan"] = {
+                        "decision": decision,
+                        "target_path": target,
+                        "reasons": reasons,
+                        "ok": True,
+                        "elapsed_s": round(plan_elapsed, 3),
+                        "plan_file": str(plan_file),
+                    }
                 elif decision == "BLOCK":
-                    reasons = plan.get("reasons", [])
                     print(f"  plan    BLOCK: {reasons[0] if reasons else '?'}")
-                    run_log.append({"payload_hash": phash, "stage": "plan", "decision": "BLOCK", "reasons": reasons})
+                    cand_rec["plan"] = {
+                        "decision": "BLOCK",
+                        "reasons": reasons,
+                        "ok": False,
+                        "elapsed_s": round(plan_elapsed, 3),
+                    }
+                    run_record["candidates"].append(cand_rec)
+                    blocked_count += 1
                     exit_code = 1
                     print()
                     continue
                 else:
                     print(f"  plan    {decision}: skipping")
-                    run_log.append({"payload_hash": phash, "stage": "plan", "decision": decision})
+                    cand_rec["plan"] = {"decision": decision, "ok": False, "elapsed_s": round(plan_elapsed, 3)}
+                    run_record["candidates"].append(cand_rec)
                     print()
                     continue
 
                 planned_count += 1
 
-                # Save plan JSON
-                plan_log_dir.mkdir(parents=True, exist_ok=True)
-                plan_file = plan_log_dir / f"{timestamp}-{phash[:16]}.json"
-                plan_file.write_text(json.dumps(plan, indent=2))
-
                 # ── Dry-run check ────────────────────────────────────────────
                 check_buf = io.StringIO()
                 check_ok = True
+                t_check = datetime.now()
                 try:
                     with contextlib.redirect_stdout(check_buf):
                         executor.dry_run(plan)
+                    check_elapsed = (datetime.now() - t_check).total_seconds()
                     print(f"  check   dryrun{'':<44}  OK")
+                    cand_rec["check"] = {"ok": True, "elapsed_s": round(check_elapsed, 3), "error": None}
                 except Exception as e:
+                    check_elapsed = (datetime.now() - t_check).total_seconds()
                     print(f"  check   dryrun FAIL: {e}")
-                    run_log.append({"payload_hash": phash, "stage": "check", "error": str(e)})
+                    cand_rec["check"] = {"ok": False, "elapsed_s": round(check_elapsed, 3), "error": str(e)}
                     check_ok = False
                     exit_code = 1
 
                 if not check_ok:
+                    run_record["candidates"].append(cand_rec)
                     print()
                     continue
 
@@ -856,15 +945,16 @@ def run_auto(
                     apply_ok = True
                     try:
                         executor.execute(plan)
-                        elapsed = (datetime.now() - t_apply).total_seconds()
-                        print(f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(elapsed)} · source deleted"
+                        apply_elapsed = (datetime.now() - t_apply).total_seconds()
+                        print(f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · source deleted"
                               f"{'':>10}  OK")
+                        cand_rec["apply"] = {"ok": True, "elapsed_s": round(apply_elapsed, 3), "freed_bytes": src_bytes, "error": None}
                         applied_count += 1
                         freed_bytes += src_bytes
                     except Exception as e:
-                        elapsed = (datetime.now() - t_apply).total_seconds()
-                        print(f"  apply   FAIL after {_fmt_elapsed(elapsed)}: {e}")
-                        run_log.append({"payload_hash": phash, "stage": "apply", "error": str(e)})
+                        apply_elapsed = (datetime.now() - t_apply).total_seconds()
+                        print(f"  apply   FAIL after {_fmt_elapsed(apply_elapsed)}: {e}")
+                        cand_rec["apply"] = {"ok": False, "elapsed_s": round(apply_elapsed, 3), "freed_bytes": 0, "error": str(e)}
                         apply_ok = False
                         exit_code = 1
 
@@ -886,19 +976,15 @@ def run_auto(
 
                         status = "OK" if verify_ok else "FAIL"
                         print(f"  verify  {verify_summary:<52}  {status}")
+                        cand_rec["verify"] = {"ok": verify_ok, "summary": verify_summary, "error": None if verify_ok else verify_summary}
                         if verify_ok:
                             verified_count += 1
                         else:
                             exit_code = 1
-                        run_log.append({
-                            "payload_hash": phash,
-                            "stage": "verify",
-                            "ok": verify_ok,
-                            "summary": verify_summary,
-                        })
                 else:
                     print(f"  apply   skipped")
 
+                run_record["candidates"].append(cand_rec)
                 print()
 
         finally:
@@ -917,20 +1003,6 @@ def run_auto(
             f"verified  {verified_count}/{taking}   "
             f"freed  {_fmt_bytes(freed_bytes)} from sources"
         )
-        run_log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = run_log_dir / f"{timestamp}.json"
-        log_file.write_text(json.dumps({
-            "timestamp": timestamp,
-            "active_device_id": active_device_id,
-            "dest_device_id": dest_device_id,
-            "limit": limit,
-            "planned": planned_count,
-            "applied": applied_count,
-            "verified": verified_count,
-            "freed_bytes": freed_bytes,
-            "runs": run_log,
-        }, indent=2))
-        print(f"log  {log_file}")
     else:
         print(
             f"dry-run  {planned_count}/{taking} planned  "
@@ -938,4 +1010,17 @@ def run_auto(
         )
         print(f"To apply: rehome auto --limit {limit} --apply")
 
+    run_record["summary"] = {
+        "planned": planned_count,
+        "blocked": blocked_count,
+        "applied": applied_count,
+        "verified": verified_count,
+        "freed_bytes": freed_bytes,
+        "exit_code": exit_code,
+    }
+
+    print(f"log  {log_path}")
+    _stdout_ctx.__exit__(None, None, None)
+    _logger.dump_json(json_path, extra=run_record)
+    _logger.close()
     return exit_code

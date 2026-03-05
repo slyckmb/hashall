@@ -203,7 +203,7 @@ def cli():
 
     \b
     Everyday workflow:
-      rehome refresh                   scan all roots + dedup dry-run + sync qBit
+      rehome refresh                   scan all roots + dedup + sync qBit
       rehome auto --limit 5            find top-5 MOVE candidates (dry-run)
       rehome auto --limit 5 --apply    execute
 
@@ -1226,13 +1226,15 @@ def normalize_plan_cmd(
 @click.option("--to", "to_alias", default=None,
               help="Destination device alias (default: default_dest_device from config). "
                    "Use 'active' to return Payload Groups to the active filesystem.")
+@click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
+@click.option("--debug", is_flag=True, help="Show config resolution and raw detail (implies --verbose)")
 # Hidden backwards-compat flags
 @click.option("--stash-device", default=None, hidden=True)
 @click.option("--pool-device", default=None, hidden=True)
 @click.option("--pool-payload-root", default=None, hidden=True)
 @click.option("--seeding-root", default=None, hidden=True)
 @click.option("--catalog", default=None, help="Override config catalog path")
-def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias,
+def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose, debug,
              stash_device, pool_device, pool_payload_root, seeding_root, catalog):
     """Find MOVE candidates across managed filesystems and rehome them (dry-run by default).
 
@@ -1314,6 +1316,8 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias,
             workers=workers,
             skip_dedup=True,
             managed_roots=managed_pairs,
+            verbose=verbose,
+            debug=debug,
         )
         if refresh_code != 0:
             click.echo("❌ Refresh failed — aborting auto", err=True)
@@ -1337,6 +1341,8 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias,
         run_log_dir=run_log_dir,
         source_device_id=explicit_source_id,
         extra_sources=extra_sources if explicit_source_id is None else None,
+        verbose=verbose,
+        debug=debug,
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
@@ -1345,9 +1351,9 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias,
 @cli.command("refresh")
 @click.option("--workers", default=8, show_default=True, help="Scan worker threads")
 @click.option("--no-dedup", "skip_dedup", is_flag=True,
-              help="Skip dedup plan (dedup dry-run runs by default)")
-@click.option("--apply-dedup", is_flag=True,
-              help="Execute dedup link plan (modifies filesystem)")
+              help="Skip dedup (dedup executes by default)")
+@click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
+@click.option("--debug", is_flag=True, help="Show config resolution and raw detail (implies --verbose)")
 @click.option("--active-device", default=None, help="Override config active device alias")
 @click.option("--dest-device", default=None, help="Override config destination device alias")
 @click.option("--active-root", default=None, help="Override config active root path")
@@ -1358,14 +1364,13 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias,
 @click.option("--seeding-root", default=None, hidden=True)
 @click.option("--pool-payload-root", default=None, hidden=True)
 @click.option("--catalog", default=None, help="Override config catalog path")
-def refresh_cmd(workers, skip_dedup, apply_dedup,
+def refresh_cmd(workers, skip_dedup, verbose, debug,
                 active_device, dest_device, active_root, dest_root,
                 stash_device, pool_device, seeding_root, pool_payload_root,
                 catalog):
-    """Scan all managed roots, upgrade SHA256, run dedup dry-run, then sync qBit payloads.
+    """Scan all managed roots, upgrade SHA256, run dedup, then sync qBit payloads.
 
-    Dedup (plan + dry-run) runs by default. Use --no-dedup to skip it.
-    Use --apply-dedup to execute the dedup plan (modifies filesystem).
+    Dedup executes by default. Use --no-dedup to skip it.
     """
     from rehome.config import load_config, parse_managed_roots
     from rehome.auto import run_refresh
@@ -1391,9 +1396,10 @@ def refresh_cmd(workers, skip_dedup, apply_dedup,
         active_device=active_alias,
         dest_device=dest_alias,
         workers=workers,
-        apply_dedup=apply_dedup,
         skip_dedup=skip_dedup,
         managed_roots=managed,
+        verbose=verbose,
+        debug=debug,
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
