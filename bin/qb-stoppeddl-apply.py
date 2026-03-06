@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -20,7 +21,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import get_qbittorrent_client
 
-SEMVER = "0.2.9"
+SEMVER = "0.2.10"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
@@ -259,14 +260,6 @@ def canonical_alias(path: str) -> str:
         return "/data/media"
     if p.startswith("/stash/media/"):
         return "/data/media/" + p[len("/stash/media/") :]
-    if p == "/pool/data/seeds":
-        return "/data/media/torrents/seeding"
-    if p.startswith("/pool/data/seeds/"):
-        return "/data/media/torrents/seeding/" + p[len("/pool/data/seeds/") :]
-    if p == "/pool/data/cross-seed-link":
-        return "/data/media/torrents/seeding/cross-seed-link"
-    if p.startswith("/pool/data/cross-seed-link/"):
-        return "/data/media/torrents/seeding/cross-seed-link/" + p[len("/pool/data/cross-seed-link/") :]
     if p == "/stash/media/downloads/torrents/seeding":
         return "/data/media/torrents/seeding"
     if p.startswith("/stash/media/downloads/torrents/seeding/"):
@@ -284,14 +277,9 @@ def alias_variants(path: str) -> List[str]:
     if p == "/stash/media" or p.startswith("/stash/media/"):
         out.append("/data/media" + p[len("/stash/media") :])
     if p == "/data/media/torrents/seeding" or p.startswith("/data/media/torrents/seeding/"):
-        out.append("/pool/data/seeds" + p[len("/data/media/torrents/seeding") :])
         out.append("/stash/media/downloads/torrents/seeding" + p[len("/data/media/torrents/seeding") :])
-    if p == "/pool/data/seeds" or p.startswith("/pool/data/seeds/"):
-        out.append("/data/media/torrents/seeding" + p[len("/pool/data/seeds") :])
-    if p == "/data/media/torrents/seeding/cross-seed-link" or p.startswith("/data/media/torrents/seeding/cross-seed-link/"):
-        out.append("/pool/data/cross-seed-link" + p[len("/data/media/torrents/seeding/cross-seed-link") :])
-    if p == "/pool/data/cross-seed-link" or p.startswith("/pool/data/cross-seed-link/"):
-        out.append("/data/media/torrents/seeding/cross-seed-link" + p[len("/pool/data/cross-seed-link") :])
+    if p == "/stash/media/downloads/torrents/seeding" or p.startswith("/stash/media/downloads/torrents/seeding/"):
+        out.append("/data/media/torrents/seeding" + p[len("/stash/media/downloads/torrents/seeding") :])
     seen = set()
     dedup = []
     for cand in out:
@@ -307,6 +295,74 @@ def resolve_existing(path: str) -> Optional[str]:
         if Path(cand).exists():
             return cand
     return None
+
+
+def _first_existing_parent(path: str) -> Optional[Path]:
+    p = Path(str(path or "").strip())
+    if not str(p):
+        return None
+    try:
+        if p.exists():
+            return p
+    except OSError:
+        pass
+    for cand in p.parents:
+        # Falling all the way back to "/" hides missing mount roots and can
+        # incorrectly mark unrelated filesystems as equivalent.
+        if str(cand) == "/":
+            break
+        try:
+            if cand.exists():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _device_id_for_path(path: str) -> Optional[int]:
+    cand = _first_existing_parent(path)
+    if cand is None:
+        return None
+    try:
+        return int(os.stat(str(cand)).st_dev)
+    except OSError:
+        return None
+
+
+def _storage_root_label(path: str) -> str:
+    p = canonical_alias(path)
+    if p.startswith("/pool/"):
+        return "pool"
+    if p.startswith("/data/"):
+        return "data"
+    if p.startswith("/stash/"):
+        return "stash"
+    return "other"
+
+
+def same_filesystem_paths(source_path: str, target_path: str) -> Tuple[bool, str]:
+    """
+    Conservative filesystem gate:
+      - Prefer direct st_dev equality when both sides can be stat'ed.
+      - Fallback to top-level storage-root family equality.
+    """
+    source = str(source_path or "").strip()
+    target = str(target_path or "").strip()
+    if not source:
+        return False, "missing_source_path"
+    if not target:
+        return False, "missing_target_path"
+    src_dev = _device_id_for_path(source)
+    dst_dev = _device_id_for_path(target)
+    if src_dev is not None and dst_dev is not None:
+        if src_dev == dst_dev:
+            return True, "device_match"
+        return False, f"device_mismatch:{src_dev}!={dst_dev}"
+    src_root = _storage_root_label(source)
+    dst_root = _storage_root_label(target)
+    if src_root == dst_root:
+        return True, f"storage_root_fallback:{src_root}"
+    return False, f"storage_root_mismatch:{src_root}!={dst_root}"
 
 
 def is_download_state(state: str) -> bool:
@@ -754,6 +810,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(fail_on_root_violations=True)
     p.add_argument(
+        "--enforce-same-filesystem",
+        dest="enforce_same_filesystem",
+        action="store_true",
+        help="Block apply actions that cross filesystems/storage roots (default: enabled)",
+    )
+    p.add_argument(
+        "--no-enforce-same-filesystem",
+        dest="enforce_same_filesystem",
+        action="store_false",
+        help="Allow cross-filesystem apply actions (dangerous)",
+    )
+    p.set_defaults(enforce_same_filesystem=True)
+    p.add_argument(
         "--ignore-hashes",
         default="",
         help="Optional hashes/prefixes to ignore (pipe/comma/space separated)",
@@ -1099,6 +1168,7 @@ def main() -> int:
         f"allowed_roots={','.join(allowed_roots) if allowed_roots else '<none>'} "
         f"forbidden_roots={','.join(forbidden_roots) if forbidden_roots else '<none>'}"
     , flush=True)
+    print(f"filesystem_gate enforce_same_filesystem={bool(args.enforce_same_filesystem)}", flush=True)
     if root_policy_rejected:
         print("root_policy_rejections:", flush=True)
         for rec in root_policy_rejected[:20]:
@@ -1127,6 +1197,7 @@ def main() -> int:
                 "ok": 0,
                 "failed": 0,
                 "blocked": 0,
+                "same_filesystem_blocked": 0,
                 "recheck_dispatched": 0,
                 "skipped_live_state": 0,
                 "skipped_ignored": int(ignored_plan),
@@ -1216,6 +1287,7 @@ def main() -> int:
         "ok": 0,
         "failed": 0,
         "blocked": 0,
+        "same_filesystem_blocked": 0,
         "recheck_dispatched": 0,
         "skipped_live_state": 0,
         "skipped_ignored": int(ignored_plan),
@@ -1239,6 +1311,7 @@ def main() -> int:
             "ok": 0,
             "failed": 0,
             "blocked": 0,
+            "same_filesystem_blocked": 0,
             "recheck_dispatched": 0,
             "skipped_live_state": 0,
             "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1287,6 +1360,7 @@ def main() -> int:
                 "ok": 0,
                 "failed": 0,
                 "blocked": int(counts["blocked"]),
+                "same_filesystem_blocked": int(counts["same_filesystem_blocked"]),
                 "recheck_dispatched": 0,
                 "skipped_live_state": 0,
                 "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1377,6 +1451,23 @@ def main() -> int:
                         )
                         print(f"  path={row.recommended_path}", flush=True)
                         print(f"  location={row.location}", flush=True)
+                        fr_save_path = str(item.get("fastresume_probe", {}).get("save_path") or "")
+                        if bool(args.enforce_same_filesystem):
+                            same_ok, same_reason = same_filesystem_paths(fr_save_path, row.location)
+                            item["same_filesystem_gate"] = {
+                                "enforced": True,
+                                "source_path": fr_save_path,
+                                "target_path": row.location,
+                                "ok": bool(same_ok),
+                                "reason": same_reason,
+                            }
+                            if not same_ok:
+                                item["status"] = "blocked"
+                                item["detail"] = f"same_filesystem_blocked:{same_reason}"
+                                counts["blocked"] += 1
+                                counts["same_filesystem_blocked"] += 1
+                                print(f"  BLOCK same_filesystem {same_reason}", flush=True)
+                                continue
                         fr_path = fr_dir / f"{row.torrent_hash}.fastresume"
                         ok_patch, patch_msg, changed = patch_fastresume(
                             fr_path, row.location, backup_suffix, apply_mode=True
@@ -1502,6 +1593,22 @@ def main() -> int:
                     if live is None:
                         live = qb.get_torrent_info(row.torrent_hash)
                     current_save_path = str(getattr(live, "save_path", "") or "")
+                    if bool(args.enforce_same_filesystem):
+                        same_ok, same_reason = same_filesystem_paths(current_save_path, row.location)
+                        item["same_filesystem_gate"] = {
+                            "enforced": True,
+                            "source_path": current_save_path,
+                            "target_path": row.location,
+                            "ok": bool(same_ok),
+                            "reason": same_reason,
+                        }
+                        if not same_ok:
+                            item["status"] = "blocked"
+                            item["detail"] = f"same_filesystem_blocked:{same_reason}"
+                            counts["blocked"] += 1
+                            counts["same_filesystem_blocked"] += 1
+                            print(f"  BLOCK same_filesystem {same_reason}", flush=True)
+                            continue
                     if current_save_path and path_equivalent(current_save_path, row.location):
                         item["steps"].append(
                             {
@@ -1600,6 +1707,7 @@ def main() -> int:
                 "ok": int(counts["ok"]),
                 "failed": int(counts["failed"]),
                 "blocked": int(counts["blocked"]),
+                "same_filesystem_blocked": int(counts["same_filesystem_blocked"]),
                 "recheck_dispatched": int(counts["recheck_dispatched"]),
                 "skipped_live_state": int(counts["skipped_live_state"]),
                 "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1685,6 +1793,7 @@ def main() -> int:
         f"skipped_live_state={summary.get('skipped_live_state',0)} "
         f"skipped_ignored={summary.get('skipped_ignored',0)} "
         f"blocked={summary['blocked']} fr_needed={summary.get('fr_needed',0)} "
+        f"same_filesystem_blocked={summary.get('same_filesystem_blocked',0)} "
         f"fr_patched={summary.get('fr_patched',0)} fr_patch_failed={summary.get('fr_patch_failed',0)} "
         f"root_policy_rejected={summary.get('root_policy_rejected',0)} "
         f"rollback_ledger_written={summary.get('rollback_ledger_written',0)} "

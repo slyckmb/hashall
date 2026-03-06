@@ -19,7 +19,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBitFile, QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.2.2"
+SEMVER = "0.2.3"
 SCRIPT_NAME = Path(__file__).name
 VERIFY_TOOL = REPO_ROOT / "bin" / "qb-libtorrent-verify.py"
 DEFAULT_SAFE_STATES = {
@@ -125,14 +125,6 @@ def canonical_alias(path: str) -> str:
         return "/data/media"
     if p.startswith("/stash/media/"):
         return "/data/media/" + p[len("/stash/media/") :]
-    if p == "/pool/data/seeds":
-        return "/data/media/torrents/seeding"
-    if p.startswith("/pool/data/seeds/"):
-        return "/data/media/torrents/seeding/" + p[len("/pool/data/seeds/") :]
-    if p == "/pool/data/cross-seed-link":
-        return "/data/media/torrents/seeding/cross-seed-link"
-    if p.startswith("/pool/data/cross-seed-link/"):
-        return "/data/media/torrents/seeding/cross-seed-link/" + p[len("/pool/data/cross-seed-link/") :]
     if p == "/stash/media/downloads/torrents/seeding":
         return "/data/media/torrents/seeding"
     if p.startswith("/stash/media/downloads/torrents/seeding/"):
@@ -150,14 +142,9 @@ def alias_variants(path: str) -> List[str]:
     if p == "/stash/media" or p.startswith("/stash/media/"):
         out.append("/data/media" + p[len("/stash/media") :])
     if p == "/data/media/torrents/seeding" or p.startswith("/data/media/torrents/seeding/"):
-        out.append("/pool/data/seeds" + p[len("/data/media/torrents/seeding") :])
         out.append("/stash/media/downloads/torrents/seeding" + p[len("/data/media/torrents/seeding") :])
-    if p == "/pool/data/seeds" or p.startswith("/pool/data/seeds/"):
-        out.append("/data/media/torrents/seeding" + p[len("/pool/data/seeds") :])
-    if p == "/data/media/torrents/seeding/cross-seed-link" or p.startswith("/data/media/torrents/seeding/cross-seed-link/"):
-        out.append("/pool/data/cross-seed-link" + p[len("/data/media/torrents/seeding/cross-seed-link") :])
-    if p == "/pool/data/cross-seed-link" or p.startswith("/pool/data/cross-seed-link/"):
-        out.append("/data/media/torrents/seeding/cross-seed-link" + p[len("/pool/data/cross-seed-link") :])
+    if p == "/stash/media/downloads/torrents/seeding" or p.startswith("/stash/media/downloads/torrents/seeding/"):
+        out.append("/data/media/torrents/seeding" + p[len("/stash/media/downloads/torrents/seeding") :])
     seen: Set[str] = set()
     dedup: List[str] = []
     for cand in out:

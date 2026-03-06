@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -23,7 +24,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBittorrentClient, QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.1.21"
+SEMVER = "0.1.22"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_ALLOWED_SAVE_ROOTS = "/pool/media,/pool/data"
 DEFAULT_FORBID_SAVE_ROOTS = "/data/media,/stash/media"
@@ -230,14 +231,6 @@ def canonical_alias(path: str) -> str:
         return "/data/media"
     if p.startswith("/stash/media/"):
         return "/data/media/" + p[len("/stash/media/") :]
-    if p == "/pool/data/seeds":
-        return "/data/media/torrents/seeding"
-    if p.startswith("/pool/data/seeds/"):
-        return "/data/media/torrents/seeding/" + p[len("/pool/data/seeds/") :]
-    if p == "/pool/data/cross-seed-link":
-        return "/data/media/torrents/seeding/cross-seed-link"
-    if p.startswith("/pool/data/cross-seed-link/"):
-        return "/data/media/torrents/seeding/cross-seed-link/" + p[len("/pool/data/cross-seed-link/") :]
     if p == "/stash/media/downloads/torrents/seeding":
         return "/data/media/torrents/seeding"
     if p.startswith("/stash/media/downloads/torrents/seeding/"):
@@ -482,14 +475,9 @@ def alias_variants(path: str) -> List[str]:
     if p == "/stash/media" or p.startswith("/stash/media/"):
         out.append("/data/media" + p[len("/stash/media") :])
     if p == "/data/media/torrents/seeding" or p.startswith("/data/media/torrents/seeding/"):
-        out.append("/pool/data/seeds" + p[len("/data/media/torrents/seeding") :])
         out.append("/stash/media/downloads/torrents/seeding" + p[len("/data/media/torrents/seeding") :])
-    if p == "/pool/data/seeds" or p.startswith("/pool/data/seeds/"):
-        out.append("/data/media/torrents/seeding" + p[len("/pool/data/seeds") :])
-    if p == "/data/media/torrents/seeding/cross-seed-link" or p.startswith("/data/media/torrents/seeding/cross-seed-link/"):
-        out.append("/pool/data/cross-seed-link" + p[len("/data/media/torrents/seeding/cross-seed-link") :])
-    if p == "/pool/data/cross-seed-link" or p.startswith("/pool/data/cross-seed-link/"):
-        out.append("/data/media/torrents/seeding/cross-seed-link" + p[len("/pool/data/cross-seed-link") :])
+    if p == "/stash/media/downloads/torrents/seeding" or p.startswith("/stash/media/downloads/torrents/seeding/"):
+        out.append("/data/media/torrents/seeding" + p[len("/stash/media/downloads/torrents/seeding") :])
     dedup: List[str] = []
     seen = set()
     for cand in out:
@@ -505,6 +493,38 @@ def resolve_existing_path(path: str) -> Optional[str]:
         if Path(cand).exists():
             return cand
     return None
+
+
+def _first_existing_parent(path: str) -> Optional[Path]:
+    p = Path(str(path or "").strip())
+    if not str(p):
+        return None
+    try:
+        if p.exists():
+            return p
+    except OSError:
+        pass
+    for cand in p.parents:
+        # Falling all the way back to "/" hides missing mount roots and can
+        # incorrectly mark unrelated filesystems as equivalent.
+        if str(cand) == "/":
+            break
+        try:
+            if cand.exists():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _device_id_for_path(path: str) -> Optional[int]:
+    cand = _first_existing_parent(path)
+    if cand is None:
+        return None
+    try:
+        return int(os.stat(str(cand)).st_dev)
+    except OSError:
+        return None
 
 
 def load_bucket_entries(index_path: Path) -> Dict[str, dict]:
@@ -835,6 +855,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--same-filesystem-only",
+        dest="same_filesystem_only",
+        action="store_true",
+        help=(
+            "Require donor candidates to match the target torrent filesystem "
+            "(default: enabled)"
+        ),
+    )
+    p.add_argument(
+        "--no-same-filesystem-only",
+        dest="same_filesystem_only",
+        action="store_false",
+        help="Allow donor candidates from other filesystems",
+    )
+    p.add_argument(
         "--ignore-hashes",
         default="",
         help="Optional hashes/prefixes to ignore (pipe/comma/space separated)",
@@ -1010,6 +1045,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(skip_hash_if_a=True)
     p.set_defaults(skip_live_active=True)
     p.set_defaults(stop_on_a=True)
+    p.set_defaults(same_filesystem_only=True)
     return p
 
 
@@ -1056,6 +1092,8 @@ def main() -> int:
     tested_cache_fallback_retests = 0
     root_policy_candidates_skipped = 0
     root_policy_hashes_blocked = 0
+    filesystem_candidates_skipped = 0
+    filesystem_hashes_blocked = 0
 
     entries_by_hash = load_bucket_entries(index_path)
     if not entries_by_hash:
@@ -1101,6 +1139,7 @@ def main() -> int:
         f"allowed_roots={','.join(allowed_donor_roots) if allowed_donor_roots else '<none>'} "
         f"forbidden_roots={','.join(forbidden_donor_roots) if forbidden_donor_roots else '<none>'}"
     )
+    print(f"filesystem_policy same_filesystem_only={bool(args.same_filesystem_only)}")
 
     if not selected_hashes:
         print("summary selected=0 reason=no_hashes")
@@ -1156,6 +1195,8 @@ def main() -> int:
             "tested_cache_fallback_retests": int(tested_cache_fallback_retests),
             "root_policy_candidates_skipped": int(root_policy_candidates_skipped),
             "root_policy_hashes_blocked": int(root_policy_hashes_blocked),
+            "filesystem_candidates_skipped": int(filesystem_candidates_skipped),
+            "filesystem_hashes_blocked": int(filesystem_hashes_blocked),
         }
         is_complete = bool(summary["remaining"] == 0 and reason == "final")
         summary["complete"] = is_complete
@@ -1252,6 +1293,13 @@ def main() -> int:
             "donor_policy": {
                 "allowed_roots": allowed_donor_roots,
                 "forbidden_roots": forbidden_donor_roots,
+                "skipped_candidates": [],
+            },
+            "filesystem_policy": {
+                "same_filesystem_only": bool(args.same_filesystem_only),
+                "target_save_path": "",
+                "target_device_id": None,
+                "target_storage_root": "",
                 "skipped_candidates": [],
             },
             "global_db_candidates_added": 0,
@@ -1514,6 +1562,10 @@ def main() -> int:
         tested_skipped_ranked: List[Tuple[float, float, float, Candidate, int, str]] = []
         target_save_path = str(save_path or "")
         target_storage_root = storage_root_label(target_save_path)
+        target_device_id = _device_id_for_path(target_save_path)
+        row_out["filesystem_policy"]["target_save_path"] = target_save_path
+        row_out["filesystem_policy"]["target_device_id"] = target_device_id
+        row_out["filesystem_policy"]["target_storage_root"] = target_storage_root
         donor_root_counts: Counter[str] = Counter()
         same_root_candidate_available = False
         pool_candidate_available = False
@@ -1604,6 +1656,37 @@ def main() -> int:
 
         ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
         existing_ranked = [item for item in ranked if Path(item[3].path).exists()]
+        if bool(args.same_filesystem_only) and existing_ranked:
+            fs_filtered_ranked: List[Tuple[float, float, float, Candidate, int, str]] = []
+            for item in existing_ranked:
+                cand = item[3]
+                cand_device_id = _device_id_for_path(cand.path)
+                reason = ""
+                allow = False
+                if target_device_id is not None and cand_device_id is not None:
+                    allow = target_device_id == cand_device_id
+                    if not allow:
+                        reason = f"device_mismatch:{cand_device_id}!={target_device_id}"
+                else:
+                    cand_storage_root = storage_root_label(cand.path)
+                    allow = cand_storage_root == target_storage_root
+                    if not allow:
+                        reason = (
+                            f"storage_root_mismatch:{cand_storage_root}!={target_storage_root}"
+                        )
+                if allow:
+                    fs_filtered_ranked.append(item)
+                    continue
+                filesystem_candidates_skipped += 1
+                row_out["filesystem_policy"]["skipped_candidates"].append(
+                    {
+                        "path": cand.path,
+                        "source": cand.source,
+                        "candidate_device_id": cand_device_id,
+                        "reason": reason or "filesystem_guard_failed",
+                    }
+                )
+            existing_ranked = fs_filtered_ranked
         quick_by_path: Dict[str, dict] = {}
         if existing_ranked and int(args.max_candidates) > 0:
             quick_window = max(20, int(args.max_candidates) * 20)
@@ -1710,7 +1793,10 @@ def main() -> int:
 
         existing_paths = [c.path for c in ordered]
         if not existing_paths:
-            if row_out["donor_policy"]["skipped_candidates"]:
+            if row_out["filesystem_policy"]["skipped_candidates"]:
+                row_out["status"] = "no_candidate_paths_after_filesystem_policy"
+                filesystem_hashes_blocked += 1
+            elif row_out["donor_policy"]["skipped_candidates"]:
                 row_out["status"] = "no_candidate_paths_after_root_policy"
                 root_policy_hashes_blocked += 1
             else:
@@ -2015,7 +2101,9 @@ def main() -> int:
         f"untrusted_verified_retests={summary['untrusted_verified_retests']} "
         f"tested_cache_fallback_retests={summary['tested_cache_fallback_retests']} "
         f"root_policy_candidates_skipped={summary['root_policy_candidates_skipped']} "
-        f"root_policy_hashes_blocked={summary['root_policy_hashes_blocked']}"
+        f"root_policy_hashes_blocked={summary['root_policy_hashes_blocked']} "
+        f"filesystem_candidates_skipped={summary['filesystem_candidates_skipped']} "
+        f"filesystem_hashes_blocked={summary['filesystem_hashes_blocked']}"
     )
     print(f"report_json={report_path}")
     print(f"latest_json={latest_report_path}")

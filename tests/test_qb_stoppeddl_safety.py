@@ -142,3 +142,27 @@ def test_drain_root_policy_check_blocks_forbidden_path() -> None:
     )
     assert ok is False
     assert reason == "forbidden_root:/data/media"
+
+
+def test_apply_path_equivalent_does_not_alias_pool_data_to_data_media() -> None:
+    mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-apply.py", "qb_stoppeddl_apply_mod")
+    assert mod.path_equivalent(
+        "/pool/data/seeds/cross-seed/example",
+        "/data/media/torrents/seeding/cross-seed/example",
+    ) is False
+
+
+def test_apply_same_filesystem_paths_blocks_cross_storage_root_on_missing_mounts() -> None:
+    mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-apply.py", "qb_stoppeddl_apply_mod")
+    ok, reason = mod.same_filesystem_paths(
+        "/pool/data/seeds/cross-seed/example",
+        "/data/media/torrents/seeding/cross-seed/example",
+    )
+    assert ok is False
+    assert reason.startswith("storage_root_mismatch:") or reason.startswith("device_mismatch:")
+
+
+def test_drain_alias_variants_do_not_expand_to_pool_data_from_data_media() -> None:
+    mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-drain.py", "qb_stoppeddl_drain_mod")
+    variants = mod.alias_variants("/data/media/torrents/seeding/cross-seed/example")
+    assert "/pool/data/seeds/cross-seed/example" not in variants

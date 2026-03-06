@@ -19,7 +19,7 @@ if str(SRC_DIR) not in sys.path:
 from hashall.qbittorrent import get_qbittorrent_client
 
 SCRIPT_NAME = Path(__file__).name
-SEMVER = "0.1.0"
+SEMVER = "0.1.1"
 DEFAULT_LEDGER = "/tmp/qb-stoppeddl-bucket-live/reports/apply-rollback-ledger.jsonl"
 
 
@@ -90,14 +90,6 @@ def canonical_alias(path: str) -> str:
         return "/data/media"
     if p.startswith("/stash/media/"):
         return "/data/media/" + p[len("/stash/media/") :]
-    if p == "/pool/data/seeds":
-        return "/data/media/torrents/seeding"
-    if p.startswith("/pool/data/seeds/"):
-        return "/data/media/torrents/seeding/" + p[len("/pool/data/seeds/") :]
-    if p == "/pool/data/cross-seed-link":
-        return "/data/media/torrents/seeding/cross-seed-link"
-    if p.startswith("/pool/data/cross-seed-link/"):
-        return "/data/media/torrents/seeding/cross-seed-link/" + p[len("/pool/data/cross-seed-link/") :]
     if p == "/stash/media/downloads/torrents/seeding":
         return "/data/media/torrents/seeding"
     if p.startswith("/stash/media/downloads/torrents/seeding/"):
