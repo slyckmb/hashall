@@ -20,7 +20,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import get_qbittorrent_client
 
-SEMVER = "0.2.7"
+SEMVER = "0.2.8"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
@@ -1276,39 +1276,52 @@ def main() -> int:
                 if live is None:
                     live = qb.get_torrent_info(row.torrent_hash)
                 current_save_path = str(getattr(live, "save_path", "") or "")
-                ok_set = qb.set_location(row.torrent_hash, row.location)
-                item["steps"].append(
-                    {
-                        "step": "setLocation",
-                        "ok": bool(ok_set),
-                        "location": row.location,
-                        "from_save_path": current_save_path,
-                    }
-                )
-                if not ok_set:
-                    item["status"] = "failed"
-                    item["detail"] = f"setLocation_failed:{qb.last_error or 'unknown'}"
-                    counts["failed"] += 1
-                    print(f"  FAIL setLocation error={qb.last_error or 'unknown'}", flush=True)
-                    continue
-                append_rollback_entry(
-                    {
-                        "ts": ts_iso(),
-                        "run_started_at": started,
-                        "tool": SCRIPT_NAME,
-                        "semver": SEMVER,
-                        "action": "set_location",
-                        "mode": selected_mode,
-                        "hash": row.torrent_hash,
-                        "name": row.name,
-                        "classification": row.classification,
-                        "source": row.source,
-                        "from_save_path": current_save_path,
-                        "to_save_path": row.location,
-                        "drain_report": str(drain_path),
-                        "apply_report_json": str(report_path),
-                    }
-                )
+                if current_save_path and path_equivalent(current_save_path, row.location):
+                    item["steps"].append(
+                        {
+                            "step": "setLocation",
+                            "ok": True,
+                            "location": row.location,
+                            "from_save_path": current_save_path,
+                            "skipped": True,
+                            "reason": "already_aligned",
+                        }
+                    )
+                    print("  setLocation skipped: already aligned", flush=True)
+                else:
+                    ok_set = qb.set_location(row.torrent_hash, row.location)
+                    item["steps"].append(
+                        {
+                            "step": "setLocation",
+                            "ok": bool(ok_set),
+                            "location": row.location,
+                            "from_save_path": current_save_path,
+                        }
+                    )
+                    if not ok_set:
+                        item["status"] = "failed"
+                        item["detail"] = f"setLocation_failed:{qb.last_error or 'unknown'}"
+                        counts["failed"] += 1
+                        print(f"  FAIL setLocation error={qb.last_error or 'unknown'}", flush=True)
+                        continue
+                    append_rollback_entry(
+                        {
+                            "ts": ts_iso(),
+                            "run_started_at": started,
+                            "tool": SCRIPT_NAME,
+                            "semver": SEMVER,
+                            "action": "set_location",
+                            "mode": selected_mode,
+                            "hash": row.torrent_hash,
+                            "name": row.name,
+                            "classification": row.classification,
+                            "source": row.source,
+                            "from_save_path": current_save_path,
+                            "to_save_path": row.location,
+                            "drain_report": str(drain_path),
+                            "apply_report_json": str(report_path),
+                        }
+                    )
                 ok_recheck = qb.recheck_torrent(row.torrent_hash)
                 item["steps"].append({"step": "recheck", "ok": bool(ok_recheck)})
                 if not ok_recheck:
