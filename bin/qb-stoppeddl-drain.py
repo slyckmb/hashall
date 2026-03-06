@@ -21,12 +21,14 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
+from hashall.qbittorrent import QBittorrentClient, QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.1.18"
+SEMVER = "0.1.21"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_ALLOWED_SAVE_ROOTS = "/pool/media,/pool/data"
 DEFAULT_FORBID_SAVE_ROOTS = "/data/media,/stash/media"
+DEFAULT_ALLOWED_DONOR_ROOTS = "/pool/media,/pool/data,/data/media"
+DEFAULT_FORBID_DONOR_ROOTS = "/stash/media"
 
 
 TRUSTED_STATES = {"stalledup", "uploading", "stoppedup", "queuedup", "checkingup", "forcedup", "pausedup"}
@@ -155,6 +157,42 @@ def root_policy_check(path: str, allowed_roots: List[str], forbidden_roots: List
     if allowed_roots and not any(is_under_root(p, root) for root in allowed_roots):
         return False, "outside_allowed_roots"
     return True, "ok"
+
+
+def storage_root_label(path: str) -> str:
+    p = canonical_alias(path)
+    if p.startswith("/pool/"):
+        return "pool"
+    if p.startswith("/data/"):
+        return "data"
+    if p.startswith("/stash/"):
+        return "stash"
+    return "other"
+
+
+def donor_affinity_score(path: str, target_save_path: str) -> float:
+    p = canonical_alias(path)
+    t = canonical_alias(target_save_path)
+    if not p or not t:
+        return 0.0
+    score = 0.0
+    p_root = storage_root_label(p)
+    t_root = storage_root_label(t)
+    if p_root == t_root:
+        score += 25.0
+    if t.startswith("/pool/") and p.startswith("/pool/"):
+        score += 10.0
+    if t.startswith("/data/") and p.startswith("/data/"):
+        score += 10.0
+    p_parts = [x for x in p.strip("/").split("/") if x]
+    t_parts = [x for x in t.strip("/").split("/") if x]
+    common_parts = 0
+    for a, b in zip(p_parts, t_parts):
+        if a != b:
+            break
+        common_parts += 1
+    score += float(min(common_parts, 8))
+    return score
 
 
 def hash_matches_filters(torrent_hash: str, filters: Set[str]) -> bool:
@@ -618,7 +656,7 @@ def source_preference_rank(source: str) -> int:
     return 0
 
 
-def fetch_qb_rows() -> Tuple[Dict[str, QBitTorrent], Dict[Tuple[str, int], List[QBitTorrent]]]:
+def fetch_qb_rows() -> Tuple[QBittorrentClient, Dict[str, QBitTorrent], Dict[Tuple[str, int], List[QBitTorrent]]]:
     qb = get_qbittorrent_client()
     if not qb.test_connection() or not qb.login():
         raise RuntimeError("qB connection/login failed")
@@ -627,7 +665,7 @@ def fetch_qb_rows() -> Tuple[Dict[str, QBitTorrent], Dict[Tuple[str, int], List[
     by_name_size: Dict[Tuple[str, int], List[QBitTorrent]] = defaultdict(list)
     for r in rows:
         by_name_size[(str(r.name or ""), int(r.size or 0))].append(r)
-    return by_hash, by_name_size
+    return qb, by_hash, by_name_size
 
 
 def db_row_for_hash(conn: sqlite3.Connection, torrent_hash: str) -> Optional[dict]:
@@ -778,6 +816,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated absolute candidate roots blocked in drain selection "
             f"(default: {DEFAULT_FORBID_SAVE_ROOTS})"
+        ),
+    )
+    p.add_argument(
+        "--allowed-donor-roots",
+        default=DEFAULT_ALLOWED_DONOR_ROOTS,
+        help=(
+            "Comma-separated absolute candidate roots allowed as donor verification sources "
+            f"(default: {DEFAULT_ALLOWED_DONOR_ROOTS})"
+        ),
+    )
+    p.add_argument(
+        "--forbid-donor-roots",
+        default=DEFAULT_FORBID_DONOR_ROOTS,
+        help=(
+            "Comma-separated absolute candidate roots blocked as donor verification sources "
+            f"(default: {DEFAULT_FORBID_DONOR_ROOTS})"
         ),
     )
     p.add_argument(
@@ -1014,6 +1068,8 @@ def main() -> int:
     selected_hashes = list(dict.fromkeys(selected_hashes))
     allowed_roots = parse_path_list(args.allowed_save_roots)
     forbidden_roots = parse_path_list(args.forbid_save_roots)
+    allowed_donor_roots = parse_path_list(args.allowed_donor_roots)
+    forbidden_donor_roots = parse_path_list(args.forbid_donor_roots)
     default_ignore_file = bucket_dir / "download-whitelist-hashes.txt"
     ignore_hashes = parse_hash_tokens(args.ignore_hashes)
     if str(args.ignore_hashes_file or "").strip():
@@ -1040,12 +1096,17 @@ def main() -> int:
         f"allowed_roots={','.join(allowed_roots) if allowed_roots else '<none>'} "
         f"forbidden_roots={','.join(forbidden_roots) if forbidden_roots else '<none>'}"
     )
+    print(
+        "donor_policy "
+        f"allowed_roots={','.join(allowed_donor_roots) if allowed_donor_roots else '<none>'} "
+        f"forbidden_roots={','.join(forbidden_donor_roots) if forbidden_donor_roots else '<none>'}"
+    )
 
     if not selected_hashes:
         print("summary selected=0 reason=no_hashes")
         return 0
 
-    by_hash_qb, by_name_size_qb = fetch_qb_rows()
+    qb_client, by_hash_qb, by_name_size_qb = fetch_qb_rows()
     conn = sqlite3.connect(str(Path(args.db).expanduser()))
     conn.row_factory = sqlite3.Row
     global_db_index: Optional[GlobalDbIndex] = None
@@ -1096,6 +1157,9 @@ def main() -> int:
             "root_policy_candidates_skipped": int(root_policy_candidates_skipped),
             "root_policy_hashes_blocked": int(root_policy_hashes_blocked),
         }
+        is_complete = bool(summary["remaining"] == 0 and reason == "final")
+        summary["complete"] = is_complete
+        summary["incomplete_reason"] = "" if is_complete else str(reason)
         payload = {
             "tool": "qb-stoppeddl-drain",
             "script": SCRIPT_NAME,
@@ -1154,6 +1218,11 @@ def main() -> int:
             "size": size,
             "bucket_state": str(entry.get("state") or ""),
             "torrent_file": str(torrent_file),
+            "torrent_file_refresh": {
+                "attempted": False,
+                "ok": False,
+                "error": "",
+            },
             "status": "pending",
             "classification": "e",
             "recommended_path": "",
@@ -1178,6 +1247,11 @@ def main() -> int:
             "root_policy": {
                 "allowed_roots": allowed_roots,
                 "forbidden_roots": forbidden_roots,
+                "skipped_candidates": [],
+            },
+            "donor_policy": {
+                "allowed_roots": allowed_donor_roots,
+                "forbidden_roots": forbidden_donor_roots,
                 "skipped_candidates": [],
             },
             "global_db_candidates_added": 0,
@@ -1218,12 +1292,22 @@ def main() -> int:
                 continue
 
         if not torrent_file.exists():
-            row_out["status"] = "no_torrent_file"
-            row_out["classification"] = "e"
-            class_counts["e"] += 1
-            out_entries.append(row_out)
-            write_progress_report(f"hash:{h}:no_torrent_file")
-            continue
+            row_out["torrent_file_refresh"]["attempted"] = True
+            try:
+                blob = qb_client.export_torrent_file(h, out_path=torrent_file)
+                refreshed = bool(blob) and torrent_file.exists() and torrent_file.stat().st_size > 0
+                row_out["torrent_file_refresh"]["ok"] = bool(refreshed)
+            except Exception as exc:
+                row_out["torrent_file_refresh"]["error"] = str(exc)
+            if row_out["torrent_file_refresh"]["ok"]:
+                print(f"  refreshed missing torrent_file from qB path={torrent_file}")
+            else:
+                row_out["status"] = "no_torrent_file"
+                row_out["classification"] = "e"
+                class_counts["e"] += 1
+                out_entries.append(row_out)
+                write_progress_report(f"hash:{h}:no_torrent_file")
+                continue
 
         cands: Dict[str, Candidate] = {}
         # Bucket/current qB hints
@@ -1426,13 +1510,18 @@ def main() -> int:
             if isinstance(prior_tested_hash, dict)
             else {}
         )
-        ranked: List[Tuple[float, float, str, Candidate, int, str]] = []
-        tested_skipped_ranked: List[Tuple[float, float, str, Candidate, int, str]] = []
+        ranked: List[Tuple[float, float, float, Candidate, int, str]] = []
+        tested_skipped_ranked: List[Tuple[float, float, float, Candidate, int, str]] = []
+        target_save_path = str(save_path or "")
+        target_storage_root = storage_root_label(target_save_path)
+        donor_root_counts: Counter[str] = Counter()
+        same_root_candidate_available = False
+        pool_candidate_available = False
         for cand in cands.values():
-            root_ok, root_reason = root_policy_check(cand.path, allowed_roots, forbidden_roots)
+            root_ok, root_reason = root_policy_check(cand.path, allowed_donor_roots, forbidden_donor_roots)
             if not root_ok:
                 root_policy_candidates_skipped += 1
-                row_out["root_policy"]["skipped_candidates"].append(
+                row_out["donor_policy"]["skipped_candidates"].append(
                     {
                         "path": cand.path,
                         "source": cand.source,
@@ -1445,12 +1534,19 @@ def main() -> int:
             bad_meta = per_hash_bad.get(key, {})
             fail_count = int(bad_meta.get("fail_count", 0) or 0)
             last_cls = str(bad_meta.get("last_classification", "") or "")
-            adjusted = float(cand.score) - (float(args.bad_penalty) * float(fail_count))
+            affinity = donor_affinity_score(cand.path, target_save_path)
+            adjusted = float(cand.score) + affinity - (float(args.bad_penalty) * float(fail_count))
+            root_label = storage_root_label(cand.path)
+            donor_root_counts[root_label] += 1
+            if root_label == "pool":
+                pool_candidate_available = True
+            if root_label == target_storage_root:
+                same_root_candidate_available = True
             prior_verified = bool(prior_tested_meta.get("last_verified", False))
             prior_seen_checking = bool(prior_tested_meta.get("last_seen_checking_files", False))
             skip_due_to_tested = (not prior_verified) or prior_seen_checking
             if args.skip_tested_candidates and prior_tested_meta and skip_due_to_tested:
-                tested_skipped_ranked.append((adjusted, float(cand.score), cand.path, cand, fail_count, last_cls))
+                tested_skipped_ranked.append((adjusted, affinity, float(cand.score), cand, fail_count, last_cls))
                 tested_candidates_skipped += 1
                 row_out["tested_cache"]["skipped_candidates"].append(
                     {
@@ -1487,7 +1583,18 @@ def main() -> int:
                     }
                 )
                 continue
-            ranked.append((adjusted, float(cand.score), cand.path, cand, fail_count, last_cls))
+            ranked.append((adjusted, affinity, float(cand.score), cand, fail_count, last_cls))
+
+        row_out["donor_insights"] = {
+            "target_save_path": target_save_path,
+            "target_storage_root": target_storage_root,
+            "pool_donor_available": bool(pool_candidate_available),
+            "same_root_donor_available": bool(same_root_candidate_available),
+            "candidate_root_counts": dict(donor_root_counts),
+            "affinity_strategy": "prefer_same_storage_root_then_longer_prefix",
+            "selected_best_storage_root": "",
+            "verified_pool_candidate": False,
+        }
 
         if not ranked and tested_skipped_ranked:
             tested_cache_fallback_retests += 1
@@ -1495,7 +1602,7 @@ def main() -> int:
             ranked = tested_skipped_ranked
             print(f"  fallback retest_all_tested candidates={len(ranked)}")
 
-        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
         existing_ranked = [item for item in ranked if Path(item[3].path).exists()]
         quick_by_path: Dict[str, dict] = {}
         if existing_ranked and int(args.max_candidates) > 0:
@@ -1512,14 +1619,22 @@ def main() -> int:
             )
             row_out["quick_probe_report_json"] = quick_json_path
             if quick_by_path:
-                def quality_key(item: Tuple[float, float, str, Candidate, int, str]) -> Tuple[float, float, float, int, float, float]:
+                def quality_key(item: Tuple[float, float, float, Candidate, int, str]) -> Tuple[float, float, float, int, float, float, float]:
                     key = canonical_alias(item[3].path)
                     quick = quick_by_path.get(key, {})
                     exact = 1.0 if bool(quick.get("exact_tree")) else 0.0
                     quick_ratio = float(quick.get("quick_ratio", 0.0) or 0.0)
                     size_overlap = float(quick.get("size_overlap_ratio", 0.0) or 0.0)
                     source_rank = source_preference_rank(item[3].source)
-                    return (exact, quick_ratio, size_overlap, int(source_rank), float(item[0]), float(item[1]))
+                    return (
+                        exact,
+                        quick_ratio,
+                        size_overlap,
+                        int(source_rank),
+                        float(item[0]),
+                        float(item[1]),
+                        float(item[2]),
+                    )
 
                 existing_ranked.sort(key=quality_key, reverse=True)
                 filtered_ranked: List[Tuple[float, float, str, Candidate, int, str]] = []
@@ -1581,8 +1696,10 @@ def main() -> int:
                 "source": item[3].source,
                 "score": item[3].score,
                 "adjusted_score": item[0],
+                "affinity_score": item[1],
                 "bad_fail_count": item[4],
                 "bad_last_classification": item[5],
+                "storage_root": storage_root_label(item[3].path),
                 "quick_ratio": float(quick_by_path.get(canonical_alias(item[3].path), {}).get("quick_ratio", -1.0)),
                 "size_overlap_ratio": float(quick_by_path.get(canonical_alias(item[3].path), {}).get("size_overlap_ratio", -1.0)),
                 "exact_tree_quick": bool(quick_by_path.get(canonical_alias(item[3].path), {}).get("exact_tree", False)),
@@ -1593,7 +1710,7 @@ def main() -> int:
 
         existing_paths = [c.path for c in ordered]
         if not existing_paths:
-            if row_out["root_policy"]["skipped_candidates"]:
+            if row_out["donor_policy"]["skipped_candidates"]:
                 row_out["status"] = "no_candidate_paths_after_root_policy"
                 root_policy_hashes_blocked += 1
             else:
@@ -1801,14 +1918,17 @@ def main() -> int:
 
         tested_hash_meta["paths"] = tested_paths_map
 
-        def rank(v: dict) -> Tuple[int, int, float, int]:
+        def rank(v: dict) -> Tuple[int, int, float, float, int]:
             cls = str(v.get("classification", ""))
             cls_rank = {"exact_tree": 3, "close_match": 2, "partial_match": 1, "no_match": 0}.get(cls, 0)
-            src = source_by_path.get(str(v.get("path") or ""), "unknown")
+            path = str(v.get("path") or "")
+            src = source_by_path.get(path, "unknown")
             src_rank = source_preference_rank(src)
+            affinity = donor_affinity_score(path, target_save_path)
             return (
                 1 if bool(v.get("verified")) else 0,
                 cls_rank,
+                affinity,
                 float(v.get("verify_ratio", 0.0)),
                 int(src_rank),
             )
@@ -1816,6 +1936,32 @@ def main() -> int:
         best = sorted(verify_results, key=rank, reverse=True)[0]
         best_path = str(best.get("path") or "")
         best_source = source_by_path.get(best_path, "unknown")
+        target_ok, target_reason = root_policy_check(best_path, allowed_roots, forbidden_roots)
+        if not target_ok and bool(best.get("verified")):
+            row_out["status"] = "verified_donor_outside_target_roots"
+            row_out["classification"] = "d"
+            row_out["recommended_path"] = ""
+            row_out["recommended_source"] = best_source
+            row_out["best_result"] = best
+            row_out["detail"] = target_reason
+            row_out["repair_hint"] = {
+                "action": "relink_or_copy_from_donor_to_target_root",
+                "donor_path": best_path,
+                "target_save_path": str(entry.get("save_path") or (row_qb.save_path if row_qb else "")),
+                "target_root_policy": {
+                    "allowed_roots": allowed_roots,
+                    "forbidden_roots": forbidden_roots,
+                },
+            }
+            class_counts["d"] += 1
+            out_entries.append(row_out)
+            flush_caches()
+            write_progress_report(f"hash:{h}:analyzed:d:donor_outside_target_roots")
+            print(
+                f"  class=d best={best.get('classification')} verified={best.get('verified')} "
+                f"reason={target_reason} source={best_source}"
+            )
+            continue
         letter = classify_letter(best, best_source)
         best_reason = str(best.get("verify_reason") or "")
         best_elapsed = float(best.get("verify_elapsed_s", 0.0) or 0.0)
@@ -1827,6 +1973,10 @@ def main() -> int:
         row_out["recommended_path"] = best_path
         row_out["recommended_source"] = best_source
         row_out["best_result"] = best
+        row_out["donor_insights"]["selected_best_storage_root"] = storage_root_label(best_path)
+        row_out["donor_insights"]["verified_pool_candidate"] = bool(
+            bool(best.get("verified")) and storage_root_label(best_path) == "pool"
+        )
         class_counts[letter] += 1
         out_entries.append(row_out)
 
