@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.3.3
-# Date:    2026-02-28
+# Version: 1.3.5
+# Date:    2026-03-05
 #
 # After each batch waits for state to settle, then checks the protected watch
 # scope (all torrents added before today) for downloading/broken flips. On any
@@ -10,10 +10,11 @@
 # Idempotent: only targets stoppedUP (100%) torrents; already-started ones
 # are stalledUP/uploading and are skipped automatically.
 #
-# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
+# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
 #   --apply        Execute changes (dry-run if omitted)
 #   --resume       Skip torrents already in stalledUP/uploading/queuedUP
 #   --daemon       Continuous watch loop: poll QB, run ramp when stoppedUP >= --min-batch
+#   --guard-only   Do not start anything; only detect/stop downloading-like flips in protected scope
 #   --min-batch N  Daemon threshold: wait until stoppedUP count >= N before ramp (default: 10)
 #   --poll N       Daemon poll interval in seconds (default: 60)
 #   --cache        Use shared qB cache agent for torrents/info reads
@@ -23,8 +24,8 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.3"
-SCRIPT_DATE="2026-02-28"
+SCRIPT_VERSION="1.3.5"
+SCRIPT_DATE="2026-03-05"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -38,6 +39,7 @@ mkdir -p "$LOGDIR"
 APPLY=false
 RESUME=false
 DAEMON=false
+GUARD_ONLY=false
 MIN_BATCH=10
 POLL=60
 USE_CACHE=false
@@ -77,6 +79,12 @@ Options:
   --daemon
       Run continuously. Poll qB and trigger ramp when stoppedUP count is
       >= --min-batch.
+
+  --guard-only
+      Guard mode. Never starts torrents.
+      Scans protected scope and immediately stops any downloading-like state
+      (downloading/stalledDL/stoppedDL<100%) found there.
+      Useful to prevent unexpected downloads while you investigate.
 
   --min-batch N
       Daemon threshold for running a ramp pass.
@@ -122,6 +130,9 @@ Examples:
   # Same, but read qB state via shared cache (max age 5s)
   bin/qbit-start-seeding-gradual.sh --daemon --apply --min-batch 1 --poll 60 --cache --cache-max-age 5
 
+  # Guard-only daemon: never starts, only auto-stops download-like flips
+  bin/qbit-start-seeding-gradual.sh --daemon --guard-only --apply --poll 5 --cache --cache-max-age 5
+
   # Ignore a known legacy downloader by hash prefix
   bin/qbit-start-seeding-gradual.sh --daemon --apply --ignore-hashes 102b7bf38155
 EOF
@@ -138,6 +149,7 @@ while [[ $# -gt 0 ]]; do
     --apply)      APPLY=true; shift ;;
     --resume)     RESUME=true; shift ;;
     --daemon)     DAEMON=true; shift ;;
+    --guard-only) GUARD_ONLY=true; shift ;;
     --min-batch)  MIN_BATCH="$2"; shift 2 ;;
     --poll)       POLL="$2"; shift 2 ;;
     --cache)      USE_CACHE=true; shift ;;
@@ -377,7 +389,7 @@ PYEOF
   LC_ALL=C sort -u "$TMPBASE_DL" -o "$TMPBASE_DL"
   BASE_DL_COUNT=$(grep -c . "$TMPBASE_DL" 2>/dev/null || true)
   if [[ "$BASE_DL_COUNT" -gt 0 ]]; then
-    log "  baseline downloading-like in watch scope: $BASE_DL_COUNT (flip-only gate enabled)"
+    log "  baseline downloading-like in watch scope: $BASE_DL_COUNT (strict gate: any downloading-like state halts)"
   fi
 
   # Collect stoppedUP hashes (100% progress, not seeding yet)
@@ -568,17 +580,15 @@ PYEOF
 
       log "  check: ok=$N_OK  downloading_total=$CURR_DL_COUNT  downloading_new=$NEW_DL_COUNT  downloading_preexisting=$PREEXIST_DL_COUNT  other_bad=$N_BAD  still_stoppedUP=$N_STOP"
 
-      if [[ "$NEW_DL_COUNT" -gt 0 ]]; then
+      if [[ "$CURR_DL_COUNT" -gt 0 ]]; then
         log ""
-        log "WARNING: NEW downloading flips detected — stopping newly flipped torrents immediately:"
-        BAD_HASHES=$(python3 - "$TMPCHECK" "$TMPFLIP_DL" << 'PYEOF' | tee -a "$LOG" | grep '^HASHES:' | sed 's/^HASHES://'
+        log "WARNING: downloading-like state detected in protected scope — stopping affected torrents immediately:"
+        BAD_HASHES=$(python3 - "$TMPCHECK" << 'PYEOF' | tee -a "$LOG" | grep '^HASHES:' | sed 's/^HASHES://'
 import json, sys
 d = json.load(open(sys.argv[1]))
-flipped = set(line.strip() for line in open(sys.argv[2]) if line.strip())
 selected = []
 for h, s, p in d.get('downloading', []):
-    if h in flipped:
-        selected.append((h, s, p))
+    selected.append((h, s, p))
 for h, s, p in selected:
     print(f'  {h[:12]}  {s}  {p:.4f}')
 print('HASHES:' + '|'.join(h for h, s, p in selected))
@@ -595,23 +605,37 @@ PYEOF
         log "HALTED — check the torrents listed above."
         # Record halt hashes for daemon error state
         echo "$BAD_HASHES" > "$TMPHALT"
-        failures=$(( failures + NEW_DL_COUNT ))
+        failures=$(( failures + CURR_DL_COUNT ))
         ramp_halted=true
         break
-      fi
-      if [[ "$PREEXIST_DL_COUNT" -gt 0 ]]; then
-        log "  note: pre-existing downloading-like torrents detected; ignored by flip-only safety gate."
       fi
 
       if [[ "$N_BAD" -gt 0 ]]; then
         log ""
-        log "⚠️  Bad state (non-downloading) detected — listing but continuing:"
-        python3 - "$TMPCHECK" << 'PYEOF' | tee -a "$LOG"
+        log "WARNING: bad state detected in protected scope — stopping affected torrents and halting:"
+        BAD_HASHES=$(python3 - "$TMPCHECK" << 'PYEOF' | tee -a "$LOG" | grep '^HASHES:' | sed 's/^HASHES://'
 import json, sys
 d = json.load(open(sys.argv[1]))
+selected = []
 for h, s, p in d.get('other_bad', []):
+    selected.append((h, s, p))
     print(f'  {h}  {s}  {p:.4f}')
+print('HASHES:' + '|'.join(h for h, s, p in selected))
 PYEOF
+)
+        if [[ -n "$BAD_HASHES" ]]; then
+          curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
+              --data-urlencode "hashes=$BAD_HASHES" >/dev/null 2>&1 || true
+          log "  stop HTTP sent for: $BAD_HASHES"
+        else
+          log "  stop HTTP skipped: no concrete bad-state hashes resolved"
+        fi
+        log ""
+        log "HALTED — check the torrents listed above."
+        echo "$BAD_HASHES" > "$TMPHALT"
+        failures=$(( failures + N_BAD ))
+        ramp_halted=true
+        break
       fi
 
       log "  ✓ batch OK — all started torrents stable"
@@ -634,9 +658,103 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# run_guard_pass — never starts torrents; only detects/stops downloading-like
+# in protected watch scope.
+# Returns:
+#   0 => clean (no downloading-like in protected scope)
+#   1 => error
+#   2 => downloading-like detected (and stopped when --apply=true)
+# ---------------------------------------------------------------------------
+run_guard_pass() {
+  if [[ "$USE_CACHE" != true ]]; then
+    qb_login
+  fi
+
+  if ! fetch_torrents_info 3 1; then
+    log "ERROR: guard pass unable to fetch torrent list"
+    return 1
+  fi
+
+  build_ignore_hashes > "$TMPIGNORE" || true
+  if ! build_watch_scope_before_today "$TMPJSON" "$TMPIGNORE" > "$TMPWATCH"; then
+    log "ERROR: guard pass unable to derive protected watch scope"
+    return 1
+  fi
+
+  if ! python3 - "$TMPJSON" "$TMPWATCH" << 'PYEOF' > "$TMPCHECK"
+import json, sys
+data = json.load(open(sys.argv[1]))
+watch = set(open(sys.argv[2]).read().split())
+download_bad = {'downloading','stalledDL'}
+bad = []
+for t in data:
+    h = str(t.get("hash", "")).strip()
+    if not h or h not in watch:
+        continue
+    s = t.get("state", "")
+    p = t.get("progress", 0)
+    if s in download_bad or (s == 'stoppedDL' and p < 0.9999):
+        bad.append([h, s, p])
+print(json.dumps({"downloading": bad}))
+PYEOF
+  then
+    log "ERROR: guard pass unable to parse state payload"
+    return 1
+  fi
+
+  local bad_count
+  bad_count="$(python3 - "$TMPCHECK" << 'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(len(d.get("downloading", [])))
+PYEOF
+)"
+
+  if [[ "$bad_count" -le 0 ]]; then
+    log "guard: clean (no downloading-like in protected scope)"
+    return 0
+  fi
+
+  log "guard: downloading-like detected in protected scope: $bad_count"
+  local bad_hashes
+  bad_hashes="$(python3 - "$TMPCHECK" << 'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+rows = d.get("downloading", [])
+for h, s, p in rows:
+    print(f"  {h[:12]}  {s}  {p:.4f}")
+print("HASHES:" + "|".join(h for h, _, _ in rows))
+PYEOF
+)"
+  echo "$bad_hashes" | tee -a "$LOG" >/dev/null
+  bad_hashes="$(echo "$bad_hashes" | awk -F'HASHES:' 'NF>1{print $2}' | tail -n1)"
+
+  if [[ "$APPLY" == true && -n "$bad_hashes" ]]; then
+    qb_login 2>/dev/null || true
+    curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
+      --data-urlencode "hashes=$bad_hashes" >/dev/null 2>&1 || true
+    log "guard: stop HTTP sent for: $bad_hashes"
+  elif [[ "$APPLY" != true ]]; then
+    log "guard: [dry-run] would stop detected downloading-like hashes"
+  fi
+  return 2
+}
+
+# ---------------------------------------------------------------------------
 # One-shot mode (no --daemon)
 # ---------------------------------------------------------------------------
 if [[ "$DAEMON" == false ]]; then
+  if [[ "$GUARD_ONLY" == true ]]; then
+    if run_guard_pass; then
+      exit 0
+    else
+      rc=$?
+      if [[ "$rc" -eq 2 ]]; then
+        exit 0
+      fi
+      exit "$rc"
+    fi
+  fi
   run_ramp_start
   exit $?
 fi
@@ -646,7 +764,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "════════════════════════════════════════════════════════════"
 echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-echo "daemon mode  apply=$APPLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
+echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
 echo "daemon log: $DAEMON_LOG"
 echo "reset file:  $DAEMON_HALT_RESET"
 echo "════════════════════════════════════════════════════════════"
@@ -654,7 +772,7 @@ echo "════════════════════════�
 {
   echo "════════════════════════════════════════════════════════════"
   echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-  echo "daemon mode  apply=$APPLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
+  echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
   echo "════════════════════════════════════════════════════════════"
 } >> "$DAEMON_LOG"
 
@@ -700,6 +818,23 @@ PYEOF
   TS="$(date '+%F %T')"
   STATUS_LINE="status ts=$TS stoppedUP=$STOPPED_UP_COUNT threshold=$MIN_BATCH"
   echo "$STATUS_LINE" | tee -a "$DAEMON_LOG"
+
+  if [[ "$GUARD_ONLY" == true ]]; then
+    RUN_TS="$(date +%Y%m%d-%H%M%S)"
+    LOG="$LOGDIR/start-seeding-gradual-guard-${RUN_TS}.log"
+    if run_guard_pass; then
+      echo "$(date '+%F %T') [daemon] Guard pass clean — log: $LOG" | tee -a "$DAEMON_LOG"
+    else
+      rc=$?
+      if [[ "$rc" -eq 2 ]]; then
+        echo "$(date '+%F %T') [daemon] Guard pass stopped downloading-like torrents — log: $LOG" | tee -a "$DAEMON_LOG"
+      else
+        echo "$(date '+%F %T') [daemon] Guard pass error (rc=$rc) — log: $LOG" | tee -a "$DAEMON_LOG"
+      fi
+    fi
+    sleep "$POLL"
+    continue
+  fi
 
   if [[ "$STOPPED_UP_COUNT" -ge "$MIN_BATCH" ]]; then
     echo "$(date '+%F %T') [daemon] Threshold met ($STOPPED_UP_COUNT >= $MIN_BATCH) — running ramp-start" | tee -a "$DAEMON_LOG"
