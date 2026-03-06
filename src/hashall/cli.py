@@ -294,6 +294,71 @@ def doctor_preflight(db, json_output, strict):
     if strict and not bool(report.get("ok")):
         raise click.ClickException("catalog preflight failed (error-severity checks)")
 
+
+@doctor.command("repair-identity")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--apply", is_flag=True, help="Apply inferred device_id/fs_uuid repairs.")
+@click.option(
+    "--max-actions",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Limit number of update actions (0 means no limit).",
+)
+@click.option(
+    "--allow-bind-alias/--no-allow-bind-alias",
+    default=True,
+    show_default=True,
+    help="Allow /data/media <-> /stash/media bind-alias inference.",
+)
+@click.option(
+    "--report-json",
+    type=click.Path(),
+    default=None,
+    help="Write full JSON report to this path.",
+)
+@click.option("--json-output", is_flag=True, help="Print full JSON report to stdout.")
+def doctor_repair_identity(db, apply, max_actions, allow_bind_alias, report_json, json_output):
+    """Repair stale identity rows using fs_uuid-first inference."""
+    from hashall.identity_repair import run_identity_repair, write_report
+
+    result = run_identity_repair(
+        Path(db),
+        apply_mode=bool(apply),
+        max_actions=max(0, int(max_actions or 0)),
+        allow_bind_aliases=bool(allow_bind_alias),
+    )
+
+    if report_json:
+        out_path = write_report(result, Path(report_json))
+        click.echo(f"report_json={out_path}")
+
+    if json_output:
+        click.echo(result.to_json().rstrip())
+        return
+
+    click.echo(
+        "identity_repair "
+        f"apply={str(bool(apply)).lower()} "
+        f"payload_candidates={result.payload_candidates} "
+        f"torrent_candidates={result.torrent_candidates} "
+        f"actions_planned={result.actions_planned} "
+        f"actions_applied={result.actions_applied} "
+        f"unresolved={result.unresolved_count}"
+    )
+    if result.reason_counts:
+        click.echo("reason_counts:")
+        for reason, count in result.reason_counts.items():
+            click.echo(f"  {reason}={count}")
+    if result.unresolved_samples:
+        click.echo("unresolved_samples:")
+        for item in result.unresolved_samples[:10]:
+            click.echo(
+                f"  table={item.get('table')} key={item.get('key')} "
+                f"device_id={item.get('device_id')} fs_uuid={item.get('fs_uuid')} "
+                f"path={item.get('path')}"
+            )
+
 # Payload command group
 @cli.group()
 def payload():
