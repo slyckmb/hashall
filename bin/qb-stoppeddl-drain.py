@@ -23,8 +23,10 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.1.16"
+SEMVER = "0.1.18"
 SCRIPT_NAME = Path(__file__).name
+DEFAULT_ALLOWED_SAVE_ROOTS = "/pool/media,/pool/data"
+DEFAULT_FORBID_SAVE_ROOTS = "/data/media,/stash/media"
 
 
 TRUSTED_STATES = {"stalledup", "uploading", "stoppedup", "queuedup", "checkingup", "forcedup", "pausedup"}
@@ -110,6 +112,49 @@ def parse_hash_tokens(text: str) -> List[str]:
         seen.add(h)
         out.append(h)
     return out
+
+
+def parse_path_list(text: str) -> List[str]:
+    raw = str(text or "")
+    for ch in ("|", ",", "\n", "\t"):
+        raw = raw.replace(ch, " ")
+    out: List[str] = []
+    seen: Set[str] = set()
+    for tok in raw.split():
+        p = str(tok or "").strip()
+        if not p:
+            continue
+        if p != "/" and p.endswith("/"):
+            p = p.rstrip("/")
+        if not p.startswith("/"):
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def is_under_root(path: str, root: str) -> bool:
+    p = str(path or "").strip()
+    r = str(root or "").strip()
+    if not p or not r:
+        return False
+    if r == "/":
+        return p.startswith("/")
+    return p == r or p.startswith(r + "/")
+
+
+def root_policy_check(path: str, allowed_roots: List[str], forbidden_roots: List[str]) -> Tuple[bool, str]:
+    p = str(path or "").strip()
+    if not p or not p.startswith("/"):
+        return False, "path_not_absolute"
+    for root in forbidden_roots:
+        if is_under_root(p, root):
+            return False, f"forbidden_root:{root}"
+    if allowed_roots and not any(is_under_root(p, root) for root in allowed_roots):
+        return False, "outside_allowed_roots"
+    return True, "ok"
 
 
 def hash_matches_filters(torrent_hash: str, filters: Set[str]) -> bool:
@@ -554,6 +599,25 @@ def add_candidate(cands: Dict[str, Candidate], path: str, source: str, score: fl
         cands[key] = Candidate(path=resolved, source=source, score=float(score), note=note)
 
 
+def source_preference_rank(source: str) -> int:
+    s = str(source or "").lower()
+    if s.startswith("qb_same_name_exact:"):
+        return 7
+    if s.startswith("qb_same_name_size:"):
+        return 6
+    if s.startswith("qb_same_name_nearsize:"):
+        return 5
+    if s.startswith("db_self_") or s.startswith("db_payload_self_"):
+        return 4
+    if s.startswith("db_payload_sibling_"):
+        return 3
+    if s.startswith("bucket_"):
+        return 2
+    if s.startswith("db_global_"):
+        return 1
+    return 0
+
+
 def fetch_qb_rows() -> Tuple[Dict[str, QBitTorrent], Dict[Tuple[str, int], List[QBitTorrent]]]:
     qb = get_qbittorrent_client()
     if not qb.test_connection() or not qb.login():
@@ -700,6 +764,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--hashes", default="", help="Optional explicit hashes")
     p.add_argument("--hashes-file", default="", help="Optional hash file")
+    p.add_argument(
+        "--allowed-save-roots",
+        default=DEFAULT_ALLOWED_SAVE_ROOTS,
+        help=(
+            "Comma-separated absolute candidate roots allowed in drain selection "
+            f"(default: {DEFAULT_ALLOWED_SAVE_ROOTS})"
+        ),
+    )
+    p.add_argument(
+        "--forbid-save-roots",
+        default=DEFAULT_FORBID_SAVE_ROOTS,
+        help=(
+            "Comma-separated absolute candidate roots blocked in drain selection "
+            f"(default: {DEFAULT_FORBID_SAVE_ROOTS})"
+        ),
+    )
     p.add_argument(
         "--ignore-hashes",
         default="",
@@ -920,6 +1000,8 @@ def main() -> int:
     ignored_hashes_skipped = 0
     untrusted_verified_retests = 0
     tested_cache_fallback_retests = 0
+    root_policy_candidates_skipped = 0
+    root_policy_hashes_blocked = 0
 
     entries_by_hash = load_bucket_entries(index_path)
     if not entries_by_hash:
@@ -930,6 +1012,8 @@ def main() -> int:
     selected_hashes = parse_hash_tokens(args.hashes)
     selected_hashes.extend(read_hash_file(args.hashes_file))
     selected_hashes = list(dict.fromkeys(selected_hashes))
+    allowed_roots = parse_path_list(args.allowed_save_roots)
+    forbidden_roots = parse_path_list(args.forbid_save_roots)
     default_ignore_file = bucket_dir / "download-whitelist-hashes.txt"
     ignore_hashes = parse_hash_tokens(args.ignore_hashes)
     if str(args.ignore_hashes_file or "").strip():
@@ -950,6 +1034,12 @@ def main() -> int:
         ignored_hashes_skipped = max(0, before_ignore - len(selected_hashes))
     if args.limit > 0:
         selected_hashes = selected_hashes[: args.limit]
+
+    print(
+        "root_policy "
+        f"allowed_roots={','.join(allowed_roots) if allowed_roots else '<none>'} "
+        f"forbidden_roots={','.join(forbidden_roots) if forbidden_roots else '<none>'}"
+    )
 
     if not selected_hashes:
         print("summary selected=0 reason=no_hashes")
@@ -1003,6 +1093,8 @@ def main() -> int:
             "ignored_hashes_skipped": int(ignored_hashes_skipped),
             "untrusted_verified_retests": int(untrusted_verified_retests),
             "tested_cache_fallback_retests": int(tested_cache_fallback_retests),
+            "root_policy_candidates_skipped": int(root_policy_candidates_skipped),
+            "root_policy_hashes_blocked": int(root_policy_hashes_blocked),
         }
         payload = {
             "tool": "qb-stoppeddl-drain",
@@ -1017,6 +1109,10 @@ def main() -> int:
             "tested_cache_json": str(tested_cache_path),
             "ignored_hashes": ignore_hashes,
             "ignore_hashes_file": str(Path(args.ignore_hashes_file).expanduser()) if str(args.ignore_hashes_file or "").strip() else (str(default_ignore_file) if default_ignore_file.exists() else ""),
+            "root_policy": {
+                "allowed_roots": allowed_roots,
+                "forbidden_roots": forbidden_roots,
+            },
             "args": vars(args),
             "summary": summary,
             "entries": out_entries,
@@ -1077,6 +1173,11 @@ def main() -> int:
                 "hash_skip_reason": "",
             },
             "quick_prefilter": {
+                "skipped_candidates": [],
+            },
+            "root_policy": {
+                "allowed_roots": allowed_roots,
+                "forbidden_roots": forbidden_roots,
                 "skipped_candidates": [],
             },
             "global_db_candidates_added": 0,
@@ -1328,6 +1429,17 @@ def main() -> int:
         ranked: List[Tuple[float, float, str, Candidate, int, str]] = []
         tested_skipped_ranked: List[Tuple[float, float, str, Candidate, int, str]] = []
         for cand in cands.values():
+            root_ok, root_reason = root_policy_check(cand.path, allowed_roots, forbidden_roots)
+            if not root_ok:
+                root_policy_candidates_skipped += 1
+                row_out["root_policy"]["skipped_candidates"].append(
+                    {
+                        "path": cand.path,
+                        "source": cand.source,
+                        "reason": root_reason,
+                    }
+                )
+                continue
             key = canonical_alias(cand.path)
             prior_tested_meta = per_hash_tested.get(key, {})
             bad_meta = per_hash_bad.get(key, {})
@@ -1400,13 +1512,14 @@ def main() -> int:
             )
             row_out["quick_probe_report_json"] = quick_json_path
             if quick_by_path:
-                def quality_key(item: Tuple[float, float, str, Candidate, int, str]) -> Tuple[float, float, float, float, float]:
+                def quality_key(item: Tuple[float, float, str, Candidate, int, str]) -> Tuple[float, float, float, int, float, float]:
                     key = canonical_alias(item[3].path)
                     quick = quick_by_path.get(key, {})
                     exact = 1.0 if bool(quick.get("exact_tree")) else 0.0
                     quick_ratio = float(quick.get("quick_ratio", 0.0) or 0.0)
                     size_overlap = float(quick.get("size_overlap_ratio", 0.0) or 0.0)
-                    return (exact, quick_ratio, size_overlap, float(item[0]), float(item[1]))
+                    source_rank = source_preference_rank(item[3].source)
+                    return (exact, quick_ratio, size_overlap, int(source_rank), float(item[0]), float(item[1]))
 
                 existing_ranked.sort(key=quality_key, reverse=True)
                 filtered_ranked: List[Tuple[float, float, str, Candidate, int, str]] = []
@@ -1480,7 +1593,11 @@ def main() -> int:
 
         existing_paths = [c.path for c in ordered]
         if not existing_paths:
-            row_out["status"] = "no_candidate_paths_exist"
+            if row_out["root_policy"]["skipped_candidates"]:
+                row_out["status"] = "no_candidate_paths_after_root_policy"
+                root_policy_hashes_blocked += 1
+            else:
+                row_out["status"] = "no_candidate_paths_exist"
             row_out["classification"] = "e"
             class_counts["e"] += 1
             out_entries.append(row_out)
@@ -1684,13 +1801,16 @@ def main() -> int:
 
         tested_hash_meta["paths"] = tested_paths_map
 
-        def rank(v: dict) -> Tuple[int, int, float]:
+        def rank(v: dict) -> Tuple[int, int, float, int]:
             cls = str(v.get("classification", ""))
             cls_rank = {"exact_tree": 3, "close_match": 2, "partial_match": 1, "no_match": 0}.get(cls, 0)
+            src = source_by_path.get(str(v.get("path") or ""), "unknown")
+            src_rank = source_preference_rank(src)
             return (
                 1 if bool(v.get("verified")) else 0,
                 cls_rank,
                 float(v.get("verify_ratio", 0.0)),
+                int(src_rank),
             )
 
         best = sorted(verify_results, key=rank, reverse=True)[0]
@@ -1743,7 +1863,9 @@ def main() -> int:
         f"quick_prefilter_skipped={summary['quick_prefilter_skipped']} "
         f"ignored_hashes_skipped={summary['ignored_hashes_skipped']} "
         f"untrusted_verified_retests={summary['untrusted_verified_retests']} "
-        f"tested_cache_fallback_retests={summary['tested_cache_fallback_retests']}"
+        f"tested_cache_fallback_retests={summary['tested_cache_fallback_retests']} "
+        f"root_policy_candidates_skipped={summary['root_policy_candidates_skipped']} "
+        f"root_policy_hashes_blocked={summary['root_policy_hashes_blocked']}"
     )
     print(f"report_json={report_path}")
     print(f"latest_json={latest_report_path}")

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.3.5
-# Date:    2026-03-05
+# Version: 1.3.7
+# Date:    2026-03-06
 #
 # After each batch waits for state to settle, then checks the protected watch
 # scope (all torrents added before today) for downloading/broken flips. On any
@@ -10,7 +10,7 @@
 # Idempotent: only targets stoppedUP (100%) torrents; already-started ones
 # are stalledUP/uploading and are skipped automatically.
 #
-# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
+# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
 #   --apply        Execute changes (dry-run if omitted)
 #   --resume       Skip torrents already in stalledUP/uploading/queuedUP
 #   --daemon       Continuous watch loop: poll QB, run ramp when stoppedUP >= --min-batch
@@ -19,13 +19,15 @@
 #   --poll N       Daemon poll interval in seconds (default: 60)
 #   --cache        Use shared qB cache agent for torrents/info reads
 #   --cache-max-age N  Max cache age seconds when --cache is enabled (default: 15)
+#   --guard-stop-cooldown N  Suppress repeated stop requests per hash for N seconds in guard-only mode (default: 120)
+#   --guard-cooldown-state PATH  JSON state file for guard cooldown tracking
 #   --ignore-hashes CSV  Hashes/prefixes to ignore in watch/candidate checks
 #   --ignore-hashes-file PATH  Ignore hash file (default: /tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt if present)
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.5"
-SCRIPT_DATE="2026-03-05"
+SCRIPT_VERSION="1.3.7"
+SCRIPT_DATE="2026-03-06"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -44,6 +46,7 @@ MIN_BATCH=10
 POLL=60
 USE_CACHE=false
 CACHE_MAX_AGE=15
+GUARD_STOP_COOLDOWN=120
 CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qbit-cache-agent.py}"
 CACHE_CLIENT_ID="${SCRIPT_NAME}:$$"
 IGNORE_HASHES=""
@@ -52,7 +55,7 @@ DEFAULT_IGNORE_HASHES_FILE="${QBIT_IGNORE_HASHES_FILE:-/tmp/qb-stoppeddl-bucket-
 
 usage_short() {
   cat <<EOF
-Usage: $SCRIPT_NAME [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--ignore-hashes CSV] [--ignore-hashes-file PATH] [-h|--help]
+Usage: $SCRIPT_NAME [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH] [-h|--help]
 Try '$SCRIPT_NAME --help' for details.
 EOF
 }
@@ -82,8 +85,8 @@ Options:
 
   --guard-only
       Guard mode. Never starts torrents.
-      Scans protected scope and immediately stops any downloading-like state
-      (downloading/stalledDL/stoppedDL<100%) found there.
+      Scans protected scope and immediately stops active download states
+      (downloading/stalledDL/queuedDL/forcedDL/metaDL/checkingDL) found there.
       Useful to prevent unexpected downloads while you investigate.
 
   --min-batch N
@@ -104,6 +107,17 @@ Options:
       Maximum cache age in seconds when --cache is enabled.
       Smaller values request a fresher snapshot.
       Default: 15
+
+  --guard-stop-cooldown N
+      Guard-only mode: suppress repeated stop requests for the same hash for
+      N seconds. This reduces stop spam when hashes repeatedly re-enter
+      download-like states during churn.
+      Default: 120
+
+  --guard-cooldown-state PATH
+      JSON file used to track last stop timestamp per hash for cooldown logic.
+      Default:
+      ~/.logs/hashall/reports/qbit-triage/guard-stop-cooldown.json
 
   --ignore-hashes CSV
       Hashes/prefixes to exclude from watch and candidate logic.
@@ -133,6 +147,9 @@ Examples:
   # Guard-only daemon: never starts, only auto-stops download-like flips
   bin/qbit-start-seeding-gradual.sh --daemon --guard-only --apply --poll 5 --cache --cache-max-age 5
 
+  # Guard-only with 5-minute stop cooldown per hash
+  bin/qbit-start-seeding-gradual.sh --daemon --guard-only --apply --poll 5 --guard-stop-cooldown 300
+
   # Ignore a known legacy downloader by hash prefix
   bin/qbit-start-seeding-gradual.sh --daemon --apply --ignore-hashes 102b7bf38155
 EOF
@@ -154,6 +171,8 @@ while [[ $# -gt 0 ]]; do
     --poll)       POLL="$2"; shift 2 ;;
     --cache)      USE_CACHE=true; shift ;;
     --cache-max-age) CACHE_MAX_AGE="$2"; shift 2 ;;
+    --guard-stop-cooldown) GUARD_STOP_COOLDOWN="$2"; shift 2 ;;
+    --guard-cooldown-state) GUARD_COOLDOWN_STATE="$2"; shift 2 ;;
     --ignore-hashes) IGNORE_HASHES="$2"; shift 2 ;;
     --ignore-hashes-file) IGNORE_HASHES_FILE="$2"; shift 2 ;;
     *)
@@ -170,6 +189,10 @@ if [[ "$DAEMON" == true ]]; then
 fi
 if ! [[ "$CACHE_MAX_AGE" =~ ^[0-9]+$ ]] || [[ "$CACHE_MAX_AGE" -lt 0 ]]; then
   echo "--cache-max-age must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "$GUARD_STOP_COOLDOWN" =~ ^[0-9]+$ ]] || [[ "$GUARD_STOP_COOLDOWN" -lt 0 ]]; then
+  echo "--guard-stop-cooldown must be a non-negative integer" >&2
   exit 2
 fi
 if [[ "$USE_CACHE" == true && ! -f "$CACHE_AGENT" ]]; then
@@ -190,6 +213,7 @@ TMPIGNORE=$(mktemp /tmp/qb_sg_ignore.XXXXXX)   # normalized ignore hashes/prefix
 # Persistent daemon log (only used when --daemon is active)
 DAEMON_LOG="$LOGDIR/daemon.log"
 DAEMON_HALT_RESET="$LOGDIR/daemon-halt-reset"
+GUARD_COOLDOWN_STATE="${GUARD_COOLDOWN_STATE:-$LOGDIR/guard-stop-cooldown.json}"
 
 # Per-run log file; set once here for one-shot mode, overridden per-run in daemon mode
 LOG="$LOGDIR/start-seeding-gradual-$(date +%Y%m%d-%H%M%S).log"
@@ -658,7 +682,7 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
-# run_guard_pass — never starts torrents; only detects/stops downloading-like
+# run_guard_pass — never starts torrents; only detects/stops active download
 # in protected watch scope.
 # Returns:
 #   0 => clean (no downloading-like in protected scope)
@@ -693,7 +717,7 @@ for t in data:
         continue
     s = t.get("state", "")
     p = t.get("progress", 0)
-    if s in download_bad or (s == 'stoppedDL' and p < 0.9999):
+    if s in download_bad or s in {'queuedDL', 'forcedDL', 'metaDL', 'checkingDL'}:
         bad.append([h, s, p])
 print(json.dumps({"downloading": bad}))
 PYEOF
@@ -730,10 +754,85 @@ PYEOF
   bad_hashes="$(echo "$bad_hashes" | awk -F'HASHES:' 'NF>1{print $2}' | tail -n1)"
 
   if [[ "$APPLY" == true && -n "$bad_hashes" ]]; then
-    qb_login 2>/dev/null || true
-    curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
-      --data-urlencode "hashes=$bad_hashes" >/dev/null 2>&1 || true
-    log "guard: stop HTTP sent for: $bad_hashes"
+    local stop_hashes="$bad_hashes"
+    local suppressed_hashes=""
+    if [[ "$GUARD_STOP_COOLDOWN" -gt 0 ]]; then
+      local cooldown_lines
+      cooldown_lines="$(python3 - "$GUARD_COOLDOWN_STATE" "$GUARD_STOP_COOLDOWN" "$bad_hashes" << 'PYEOF'
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1]).expanduser()
+cooldown = max(0, int(sys.argv[2]))
+raw_hashes = str(sys.argv[3] or "")
+hashes = [h.strip().lower() for h in raw_hashes.split("|") if h.strip()]
+now = int(time.time())
+
+state = {}
+if state_path.exists():
+    try:
+        obj = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(obj, dict):
+            state = {str(k).lower(): int(v or 0) for k, v in obj.items()}
+    except Exception:
+        state = {}
+
+stop = []
+supp = []
+for h in hashes:
+    last = int(state.get(h, 0) or 0)
+    if (now - last) >= cooldown:
+        stop.append(h)
+    else:
+        supp.append(h)
+
+for h in stop:
+    state[h] = now
+
+ttl = max(3600, cooldown * 20)
+state = {
+    str(k).lower(): int(v or 0)
+    for k, v in state.items()
+    if now - int(v or 0) <= ttl
+}
+
+state_path.parent.mkdir(parents=True, exist_ok=True)
+tmp = state_path.with_suffix(state_path.suffix + ".tmp")
+tmp.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(str(tmp), str(state_path))
+
+print("STOP:" + "|".join(stop))
+print("SUPP:" + "|".join(supp))
+PYEOF
+)"
+      if [[ -n "$cooldown_lines" ]]; then
+        stop_hashes="$(echo "$cooldown_lines" | awk -F'STOP:' 'NF>1{print $2}' | tail -n1)"
+        suppressed_hashes="$(echo "$cooldown_lines" | awk -F'SUPP:' 'NF>1{print $2}' | tail -n1)"
+      else
+        log "guard: cooldown parser produced no output; falling back to stop all detected hashes"
+        stop_hashes="$bad_hashes"
+      fi
+      local stop_count=0
+      local suppress_count=0
+      if [[ -n "$stop_hashes" ]]; then
+        stop_count="$(awk -F'|' '{print NF}' <<<"$stop_hashes")"
+      fi
+      if [[ -n "$suppressed_hashes" ]]; then
+        suppress_count="$(awk -F'|' '{print NF}' <<<"$suppressed_hashes")"
+      fi
+      log "guard: cooldown=${GUARD_STOP_COOLDOWN}s stop_now=${stop_count} suppressed=${suppress_count} state=${GUARD_COOLDOWN_STATE}"
+    fi
+    if [[ -n "$stop_hashes" ]]; then
+      qb_login 2>/dev/null || true
+      curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
+        --data-urlencode "hashes=$stop_hashes" >/dev/null 2>&1 || true
+      log "guard: stop HTTP sent for: $stop_hashes"
+    else
+      log "guard: stop suppressed by cooldown (no stop HTTP sent this pass)"
+    fi
   elif [[ "$APPLY" != true ]]; then
     log "guard: [dry-run] would stop detected downloading-like hashes"
   fi
@@ -764,7 +863,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "════════════════════════════════════════════════════════════"
 echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
+echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  guard_stop_cooldown=${GUARD_STOP_COOLDOWN}s  guard_cooldown_state=${GUARD_COOLDOWN_STATE}  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
 echo "daemon log: $DAEMON_LOG"
 echo "reset file:  $DAEMON_HALT_RESET"
 echo "════════════════════════════════════════════════════════════"
@@ -772,7 +871,7 @@ echo "════════════════════════�
 {
   echo "════════════════════════════════════════════════════════════"
   echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-  echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
+  echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  guard_stop_cooldown=${GUARD_STOP_COOLDOWN}s  guard_cooldown_state=${GUARD_COOLDOWN_STATE}  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
   echo "════════════════════════════════════════════════════════════"
 } >> "$DAEMON_LOG"
 

@@ -20,10 +20,13 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import get_qbittorrent_client
 
-SEMVER = "0.2.4"
+SEMVER = "0.2.7"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
+DEFAULT_ALLOWED_SAVE_ROOTS = "/pool/media,/pool/data"
+DEFAULT_FORBID_SAVE_ROOTS = "/data/media,/stash/media"
+DEFAULT_ROLLBACK_LEDGER_NAME = "apply-rollback-ledger.jsonl"
 SAFE_STATES = {"stalledup", "uploading", "stoppedup", "queuedup", "forcedup", "checkingup"}
 DANGEROUS_DOWNLOAD_STATES = {
     "downloading",
@@ -45,6 +48,12 @@ class ApplyRow:
     location: str
     verified: bool
     ratio: float
+
+
+@dataclass(frozen=True)
+class BuildPlanResult:
+    rows: List[ApplyRow]
+    root_policy_rejected: List[Dict[str, str]]
 
 
 class Bencode:
@@ -130,6 +139,12 @@ def emit_start() -> str:
     return now
 
 
+def append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj, sort_keys=False) + "\n")
+
+
 def parse_hash_tokens(text: str) -> List[str]:
     if not text:
         return []
@@ -190,6 +205,49 @@ def parse_states(text: str) -> Set[str]:
         if state:
             out.add(state)
     return out
+
+
+def parse_path_list(text: str) -> List[str]:
+    raw = str(text or "")
+    for ch in ("|", ",", "\n", "\t"):
+        raw = raw.replace(ch, " ")
+    out: List[str] = []
+    seen: Set[str] = set()
+    for tok in raw.split():
+        p = str(tok or "").strip()
+        if not p:
+            continue
+        if p != "/" and p.endswith("/"):
+            p = p.rstrip("/")
+        if not p.startswith("/"):
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def is_under_root(path: str, root: str) -> bool:
+    p = str(path or "").strip()
+    r = str(root or "").strip()
+    if not p or not r:
+        return False
+    if r == "/":
+        return p.startswith("/")
+    return p == r or p.startswith(r + "/")
+
+
+def root_policy_check(path: str, allowed_roots: List[str], forbidden_roots: List[str]) -> Tuple[bool, str]:
+    p = str(path or "").strip()
+    if not p or not p.startswith("/"):
+        return False, "path_not_absolute"
+    for root in forbidden_roots:
+        if is_under_root(p, root):
+            return False, f"forbidden_root:{root}"
+    if allowed_roots and not any(is_under_root(p, root) for root in allowed_roots):
+        return False, "outside_allowed_roots"
+    return True, "ok"
 
 
 def canonical_alias(path: str) -> str:
@@ -292,8 +350,11 @@ def build_plan(
     allowed_hashes: Set[str],
     require_verified: bool,
     min_ratio: float,
-) -> List[ApplyRow]:
+    allowed_roots: List[str],
+    forbidden_roots: List[str],
+) -> BuildPlanResult:
     rows: List[ApplyRow] = []
+    rejected: List[Dict[str, str]] = []
     for entry in drain_obj.get("entries", []):
         h = str(entry.get("hash") or "").lower().strip()
         if not h:
@@ -313,10 +374,31 @@ def build_plan(
         raw_path = str(entry.get("recommended_path") or best.get("path") or "").strip()
         if not raw_path:
             continue
+        # Safety gate: for single-file torrents, candidate basename must match
+        # torrent name exactly. This blocks same-size false positives.
+        expected_files = int(best.get("expected_files", 0) or 0)
+        if expected_files == 1:
+            torrent_name = Path(str(entry.get("name") or "")).name
+            candidate_name = Path(raw_path).name
+            if torrent_name and candidate_name and candidate_name != torrent_name:
+                continue
         resolved = resolve_existing(raw_path)
         if not resolved:
             continue
         location, _ = decide_location(resolved, str(entry.get("name") or ""))
+        ok_path, reason_path = root_policy_check(resolved, allowed_roots, forbidden_roots)
+        ok_loc, reason_loc = root_policy_check(location, allowed_roots, forbidden_roots)
+        if not ok_path or not ok_loc:
+            rejected.append(
+                {
+                    "hash": h,
+                    "name": str(entry.get("name") or ""),
+                    "recommended_path": resolved,
+                    "location": location,
+                    "reason": reason_path if not ok_path else reason_loc,
+                }
+            )
+            continue
         rows.append(
             ApplyRow(
                 torrent_hash=h,
@@ -329,7 +411,7 @@ def build_plan(
                 ratio=ratio,
             )
         )
-    return rows
+    return BuildPlanResult(rows=rows, root_policy_rejected=rejected)
 
 
 def path_equivalent(a: str, b: str) -> bool:
@@ -446,11 +528,14 @@ def wait_recheck_terminal(
     show_progress: bool,
     progress_interval: float,
     protect_download: bool,
+    transient_miss_retries: int,
     item: Dict[str, Any],
 ) -> Tuple[str, str]:
     deadline = time.monotonic() + max(1.0, float(timeout_seconds))
     check_start = time.monotonic()
     max_idle = max(0.5, float(progress_interval))
+    allowed_transient_misses = max(0, int(transient_miss_retries))
+    transient_miss_count = 0
     last_emit_at = 0.0
     last_emit_state = ""
     last_emit_prog = -1.0
@@ -461,7 +546,28 @@ def wait_recheck_terminal(
     while time.monotonic() < deadline:
         info = qb.get_torrent_info(torrent_hash)
         if info is None:
-            return "failed", f"postcheck_not_found:{qb.last_error or 'unknown'}"
+            transient_miss_count += 1
+            err = str(qb.last_error or "unknown")
+            item["steps"].append(
+                {
+                    "step": "poll_missing",
+                    "error": err,
+                    "attempt": transient_miss_count,
+                    "allowed": allowed_transient_misses,
+                    "ts": ts_iso(),
+                }
+            )
+            if transient_miss_count <= allowed_transient_misses:
+                if show_progress:
+                    print(
+                        f"  poll missing transient attempt={transient_miss_count}/{allowed_transient_misses} "
+                        f"error={err}",
+                        flush=True,
+                    )
+                time.sleep(max(0.2, float(poll_seconds)))
+                continue
+            return "failed", f"postcheck_not_found_after_retries:{err}"
+        transient_miss_count = 0
         state = str(info.state or "").lower()
         prog = float(info.progress or 0.0)
         item["steps"].append({"step": "poll", "state": state, "progress": prog, "ts": ts_iso()})
@@ -519,6 +625,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--hashes", default="", help="Optional explicit hashes filter")
     p.add_argument("--hashes-file", default="", help="Optional hash file filter")
+    p.add_argument(
+        "--allowed-save-roots",
+        default=DEFAULT_ALLOWED_SAVE_ROOTS,
+        help=(
+            "Comma-separated absolute save roots allowed for recommended paths/locations "
+            f"(default: {DEFAULT_ALLOWED_SAVE_ROOTS})"
+        ),
+    )
+    p.add_argument(
+        "--forbid-save-roots",
+        default=DEFAULT_FORBID_SAVE_ROOTS,
+        help=(
+            "Comma-separated absolute save roots blocked for recommended paths/locations "
+            f"(default: {DEFAULT_FORBID_SAVE_ROOTS})"
+        ),
+    )
+    p.add_argument(
+        "--fail-on-root-violations",
+        dest="fail_on_root_violations",
+        action="store_true",
+        help="Abort apply when drain rows violate root policy (default: enabled)",
+    )
+    p.add_argument(
+        "--no-fail-on-root-violations",
+        dest="fail_on_root_violations",
+        action="store_false",
+        help="Do not abort apply when root-policy violations are present",
+    )
+    p.set_defaults(fail_on_root_violations=True)
     p.add_argument(
         "--ignore-hashes",
         default="",
@@ -599,9 +734,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-wait-recheck",
         dest="wait_recheck",
         action="store_false",
-        help="Do not wait for recheck; dispatch and continue (default)",
+        help="Do not wait for recheck; dispatch and continue (not recommended)",
     )
-    p.set_defaults(wait_recheck=False)
+    p.set_defaults(wait_recheck=True)
     p.add_argument(
         "--show-poll-progress",
         dest="show_poll_progress",
@@ -619,6 +754,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=10.0,
         help="Max seconds between poll heartbeat lines when state/progress is unchanged (default: 10)",
+    )
+    p.add_argument(
+        "--transient-miss-retries",
+        type=int,
+        default=6,
+        help="Consecutive get_torrent_info misses tolerated during wait-recheck (default: 6)",
     )
     p.set_defaults(show_poll_progress=True)
     p.add_argument(
@@ -648,6 +789,27 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: <bucket>/reports/apply-last-completion.json)"
         ),
     )
+    p.add_argument(
+        "--rollback-ledger",
+        default="",
+        help=(
+            "Optional rollback ledger JSONL path "
+            "(default: <bucket>/reports/" + DEFAULT_ROLLBACK_LEDGER_NAME + ")"
+        ),
+    )
+    p.add_argument(
+        "--rollback-ledger-enabled",
+        dest="rollback_ledger_enabled",
+        action="store_true",
+        help="Write rollback ledger entries on apply mutations (default: enabled)",
+    )
+    p.add_argument(
+        "--no-rollback-ledger",
+        dest="rollback_ledger_enabled",
+        action="store_false",
+        help="Disable rollback ledger writes",
+    )
+    p.set_defaults(rollback_ledger_enabled=True)
     return p
 
 
@@ -675,6 +837,25 @@ def main() -> int:
         else reports_dir / "apply-last-completion.json"
     )
     completion_path.parent.mkdir(parents=True, exist_ok=True)
+    rollback_ledger_path = (
+        Path(args.rollback_ledger).expanduser()
+        if str(args.rollback_ledger or "").strip()
+        else reports_dir / DEFAULT_ROLLBACK_LEDGER_NAME
+    )
+    rollback_ledger_enabled = bool(args.rollback_ledger_enabled)
+    rollback_ledger_written = 0
+
+    def append_rollback_entry(entry: Dict[str, Any]) -> None:
+        nonlocal rollback_ledger_written
+        if not bool(args.apply):
+            return
+        if not rollback_ledger_enabled:
+            return
+        try:
+            append_jsonl(rollback_ledger_path, entry)
+            rollback_ledger_written += 1
+        except Exception as e:
+            print(f"WARN rollback_ledger_write_failed path={rollback_ledger_path} error={e}", flush=True)
 
     try:
         drain_obj = json.loads(drain_path.read_text(encoding="utf-8"))
@@ -683,6 +864,8 @@ def main() -> int:
         return 2
 
     allow_classes = parse_classes(args.allow_class)
+    allowed_roots = parse_path_list(args.allowed_save_roots)
+    forbidden_roots = parse_path_list(args.forbid_save_roots)
     allow_hashes = set(parse_hash_tokens(args.hashes) + read_hash_file(args.hashes_file))
     default_ignore_file = bucket_dir / "download-whitelist-hashes.txt"
     ignore_hashes = parse_hash_tokens(args.ignore_hashes)
@@ -692,13 +875,17 @@ def main() -> int:
         ignore_hashes.extend(read_hash_file(str(default_ignore_file)))
     ignore_hashes = list(dict.fromkeys(ignore_hashes))
     ignore_set = set(ignore_hashes)
-    plan = build_plan(
+    plan_result = build_plan(
         drain_obj=drain_obj,
         allow_classes=allow_classes,
         allowed_hashes=allow_hashes,
         require_verified=bool(args.require_verified),
         min_ratio=float(args.min_ratio),
+        allowed_roots=allowed_roots,
+        forbidden_roots=forbidden_roots,
     )
+    plan = list(plan_result.rows)
+    root_policy_rejected = list(plan_result.root_policy_rejected)
     ignored_plan = 0
     if ignore_set:
         before_ignore = len(plan)
@@ -710,8 +897,63 @@ def main() -> int:
     print(
         f"plan report={drain_path} apply={bool(args.apply)} "
         f"selected={len(plan)} allow_class={','.join(sorted(allow_classes))} min_ratio={float(args.min_ratio):.4f} "
-        f"ignored={ignored_plan}"
+        f"ignored={ignored_plan} root_policy_rejected={len(root_policy_rejected)} "
+        f"allowed_roots={','.join(allowed_roots) if allowed_roots else '<none>'} "
+        f"forbidden_roots={','.join(forbidden_roots) if forbidden_roots else '<none>'}"
     , flush=True)
+    if root_policy_rejected:
+        print("root_policy_rejections:", flush=True)
+        for rec in root_policy_rejected[:20]:
+            print(
+                f"  hash={str(rec.get('hash') or '')[:12]} reason={rec.get('reason','unknown')} "
+                f"location={rec.get('location','')}",
+                flush=True,
+            )
+        if len(root_policy_rejected) > 20:
+            print(f"  ... {len(root_policy_rejected) - 20} more", flush=True)
+    if bool(args.apply) and bool(args.fail_on_root_violations) and root_policy_rejected:
+        payload = {
+            "tool": "qb-stoppeddl-apply",
+            "script": SCRIPT_NAME,
+            "semver": SEMVER,
+            "generated_at": started,
+            "drain_report": str(drain_path),
+            "bucket_dir": str(bucket_dir),
+            "ignored_hashes": ignore_hashes,
+            "ignore_hashes_file": str(Path(args.ignore_hashes_file).expanduser()) if str(args.ignore_hashes_file or "").strip() else (str(default_ignore_file) if default_ignore_file.exists() else ""),
+            "args": vars(args),
+            "summary": {
+                "mode": "root_policy_blocked",
+                "planned": int(len(plan)),
+                "applied": 0,
+                "ok": 0,
+                "failed": 0,
+                "blocked": 0,
+                "recheck_dispatched": 0,
+                "skipped_live_state": 0,
+                "skipped_ignored": int(ignored_plan),
+                "fr_needed": 0,
+                "fr_patched": 0,
+                "fr_patch_failed": 0,
+                "root_policy_rejected": int(len(root_policy_rejected)),
+                "rollback_ledger_written": int(rollback_ledger_written),
+            },
+            "root_policy": {
+                "allowed_roots": allowed_roots,
+                "forbidden_roots": forbidden_roots,
+                "rejected": root_policy_rejected,
+            },
+            "rollback_ledger": {
+                "enabled": bool(rollback_ledger_enabled),
+                "path": str(rollback_ledger_path),
+                "written": int(rollback_ledger_written),
+            },
+            "entries": [],
+        }
+        report_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print("ERROR root_policy_violations_detected; refusing to apply", flush=True)
+        print(f"report_json={report_path}", flush=True)
+        return 4
 
     fr_dir = Path(args.fastresume_dir).expanduser()
     fr_probe_by_hash: Dict[str, Dict[str, Any]] = {}
@@ -725,13 +967,14 @@ def main() -> int:
         if not bool(probe.get("parse_ok")):
             fr_probe_errors += 1
 
-    selected_mode = str(args.ops_mode or "auto").strip().lower()
-    if selected_mode == "auto":
-        selected_mode = "fastresume_batch" if fr_needed > 0 else "api_nowait"
-    elif selected_mode == "fastresume":
-        selected_mode = "fastresume_batch"
+    selected_ops = str(args.ops_mode or "auto").strip().lower()
+    if selected_ops == "auto":
+        selected_ops = "fastresume_batch" if fr_needed > 0 else "api"
+    elif selected_ops == "fastresume":
+        selected_ops = "fastresume_batch"
     else:
-        selected_mode = "api_nowait"
+        selected_ops = "api"
+    selected_mode = f"{selected_ops}_{'wait' if bool(args.wait_recheck) else 'nowait'}"
 
     print(
         f"mode selected={selected_mode} fr_needed={fr_needed}/{len(plan)} fr_probe_errors={fr_probe_errors}",
@@ -771,6 +1014,8 @@ def main() -> int:
         "fr_needed": fr_needed,
         "fr_patched": 0,
         "fr_patch_failed": 0,
+        "root_policy_rejected": int(len(root_policy_rejected)),
+        "rollback_ledger_written": 0,
     }
 
     if not args.apply:
@@ -790,6 +1035,8 @@ def main() -> int:
             "fr_needed": int(counts["fr_needed"]),
             "fr_patched": 0,
             "fr_patch_failed": 0,
+            "root_policy_rejected": int(counts["root_policy_rejected"]),
+            "rollback_ledger_written": int(counts["rollback_ledger_written"]),
         }
     else:
         qb = get_qbittorrent_client()
@@ -798,6 +1045,7 @@ def main() -> int:
             return 2
 
         active_plan = list(plan)
+        state_map: Dict[str, Any] = {}
         if bool(args.require_live_state) and active_plan:
             allowed_live_states = parse_states(args.live_allow_states)
             if not allowed_live_states:
@@ -840,7 +1088,7 @@ def main() -> int:
 
         if not active_plan:
             print("no active hashes remain after live-state gate; nothing to apply", flush=True)
-        elif selected_mode == "fastresume_batch":
+        elif selected_ops == "fastresume_batch":
             if not fr_dir.exists():
                 print(f"ERROR fastresume_dir_not_found path={fr_dir}", flush=True)
                 return 2
@@ -903,6 +1151,25 @@ def main() -> int:
                         backup_path = fr_path.with_name(fr_path.name + backup_suffix)
                         if backup_path.exists():
                             patched_backups.append((fr_path, backup_path))
+                        append_rollback_entry(
+                            {
+                                "ts": ts_iso(),
+                                "run_started_at": started,
+                                "tool": SCRIPT_NAME,
+                                "semver": SEMVER,
+                                "action": "fastresume_patch",
+                                "mode": selected_mode,
+                                "hash": row.torrent_hash,
+                                "name": row.name,
+                                "classification": row.classification,
+                                "source": row.source,
+                                "from_save_path": str(item.get("fastresume_probe", {}).get("save_path") or ""),
+                                "to_save_path": row.location,
+                                "drain_report": str(drain_path),
+                                "apply_report_json": str(report_path),
+                                "detail": str(patch_msg or ""),
+                            }
+                        )
 
                 if batch_failed:
                     # Roll back all patches applied before the failure.
@@ -981,6 +1248,7 @@ def main() -> int:
                                 show_progress=bool(args.show_poll_progress),
                                 progress_interval=float(args.progress_interval),
                                 protect_download=bool(args.protect_download),
+                                transient_miss_retries=int(args.transient_miss_retries),
                                 item=item,
                             )
                             item["status"] = status
@@ -1004,14 +1272,43 @@ def main() -> int:
                 )
                 print(f"  path={row.recommended_path}", flush=True)
                 print(f"  location={row.location}", flush=True)
+                live = state_map.get(row.torrent_hash)
+                if live is None:
+                    live = qb.get_torrent_info(row.torrent_hash)
+                current_save_path = str(getattr(live, "save_path", "") or "")
                 ok_set = qb.set_location(row.torrent_hash, row.location)
-                item["steps"].append({"step": "setLocation", "ok": bool(ok_set), "location": row.location})
+                item["steps"].append(
+                    {
+                        "step": "setLocation",
+                        "ok": bool(ok_set),
+                        "location": row.location,
+                        "from_save_path": current_save_path,
+                    }
+                )
                 if not ok_set:
                     item["status"] = "failed"
                     item["detail"] = f"setLocation_failed:{qb.last_error or 'unknown'}"
                     counts["failed"] += 1
                     print(f"  FAIL setLocation error={qb.last_error or 'unknown'}", flush=True)
                     continue
+                append_rollback_entry(
+                    {
+                        "ts": ts_iso(),
+                        "run_started_at": started,
+                        "tool": SCRIPT_NAME,
+                        "semver": SEMVER,
+                        "action": "set_location",
+                        "mode": selected_mode,
+                        "hash": row.torrent_hash,
+                        "name": row.name,
+                        "classification": row.classification,
+                        "source": row.source,
+                        "from_save_path": current_save_path,
+                        "to_save_path": row.location,
+                        "drain_report": str(drain_path),
+                        "apply_report_json": str(report_path),
+                    }
+                )
                 ok_recheck = qb.recheck_torrent(row.torrent_hash)
                 item["steps"].append({"step": "recheck", "ok": bool(ok_recheck)})
                 if not ok_recheck:
@@ -1034,6 +1331,7 @@ def main() -> int:
                     show_progress=bool(args.show_poll_progress),
                     progress_interval=float(args.progress_interval),
                     protect_download=bool(args.protect_download),
+                    transient_miss_retries=int(args.transient_miss_retries),
                     item=item,
                 )
                 item["status"] = status
@@ -1048,6 +1346,7 @@ def main() -> int:
                     counts["failed"] += 1
                     print(f"  FAIL {detail}", flush=True)
 
+        counts["rollback_ledger_written"] = int(rollback_ledger_written)
         summary = {
             "mode": selected_mode,
             "planned": int(counts["planned"]),
@@ -1061,6 +1360,8 @@ def main() -> int:
             "fr_needed": int(counts["fr_needed"]),
             "fr_patched": int(counts["fr_patched"]),
             "fr_patch_failed": int(counts["fr_patch_failed"]),
+            "root_policy_rejected": int(counts["root_policy_rejected"]),
+            "rollback_ledger_written": int(counts["rollback_ledger_written"]),
         }
     payload = {
         "tool": "qb-stoppeddl-apply",
@@ -1073,6 +1374,16 @@ def main() -> int:
         "ignore_hashes_file": str(Path(args.ignore_hashes_file).expanduser()) if str(args.ignore_hashes_file or "").strip() else (str(default_ignore_file) if default_ignore_file.exists() else ""),
         "args": vars(args),
         "summary": summary,
+        "root_policy": {
+            "allowed_roots": allowed_roots,
+            "forbidden_roots": forbidden_roots,
+            "rejected": root_policy_rejected,
+        },
+        "rollback_ledger": {
+            "enabled": bool(rollback_ledger_enabled),
+            "path": str(rollback_ledger_path),
+            "written": int(rollback_ledger_written),
+        },
         "entries": out_rows,
     }
     report_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -1094,6 +1405,11 @@ def main() -> int:
         "bucket_dir": str(bucket_dir),
         "mode": str(summary.get("mode") or ""),
         "summary": summary,
+        "rollback_ledger": {
+            "enabled": bool(rollback_ledger_enabled),
+            "path": str(rollback_ledger_path),
+            "written": int(rollback_ledger_written),
+        },
         "hashes_by_status": hashes_by_status,
     }
     completion_path.write_text(json.dumps(completion_payload, indent=2) + "\n", encoding="utf-8")
@@ -1104,10 +1420,14 @@ def main() -> int:
         f"skipped_live_state={summary.get('skipped_live_state',0)} "
         f"skipped_ignored={summary.get('skipped_ignored',0)} "
         f"blocked={summary['blocked']} fr_needed={summary.get('fr_needed',0)} "
-        f"fr_patched={summary.get('fr_patched',0)} fr_patch_failed={summary.get('fr_patch_failed',0)}"
+        f"fr_patched={summary.get('fr_patched',0)} fr_patch_failed={summary.get('fr_patch_failed',0)} "
+        f"root_policy_rejected={summary.get('root_policy_rejected',0)} "
+        f"rollback_ledger_written={summary.get('rollback_ledger_written',0)}"
     , flush=True)
     print(f"report_json={report_path}", flush=True)
     print(f"completion_json={completion_path}", flush=True)
+    if bool(args.apply) and rollback_ledger_enabled:
+        print(f"rollback_ledger_jsonl={rollback_ledger_path}", flush=True)
     return 0
 
 
