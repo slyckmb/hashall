@@ -1,6 +1,6 @@
 # Run State (Canonical)
 
-Last updated: 2026-03-05
+Last updated: 2026-03-06
 Status: canonical living state
 
 ## Purpose
@@ -51,6 +51,31 @@ Single living document for current operational status, handoff context, and next
 - Step 3 / 3.5 aggregate per-device failures and exit non-zero on partial failure.
 - `hashall stats --hash-coverage` path for negative `device_id` tables is fixed in branch code
   by quoting dynamic SQLite identifiers (e.g. `files_-905882091`).
+
+## Incident Update (2026-03-06 08:45 EST)
+
+- Pilot failure root cause is confirmed:
+  - active guard daemon (`qbit-start-seeding-gradual.sh --daemon --guard-only`) stopped hashes in `checkingDL` during repair recheck, producing false `postcheck_timeout`.
+  - evidence:
+    - apply pilot report: `/tmp/qb-stoppeddl-bucket-live/reports/apply-pilot-r2-20260306-074556.json`
+    - guard stop log: `/home/michael/.logs/hashall/reports/qbit-triage/start-seeding-gradual-guard-20260306-074602.log`
+- New hardening now on this branch/worktree:
+  - `bin/qbit-start-seeding-gradual.sh` `v1.3.8`
+    - `checkingDL` is no longer treated as dangerous by default.
+    - supports repair recheck allowlist file: `/tmp/qb-stoppeddl-bucket-live/guard-recheck-allowlist.json`.
+    - optional `--guard-include-checkingdl` retains old strict behavior when explicitly requested.
+  - `bin/qb-stoppeddl-apply.py` `v0.2.9`
+    - preflight detection for active gradual/guard daemon; default fail-fast block (`mode=guard_daemon_blocked`).
+    - explicit override available via `--allow-guard-daemon`.
+    - guard allowlist add/remove around recheck waits (`--guard-allowlist-*`).
+    - enriched summary/report telemetry (`guard_daemon_detected`, guard daemon records).
+- Pilot validation after patch:
+  - preflight block works:
+    - `/tmp/qb-stoppeddl-bucket-live/reports/apply-pilot-guard-preflight-20260306-083911.json`
+  - override pilot records allowlist add/remove and guard presence:
+    - `/tmp/qb-stoppeddl-bucket-live/reports/apply-pilot-guard-allow-20260306-084229.json`
+- Critical operational caveat:
+  - currently running daemon PID `115681` was started before these script edits and still uses old in-memory behavior (`checkingDL` stop). Restart daemon after deploying updated script to activate new guard logic.
 
 ## Current Long-Running Operation
 
