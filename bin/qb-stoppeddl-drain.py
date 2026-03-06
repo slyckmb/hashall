@@ -24,7 +24,7 @@ if str(SRC_DIR) not in sys.path:
 
 from hashall.qbittorrent import QBittorrentClient, QBitTorrent, get_qbittorrent_client
 
-SEMVER = "0.1.22"
+SEMVER = "0.1.23"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_ALLOWED_SAVE_ROOTS = "/pool/media,/pool/data"
 DEFAULT_FORBID_SAVE_ROOTS = "/data/media,/stash/media"
@@ -1095,9 +1095,14 @@ def main() -> int:
     filesystem_candidates_skipped = 0
     filesystem_hashes_blocked = 0
 
-    entries_by_hash = load_bucket_entries(index_path)
-    if not entries_by_hash:
-        print(f"ERROR bucket_index_missing_or_empty path={index_path}")
+    if not index_path.exists():
+        print(f"ERROR bucket_index_missing path={index_path}")
+        print("hint: run bin/qb-stoppeddl-bucket.py first")
+        return 2
+    try:
+        entries_by_hash = load_bucket_entries(index_path)
+    except Exception as exc:
+        print(f"ERROR bucket_index_invalid path={index_path} err={exc}")
         print("hint: run bin/qb-stoppeddl-bucket.py first")
         return 2
 
