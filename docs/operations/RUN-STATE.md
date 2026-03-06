@@ -67,6 +67,45 @@ Single living document for current operational status, handoff context, and next
 - Rollout caveat:
   - migration has **not** been intentionally forced against live `~/.hashall/catalog.db` in this turn; it will apply on next write-open via normal migration path.
 
+## fs_uuid Identity Repair Execution (2026-03-06 13:20 EST)
+
+- New repair tooling added in this worktree:
+  - `hashall doctor repair-identity`
+  - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
+  - `src/hashall/identity_repair.py`
+- Safety hardening in repair logic:
+  - fail-closed inference (no `/pool/media` <-> `/pool/data` aliasing)
+  - optional bind alias only for `/data/media` <-> `/stash/media`
+  - same-run convergence for dependent torrent repairs (`torrent_linked_payload_pending_repair`)
+  - report filename collision fixed (microsecond timestamp suffix)
+- Version bump:
+  - `hashall`: `0.4.133`
+- Live catalog execution (with snapshots before each apply):
+  - snapshot: `out/reports/fsuuid-identity/catalog-pre-identity-repair-20260306-131658.db`
+  - apply pass: strict (`--no-allow-bind-alias`) -> `83` actions
+    - report: `out/reports/fsuuid-identity/identity-repair-apply-20260306-131703.json`
+  - apply pass: strict follow-up -> `16` actions
+    - report: `out/reports/fsuuid-identity/identity-repair-apply-20260306-131827-569679.json`
+  - apply pass: bind-alias lane (validated same `st_dev` for `/data/media` and `/stash/media`) -> `13` actions
+    - report: `out/reports/fsuuid-identity/identity-repair-apply-20260306-131853-274411.json`
+  - apply pass: linked-incomplete lane -> `2` actions
+    - report: `out/reports/fsuuid-identity/identity-repair-apply-20260306-131914-013677.json`
+  - total identity repairs applied: `114`
+- Post-apply audit snapshot:
+  - report: `out/reports/fsuuid-identity/identity-drift-audit-post-20260306-1319.json`
+  - key metrics:
+    - `payloads_fs_uuid_null: 31` (down from `72`)
+    - `payloads_device_id_null: 2` (down from `27`)
+    - `payloads_device_unknown: 29` (down from `45`)
+    - `torrents_fs_uuid_null: 69` (down from `137`)
+    - `torrents_device_id_null: 2` (down from `75`)
+    - `torrents_device_unknown: 67` (unchanged; all on missing device `141`)
+- Remaining unresolved scope:
+  - `100` identity-candidate rows remain (all rooted under `/pool/media`)
+  - payload candidates: `31` (`29` with stale `device_id=141`, `2` with `device_id=NULL`)
+  - torrent candidates: `69` (`67` with stale `device_id=141`, `2` with `device_id=NULL`)
+  - no remaining auto-fix actions from repair tool without a valid `/pool/media` device mapping in `devices`.
+
 ## Non-Negotiables
 
 - One mutating qB workflow at a time.

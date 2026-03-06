@@ -11,6 +11,9 @@ Latest qB repair ops markers (2026-03-06):
   - stale/missing identity data tied to `device_id` drift in catalog tables.
 - active program of work:
   - move identity to durable `fs_uuid` across payload/torrent/rehome workflows.
+- current identity-repair state:
+  - new tooling live (`hashall doctor repair-identity`, `bin/hashall-fs-identity-repair.py v0.1.1`)
+  - 114 repairs applied; unresolved set narrowed to `/pool/media` candidates only.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/qbit-repair-ops-log.md`

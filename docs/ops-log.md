@@ -13,10 +13,16 @@ Latest critical operations note (2026-03-06):
 - Current strategic ops shift:
   - stop treating `device_id` as durable identity;
   - implement `fs_uuid`-first identity path for payload/torrent/rehome flows.
-- Known data drift retained for remediation:
-  - `payloads`: rows with `device_id in (141, NULL, 49 legacy)`;
-  - `torrent_instances`: rows with `device_id in (141, NULL)`;
-  - `devices`: one parked negative `device_id` row.
+- New repair path is active:
+  - `hashall doctor repair-identity`
+  - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
+- Live repair progress:
+  - `114` identity actions applied on `~/.hashall/catalog.db`.
+  - post-repair unresolved candidate scope is `100` rows, all under `/pool/media`.
+  - no further auto-fixes remain until `/pool/media` is represented correctly in `devices`.
+- Residual catalog risks:
+  - stale `device_id=141` rows remain on `/pool/media`;
+  - parked negative `device_id` row remains in `devices` (`-905882091`).
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`
