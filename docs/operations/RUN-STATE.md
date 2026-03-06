@@ -13,6 +13,60 @@ Single living document for current operational status, handoff context, and next
 2. Keep hashall catalog refresh + dedup pipeline robust across `stash`, `data`, and `spare`.
 3. Eliminate refresh/runtime failures caused by device alias drift and negative device IDs.
 
+## Compact-Critical Snapshot (2026-03-06 12:30 EST)
+
+- Branch/worktree in active use for this incident:
+  - `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260305-181919`
+  - `chatrap/codex-hashall-20260305-181919`
+- Last completed safety fix in this worktree:
+  - commit `657eccc`: `qb-stoppeddl-drain` now treats empty bucket `index.json` as valid no-op (`summary selected=0`) instead of hard error.
+  - script semver now `bin/qb-stoppeddl-drain.py v0.1.23`.
+- Current stoppedDL bucket status at last check:
+  - `python3 bin/qb-stoppeddl-bucket.py --bucket-dir /tmp/qb-stoppeddl-bucket-live --states stoppedDL,missingFiles,pausedDL,error --limit 0 --prune-absent`
+  - result: `active=0 total_entries=0`.
+- Confirmed catalog identity drift that must not be ignored:
+  - `devices` still contains parked temp negative `device_id` (`-905882091`).
+  - `payloads` has rows on missing/unknown `device_id` values (`141`, `NULL`, legacy `49`).
+  - `torrent_instances` has rows on missing/unknown `device_id` values (`141`, `NULL`).
+- Strategic directive now active:
+  - migrate identity model from volatile `device_id` to stable `fs_uuid` as primary key for payload/torrent/rehome workflows.
+  - keep `device_id` only as runtime lookup for `files_<device_id>` tables until table model is redesigned.
+- Critical WIP note:
+  - `fs_uuid` transition is now implemented-in-progress across core code and tests; do not discard silently.
+
+## fs_uuid Identity Layer Update (2026-03-06 13:35 EST)
+
+- Implemented schema migration:
+  - `src/hashall/migrations/0012_fs_uuid_identity.sql`
+  - adds `fs_uuid` to `payloads` and `torrent_instances`
+  - adds fs_uuid indexes
+  - backfills from `devices`, then payload/torrent cross-link fallbacks
+- Implemented model/write path updates:
+  - `src/hashall/payload.py`
+    - `Payload`/`TorrentInstance` now carry `fs_uuid`
+    - `build_payload()` resolves fs_uuid
+    - `upsert_payload()` prefers `(fs_uuid, root_path)` identity when available
+    - `upsert_torrent_instance()` persists fs_uuid when column exists
+    - getters support fs_uuid-aware filtering/reads
+  - `src/hashall/cli.py`
+    - `payload sync` writes `TorrentInstance.fs_uuid`
+- Implemented rehome identity propagation:
+  - `src/rehome/planner.py`
+    - resolves stash/pool fs_uuid from devices
+    - pool/stash payload existence checks use fs_uuid-aware filtering
+    - executable demote/promote plans now carry `source_fs_uuid` / `target_fs_uuid`
+  - `src/rehome/executor.py`
+    - resolves runtime `device_id` from plan fs_uuid when present
+    - catalog sync writes/updates fs_uuid fields when schema supports them
+- Version bumps:
+  - `hashall`: `0.4.131`
+  - `rehome`: `0.6.1`
+- Verification run:
+  - `pytest -q tests/test_rehome.py tests/test_payload.py` -> pass
+  - `pytest -q tests/test_cli_payload_sync.py tests/test_rehome_catalog_sync.py tests/test_rehome_promotion.py tests/test_rehome_stage4.py` -> pass
+- Rollout caveat:
+  - migration has **not** been intentionally forced against live `~/.hashall/catalog.db` in this turn; it will apply on next write-open via normal migration path.
+
 ## Non-Negotiables
 
 - One mutating qB workflow at a time.
