@@ -1,5 +1,5 @@
 [bumpver]
-current_version = "0.3.0"
+current_version = "0.4.130"
 version_pattern = "MAJOR.MINOR.PATCH"
 commit_message = "🔖 Bump version: {old_version} → {new_version}"
 tag_message = "Release {new_version}"
@@ -10,7 +10,7 @@ push = false
 
 [bumpver.file_patterns]
 "src/hashall/__init__.py" = [
-    "__version__ = '{version}'"
+    '__version__ = "{version}"'
 ]
 "README.md" = [
     'hashall_version": "{version}"',
