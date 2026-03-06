@@ -248,6 +248,52 @@ def verify_trees_cmd(src, dst, repair, rsync_source, db, force, no_export):
         auto_export=not no_export,
     )
 
+
+@cli.group()
+def doctor():
+    """Safety and integrity diagnostics."""
+    pass
+
+
+@doctor.command("preflight")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--json-output", is_flag=True, help="Emit JSON report.")
+@click.option(
+    "--strict/--no-strict",
+    default=True,
+    show_default=True,
+    help="Return non-zero when error-severity checks fail.",
+)
+def doctor_preflight(db, json_output, strict):
+    """Run fail-closed catalog integrity checks used by migration/repair tooling."""
+    from hashall.model import connect_db
+    from hashall.preflight import run_catalog_preflight
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    report = run_catalog_preflight(conn)
+    conn.close()
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        summary = report.get("summary", {})
+        click.echo(
+            "preflight "
+            f"ok={bool(report.get('ok'))} "
+            f"total_checks={int(summary.get('total_checks', 0) or 0)} "
+            f"failed_error={int(summary.get('failed_error', 0) or 0)} "
+            f"failed_warning={int(summary.get('failed_warning', 0) or 0)}"
+        )
+        for check in report.get("checks", []):
+            status = "OK" if bool(check.get("ok")) else "FAIL"
+            severity = str(check.get("severity") or "info").upper()
+            name = str(check.get("name") or "unknown")
+            msg = str(check.get("message") or "")
+            click.echo(f"  [{status}] [{severity}] {name} - {msg}")
+
+    if strict and not bool(report.get("ok")):
+        raise click.ClickException("catalog preflight failed (error-severity checks)")
+
 # Payload command group
 @cli.group()
 def payload():
