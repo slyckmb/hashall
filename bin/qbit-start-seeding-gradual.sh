@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.3.7
+# Version: 1.3.8
 # Date:    2026-03-06
 #
 # After each batch waits for state to settle, then checks the protected watch
@@ -10,7 +10,7 @@
 # Idempotent: only targets stoppedUP (100%) torrents; already-started ones
 # are stalledUP/uploading and are skipped automatically.
 #
-# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
+# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--guard-include-checkingdl] [--guard-recheck-allowlist-file PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
 #   --apply        Execute changes (dry-run if omitted)
 #   --resume       Skip torrents already in stalledUP/uploading/queuedUP
 #   --daemon       Continuous watch loop: poll QB, run ramp when stoppedUP >= --min-batch
@@ -21,12 +21,14 @@
 #   --cache-max-age N  Max cache age seconds when --cache is enabled (default: 15)
 #   --guard-stop-cooldown N  Suppress repeated stop requests per hash for N seconds in guard-only mode (default: 120)
 #   --guard-cooldown-state PATH  JSON state file for guard cooldown tracking
+#   --guard-include-checkingdl  Treat checkingDL as dangerous in guard mode (default: disabled)
+#   --guard-recheck-allowlist-file PATH  JSON TTL map of hashes exempted during repair rechecks
 #   --ignore-hashes CSV  Hashes/prefixes to ignore in watch/candidate checks
 #   --ignore-hashes-file PATH  Ignore hash file (default: /tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt if present)
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.7"
+SCRIPT_VERSION="1.3.8"
 SCRIPT_DATE="2026-03-06"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -47,15 +49,17 @@ POLL=60
 USE_CACHE=false
 CACHE_MAX_AGE=15
 GUARD_STOP_COOLDOWN=120
+GUARD_INCLUDE_CHECKINGDL=false
 CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qbit-cache-agent.py}"
 CACHE_CLIENT_ID="${SCRIPT_NAME}:$$"
 IGNORE_HASHES=""
 IGNORE_HASHES_FILE=""
 DEFAULT_IGNORE_HASHES_FILE="${QBIT_IGNORE_HASHES_FILE:-/tmp/qb-stoppeddl-bucket-live/download-whitelist-hashes.txt}"
+GUARD_RECHECK_ALLOWLIST_FILE="${QBIT_GUARD_RECHECK_ALLOWLIST_FILE:-/tmp/qb-stoppeddl-bucket-live/guard-recheck-allowlist.json}"
 
 usage_short() {
   cat <<EOF
-Usage: $SCRIPT_NAME [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH] [-h|--help]
+Usage: $SCRIPT_NAME [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--guard-include-checkingdl] [--guard-recheck-allowlist-file PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH] [-h|--help]
 Try '$SCRIPT_NAME --help' for details.
 EOF
 }
@@ -86,8 +90,12 @@ Options:
   --guard-only
       Guard mode. Never starts torrents.
       Scans protected scope and immediately stops active download states
-      (downloading/stalledDL/queuedDL/forcedDL/metaDL/checkingDL) found there.
+      (downloading/stalledDL/queuedDL/forcedDL/metaDL) found there.
       Useful to prevent unexpected downloads while you investigate.
+
+  --guard-include-checkingdl
+      Also treat checkingDL as dangerous in guard mode.
+      Default: disabled, so active rechecks are not auto-stopped.
 
   --min-batch N
       Daemon threshold for running a ramp pass.
@@ -118,6 +126,12 @@ Options:
       JSON file used to track last stop timestamp per hash for cooldown logic.
       Default:
       ~/.logs/hashall/reports/qbit-triage/guard-stop-cooldown.json
+
+  --guard-recheck-allowlist-file PATH
+      JSON TTL map {hash: expires_epoch} used to exempt active repair rechecks
+      from guard stopping.
+      Default:
+      /tmp/qb-stoppeddl-bucket-live/guard-recheck-allowlist.json
 
   --ignore-hashes CSV
       Hashes/prefixes to exclude from watch and candidate logic.
@@ -173,6 +187,9 @@ while [[ $# -gt 0 ]]; do
     --cache-max-age) CACHE_MAX_AGE="$2"; shift 2 ;;
     --guard-stop-cooldown) GUARD_STOP_COOLDOWN="$2"; shift 2 ;;
     --guard-cooldown-state) GUARD_COOLDOWN_STATE="$2"; shift 2 ;;
+    --guard-include-checkingdl) GUARD_INCLUDE_CHECKINGDL=true; shift ;;
+    --no-guard-include-checkingdl) GUARD_INCLUDE_CHECKINGDL=false; shift ;;
+    --guard-recheck-allowlist-file) GUARD_RECHECK_ALLOWLIST_FILE="$2"; shift 2 ;;
     --ignore-hashes) IGNORE_HASHES="$2"; shift 2 ;;
     --ignore-hashes-file) IGNORE_HASHES_FILE="$2"; shift 2 ;;
     *)
@@ -705,21 +722,59 @@ run_guard_pass() {
     return 1
   fi
 
-  if ! python3 - "$TMPJSON" "$TMPWATCH" << 'PYEOF' > "$TMPCHECK"
-import json, sys
+  if ! python3 - "$TMPJSON" "$TMPWATCH" "$GUARD_RECHECK_ALLOWLIST_FILE" "$GUARD_INCLUDE_CHECKINGDL" << 'PYEOF' > "$TMPCHECK"
+import json, sys, time
+from pathlib import Path
 data = json.load(open(sys.argv[1]))
 watch = set(open(sys.argv[2]).read().split())
-download_bad = {'downloading','stalledDL'}
+allowlist_path = Path(sys.argv[3]).expanduser()
+include_checking = str(sys.argv[4] or "").strip().lower() in {"1", "true", "yes", "on"}
+now = int(time.time())
+allowlist = {}
+if allowlist_path.exists():
+    try:
+        raw = json.loads(allowlist_path.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            h = str(k or "").strip().lower()
+            if len(h) != 40:
+                continue
+            try:
+                exp = int(v)
+            except Exception:
+                continue
+            if exp > now:
+                allowlist[h] = exp
+        # Prune stale/invalid entries on read.
+        cleaned = {k: int(v) for k, v in allowlist.items() if int(v) > now}
+        if cleaned != raw:
+            try:
+                allowlist_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = allowlist_path.with_suffix(allowlist_path.suffix + ".tmp")
+                tmp.write_text(json.dumps(cleaned, sort_keys=True) + "\n", encoding="utf-8")
+                tmp.replace(allowlist_path)
+            except Exception:
+                pass
+download_bad = {'downloading', 'stalledDL', 'queuedDL', 'forcedDL', 'metaDL'}
+if include_checking:
+    download_bad.add('checkingDL')
 bad = []
+exempted = []
 for t in data:
     h = str(t.get("hash", "")).strip()
     if not h or h not in watch:
         continue
     s = t.get("state", "")
     p = t.get("progress", 0)
-    if s in download_bad or s in {'queuedDL', 'forcedDL', 'metaDL', 'checkingDL'}:
+    if h.lower() in allowlist:
+        if s in download_bad:
+            exempted.append([h, s, p, int(allowlist[h.lower()])])
+        continue
+    if s in download_bad:
         bad.append([h, s, p])
-print(json.dumps({"downloading": bad}))
+print(json.dumps({"downloading": bad, "allowlist_exempted": exempted, "allowlist_size": len(allowlist)}))
 PYEOF
   then
     log "ERROR: guard pass unable to parse state payload"
@@ -733,6 +788,16 @@ d = json.load(open(sys.argv[1]))
 print(len(d.get("downloading", [])))
 PYEOF
 )"
+  local allowlist_exempt_count
+  allowlist_exempt_count="$(python3 - "$TMPCHECK" << 'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(len(d.get("allowlist_exempted", [])))
+PYEOF
+)"
+  if [[ "$allowlist_exempt_count" -gt 0 ]]; then
+    log "guard: allowlist exempted active rechecks: $allowlist_exempt_count file=$GUARD_RECHECK_ALLOWLIST_FILE"
+  fi
 
   if [[ "$bad_count" -le 0 ]]; then
     log "guard: clean (no downloading-like in protected scope)"
@@ -863,7 +928,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "════════════════════════════════════════════════════════════"
 echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  guard_stop_cooldown=${GUARD_STOP_COOLDOWN}s  guard_cooldown_state=${GUARD_COOLDOWN_STATE}  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
+echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  guard_stop_cooldown=${GUARD_STOP_COOLDOWN}s  guard_include_checkingdl=${GUARD_INCLUDE_CHECKINGDL}  guard_cooldown_state=${GUARD_COOLDOWN_STATE}  guard_allowlist_file=${GUARD_RECHECK_ALLOWLIST_FILE}  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
 echo "daemon log: $DAEMON_LOG"
 echo "reset file:  $DAEMON_HALT_RESET"
 echo "════════════════════════════════════════════════════════════"
@@ -871,7 +936,7 @@ echo "════════════════════════�
 {
   echo "════════════════════════════════════════════════════════════"
   echo "$SCRIPT_NAME  v$SCRIPT_VERSION  ($SCRIPT_DATE)  $(date '+%F %T')"
-  echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  guard_stop_cooldown=${GUARD_STOP_COOLDOWN}s  guard_cooldown_state=${GUARD_COOLDOWN_STATE}  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
+  echo "daemon mode  apply=$APPLY  guard_only=$GUARD_ONLY  min-batch=$MIN_BATCH  poll=${POLL}s  cache=$USE_CACHE  cache_max_age=${CACHE_MAX_AGE}s  guard_stop_cooldown=${GUARD_STOP_COOLDOWN}s  guard_include_checkingdl=${GUARD_INCLUDE_CHECKINGDL}  guard_cooldown_state=${GUARD_COOLDOWN_STATE}  guard_allowlist_file=${GUARD_RECHECK_ALLOWLIST_FILE}  ignore_file=${IGNORE_HASHES_FILE:-${DEFAULT_IGNORE_HASHES_FILE}}"
   echo "════════════════════════════════════════════════════════════"
 } >> "$DAEMON_LOG"
 
