@@ -3,6 +3,7 @@ Command-line interface for rehome.
 """
 
 import click
+import fcntl
 import json
 import os
 import sqlite3
@@ -28,6 +29,113 @@ DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
 def _debug_enabled() -> bool:
     return os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _print_post_apply_summary(executor: "DemotionExecutor", plans: list) -> bool:
+    """
+    Query qBittorrent for the final state of all affected torrents and print
+    a summary table.
+
+    Returns True if all torrents are in acceptable seed-ready states.
+    Returns False if any torrent is in an unexpected/alarm state.
+    """
+    # Collect all affected hashes (deduplicated, preserving order).
+    all_hashes = []
+    seen: set = set()
+    for plan in plans:
+        for h in (plan.get("affected_torrents") or []):
+            if h not in seen:
+                seen.add(h)
+                all_hashes.append(h)
+
+    if not all_hashes:
+        return True
+
+    # States that are acceptable after a successful rehome.
+    good_states = {
+        "stalledup", "uploading", "queuedup", "forcedup",
+        "stoppedup",  # paused by operator (was seeding, user paused it)
+        "pausedup",
+        "checkingup",  # transient post-recheck
+    }
+    # States that are alarm-worthy.
+    alarm_states = {"stoppeddl", "pauseddl", "downloading", "stalleddl",
+                    "missingfiles", "error"}
+
+    click.echo()
+    click.echo("── Post-apply torrent state summary ──────────────────────────────")
+    click.echo(f"{'hash':<18}  {'state':<16}  {'progress':>8}  {'note'}")
+    click.echo(f"{'─'*18}  {'─'*16}  {'─'*8}  {'─'*16}")
+
+    alarm_count = 0
+    missing_count = 0
+
+    for h in all_hashes:
+        info = executor.qbit_client.get_torrent_info(h)
+        if not info:
+            click.echo(f"{h[:16]}..  {'not_found':<16}  {'?':>8}  ⚠️  NOT IN QB")
+            missing_count += 1
+            continue
+
+        state = str(getattr(info, "state", "") or "").strip().lower()
+        progress_raw = getattr(info, "progress", None)
+        try:
+            progress = float(progress_raw) if progress_raw is not None else 0.0
+        except (TypeError, ValueError):
+            progress = 0.0
+
+        if state in alarm_states:
+            note = "🚨 ALARM"
+            alarm_count += 1
+        elif state in good_states or ("check" in state and "up" in state):
+            note = "✓"
+        else:
+            note = "?"
+
+        click.echo(
+            f"{h[:16]}..  {state:<16}  {progress*100:>7.1f}%  {note}"
+        )
+
+    click.echo(f"{'─'*18}  {'─'*16}  {'─'*8}  {'─'*16}")
+    total = len(all_hashes)
+    alarm_total = alarm_count + missing_count
+    if alarm_total > 0:
+        click.echo(
+            f"⚠️  Summary: {total} torrent(s) checked, "
+            f"{alarm_count} alarm state(s), {missing_count} not found in qB"
+        )
+    else:
+        click.echo(f"✅ Summary: {total} torrent(s) checked, all in acceptable state")
+
+    return alarm_total == 0
+
+
+def _acquire_rehome_lock() -> "file":
+    """
+    Acquire an exclusive process-level lock for rehome apply operations.
+
+    Returns an open file handle that holds the lock.  The caller MUST close
+    it (or use try/finally) to release the lock on exit.
+
+    Raises SystemExit if the lock is held by another process.
+    """
+    lock_dir = Path.home() / ".hashall"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "rehome.lock"
+    lock_fh = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_fh.close()
+        click.echo(
+            "❌ Another rehome apply is already running "
+            f"(lock held: {lock_path}). Aborting.",
+            err=True,
+        )
+        raise SystemExit(1)
+    lock_fh.write(f"pid={os.getpid()}\n")
+    lock_fh.flush()
+    return lock_fh
 
 
 def _emit_banner() -> None:
@@ -91,7 +199,21 @@ def _refresh_catalog_from_qb(
 @click.group()
 @click.version_option(__version__)
 def cli():
-    """Rehome - Seed payload demotion orchestrator."""
+    """Seed payload demotion orchestrator.
+
+    \b
+    Everyday workflow:
+      rehome refresh                   scan all roots + dedup + sync qBit
+      rehome auto --limit 5            find top-5 MOVE candidates (dry-run)
+      rehome auto --limit 5 --apply    execute
+
+    \b
+    Config (persisted in ~/.hashall/rehome.toml):
+      rehome config show
+      rehome config set <key> <value>
+      rehome config add-root <path> <alias>
+      rehome config remove-root <path>
+    """
     _emit_banner()
 
 
@@ -116,10 +238,10 @@ def cli():
               help="Path to cross-seed config.js to import dataDirs")
 @click.option("--tracker-registry", type=click.Path(),
               help="Path to tracker-registry.yml to import qbittorrent.save_path")
-@click.option("--stash-device", type=int, required=True,
-              help="Device ID for stash storage")
-@click.option("--pool-device", type=int, required=True,
-              help="Device ID for pool storage")
+@click.option("--stash-device", type=str, required=True,
+              help="Device alias (e.g. 'stash') or integer device_id for stash storage")
+@click.option("--pool-device", type=str, required=True,
+              help="Device alias (e.g. 'pool') or integer device_id for pool storage")
 @click.option("--stash-seeding-root", type=click.Path(),
               help="Base seeding root on stash (for save_path mapping)")
 @click.option("--pool-seeding-root", type=click.Path(),
@@ -160,6 +282,20 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
 
     if not catalog_path.exists():
         click.echo(f"❌ Catalog not found: {catalog_path}", err=True)
+        raise click.Abort()
+
+    # Resolve device alias/integer to current device_id
+    try:
+        from hashall.model import connect_db
+        from hashall.device import resolve_device_id
+        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            stash_device = resolve_device_id(_resolve_conn, stash_device)
+            pool_device = resolve_device_id(_resolve_conn, pool_device)
+        finally:
+            _resolve_conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
         raise click.Abort()
 
     # Validate mapping roots
@@ -320,10 +456,10 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
               help="Path to cross-seed config.js to import dataDirs")
 @click.option("--tracker-registry", type=click.Path(),
               help="Path to tracker-registry.yml to import qbittorrent.save_path")
-@click.option("--stash-device", type=int, required=True,
-              help="Device ID for stash storage")
-@click.option("--pool-device", type=int, required=True,
-              help="Device ID for pool storage")
+@click.option("--stash-device", type=str, required=True,
+              help="Device alias (e.g. 'stash') or integer device_id for stash storage")
+@click.option("--pool-device", type=str, required=True,
+              help="Device alias (e.g. 'pool') or integer device_id for pool storage")
 @click.option("--stash-seeding-root", type=click.Path(),
               help="Base seeding root on stash (for save_path mapping)")
 @click.option("--pool-seeding-root", type=click.Path(),
@@ -378,6 +514,21 @@ def plan_batch_cmd(
         raise click.Abort()
 
     catalog_path = Path(catalog)
+
+    # Resolve device alias/integer to current device_id
+    try:
+        from hashall.model import connect_db
+        from hashall.device import resolve_device_id
+        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            stash_device = resolve_device_id(_resolve_conn, stash_device)
+            pool_device = resolve_device_id(_resolve_conn, pool_device)
+        finally:
+            _resolve_conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(manifest)
@@ -796,6 +947,13 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
         click.echo(f"debug_module rehome.view_builder={Path(rehome_view_builder.__file__).resolve()}")
         click.echo(f"debug_version rehome={__version__}")
 
+    # Acquire exclusive lock for execute mode — dry-run is read-only and does
+    # not need a lock.  Two concurrent execute runs corrupt each other's state
+    # (confirmed amplifying factor in Feb-2026 incident).
+    lock_fh = None
+    if not dryrun:
+        lock_fh = _acquire_rehome_lock()
+
     try:
         for i, plan in enumerate(plans_to_apply, 1):
             if len(plans_to_apply) > 1:
@@ -830,6 +988,9 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
             click.echo(traceback.format_exc(), err=True)
             click.echo("debug_traceback_end", err=True)
         raise click.Abort()
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
 
     click.echo()
     if dryrun:
@@ -837,6 +998,17 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
         click.echo(f"To execute: rehome apply {plan_file} --force")
     else:
         click.echo("✅ Plan executed successfully")
+        # Mandatory post-apply summary: query qBittorrent for final torrent states.
+        # Exit non-zero if any torrent is in an alarm/stoppedDL state so CI/scripts
+        # can detect silent failures without reading logs.
+        all_ok = _print_post_apply_summary(executor, plans_to_apply)
+        if not all_ok:
+            click.echo(
+                "❌ One or more torrents are in alarm state — "
+                "investigate before continuing.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
 
 
 @cli.command("followup")
@@ -923,8 +1095,8 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, 
 @cli.command("normalize-plan")
 @click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
               help="Path to hashall catalog database")
-@click.option("--pool-device", type=int, required=True,
-              help="Pool device_id in catalog")
+@click.option("--pool-device", type=str, required=True,
+              help="Device alias (e.g. 'pool') or integer device_id for pool storage")
 @click.option("--pool-seeding-root", type=click.Path(), required=True,
               help="Pool seeding root (example: /pool/data/seeds)")
 @click.option("--stash-seeding-root", type=click.Path(),
@@ -964,6 +1136,19 @@ def normalize_plan_cmd(
 ):
     """Create batch plan(s) to normalize pool payload root paths."""
     catalog_path = Path(catalog)
+
+    # Resolve device alias/integer to current device_id
+    try:
+        from hashall.model import connect_db
+        from hashall.device import resolve_device_id
+        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            pool_device = resolve_device_id(_resolve_conn, pool_device)
+        finally:
+            _resolve_conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
 
     try:
         if refresh_before_plan:
@@ -1027,6 +1212,488 @@ def normalize_plan_cmd(
 
     click.echo()
     click.echo(f"Next step: rehome apply {output_path} --dryrun")
+
+
+@cli.command("auto")
+@click.option("--limit", default=5, show_default=True, help="Max candidates to process")
+@click.option("--apply", "do_apply", is_flag=True, help="Execute (default: dry-run only)")
+@click.option("--refresh", "do_refresh", is_flag=True,
+              help="Run preflight refresh before finding candidates")
+@click.option("--workers", default=8, show_default=True, help="Scan worker threads (used with --refresh)")
+@click.option("--from", "from_alias", default=None,
+              help="Source device alias (default: all managed devices except dest). "
+                   "Use 'active' for the active filesystem.")
+@click.option("--to", "to_alias", default=None,
+              help="Destination device alias (default: default_dest_device from config). "
+                   "Use 'active' to return Payload Groups to the active filesystem.")
+@click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
+@click.option("--debug", is_flag=True, help="Show config resolution and raw detail (implies --verbose)")
+# Hidden backwards-compat flags
+@click.option("--stash-device", default=None, hidden=True)
+@click.option("--pool-device", default=None, hidden=True)
+@click.option("--pool-payload-root", default=None, hidden=True)
+@click.option("--seeding-root", default=None, hidden=True)
+@click.option("--catalog", default=None, help="Override config catalog path")
+def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose, debug,
+             stash_device, pool_device, pool_payload_root, seeding_root, catalog):
+    """Find MOVE candidates across managed filesystems and rehome them (dry-run by default).
+
+    \b
+    Examples:
+      rehome auto --limit 5                         # all sources → default dest
+      rehome auto --from spare --to pool            # spare→pool only
+      rehome auto --to active --from pool           # pool→stash (promotion)
+      rehome auto --limit 5 --apply                 # execute
+    """
+    from rehome.config import load_config, parse_managed_roots
+    from rehome.auto import run_auto, run_refresh
+    from hashall.model import connect_db
+    from hashall.device import resolve_device_id
+
+    cfg = load_config()
+
+    catalog_str = catalog or cfg["catalog"]
+    catalog_path = Path(catalog_str).expanduser()
+    if not catalog_path.exists():
+        click.echo(f"❌ Catalog not found: {catalog_path}", err=True)
+        raise click.Abort()
+
+    # Resolve config values (new key names primary, old names as override fallback)
+    active_alias = stash_device or cfg["active_device"]
+    default_dest_alias = pool_device or cfg["default_dest_device"]
+    dest_r = pool_payload_root or cfg["default_dest_root"]
+    active_r = seeding_root or cfg["active_root"]
+    content_r = cfg["content_root"]
+
+    # Resolve --to (destination)
+    if to_alias == "active":
+        dest_alias = active_alias
+    elif to_alias is not None:
+        dest_alias = to_alias
+    else:
+        dest_alias = default_dest_alias
+
+    # Resolve --from (explicit single source, or None = all managed)
+    if from_alias == "active":
+        from_alias = active_alias
+
+    try:
+        _conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            active_id = resolve_device_id(_conn, active_alias)
+            dest_id = resolve_device_id(_conn, dest_alias)
+            explicit_source_id: Optional[int] = None
+            if from_alias is not None:
+                explicit_source_id = resolve_device_id(_conn, from_alias)
+        finally:
+            _conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+
+    # Resolve managed roots to (device_id, alias, path) triples
+    managed_pairs = parse_managed_roots(cfg.get("managed_roots") or [])
+    extra_sources: list[tuple[int, str, str]] = []
+    if explicit_source_id is None:
+        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            for xpath, xalias in managed_pairs:
+                try:
+                    xid = resolve_device_id(_resolve_conn, xalias)
+                    extra_sources.append((xid, xalias, xpath))
+                except (ValueError, Exception):
+                    pass
+        finally:
+            _resolve_conn.close()
+
+    if do_refresh:
+        refresh_code = run_refresh(
+            catalog_path=catalog_path,
+            active_root=active_r,
+            dest_root=dest_r,
+            active_device=active_alias,
+            dest_device=dest_alias,
+            workers=workers,
+            skip_dedup=True,
+            managed_roots=managed_pairs,
+            verbose=verbose,
+            debug=debug,
+        )
+        if refresh_code != 0:
+            click.echo("❌ Refresh failed — aborting auto", err=True)
+            raise click.exceptions.Exit(refresh_code)
+        print()
+
+    log_base = Path.home() / ".logs" / "hashall" / "reports" / "rehome-runs"
+    plan_log_dir = log_base / "plans"
+    run_log_dir = log_base
+
+    exit_code = run_auto(
+        catalog_path=catalog_path,
+        active_device_id=active_id,
+        dest_device_id=dest_id,
+        dest_root=dest_r,
+        active_root=active_r,
+        content_root=content_r,
+        limit=limit,
+        do_apply=do_apply,
+        plan_log_dir=plan_log_dir,
+        run_log_dir=run_log_dir,
+        source_device_id=explicit_source_id,
+        extra_sources=extra_sources if explicit_source_id is None else None,
+        verbose=verbose,
+        debug=debug,
+    )
+    if exit_code != 0:
+        raise click.exceptions.Exit(exit_code)
+
+
+@cli.command("refresh")
+@click.option("--workers", default=8, show_default=True, help="Scan worker threads")
+@click.option("--no-dedup", "skip_dedup", is_flag=True,
+              help="Skip dedup (dedup executes by default)")
+@click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
+@click.option("--debug", is_flag=True, help="Show config resolution and raw detail (implies --verbose)")
+@click.option("--active-device", default=None, help="Override config active device alias")
+@click.option("--dest-device", default=None, help="Override config destination device alias")
+@click.option("--active-root", default=None, help="Override config active root path")
+@click.option("--dest-root", default=None, help="Override config destination root path")
+# Hidden backwards-compat flags
+@click.option("--stash-device", default=None, hidden=True)
+@click.option("--pool-device", default=None, hidden=True)
+@click.option("--seeding-root", default=None, hidden=True)
+@click.option("--pool-payload-root", default=None, hidden=True)
+@click.option("--catalog", default=None, help="Override config catalog path")
+def refresh_cmd(workers, skip_dedup, verbose, debug,
+                active_device, dest_device, active_root, dest_root,
+                stash_device, pool_device, seeding_root, pool_payload_root,
+                catalog):
+    """Scan all managed roots, upgrade SHA256, run dedup, then sync qBit payloads.
+
+    Dedup executes by default. Use --no-dedup to skip it.
+    """
+    from rehome.config import load_config, parse_managed_roots
+    from rehome.auto import run_refresh
+
+    cfg = load_config()
+
+    catalog_str = catalog or cfg["catalog"]
+    catalog_path = Path(catalog_str).expanduser()
+    if not catalog_path.exists():
+        click.echo(f"❌ Catalog not found: {catalog_path}", err=True)
+        raise click.Abort()
+
+    active_alias = active_device or stash_device or cfg["active_device"]
+    dest_alias = dest_device or pool_device or cfg["default_dest_device"]
+    ar = active_root or seeding_root or cfg["active_root"]
+    dr = dest_root or pool_payload_root or cfg["default_dest_root"]
+    managed = parse_managed_roots(cfg.get("managed_roots") or [])
+
+    exit_code = run_refresh(
+        catalog_path=catalog_path,
+        active_root=ar,
+        dest_root=dr,
+        active_device=active_alias,
+        dest_device=dest_alias,
+        workers=workers,
+        skip_dedup=skip_dedup,
+        managed_roots=managed,
+        verbose=verbose,
+        debug=debug,
+    )
+    if exit_code != 0:
+        raise click.exceptions.Exit(exit_code)
+
+
+def _db_open_readonly(catalog_path: Path) -> Optional[sqlite3.Connection]:
+    """Open catalog read-only; return None (with note) if it doesn't exist."""
+    if not catalog_path.exists():
+        click.echo(f"  (catalog not found at {catalog_path} — skipping DB stats)", err=True)
+        return None
+    return sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+
+
+def _db_device_stats(conn: sqlite3.Connection, alias: str) -> Optional[tuple]:
+    """Return (total_files, total_bytes, last_scanned_at) for an alias, or None."""
+    return conn.execute(
+        "SELECT total_files, total_bytes, last_scanned_at"
+        " FROM devices WHERE device_alias = ?",
+        (alias,),
+    ).fetchone()
+
+
+@cli.group("config")
+def config_group():
+    """Manage rehome defaults (~/.hashall/rehome.toml)."""
+
+
+@config_group.command("show")
+@click.option("--catalog", default=None, help="Override config catalog path")
+def config_show(catalog):
+    """Print current config with DB stats for each managed filesystem."""
+    from rehome.config import load_config, CONFIG_PATH, parse_managed_roots, _load_raw, _KEY_RENAMES
+    from rehome.auto import _fmt_bytes
+
+    cfg = load_config()
+    catalog_str = catalog or cfg["catalog"]
+    catalog_path = Path(catalog_str).expanduser()
+
+    click.echo(f"# {CONFIG_PATH}\n")
+
+    # Deprecation notice if on-disk file still uses old keys
+    raw = _load_raw()
+    old_keys_present = sorted(k for k in raw if k in _KEY_RENAMES)
+    if old_keys_present:
+        click.echo(
+            f"  [DEPRECATION] Config file uses old key names: {', '.join(old_keys_present)}",
+            err=True,
+        )
+        click.echo("  Run: rehome config migrate  (rewrites file with new key names)\n", err=True)
+
+    scalar_keys = ("catalog", "active_device", "active_root", "content_root",
+                   "default_dest_device", "default_dest_root")
+    for key in scalar_keys:
+        click.echo(f"  {key:<20} {cfg.get(key, '')}")
+
+    conn = _db_open_readonly(catalog_path)
+    try:
+        def _show_device(label: str, alias: str, path: str, suffix: str = "") -> None:
+            if conn:
+                row = _db_device_stats(conn, alias)
+            else:
+                row = None
+            if row:
+                files, nbytes, last = row
+                stat = (f"files={int(files or 0):>8,}  {_fmt_bytes(int(nbytes or 0)):<10}"
+                        f"  last={str(last or '')[:10]}")
+            else:
+                stat = "(not found in DB)"
+            click.echo(f"  {alias:<20} {path}  {stat}{suffix}")
+
+        # Active filesystem
+        click.echo(f"\nActive filesystem (consumed content lives here):")
+        _show_device("active", cfg.get("active_device", ""), cfg.get("active_root", ""))
+
+        # Default destination
+        click.echo(f"\nDefault destination:")
+        _show_device("dest", cfg.get("default_dest_device", ""), cfg.get("default_dest_root", ""))
+
+        # Additional managed roots
+        managed_pairs = parse_managed_roots(cfg.get("managed_roots") or [])
+        if managed_pairs:
+            click.echo(f"\nManaged storage roots ({len(managed_pairs)}):")
+            click.echo("  (eligible sources and destinations; scanned during refresh)")
+            for path, alias in managed_pairs:
+                if conn:
+                    row = _db_device_stats(conn, alias)
+                else:
+                    row = None
+                if row:
+                    files, nbytes, last = row
+                    stat = (f"files={int(files or 0):>8,}  {_fmt_bytes(int(nbytes or 0)):<10}"
+                            f"  last={str(last or '')[:10]}  [DB OK]")
+                else:
+                    stat = "(not found in DB)"
+                click.echo(f"  {alias:<20} {path}  {stat}")
+        else:
+            click.echo("\nManaged storage roots: (none — use: rehome config add-root <path> <alias>)")
+    finally:
+        if conn:
+            conn.close()
+
+
+@config_group.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key, value):
+    """Set a scalar config key (writes to ~/.hashall/rehome.toml).
+
+    Both new key names (active_device, content_root, ...) and old names
+    (stash_device, library_root, ...) are accepted.
+    """
+    from rehome.config import load_config, save_config_key, DEFAULTS, _KEY_RENAMES
+    scalar_keys = {k for k, v in DEFAULTS.items() if not isinstance(v, list)}
+    all_valid = scalar_keys | set(_KEY_RENAMES.keys())
+    if key not in all_valid:
+        known = ", ".join(sorted(scalar_keys))
+        click.echo(f"❌ Unknown key '{key}'. Known keys: {known}", err=True)
+        click.echo("  (For list keys use: rehome config add-root / remove-root)", err=True)
+        raise click.Abort()
+    canonical = _KEY_RENAMES.get(key, key)
+    save_config_key(key, value)
+    if canonical != key:
+        click.echo(f"✅ {canonical} = {value!r}  (note: '{key}' is a deprecated alias for '{canonical}')")
+    else:
+        click.echo(f"✅ {canonical} = {value!r}")
+
+
+@config_group.command("add-root")
+@click.argument("path")
+@click.argument("alias")
+@click.option("--catalog", default=None, help="Override config catalog path")
+def config_add_root(path, alias, catalog):
+    """Add (or update) a managed storage root with its device alias.
+
+    \b
+    Example:
+      rehome config add-root /mnt/hotspare6tb spare
+    """
+    from rehome.config import add_scan_root, load_config
+
+    cfg = load_config()
+    catalog_path = Path(catalog or cfg["catalog"]).expanduser()
+    conn = _db_open_readonly(catalog_path)
+    if conn:
+        try:
+            rows = conn.execute(
+                "SELECT device_alias, preferred_mount_point, mount_point, total_files"
+                " FROM devices ORDER BY total_files DESC"
+            ).fetchall()
+            known = {str(r[0]): r for r in rows if r[0]}
+        finally:
+            conn.close()
+
+        if alias not in known:
+            click.echo(f"  WARNING: alias '{alias}' not found in DB ({catalog_path})", err=True)
+            click.echo("  Known DB aliases:", err=True)
+            for da, (_, pmp, mp, tf) in known.items():
+                mount = pmp or mp or "?"
+                click.echo(f"    {da:<22} {mount}  files={int(tf or 0):,}", err=True)
+            click.echo(
+                "  (Config will still be written — alias may be pre-configured before first scan.)\n",
+                err=True,
+            )
+
+    add_scan_root(path, alias)
+    click.echo(f"✅ added managed root: {path} → {alias}")
+
+
+@config_group.command("remove-root")
+@click.argument("path")
+def config_remove_root(path):
+    """Remove a managed storage root by path.
+
+    \b
+    Example:
+      rehome config remove-root /mnt/hotspare6tb
+    """
+    from rehome.config import remove_scan_root
+    removed = remove_scan_root(path)
+    if removed:
+        click.echo(f"✅ removed managed root: {path}")
+    else:
+        click.echo(f"⚠️  no entry found for path: {path}", err=True)
+        raise click.exceptions.Exit(1)
+
+
+@config_group.command("sync-roots")
+@click.option("--apply", "do_apply", is_flag=True,
+              help="Auto-add untracked DB devices to managed_roots")
+@click.option("--min-files", default=1, show_default=True,
+              help="Exclude devices with fewer than N files")
+@click.option("--catalog", default=None, help="Override config catalog path")
+def config_sync_roots(do_apply, min_files, catalog):
+    """Show DB devices not tracked in rehome config; --apply adds them.
+
+    Compares the catalog devices table against what rehome.toml tracks
+    (active_device, default_dest_device, managed_roots) and surfaces any gap.
+    """
+    from rehome.config import load_config, parse_managed_roots, add_scan_root
+    from rehome.auto import _fmt_bytes
+
+    cfg = load_config()
+    catalog_str = catalog or cfg["catalog"]
+    catalog_path = Path(catalog_str).expanduser()
+
+    click.echo(f"\nRehome Config Sync-Roots")
+    click.echo(f"  catalog  {catalog_path}")
+    click.echo(f"  config   {Path.home() / '.hashall' / 'rehome.toml'}\n")
+
+    conn = _db_open_readonly(catalog_path)
+    if not conn:
+        raise click.exceptions.Exit(1)
+
+    try:
+        rows = conn.execute(
+            "SELECT device_alias, preferred_mount_point, mount_point,"
+            "       total_files, total_bytes, last_scanned_at"
+            " FROM devices"
+            " WHERE total_files >= ?"
+            " ORDER BY total_files DESC",
+            (min_files,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Build tracked set from config (new key names, with old key fallback via load_config)
+    managed_pairs = parse_managed_roots(cfg.get("managed_roots") or [])
+    tracked_aliases: set[str] = {cfg.get("active_device", ""), cfg.get("default_dest_device", "")}
+    for _, a in managed_pairs:
+        tracked_aliases.add(a)
+
+    tracked_rows = [r for r in rows if str(r[0] or "") in tracked_aliases]
+    untracked_rows = [r for r in rows if str(r[0] or "") not in tracked_aliases]
+
+    if tracked_rows:
+        click.echo(f"Already tracked ({len(tracked_rows)}):")
+        for alias, pmp, mp, tf, tb, last in tracked_rows:
+            mount = pmp or mp or "?"
+            click.echo(
+                f"  {str(alias):<20} {mount:<30} "
+                f"files={int(tf or 0):>8,}  {_fmt_bytes(int(tb or 0)):<10}  last={str(last or '')[:10]}"
+            )
+
+    if untracked_rows:
+        click.echo(f"\nUntracked in DB ({len(untracked_rows)}):")
+        added = 0
+        for alias, pmp, mp, tf, tb, last in untracked_rows:
+            mount = pmp or mp or "?"
+            click.echo(
+                f"  {str(alias):<20} {mount:<30} "
+                f"files={int(tf or 0):>8,}  {_fmt_bytes(int(tb or 0)):<10}  last={str(last or '')[:10]}"
+            )
+            click.echo(f"  → rehome config add-root {mount} {alias}")
+            if do_apply:
+                add_scan_root(mount, str(alias))
+                click.echo(f"  ✅ added")
+                added += 1
+
+        if do_apply:
+            click.echo(f"\nsync-roots complete: {added} added, {len(tracked_rows)} already tracked.")
+        else:
+            click.echo(f"\n(dry-run) Re-run with --apply to add automatically.")
+    else:
+        click.echo("\nAll DB devices are already tracked in rehome config.")
+
+
+@config_group.command("migrate")
+def config_migrate():
+    """Rewrite ~/.hashall/rehome.toml using new canonical key names (one-time migration).
+
+    Translates old key names (stash_device, pool_device, seeding_root, library_root,
+    pool_payload_root, extra_scan_roots) to their new equivalents.
+    """
+    from rehome.config import load_config, _write_config, _load_raw, _KEY_RENAMES, DEFAULTS
+
+    raw = _load_raw()
+    old_keys = [k for k in raw if k in _KEY_RENAMES]
+    if not old_keys:
+        click.echo("✅ Config already uses current key names — nothing to migrate.")
+        return
+
+    # load_config() returns fully normalized dict; rebuild as raw for writing
+    cfg = load_config()
+    # Only write keys that are set to non-default values or explicitly present
+    normalized: dict = {}
+    for k, v in cfg.items():
+        if isinstance(v, list):
+            normalized[k] = v
+        else:
+            normalized[k] = str(v)
+    _write_config(normalized)
+    click.echo(f"✅ Migrated {len(old_keys)} old key(s): {', '.join(sorted(old_keys))}")
+    from rehome.config import CONFIG_PATH
+    click.echo(f"   Config written to: {CONFIG_PATH}")
 
 
 if __name__ == "__main__":

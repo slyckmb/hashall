@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 DEFAULT_FASTRESUME_DIR = Path(
@@ -31,7 +32,49 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated row statuses to patch (default: prepared,ok,planned)",
     )
     p.add_argument("--dryrun", action="store_true", help="Print intended changes only")
+    p.add_argument(
+        "--qb-container",
+        default=None,
+        help="Docker container name for qBittorrent. If specified, the container MUST be "
+             "stopped before this tool will patch any fastresume files. Prevents race "
+             "conditions where qBittorrent overwrites patches mid-run.",
+    )
     return p.parse_args()
+
+
+def _check_container_stopped(container: str) -> Optional[str]:
+    """
+    Verify a Docker container is stopped.
+
+    Returns None if the container is confirmed stopped/not-running.
+    Returns an error string if the container appears to be running or
+    the status cannot be determined.
+    """
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", container],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            # Container not found is safe — treat as stopped.
+            stderr = (proc.stderr or "").strip()
+            if "No such container" in stderr or "no such object" in stderr.lower():
+                return None
+            return f"docker_inspect_failed rc={proc.returncode} stderr={stderr!r}"
+        running = (proc.stdout or "").strip().lower()
+        if running == "true":
+            return (
+                f"Container {container!r} is RUNNING — "
+                "stop it before patching fastresume files to prevent data races. "
+                "Use: docker stop " + container
+            )
+        return None
+    except FileNotFoundError:
+        return "docker executable not found — cannot verify container state"
+    except Exception as e:
+        return f"container_check_error:{e}"
 
 
 class Bencode:
@@ -160,6 +203,16 @@ def main() -> int:
     if not fr_dir.exists():
         print(f"ERROR fastresume_dir_not_found path={fr_dir}")
         return 2
+
+    # H5: Verify qBittorrent container is stopped before touching any fastresume
+    # files.  qBittorrent continuously rewrites its own fastresume state; patching
+    # while it runs is a race condition that can corrupt or lose changes.
+    if args.qb_container and not args.dryrun:
+        container_err = _check_container_stopped(str(args.qb_container))
+        if container_err:
+            print(f"ERROR container_running_abort {container_err}")
+            return 2
+        print(f"container_check ok container={args.qb_container} status=stopped")
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     rows = list(report.get("results", []))

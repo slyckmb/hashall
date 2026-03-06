@@ -50,7 +50,7 @@ class DemotionExecutor:
         """
         self.catalog_path = catalog_path
         self.qbit_client = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
-        self.tag_strict = os.getenv("HASHALL_REHOME_TAG_STRICT") == "1"
+        self.tag_strict = os.getenv("HASHALL_REHOME_TAG_STRICT", "1").strip().lower() not in {"0", "false", "no", "off"}
         self.disable_atm_on_rehome = os.getenv("HASHALL_REHOME_DISABLE_ATM", "1") != "0"
         self.debug_qb = os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
         self.force_recheck_after_relocate = (
@@ -62,8 +62,8 @@ class DemotionExecutor:
             in {"1", "true", "yes", "on"}
         )
         self.resume_on_failure = (
-            os.getenv("HASHALL_REHOME_QB_RESUME_ON_FAILURE", "0").strip().lower()
-            in {"1", "true", "yes", "on"}
+            os.getenv("HASHALL_REHOME_QB_RESUME_ON_FAILURE", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
         )
         try:
             self.recheck_base_seconds = max(
@@ -656,7 +656,7 @@ class DemotionExecutor:
             return False, "amount_left_nonzero"
         if not state:
             return True, "ok_no_state"
-        if state not in {"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}:
+        if state not in {"uploading", "stalledup", "queuedup", "forcedup", "pausedup", "stoppedup"}:
             return False, f"state_not_seed_ready:{state or 'unknown'}"
         return True, "ok"
 
@@ -730,11 +730,20 @@ class DemotionExecutor:
                 )
                 return
 
-            # Hard failures: do not resume torrents that would redownload.
+            # Hard failures: do not wait for torrents that cannot recover on their own.
             if reason in {"state_error", "state_downloading", "progress_below_100", "amount_left_nonzero"}:
                 raise RuntimeError(
                     f"qB seed-readiness guard failed for torrent {torrent_hash[:16]} "
                     f"reason={reason} state={state} progress={progress:.4f} amount_left={amount_left}"
+                )
+            # stoppedDL is a sentinel that qBt-downloadPath is stale/wrong — it
+            # will never self-resolve without a fastresume patch.  Fast-fail
+            # immediately rather than spinning for up to 7200 s.
+            if state in {"stoppeddl", "pauseddl"}:
+                raise RuntimeError(
+                    f"qB torrent entered stoppedDL/pausedDL after relocation — "
+                    f"stale qBt-downloadPath suspected for {torrent_hash[:16]} "
+                    f"state={state} progress={progress:.4f}"
                 )
 
             now = time.monotonic()
@@ -771,6 +780,9 @@ class DemotionExecutor:
         resume_candidates: List[str] = []
         original_qb_paths: Dict[str, str] = {}
         verify_timeout_by_hash: Dict[str, float] = {}
+        # Tracks which torrents had ATM enabled before we disabled it so we can
+        # restore the original state on rollback.
+        atm_disabled_by_us: List[str] = []
         total = len(relocations)
         progress_every = 5 if total <= 50 else 25
 
@@ -808,13 +820,17 @@ class DemotionExecutor:
                         self._log(f"  disable_auto_tmm hash={torrent_hash[:16]}")
                         if not self.qbit_client.set_auto_management(torrent_hash, False):
                             raise RuntimeError(f"Failed to disable ATM for torrent {torrent_hash[:16]}")
+                        atm_disabled_by_us.append(torrent_hash)
 
             for idx, r in enumerate(relocations, start=1):
                 torrent_hash = r["torrent_hash"]
                 if not self.qbit_client.pause_torrent(torrent_hash):
                     raise RuntimeError(f"Failed to pause torrent {torrent_hash[:16]}")
-                if not self._wait_for_stable_qb_state(torrent_hash, timeout_seconds=20.0):
-                    raise RuntimeError(f"Torrent {torrent_hash[:16]} did not reach stable paused state")
+                if not self._wait_for_stable_qb_state(torrent_hash, timeout_seconds=60.0):
+                    raise RuntimeError(
+                        f"Torrent {torrent_hash[:16]} did not reach stable state within 60s — "
+                        f"cannot safely call setLocation while in a transient state"
+                    )
                 paused.append(torrent_hash)
                 if idx == 1 or idx == total or idx % progress_every == 0:
                     self._log(f"  relocate_progress phase=pause done={idx}/{total}")
@@ -914,17 +930,41 @@ class DemotionExecutor:
                 src = m.get("original_save_path_qb") or original_qb_paths.get(m["torrent_hash"])
                 if src:
                     self._set_location_with_retry(m["torrent_hash"], src, attempts=12, delay_seconds=1.0)
-            if self.resume_on_failure:
-                for h in resume_candidates:
-                    if not self.qbit_client.resume_torrent(h):
-                        self._log(
-                            f"  relocate_progress phase=resume_on_failure hash={h[:16]} status=resume_failed",
-                            "warning",
-                        )
+            # Restore ATM for every torrent where we disabled it.
+            if atm_disabled_by_us and hasattr(self.qbit_client, "set_auto_management"):
+                atm_restore_failed: List[str] = []
+                for h in atm_disabled_by_us:
+                    if not self.qbit_client.set_auto_management(h, True):
+                        atm_restore_failed.append(h[:16])
+                if atm_restore_failed:
+                    self._log(
+                        f"  relocate_rollback phase=atm_restore "
+                        f"failed_hashes={','.join(atm_restore_failed)}",
+                        "warning",
+                    )
+                else:
+                    self._log(
+                        f"  relocate_rollback phase=atm_restore restored={len(atm_disabled_by_us)}"
+                    )
+            # Always restore pre-operation state: resume every torrent that was
+            # running before this operation paused it.  This is unconditional —
+            # leaving torrents permanently paused after a failed operation is
+            # worse than resuming them, since the rollback already reverted
+            # their save_path.
+            resume_failed: List[str] = []
+            for h in resume_candidates:
+                if not self.qbit_client.resume_torrent(h):
+                    resume_failed.append(h[:16])
+            if resume_failed:
+                self._log(
+                    f"  relocate_rollback phase=resume "
+                    f"failed_hashes={','.join(resume_failed)}",
+                    "warning",
+                )
             else:
                 self._log(
-                    f"  relocate_progress phase=resume skipped=failure_keep_paused count={len(paused)}",
-                    "warning",
+                    f"  relocate_rollback phase=resume "
+                    f"resumed={len(resume_candidates)} paused_total={len(paused)}"
                 )
             raise
 
@@ -1087,18 +1127,26 @@ class DemotionExecutor:
         self,
         torrent_hash: str,
         *,
-        timeout_seconds: float = 20.0,
+        timeout_seconds: float = 60.0,
         interval_seconds: float = 0.5,
     ) -> bool:
-        """Wait until torrent state is no longer in a transient move/check phase."""
+        """
+        Wait until torrent state is no longer in a transient move/check phase.
+
+        Returns False if the timeout fires before the state stabilises.
+        The caller must treat a False return as an error — calling setLocation
+        on a torrent in a transient state is unsafe.
+        """
         import time
 
         transient_markers = ("checking", "moving", "allocating", "queued")
         deadline = time.monotonic() + timeout_seconds
+        last_state = "unknown"
         while time.monotonic() <= deadline:
             info = self.qbit_client.get_torrent_info(torrent_hash)
             if info:
                 state = str(getattr(info, "state", "")).lower()
+                last_state = state or "unknown"
                 if not any(marker in state for marker in transient_markers):
                     return True
                 if self.debug_qb:
@@ -1107,6 +1155,11 @@ class DemotionExecutor:
                         "warning",
                     )
             time.sleep(interval_seconds)
+        self._log(
+            f"  qb_wait_state_timeout hash={torrent_hash[:16]} "
+            f"last_state={last_state} timeout_s={int(timeout_seconds)}",
+            "warning",
+        )
         return False
 
     def _wait_for_save_path(
@@ -1178,7 +1231,11 @@ class DemotionExecutor:
 
             raw = str(getattr(info, "content_path", "") or "").strip()
             if not raw:
-                if self.debug_qb and not warned_missing_field:
+                if not warned_missing_field:
+                    # Always warn — an empty content_path after relocation means
+                    # qBittorrent hasn't populated it yet or the API response is
+                    # incomplete.  Silently skipping treated this as a pass; now
+                    # we surface it unconditionally so operators can see it.
                     self._log(
                         f"  validate_content_skipped hash={torrent_hash[:16]} reason=no_content_path_field",
                         "warning",
@@ -1486,6 +1543,84 @@ class DemotionExecutor:
 
 
 
+    # -----------------------------------------------------------------------
+    # Download-state set used by the pre-flight guard.  Any torrent in these
+    # states has either an active or stale qBt-downloadPath in its fastresume
+    # file and must NOT be rehomed — doing so is how the Feb-2026 disaster was
+    # triggered (2103 torrents entered stoppedDL on next qB restart).
+    _PREFLIGHT_BLOCKED_STATES: frozenset = frozenset({
+        "stoppeddl",     # primary disaster state
+        "downloading",
+        "stalleddl",
+        "queueddl",
+        "forceddl",
+        "metadl",
+        "pauseddl",
+        "missingfiles",
+        "error",
+    })
+
+    def _preflight_torrent_state_check(self, plan: Dict) -> None:
+        """
+        Block execution if any affected torrent is not seed-ready.
+
+        This is the primary guard against recurrence of the Feb-2026 disaster:
+        torrents that are not 100% complete carry an active qBt-downloadPath in
+        their fastresume file; rehoming them via setLocation leaves that field
+        pointing at the old (now-wrong) path, causing stoppedDL on next qB restart.
+
+        Raises:
+            RuntimeError: If any torrent fails the state/progress check.
+        """
+        torrent_hashes = plan.get("affected_torrents") or []
+        if not torrent_hashes:
+            return
+
+        blocked: List[str] = []
+
+        for torrent_hash in torrent_hashes:
+            info = self.qbit_client.get_torrent_info(torrent_hash)
+            if not info:
+                blocked.append(
+                    f"{torrent_hash[:16]}: not found in qBittorrent"
+                )
+                continue
+
+            state = str(getattr(info, "state", "") or "").strip().lower()
+            progress_raw = getattr(info, "progress", None)
+            try:
+                progress = float(progress_raw) if progress_raw is not None else 0.0
+            except (TypeError, ValueError):
+                progress = 0.0
+
+            # Any transient checking/moving state is also unsafe.
+            is_transient = any(
+                marker in state
+                for marker in ("checking", "moving", "allocating")
+            )
+
+            if state in self._PREFLIGHT_BLOCKED_STATES or is_transient:
+                blocked.append(
+                    f"{torrent_hash[:16]}: unsafe state={state!r} progress={progress:.4f}"
+                )
+                continue
+
+            if progress < 0.9999:
+                blocked.append(
+                    f"{torrent_hash[:16]}: incomplete progress={progress:.4f} state={state!r}"
+                )
+
+        if blocked:
+            detail = "\n  ".join(blocked)
+            raise RuntimeError(
+                f"Preflight check blocked {len(blocked)}/{len(torrent_hashes)} torrent(s) — "
+                f"rehome aborted before any mutation:\n  {detail}"
+            )
+
+        self._log(
+            f"preflight_state_check passed torrents={len(torrent_hashes)}"
+        )
+
     @staticmethod
     def _split_tags(raw_tags: Optional[str]) -> List[str]:
         """Split qB tag CSV into normalized tag names."""
@@ -1692,6 +1827,7 @@ class DemotionExecutor:
             raise RuntimeError("Cannot execute BLOCKED plan")
 
         preloaded_files = self._sanitize_plan_live_torrents(plan)
+        self._preflight_torrent_state_check(plan)
 
         self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
 

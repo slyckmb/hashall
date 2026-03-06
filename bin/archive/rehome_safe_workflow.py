@@ -150,8 +150,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=5, help="How many safe groups to process")
     parser.add_argument("--seeding-root", default="/stash/media")
     parser.add_argument("--library-root", default="/stash/media")
-    parser.add_argument("--stash-device", type=int, required=True)
-    parser.add_argument("--pool-device", type=int, required=True)
+    parser.add_argument("--pool-payload-root", default="/pool/data/seeds",
+                        help="Base directory on pool for MOVE target paths")
+    parser.add_argument("--stash-device", required=True,
+                        help="Device alias (e.g. 'stash') or integer device_id")
+    parser.add_argument("--pool-device", required=True,
+                        help="Device alias (e.g. 'pool') or integer device_id")
     parser.add_argument("--out-dir", default=str(Path.home() / ".logs/hashall/reports/rehome-plans"))
     parser.add_argument("--run-log-dir", default=str(Path.home() / ".logs/hashall/reports/rehome-safe-runs"))
     parser.add_argument(
@@ -171,6 +175,13 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = connect_db(db_path, read_only=True, apply_migrations=False)
     try:
+        from hashall.device import resolve_device_id
+        try:
+            args.stash_device = resolve_device_id(conn, args.stash_device)
+            args.pool_device = resolve_device_id(conn, args.pool_device)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
         report = build_status_report(
             conn,
             roots_arg=args.roots,
@@ -262,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
             str(args.stash_device),
             "--pool-device",
             str(args.pool_device),
+            "--pool-payload-root",
+            args.pool_payload_root,
             "--output",
             str(plan_path),
         ]

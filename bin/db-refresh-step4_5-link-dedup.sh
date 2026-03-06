@@ -9,7 +9,7 @@ PYTHON="/home/michael/.venvs/hashall/bin/python"
 export PYTHONPATH="$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
 
 APPLY=false
-DEVICES_CSV="${DEVICES_CSV:-stash,data,spare}"
+DEVICES_CSV="${DEVICES_CSV:-stash,pool,spare}"
 MIN_SIZE="${MIN_SIZE:-1048576}"   # 1 MiB default to avoid tiny-file churn
 EXEC_LIMIT="${EXEC_LIMIT:-0}"     # 0 = all planned actions
 LOCK_RETRY_SECS="${LOCK_RETRY_SECS:-30}"
@@ -23,8 +23,8 @@ Usage: bin/db-refresh-step4_5-link-dedup.sh [--apply] [--devices CSV | --alias N
 
 Options:
   --apply          Execute hardlink actions after dry-run (default: dry-run only)
-  --devices CSV    Comma-separated device aliases (default: stash,data,spare)
-  --alias NAME     Repeatable alias selector (example: --alias data --alias stash)
+  --devices CSV    Comma-separated device aliases (default: stash,pool,spare)
+  --alias NAME     Repeatable alias selector (example: --alias pool --alias stash)
   --min-size N     Min file size in bytes for plan candidates (default: 1048576)
   --limit N        Max actions for execute phase per device (default: 0 = all)
   --lock-retry-secs N   Sleep interval between DB-lock retries (default: 30)

@@ -38,7 +38,7 @@ Single living document for current operational status, handoff context, and next
   - `bin/db-refresh-step3-sha256-backfill.sh`
   - `bin/db-refresh-step4_5-link-dedup.sh`
   - `bin/db-refresh-step4-payload-sync.sh`
-  - `bin/rehome-106_nohl-basics-qb-hash-root-report.sh`
+  - `bin/qb-hash-root-report.sh`
 
 ## Recent Hardening (2026-03-01)
 

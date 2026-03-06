@@ -1,0 +1,927 @@
+# gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
+# hashall - 0.4.43 - 2026-02-11T17:58:00-0500
+# Makefile for hashall - Development and smart scan operations
+
+REPO_DIR := $(shell pwd)
+DB_DIR := $(HOME)/.hashall
+DB_FILE := $(DB_DIR)/catalog.db
+HASHALL_IMG := hashall
+
+# Python interpreter (uses active virtualenv if available)
+PYTHON := $(shell if [ -n "$$VIRTUAL_ENV" ]; then echo "$$VIRTUAL_ENV/bin/python"; else echo "python3"; fi)
+
+# Smart scan wrapper
+SMART_SCAN = ./bin/scan/hashall-smart-scan
+
+# Hierarchical scanners
+AUTO_SCAN = ./bin/scan/hashall-auto-scan
+PLAN_SCAN = ./bin/scan/hashall-plan-scan
+
+# Default scan path (override with PATH=/custom/path)
+PATH ?= .
+PATHS ?= /pool/data /stash/media
+LINK_UPGRADE_COLLISIONS ?= 1
+LINK_MIN_SIZE ?= 0
+LINK_DRY_RUN ?= 0
+LINK_LIMIT ?= 0
+LINK_REQUIRE_EXISTING_HARDLINKS ?= 1
+LINK_LOW_PRIORITY ?= 1
+LINK_FIX_PERMS ?= 1
+LINK_FIX_ACL ?= 0
+LINK_FIX_PERMS_LOG ?=
+HARDLINK_ROOTS ?=
+HARDLINK_AUTO_EXECUTE ?= 0
+HARDLINK_AUTO_MAX_ITER ?= 5
+HARDLINK_AUTO_SCAN_EACH_ITER ?= 0
+HARDLINK_AUTO_DRY_RUN ?= 0
+HARDLINK_AUTO_HASH_MODE ?= $(HASH_MODE)
+HARDLINK_AUTO_MIN_SIZE ?= $(LINK_MIN_SIZE)
+
+# Payload sync defaults (override via make VAR=value)
+PAYLOAD_CATEGORY ?=
+PAYLOAD_TAG ?=
+PAYLOAD_PATH_PREFIXES ?=
+PAYLOAD_LIMIT ?= 0
+PAYLOAD_DRY_RUN ?= 0
+PAYLOAD_UPGRADE_MISSING ?= 0
+PAYLOAD_PARALLEL ?= 0
+PAYLOAD_WORKERS ?=
+PAYLOAD_LOW_PRIORITY ?= 1
+PAYLOAD_MAX_GROUPS ?= 0
+PAYLOAD_AUTO_BACKUP ?= 0
+PAYLOAD_AUTO_BACKUP_DIR ?=
+PAYLOAD_UNMANAGED_PATH_PREFIXES ?=
+PAYLOAD_UNMANAGED_SAMPLES ?= 5
+PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES ?=
+PAYLOAD_ORPHAN_AUDIT_SAMPLES ?= 5
+PAYLOAD_ORPHAN_AUDIT_JSON ?= 0
+PAYLOAD_ORPHAN_AUDIT_ROOTS ?= /pool/data,/stash/media,/data/media
+PAYLOAD_ORPHAN_AUDIT_OUTPUT_DIR ?= $(HOME)/.logs/hashall/orphan-audit
+PAYLOAD_ORPHAN_AUDIT_SKIP_AUTO ?= 0
+PAYLOAD_ORPHAN_TIMER_UNIT ?= hashall-payload-orphan-snapshot.timer
+PAYLOAD_ORPHAN_TIMER_SERVICE ?= hashall-payload-orphan-snapshot.service
+STATUS_ROOTS ?=
+STATUS_REPORT_TOP ?= 15
+STATUS_REPORT_POCKET_DEPTH ?= 2
+STATUS_REPORT_OUTPUT_DIR ?= $(HOME)/.logs/hashall/reports
+STATUS_REPORT_MEDIA_ROOT ?= /data/media
+STATUS_REPORT_RECOVERY_PREFIX ?= /data/media/torrents/seeding/recovery_20260211
+STATUS_REPORT_PHONE_WIDTH ?= 0
+STATUS_REPORT_PHONE_TOP ?= 5
+STATUS_REPORT_CACHE_TTL ?= 300
+STATUS_REPORT_REFRESH ?= 0
+PAYLOAD_AUTO_QBM_FAIL_CLOSED ?= 0
+PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES ?= 120
+PAYLOAD_AUTO_QBM_ACTIVITY_LOG ?=
+
+# Root scan defaults (override via make VAR=value)
+PARALLEL ?= 1
+WORKERS ?=
+HASH_MODE ?= fast
+SHOW_PATH ?= 1
+SCAN_NESTED_DATASETS ?= 0
+SCAN_LOW_PRIORITY ?= 0
+
+# Root scan CLI (force repo-local src to avoid editable-install path drift)
+HASHALL_CLI := PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -m hashall.cli
+# Rehome CLI (force repo-local src to avoid editable-install path drift)
+REHOME_CLI := PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -m rehome.cli
+
+# Rehome defaults (override via make VAR=value)
+REHOME_CATALOG ?= $(DB_FILE)
+REHOME_MODE ?=
+REHOME_TORRENT_HASH ?=
+REHOME_PAYLOAD_HASH ?=
+REHOME_TAG ?=
+REHOME_SEEDING_ROOTS ?=
+REHOME_LIBRARY_ROOTS ?=
+REHOME_CROSS_SEED_CONFIG ?=
+REHOME_TRACKER_REGISTRY ?=
+REHOME_STASH_DEVICE ?=
+REHOME_POOL_DEVICE ?=
+REHOME_STASH_SEEDING_ROOT ?=
+REHOME_POOL_SEEDING_ROOT ?=
+REHOME_POOL_PAYLOAD_ROOT ?=
+REHOME_OUTPUT ?=
+REHOME_PLAN ?=
+REHOME_SPOT_CHECK ?= 0
+REHOME_RESCAN ?= 0
+REHOME_CLEANUP_SOURCE_VIEWS ?= 0
+REHOME_CLEANUP_EMPTY_DIRS ?= 0
+REHOME_CLEANUP_DUPLICATE_PAYLOAD ?= 0
+REHOME_SAFE_ROOTS ?= /pool/data,/stash/media,/data/media
+REHOME_SAFE_LIMIT ?= 5
+REHOME_SAFE_APPLY ?= 0
+REHOME_SAFE_SEEDING_ROOT ?= /stash/media
+REHOME_SAFE_LIBRARY_ROOT ?= /stash/media
+REHOME_SAFE_POOL_PAYLOAD_ROOT ?= /pool/data/seeds
+REHOME_SAFE_RUN_LOG_DIR ?= $(HOME)/.logs/hashall/reports/rehome-safe-runs
+REHOME_SAFE_RUN_LOG ?=
+REHOME_SAFE_VERIFY_STRICT ?= 1
+REHOME_SAFE_VERIFY_CLEANUP ?= 0
+REHOME_SAFE_VERIFY_PRINT_TORRENTS ?= 1
+REHOME_FOLLOWUP_CLEANUP ?= 0
+REHOME_FOLLOWUP_STRICT ?= 0
+REHOME_FOLLOWUP_RETRY_FAILED ?= 0
+REHOME_FOLLOWUP_LIMIT ?= 0
+REHOME_FOLLOWUP_PRINT_TORRENTS ?= 0
+REHOME_FOLLOWUP_OUTPUT ?=
+REHOME_FOLLOWUP_PAYLOAD_HASH ?=
+REHOME_NORMALIZE_POOL_ROOT ?= /pool/data/seeds
+REHOME_NORMALIZE_STASH_ROOT ?= /stash/media/torrents/seeding
+REHOME_NORMALIZE_LIMIT ?= 0
+REHOME_NORMALIZE_FLAT_ONLY ?= 1
+REHOME_NORMALIZE_PRINT_SKIPPED ?= 0
+REHOME_NORMALIZE_PAYLOAD_HASH ?=
+REHOME_NORMALIZE_OUTPUT ?=
+RECOVERY_WORKFLOW_PREFIX ?= /data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207
+RECOVERY_WORKFLOW_STASH_DEVICE ?= stash
+RECOVERY_WORKFLOW_POOL_DEVICE ?= pool
+RECOVERY_WORKFLOW_LIMIT ?= 20
+RECOVERY_WORKFLOW_APPLY ?= 0
+RECOVERY_WORKFLOW_OUTPUT_DIR ?= $(HOME)/.logs/hashall/reports/recovery-workflow
+
+REHOME_SEEDING_ARGS := $(foreach r,$(REHOME_SEEDING_ROOTS),--seeding-root "$(r)")
+HELP_BANNER := hashall - $(shell PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c "from hashall import __version__; print(__version__)" 2>/dev/null || echo unknown) - $(shell TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)
+REHOME_LIBRARY_ARGS := $(foreach r,$(REHOME_LIBRARY_ROOTS),--library-root "$(r)")
+REHOME_CROSS_SEED_ARG := $(if $(REHOME_CROSS_SEED_CONFIG),--cross-seed-config "$(REHOME_CROSS_SEED_CONFIG)",)
+REHOME_TRACKER_ARG := $(if $(REHOME_TRACKER_REGISTRY),--tracker-registry "$(REHOME_TRACKER_REGISTRY)",)
+REHOME_STASH_SEEDING_ARG := $(if $(REHOME_STASH_SEEDING_ROOT),--stash-seeding-root "$(REHOME_STASH_SEEDING_ROOT)",)
+REHOME_POOL_SEEDING_ARG := $(if $(REHOME_POOL_SEEDING_ROOT),--pool-seeding-root "$(REHOME_POOL_SEEDING_ROOT)",)
+REHOME_POOL_PAYLOAD_ARG := $(if $(REHOME_POOL_PAYLOAD_ROOT),--pool-payload-root "$(REHOME_POOL_PAYLOAD_ROOT)",)
+REHOME_OUTPUT_ARG := $(if $(REHOME_OUTPUT),--output "$(REHOME_OUTPUT)",)
+
+.DEFAULT_GOAL := help
+
+.PHONY: help
+help:  ## Show this help message
+	@echo "🧰 Hashall Make Targets"
+	@echo ""
+	@echo "$(HELP_BANNER)"
+	@echo ""
+	@echo "Meta & Docs:"
+	@grep -E '^(help|targets-table|targets-full|prompts-remote):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Scan (Root):"
+	@grep -E '^scan:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Scan Presets:"
+	@grep -E '^(scan-auto|scan-video|scan-audio|scan-books|scan-mixed|scan-dry-run|scan-presets):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Scan Hierarchical:"
+	@grep -E '^(scan-hierarchical|scan-hier-per-device|scan-plan|scan-plan-execute|scan-hier-dry):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Dedup & Link:"
+	@grep -E '^(hardlink-workflow|hardlink-auto|link-path|link-paths|link-verify-scope|link-execute|link-payload-empty):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Payload & Rehome:"
+	@grep -E '^(payload-sync|payload-collisions|payload-upgrade-collisions|payload-unmanaged|payload-orphan-audit|payload-orphan-snapshot|payload-orphan-timer-install|payload-orphan-timer-status|payload-orphan-timer-disable|payload-workflow|payload-auto|status-report|status-report-phone|recovery-auto|recovery-auto-apply|rehome-safe-auto|rehome-safe-verify|rehome-safe-cleanup|rehome-followup|rehome-normalize-plan|rehome-normalize-apply|rehome-plan|rehome-plan-demote|rehome-plan-promote|rehome-apply-dry|rehome-apply|rehome-checklist|rehome-last-plan|rehome-review-plan):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Devices & Stats:"
+	@grep -E '^(devices|show-device|alias-device|stats):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "DB & Verification:"
+	@grep -E '^(export|verify-trees|verify|diff|version|backup-db|clean-db):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Docker:"
+	@grep -E '^(docker-scan|docker-export|docker-test):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Development & Testing:"
+	@grep -E '^(bootstrap|install|install-dev|build|test|test-fast|test-integration|test-smoke|bench|sandbox|clean):.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Examples:"
+	@echo "  make scan PATH=/pool/media WORKERS=12   # Root scan (parallel)"
+	@echo "  make scan PATH=/pool/media HASH_MODE=full  # Full hashes"
+	@echo "  make scan PATH=/pool/media SHOW_PATH=0     # Hide current file path line"
+	@echo "  make link-path PATH=/pool/data            # Plan hardlinks for a path"
+	@echo "  make link-paths PATHS='/pool/data /stash/media'  # Plan both roots"
+	@echo "  make link-paths LINK_UPGRADE_COLLISIONS=0  # Skip collision upgrade"
+	@echo "  make hardlink-workflow PATH=/pool/data    # Show hardlink workflow done/todo"
+	@echo "  make hardlink-auto ROOTS='/pool/data,/stash/media' HARDLINK_AUTO_DRY_RUN=1  # Preview full hardlink workflow"
+	@echo "  make hardlink-auto ROOTS='/pool/data,/stash/media' HARDLINK_AUTO_EXECUTE=1   # Run full hardlink workflow"
+	@echo "  make link-execute PLAN_ID=1 LINK_LIMIT=10 # Execute 10 actions"
+	@echo "  make payload-sync                         # Sync torrents -> payloads"
+	@echo "  make payload-workflow                     # Cross-device payload status"
+	@echo "  make payload-workflow PW_PATHS='/pool/data /stash/media'  # Explicit roots"
+	@echo "  make status-report ROOTS='/pool/data,/stash/media,/data/media'  # Operations report + heat map"
+	@echo "  make status-report-phone ROOTS='/pool/data,/stash/media,/data/media'  # Phone-friendly summary"
+	@echo "  make payload-unmanaged PAYLOAD_UNMANAGED_PATH_PREFIXES='/pool/data /stash/media'  # Orphan inventory"
+	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media'  # Non-destructive orphan staging audit"
+	@echo "  make payload-orphan-audit PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES='/pool/data /stash/media' PAYLOAD_ORPHAN_AUDIT_JSON=1  # JSON snapshot for trend checks"
+	@echo "  make payload-orphan-snapshot PAYLOAD_ORPHAN_AUDIT_ROOTS='/pool/data,/stash/media,/data/media'  # Timestamped snapshot bundle"
+	@echo "  make payload-orphan-timer-install             # Install+enable user timer"
+	@echo "  make payload-orphan-timer-status              # Show timer status/next runs"
+	@echo "  make payload-auto ROOTS='/pool/data,/stash/media' DRY_RUN=1  # Preview actions"
+	@echo "  make payload-auto ROOTS='/pool/data,/stash/media'            # Run to completion"
+	@echo "  make recovery-auto RECOVERY_WORKFLOW_PREFIX='/data/media/torrents/seeding/recovery_20260211/recycle_snapshot_20260207'  # Audit recovered content"
+	@echo "  make recovery-auto-apply RECOVERY_WORKFLOW_LIMIT=10  # Prune exact duplicate recovered units"
+	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool  # Top safe rehome dry-run batch"
+	@echo "  make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool REHOME_SAFE_APPLY=1  # Execute safe rehomes"
+	@echo "  make rehome-safe-verify                    # Gate check latest safe run (qB+DB+source)"
+	@echo "  make rehome-safe-cleanup                   # Delete source paths only when gates pass"
+	@echo "  make rehome-followup                       # Process rehome_verify_pending + cleanup-required tags"
+	@echo "  make rehome-normalize-plan REHOME_POOL_DEVICE=pool  # Build batch plan for misplaced pool payload roots"
+	@echo "  make rehome-normalize-apply REHOME_PLAN=rehome-plan-normalize-*.json  # Apply normalization + cleanup old roots"
+	@echo "  make rehome-checklist                     # Rehome checklist"
+	@echo "  make devices                             # List all registered devices"
+	@echo "  make stats                               # Show catalog statistics"
+	@echo ""
+	@echo "$(HELP_BANNER)"
+	@echo ""
+
+# ============================================================================
+# Root Scan (Recommended)
+# ============================================================================
+
+SCAN_ARGS = --db "$(DB_FILE)" --hash-mode "$(HASH_MODE)"
+ifeq ($(PARALLEL),1)
+SCAN_ARGS += --parallel
+endif
+ifneq ($(WORKERS),)
+SCAN_ARGS += --workers $(WORKERS)
+endif
+ifeq ($(SHOW_PATH),1)
+SCAN_ARGS += --show-path
+endif
+ifeq ($(SCAN_NESTED_DATASETS),1)
+SCAN_ARGS += --scan-nested-datasets
+endif
+ifeq ($(SCAN_LOW_PRIORITY),1)
+SCAN_ARGS += --low-priority
+endif
+
+.PHONY: scan
+scan:  ## Root scan (parallel by default). Vars: PATH, WORKERS, HASH_MODE, SHOW_PATH, PARALLEL
+	@echo "📦 Root scan: $(PATH)"
+	@$(HASHALL_CLI) scan "$(PATH)" $(SCAN_ARGS)
+
+# ============================================================================
+# Smart Scan Targets (Auto-Tuning) - RECOMMENDED
+# ============================================================================
+
+.PHONY: scan-auto
+scan-auto:  ## Auto-detect optimal scan settings (recommended)
+	@echo "⚠️ Deprecated: use 'make scan PATH=...' for a single root scan."
+	@echo "🔍 Auto-detecting optimal settings for: $(PATH)"
+	$(SMART_SCAN) "$(PATH)" --db "$(DB_FILE)"
+
+.PHONY: scan-video
+scan-video:  ## Scan large video files (parallel, 4 workers, optimized >50MB)
+	@echo "⚠️ Deprecated: use 'make scan PATH=... HASH_MODE=full WORKERS=4'."
+	@echo "🎬 Scanning video files: $(PATH)"
+	$(SMART_SCAN) "$(PATH)" --preset video --db "$(DB_FILE)"
+
+.PHONY: scan-audio
+scan-audio:  ## Scan medium audio files (parallel, 8 workers, optimized 5-50MB)
+	@echo "⚠️ Deprecated: use 'make scan PATH=... WORKERS=8'."
+	@echo "🎵 Scanning audio files: $(PATH)"
+	$(SMART_SCAN) "$(PATH)" --preset audio --db "$(DB_FILE)"
+
+.PHONY: scan-books
+scan-books:  ## Scan small files/books (sequential, optimized <5MB)
+	@echo "⚠️ Deprecated: use 'make scan PATH=... PARALLEL=0'."
+	@echo "📚 Scanning books/documents: $(PATH)"
+	$(SMART_SCAN) "$(PATH)" --preset books --db "$(DB_FILE)"
+
+.PHONY: scan-mixed
+scan-mixed:  ## Scan mixed content (balanced parallel settings)
+	@echo "⚠️ Deprecated: use 'make scan PATH=...'."
+	@echo "📦 Scanning mixed content: $(PATH)"
+	$(SMART_SCAN) "$(PATH)" --preset mixed --db "$(DB_FILE)"
+
+.PHONY: scan-dry-run
+scan-dry-run:  ## Show what scan would execute without running
+	@echo "⚠️ Deprecated: use 'make scan PATH=...' for actual scans."
+	@echo "🔍 Analyzing $(PATH) (dry-run mode)..."
+	$(SMART_SCAN) "$(PATH)" --dry-run --db "$(DB_FILE)"
+
+.PHONY: scan-presets
+scan-presets:  ## Show all available scan presets and their settings
+	@echo "⚠️ Deprecated: use 'make scan PATH=...'."
+	@$(SMART_SCAN) --show-presets
+
+# ============================================================================
+# Hierarchical & Adaptive Scanning - ADVANCED
+# ============================================================================
+
+.PHONY: scan-hierarchical
+scan-hierarchical:  ## Adaptive scan - analyzes each subfolder independently (unified)
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical scans (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical scans may overscan. Use 'make scan PATH=...'."
+	@echo "🌳 Hierarchical scan with unified database: $(PATH)"
+	$(AUTO_SCAN) "$(PATH)" --db "$(DB_FILE)"
+
+.PHONY: scan-hier-per-device
+scan-hier-per-device:  ## Adaptive scan - per-device databases (legacy)
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical scans (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical scans may overscan. Use 'make scan PATH=...'."
+	@echo "🌳 Hierarchical scan with device-local database: $(PATH)"
+	$(AUTO_SCAN) "$(PATH)" --per-device
+
+.PHONY: scan-plan
+scan-plan:  ## Analyze tree and propose optimal scan strategy
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical planning (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical planning may overscan. Use 'make scan PATH=...'."
+	@echo "📊 Analyzing directory tree for optimal scan strategy: $(PATH)"
+	$(PLAN_SCAN) "$(PATH)" --db "$(DB_FILE)"
+
+.PHONY: scan-plan-execute
+scan-plan-execute:  ## Analyze and execute optimal scan plan
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical planning (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical planning may overscan. Use 'make scan PATH=...'."
+	@echo "🚀 Planning and executing optimal scan: $(PATH)"
+	$(PLAN_SCAN) "$(PATH)" --execute --db "$(DB_FILE)"
+
+.PHONY: scan-hier-dry
+scan-hier-dry:  ## Preview hierarchical scan plan without executing
+	@if [ "$(ALLOW_HIER)" != "1" ]; then \
+		echo "❌ Disabled. Set ALLOW_HIER=1 to run hierarchical scans (may overscan)."; \
+		exit 1; \
+	fi
+	@echo "⚠️ Deprecated: hierarchical scans may overscan. Use 'make scan PATH=...'."
+	@echo "🔍 Previewing hierarchical scan plan: $(PATH)"
+	$(AUTO_SCAN) "$(PATH)" --dry-run --db "$(DB_FILE)"
+
+# ============================================================================
+# Device Management
+# ============================================================================
+
+.PHONY: devices
+devices:  ## List all registered devices
+	@hashall devices list
+
+.PHONY: show-device
+show-device:  ## Show detailed device info (usage: make show-device DEVICE=pool)
+ifndef DEVICE
+	@echo "❌ Error: DEVICE not specified"
+	@echo "Usage: make show-device DEVICE=<device_id_or_alias>"
+	@echo ""
+	@echo "Available devices:"
+	@hashall devices list
+	@exit 1
+endif
+	@hashall devices show "$(DEVICE)"
+
+.PHONY: alias-device
+alias-device:  ## Set device alias (usage: make alias-device DEVICE=49 ALIAS=pool)
+ifndef DEVICE
+	@echo "❌ Error: DEVICE not specified"
+	@echo "Usage: make alias-device DEVICE=<current> ALIAS=<new>"
+	@exit 1
+endif
+ifndef ALIAS
+	@echo "❌ Error: ALIAS not specified"
+	@echo "Usage: make alias-device DEVICE=<current> ALIAS=<new>"
+	@exit 1
+endif
+	@hashall devices alias "$(DEVICE)" "$(ALIAS)"
+
+.PHONY: stats
+stats:  ## Show catalog statistics (file counts, sizes, devices)
+	@hashall stats
+
+# ============================================================================
+# Development & Testing
+# ============================================================================
+
+.PHONY: bootstrap
+bootstrap:  ## Prepare environment (clone, venv, db dir, ~/.bin link)
+	@echo "🚀 Bootstrapping hashall repo setup..."
+	@.setup/bootstrap-hashall.sh
+
+.PHONY: build
+build:  ## Build Docker image for hashall
+	@echo "🐳 Building Docker image: $(HASHALL_IMG)"
+	docker build -t $(HASHALL_IMG) .
+
+.PHONY: test
+test:  ## Run full test suite
+	@echo "🧪 Running tests..."
+	@python -m pytest tests/ -v
+
+.PHONY: test-fast
+test-fast:  ## Run tests without integration tests
+	@python -m pytest tests/ -v -m "not integration"
+
+.PHONY: test-integration
+test-integration:  ## Run only integration tests
+	@python -m pytest tests/ -v -m integration
+
+.PHONY: test-smoke
+test-smoke:  ## Run full CLI smoke test
+	@echo "🧪 Running smoke test..."
+	@bash tests/smoke_test.sh
+
+.PHONY: bench
+bench:  ## Run performance benchmarks
+	@python benchmarks/bench_incremental.py
+
+.PHONY: sandbox
+sandbox:  ## Regenerate local test sandbox
+	@echo "🔁 Resetting test sandbox..."
+	@bash tests/generate_sandbox.sh
+
+.PHONY: targets-table
+targets-table:  ## Generate summarized Markdown table of Makefile targets and CLI equivalents
+	@python3 scripts/generate_target_table.py
+
+.PHONY: targets-full
+targets-full:  ## Generate table with full untruncated CLI commands (hides description)
+	@python3 scripts/generate_target_table.py --full
+
+.PHONY: prompts-remote
+prompts-remote:  ## Prepend remote Codex preamble to prompts under out/
+	@scripts/prepend_remote_preamble.sh
+
+.PHONY: clean
+clean:  ## Remove generated files and caches
+	@echo "🧹 Cleaning up..."
+	rm -rf sandbox/ tmp/
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete
+	find . -type f -name "*.pyo" -delete
+	find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+	rm -rf build/ dist/ .pytest_cache/ .coverage
+
+.PHONY: clean-db
+clean-db:  ## Remove catalog database (DESTRUCTIVE!)
+	@echo "⚠️  WARNING: This will delete your entire catalog!"
+	@echo "Database: $(DB_FILE)"
+	@read -p "Are you sure? [y/N] " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		rm -f "$(DB_FILE)" "$(DB_FILE)-wal" "$(DB_FILE)-shm"; \
+		echo "✅ Database deleted"; \
+	else \
+		echo "❌ Cancelled"; \
+	fi
+
+.PHONY: install
+install:  ## Install hashall in development mode
+	pip install -e .
+
+.PHONY: install-dev
+install-dev:  ## Install with development dependencies
+	pip install -e ".[dev]"
+
+# ============================================================================
+# Other Operations
+# ============================================================================
+
+.PHONY: link-path
+link-path:  ## Create a hardlink plan for PATH (auto-detect device)
+	@device="$$(PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c 'import os,sys; from pathlib import Path; from hashall.model import connect_db; from hashall.pathing import canonicalize_path; p=Path(sys.argv[1]); db=Path(sys.argv[2]); device_id=os.stat(canonicalize_path(p)).st_dev; conn=connect_db(db); cur=conn.cursor(); row=cur.execute("SELECT device_alias FROM devices WHERE device_id = ?", (device_id,)).fetchone(); conn.close(); print(row[0] if row and row[0] else device_id)' "$(PATH)" "$(DB_FILE)")"; \
+	if [ -z "$$device" ]; then \
+		echo "❌ Could not resolve device for $(PATH)"; \
+		exit 1; \
+	fi; \
+	args="--device $$device"; \
+	if [ "$(LINK_UPGRADE_COLLISIONS)" != "1" ]; then args="$$args --no-upgrade-collisions"; fi; \
+	if [ "$(LINK_MIN_SIZE)" != "0" ]; then args="$$args --min-size $(LINK_MIN_SIZE)"; fi; \
+	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	$(HASHALL_CLI) link plan "dedupe $(PATH)" $$args --db "$(DB_FILE)"
+
+.PHONY: link-paths
+link-paths:  ## Create hardlink plans for PATHS (space-separated)
+	@for p in $(PATHS); do \
+		$(MAKE) link-path PATH="$$p"; \
+	done
+
+.PHONY: link-verify-scope
+link-verify-scope:  ## Verify latest plan scope for PATH (optional PLAN_ID)
+	@plan_arg=""; \
+	if [ -n "$(PLAN_ID)" ]; then plan_arg="--plan-id $(PLAN_ID)"; fi; \
+	$(HASHALL_CLI) link verify-scope "$(PATH)" $$plan_arg --db "$(DB_FILE)"
+
+.PHONY: link-execute
+link-execute:  ## Execute a link plan (requires PLAN_ID). Vars: PLAN_ID, LINK_DRY_RUN, LINK_LIMIT, LINK_LOW_PRIORITY, LINK_FIX_PERMS, LINK_FIX_ACL, LINK_FIX_PERMS_LOG
+	@if [ -z "$(PLAN_ID)" ]; then \
+		echo "❌ PLAN_ID is required"; \
+		exit 1; \
+	fi; \
+	args=""; \
+	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	if [ "$(LINK_LIMIT)" != "0" ] && [ -n "$(LINK_LIMIT)" ]; then args="$$args --limit $(LINK_LIMIT)"; fi; \
+	if [ "$(LINK_LOW_PRIORITY)" = "1" ]; then args="$$args --low-priority"; fi; \
+	if [ "$(LINK_FIX_PERMS)" = "1" ]; then args="$$args --fix-perms"; else args="$$args --no-fix-perms"; fi; \
+	if [ "$(LINK_FIX_ACL)" = "1" ]; then args="$$args --fix-acl"; fi; \
+	if [ -n "$(LINK_FIX_PERMS_LOG)" ]; then args="$$args --fix-perms-log $(LINK_FIX_PERMS_LOG)"; fi; \
+	$(HASHALL_CLI) link execute $(PLAN_ID) $$args --db "$(DB_FILE)"
+
+.PHONY: link-payload-empty
+link-payload-empty:  ## Create empty-payload plan for PATH (auto-detect device)
+	@device="$$(PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -c 'import os,sys; from pathlib import Path; from hashall.model import connect_db; from hashall.pathing import canonicalize_path; p=Path(sys.argv[1]); db=Path(sys.argv[2]); device_id=os.stat(canonicalize_path(p)).st_dev; conn=connect_db(db); cur=conn.cursor(); row=cur.execute("SELECT device_alias FROM devices WHERE device_id = ?", (device_id,)).fetchone(); conn.close(); print(row[0] if row and row[0] else device_id)' "$(PATH)" "$(DB_FILE)")"; \
+	if [ -z "$$device" ]; then \
+		echo "❌ Could not resolve device for $(PATH)"; \
+		exit 1; \
+	fi; \
+	args="--device $$device"; \
+	if [ "$(LINK_DRY_RUN)" = "1" ]; then args="$$args --dry-run"; fi; \
+	if [ "$(LINK_REQUIRE_EXISTING_HARDLINKS)" != "1" ]; then args="$$args --no-require-existing-hardlinks"; fi; \
+	$(HASHALL_CLI) link plan-payload-empty "empty payload $(PATH)" $$args --db "$(DB_FILE)"
+
+.PHONY: hardlink-workflow
+hardlink-workflow:  ## Show hardlink workflow done/todo for PATH
+	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)" --auto-verify-scope
+
+.PHONY: workflow
+workflow:  ## Alias for hardlink-workflow (deprecated)
+	@echo "⚠️  'workflow' target is deprecated; use 'hardlink-workflow'"
+	@$(PYTHON) scripts/workflow_status.py "$(PATH)" --db "$(DB_FILE)" --auto-verify-scope
+
+.PHONY: hardlink-auto
+hardlink-auto:  ## Auto-run hardlink workflow (ROOTS='path1,path2' HARDLINK_AUTO_EXECUTE=1 optional)
+	@set -- --db "$(DB_FILE)"; \
+		roots="$(HARDLINK_ROOTS)"; \
+		if [ -z "$$roots" ] && [ -n "$(ROOTS)" ]; then roots="$(ROOTS)"; fi; \
+		if [ -n "$$roots" ]; then set -- "$$@" --roots "$$roots"; fi; \
+		set -- "$$@" --max-iterations "$(HARDLINK_AUTO_MAX_ITER)" --hash-mode "$(HARDLINK_AUTO_HASH_MODE)"; \
+		if [ "$(HARDLINK_AUTO_SCAN_EACH_ITER)" = "1" ]; then set -- "$$@" --scan-each-iteration; fi; \
+		if [ "$(HARDLINK_AUTO_EXECUTE)" = "1" ]; then set -- "$$@" --execute; fi; \
+		if [ "$(HARDLINK_AUTO_DRY_RUN)" = "1" ] || [ "$(DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
+		if [ "$(HARDLINK_AUTO_MIN_SIZE)" != "0" ] && [ -n "$(HARDLINK_AUTO_MIN_SIZE)" ]; then set -- "$$@" --min-size "$(HARDLINK_AUTO_MIN_SIZE)"; fi; \
+		if [ "$(LINK_LIMIT)" != "0" ] && [ -n "$(LINK_LIMIT)" ]; then set -- "$$@" --link-limit "$(LINK_LIMIT)"; fi; \
+		if [ "$(LINK_LOW_PRIORITY)" = "1" ]; then set -- "$$@" --low-priority; else set -- "$$@" --normal-priority; fi; \
+		if [ "$(LINK_FIX_PERMS)" = "1" ]; then set -- "$$@" --fix-perms; else set -- "$$@" --no-fix-perms; fi; \
+		if [ "$(LINK_FIX_ACL)" = "1" ]; then set -- "$$@" --fix-acl; fi; \
+		PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/hardlink_auto_workflow.py "$$@"
+
+.PHONY: payload-sync
+payload-sync:  ## Sync qBittorrent payloads into catalog
+	@set --; \
+	if [ -n "$(PAYLOAD_CATEGORY)" ]; then set -- "$$@" --category "$(PAYLOAD_CATEGORY)"; fi; \
+	if [ -n "$(PAYLOAD_TAG)" ]; then set -- "$$@" --tag "$(PAYLOAD_TAG)"; fi; \
+	for p in $(PAYLOAD_PATH_PREFIXES); do set -- "$$@" --path-prefix "$$p"; done; \
+	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then set -- "$$@" --limit $(PAYLOAD_LIMIT); fi; \
+	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
+	if [ "$(PAYLOAD_UPGRADE_MISSING)" = "1" ]; then set -- "$$@" --upgrade-missing; fi; \
+	if [ "$(PAYLOAD_PARALLEL)" = "1" ]; then set -- "$$@" --parallel; fi; \
+	if [ -n "$(PAYLOAD_WORKERS)" ]; then set -- "$$@" --workers $(PAYLOAD_WORKERS); fi; \
+	if [ -n "$(PAYLOAD_HASH_PROGRESS)" ]; then set -- "$$@" --hash-progress "$(PAYLOAD_HASH_PROGRESS)"; fi; \
+	if [ "$(PAYLOAD_LOW_PRIORITY)" = "1" ]; then set -- "$$@" --low-priority; fi; \
+	$(HASHALL_CLI) payload sync --db "$(DB_FILE)" "$$@"
+
+.PHONY: payload-collisions
+payload-collisions:  ## Detect candidate duplicate payloads under PATH (fast signature)
+	@set -- --path-prefix "$(PATH)"; \
+	if [ "$(PAYLOAD_LIMIT)" != "0" ] && [ -n "$(PAYLOAD_LIMIT)" ]; then set -- "$$@" --limit $(PAYLOAD_LIMIT); fi; \
+	$(HASHALL_CLI) payload collisions --db "$(DB_FILE)" "$$@"
+
+.PHONY: payload-upgrade-collisions
+payload-upgrade-collisions:  ## Upgrade candidate duplicate payloads under PATH (hash missing SHA256 + compute payload_hash)
+	@set -- --path-prefix "$(PATH)"; \
+	if [ "$(PAYLOAD_DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
+	if [ "$(PAYLOAD_MAX_GROUPS)" != "" ] && [ "$(PAYLOAD_MAX_GROUPS)" != "0" ]; then set -- "$$@" --max-groups $(PAYLOAD_MAX_GROUPS); fi; \
+	if [ "$(PAYLOAD_PARALLEL)" = "1" ]; then set -- "$$@" --parallel; fi; \
+	if [ -n "$(PAYLOAD_WORKERS)" ]; then set -- "$$@" --workers $(PAYLOAD_WORKERS); fi; \
+	if [ -n "$(PAYLOAD_HASH_PROGRESS)" ]; then set -- "$$@" --hash-progress "$(PAYLOAD_HASH_PROGRESS)"; fi; \
+	if [ "$(PAYLOAD_LOW_PRIORITY)" = "1" ]; then set -- "$$@" --low-priority; fi; \
+	$(HASHALL_CLI) payload upgrade-collisions --db "$(DB_FILE)" "$$@"
+
+# PW_PATHS: explicit roots for payload-workflow (auto-discovers from DB if empty)
+PW_PATHS ?=
+
+.PHONY: payload-unmanaged
+payload-unmanaged:  ## Inventory payload rows with no qB refs (true orphan vs alias artifact)
+	@set --; \
+	for p in $(PAYLOAD_UNMANAGED_PATH_PREFIXES); do set -- "$$@" --path-prefix "$$p"; done; \
+	if [ -n "$(PAYLOAD_UNMANAGED_SAMPLES)" ]; then set -- "$$@" --samples $(PAYLOAD_UNMANAGED_SAMPLES); fi; \
+	$(HASHALL_CLI) payload unmanaged --db "$(DB_FILE)" "$$@"
+
+.PHONY: payload-orphan-audit
+payload-orphan-audit:  ## Audit true-orphan staging (non-destructive)
+	@set --; \
+	for p in $(PAYLOAD_ORPHAN_AUDIT_PATH_PREFIXES); do set -- "$$@" --path-prefix "$$p"; done; \
+	if [ -n "$(PAYLOAD_ORPHAN_AUDIT_SAMPLES)" ]; then set -- "$$@" --samples $(PAYLOAD_ORPHAN_AUDIT_SAMPLES); fi; \
+	if [ "$(PAYLOAD_ORPHAN_AUDIT_JSON)" = "1" ]; then set -- "$$@" --json; fi; \
+	$(HASHALL_CLI) payload orphan-audit --db "$(DB_FILE)" "$$@"
+
+.PHONY: payload-orphan-snapshot
+payload-orphan-snapshot:  ## Capture timestamped orphan-audit + payload-auto dry-run snapshot
+	@set -- --db "$(DB_FILE)" --roots "$(PAYLOAD_ORPHAN_AUDIT_ROOTS)" --samples "$(PAYLOAD_ORPHAN_AUDIT_SAMPLES)" --output-dir "$(PAYLOAD_ORPHAN_AUDIT_OUTPUT_DIR)"; \
+	if [ "$(PAYLOAD_ORPHAN_AUDIT_SKIP_AUTO)" = "1" ]; then set -- "$$@" --skip-payload-auto; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/payload_orphan_audit_snapshot.py "$$@"
+
+.PHONY: payload-orphan-timer-install
+payload-orphan-timer-install:  ## Install and enable payload orphan snapshot user timer
+	@$(PYTHON) scripts/payload_orphan_audit_snapshot.py --help >/dev/null
+	@bash scripts/install_payload_orphan_snapshot_user_timer.sh
+
+.PHONY: payload-orphan-timer-status
+payload-orphan-timer-status:  ## Show payload orphan snapshot timer status
+	@systemctl --user status $(PAYLOAD_ORPHAN_TIMER_UNIT) --no-pager || true
+	@systemctl --user list-timers --all | grep -E 'hashall-payload-orphan-snapshot|NEXT|LEFT' || true
+
+.PHONY: payload-orphan-timer-disable
+payload-orphan-timer-disable:  ## Disable payload orphan snapshot timer (keeps unit files)
+	@systemctl --user disable --now $(PAYLOAD_ORPHAN_TIMER_UNIT) || true
+	@echo "Timer disabled: $(PAYLOAD_ORPHAN_TIMER_UNIT)"
+
+.PHONY: payload-workflow
+payload-workflow:  ## Show payload workflow status across all roots
+	@$(PYTHON) scripts/payload_workflow_status.py --db "$(DB_FILE)" $(foreach p,$(PW_PATHS),"$(p)")
+
+.PHONY: status-report
+status-report:  ## Generate operations status report (inventory, duplicate heat map, rehome signals)
+	@set -- --db "$(DB_FILE)" --output-dir "$(STATUS_REPORT_OUTPUT_DIR)" --top "$(STATUS_REPORT_TOP)" --pocket-depth "$(STATUS_REPORT_POCKET_DEPTH)" --media-root "$(STATUS_REPORT_MEDIA_ROOT)" --recovery-prefix "$(STATUS_REPORT_RECOVERY_PREFIX)" --cache-ttl-seconds "$(STATUS_REPORT_CACHE_TTL)"; \
+	if [ "$(STATUS_REPORT_REFRESH)" = "1" ]; then set -- "$$@" --refresh-cache; fi; \
+	roots="$(STATUS_ROOTS)"; \
+	if [ -z "$$roots" ] && [ -n "$(ROOTS)" ]; then roots="$(ROOTS)"; fi; \
+	if [ -n "$$roots" ]; then set -- "$$@" --roots "$$roots"; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -m hashall.status_report "$$@"
+
+.PHONY: status-report-phone
+status-report-phone:  ## Generate compact status report for narrow terminals/phones
+	@set -- --db "$(DB_FILE)" --output-dir "$(STATUS_REPORT_OUTPUT_DIR)" --top "$(STATUS_REPORT_TOP)" --pocket-depth "$(STATUS_REPORT_POCKET_DEPTH)" --media-root "$(STATUS_REPORT_MEDIA_ROOT)" --recovery-prefix "$(STATUS_REPORT_RECOVERY_PREFIX)" --cache-ttl-seconds "$(STATUS_REPORT_CACHE_TTL)" --print-phone --phone-width "$(STATUS_REPORT_PHONE_WIDTH)" --phone-top "$(STATUS_REPORT_PHONE_TOP)"; \
+	if [ "$(STATUS_REPORT_REFRESH)" = "1" ]; then set -- "$$@" --refresh-cache; fi; \
+	roots="$(STATUS_ROOTS)"; \
+	if [ -z "$$roots" ] && [ -n "$(ROOTS)" ]; then roots="$(ROOTS)"; fi; \
+	if [ -n "$$roots" ]; then set -- "$$@" --roots "$$roots"; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) -m hashall.status_report "$$@"
+
+.PHONY: payload-auto
+payload-auto:  ## Auto-run payload workflow to completion (ROOTS='path1,path2' PAYLOAD_AUTO_BACKUP=1 optional)
+	@set -- --db "$(DB_FILE)"; \
+	if [ -n "$(ROOTS)" ]; then set -- "$$@" --roots "$(ROOTS)"; fi; \
+	if [ "$(DRY_RUN)" = "1" ]; then set -- "$$@" --dry-run; fi; \
+	if [ "$(PAYLOAD_AUTO_BACKUP)" = "1" ]; then set -- "$$@" --backup; fi; \
+	if [ -n "$(PAYLOAD_AUTO_BACKUP_DIR)" ]; then set -- "$$@" --backup-dir "$(PAYLOAD_AUTO_BACKUP_DIR)"; fi; \
+	qbm_env=""; \
+	if [ "$(PAYLOAD_AUTO_QBM_FAIL_CLOSED)" = "1" ]; then qbm_env="$$qbm_env HASHALL_QBM_FRESH_FAIL_CLOSED=1"; fi; \
+	if [ -n "$(PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES)" ]; then qbm_env="$$qbm_env HASHALL_QBM_FRESH_MAX_MINUTES=$(PAYLOAD_AUTO_QBM_FRESH_MAX_MINUTES)"; fi; \
+	if [ -n "$(PAYLOAD_AUTO_QBM_ACTIVITY_LOG)" ]; then qbm_env="$$qbm_env HASHALL_QBM_ACTIVITY_LOG=$(PAYLOAD_AUTO_QBM_ACTIVITY_LOG) HASHALL_QBM_ACTIVITY_LOG_ONLY=1"; fi; \
+	eval $$qbm_env PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/payload_auto_workflow.py "$$@"
+
+# ============================================================================
+# Rehome (Payload Moves)
+# ============================================================================
+
+.PHONY: rehome-safe-auto
+rehome-safe-auto:  ## Run top safe stash->pool rehomes (MOVE + 100% movable-bytes), dry-run by default
+	@if [ -z "$(REHOME_STASH_DEVICE)" ] || [ -z "$(REHOME_POOL_DEVICE)" ]; then \
+		echo "❌ REHOME_STASH_DEVICE and REHOME_POOL_DEVICE are required"; \
+		echo "💡 Example: make rehome-safe-auto REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool"; \
+		exit 1; \
+	fi; \
+	set -- \
+		--db "$(DB_FILE)" \
+		--roots "$(REHOME_SAFE_ROOTS)" \
+		--limit "$(REHOME_SAFE_LIMIT)" \
+		--seeding-root "$(REHOME_SAFE_SEEDING_ROOT)" \
+		--library-root "$(REHOME_SAFE_LIBRARY_ROOT)" \
+		--pool-payload-root "$(REHOME_SAFE_POOL_PAYLOAD_ROOT)" \
+		--run-log-dir "$(REHOME_SAFE_RUN_LOG_DIR)" \
+		--stash-device "$(REHOME_STASH_DEVICE)" \
+		--pool-device "$(REHOME_POOL_DEVICE)"; \
+	if [ "$(REHOME_SAFE_APPLY)" = "1" ]; then set -- "$$@" --apply; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/rehome_safe_workflow.py "$$@"
+
+.PHONY: rehome-safe-verify
+rehome-safe-verify:  ## Verify latest/selected safe rehome run gates (qB + DB + source refs)
+	@set -- --run-log-dir "$(REHOME_SAFE_RUN_LOG_DIR)"; \
+	if [ -n "$(REHOME_SAFE_RUN_LOG)" ]; then set -- "$$@" --run-log "$(REHOME_SAFE_RUN_LOG)"; fi; \
+	if [ "$(REHOME_SAFE_VERIFY_STRICT)" = "1" ]; then set -- "$$@" --strict; fi; \
+	if [ "$(REHOME_SAFE_VERIFY_PRINT_TORRENTS)" = "1" ]; then set -- "$$@" --print-torrents; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/rehome_safe_verify_cleanup.py "$$@"
+
+.PHONY: rehome-safe-cleanup
+rehome-safe-cleanup:  ## Cleanup source paths only for safe groups that pass verify gates
+	@set -- --run-log-dir "$(REHOME_SAFE_RUN_LOG_DIR)" --cleanup; \
+	if [ -n "$(REHOME_SAFE_RUN_LOG)" ]; then set -- "$$@" --run-log "$(REHOME_SAFE_RUN_LOG)"; fi; \
+	if [ "$(REHOME_SAFE_VERIFY_STRICT)" = "1" ]; then set -- "$$@" --strict; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/rehome_safe_verify_cleanup.py "$$@"
+
+.PHONY: rehome-followup
+rehome-followup:  ## Re-evaluate rehome_verify_pending/cleanup-required tags and retry cleanup when enabled
+	@set -- followup --catalog "$(REHOME_CATALOG)" --limit "$(REHOME_FOLLOWUP_LIMIT)"; \
+	if [ "$(REHOME_FOLLOWUP_CLEANUP)" = "1" ]; then set -- "$$@" --cleanup; fi; \
+	if [ "$(REHOME_FOLLOWUP_STRICT)" = "1" ]; then set -- "$$@" --strict; fi; \
+	if [ "$(REHOME_FOLLOWUP_RETRY_FAILED)" = "1" ]; then set -- "$$@" --retry-failed; fi; \
+	if [ "$(REHOME_FOLLOWUP_PRINT_TORRENTS)" = "1" ]; then set -- "$$@" --print-torrents; fi; \
+	if [ -n "$(REHOME_FOLLOWUP_OUTPUT)" ]; then set -- "$$@" --output "$(REHOME_FOLLOWUP_OUTPUT)"; fi; \
+	if [ -n "$(REHOME_FOLLOWUP_PAYLOAD_HASH)" ]; then set -- "$$@" --payload-hash "$(REHOME_FOLLOWUP_PAYLOAD_HASH)"; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) "$$@"
+
+.PHONY: rehome-normalize-plan
+rehome-normalize-plan:  ## Build batch plan to normalize misplaced pool payload root paths
+	@if [ -z "$(REHOME_POOL_DEVICE)" ]; then \
+		echo "❌ REHOME_POOL_DEVICE is required"; \
+		exit 1; \
+	fi; \
+	set -- normalize-plan \
+		--catalog "$(REHOME_CATALOG)" \
+		--pool-device "$(REHOME_POOL_DEVICE)" \
+		--pool-seeding-root "$(REHOME_NORMALIZE_POOL_ROOT)" \
+		--stash-seeding-root "$(REHOME_NORMALIZE_STASH_ROOT)" \
+		--limit "$(REHOME_NORMALIZE_LIMIT)"; \
+	if [ "$(REHOME_NORMALIZE_FLAT_ONLY)" = "0" ]; then set -- "$$@" --all-mismatches; fi; \
+	if [ "$(REHOME_NORMALIZE_PRINT_SKIPPED)" = "1" ]; then set -- "$$@" --print-skipped; fi; \
+	if [ "$(REHOME_NORMALIZE_REFRESH)" = "1" ]; then set -- "$$@" --refresh-before-plan; fi; \
+	if [ -n "$(REHOME_NORMALIZE_REFRESH_CATEGORY)" ]; then set -- "$$@" --refresh-category "$(REHOME_NORMALIZE_REFRESH_CATEGORY)"; fi; \
+	if [ -n "$(REHOME_NORMALIZE_REFRESH_TAG)" ]; then set -- "$$@" --refresh-tag "$(REHOME_NORMALIZE_REFRESH_TAG)"; fi; \
+	if [ "$(REHOME_NORMALIZE_REFRESH_LIMIT)" != "0" ] && [ -n "$(REHOME_NORMALIZE_REFRESH_LIMIT)" ]; then set -- "$$@" --refresh-limit "$(REHOME_NORMALIZE_REFRESH_LIMIT)"; fi; \
+	if [ -n "$(REHOME_NORMALIZE_PAYLOAD_HASH)" ]; then set -- "$$@" --payload-hash "$(REHOME_NORMALIZE_PAYLOAD_HASH)"; fi; \
+	if [ -n "$(REHOME_NORMALIZE_OUTPUT)" ]; then set -- "$$@" --output "$(REHOME_NORMALIZE_OUTPUT)"; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) "$$@"
+
+.PHONY: rehome-normalize-apply
+rehome-normalize-apply:  ## Apply normalization plan and prune source canonical roots
+	@plan="$(REHOME_PLAN)"; \
+	if [ -z "$$plan" ] && [ -n "$(REHOME_NORMALIZE_OUTPUT)" ]; then plan="$(REHOME_NORMALIZE_OUTPUT)"; fi; \
+	if [ -z "$$plan" ]; then \
+		echo "❌ REHOME_PLAN (or REHOME_NORMALIZE_OUTPUT) is required"; \
+		exit 1; \
+	fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(REHOME_CLI) apply "$$plan" --force \
+		--catalog "$(REHOME_CATALOG)" \
+		--cleanup-duplicate-payload
+
+.PHONY: recovery-auto
+recovery-auto:  ## Audit recovered non-seeding content and classify exact dupes/support/unique units
+	@set -- \
+		--db "$(DB_FILE)" \
+		--recovery-prefix "$(RECOVERY_WORKFLOW_PREFIX)" \
+		--stash-device "$(RECOVERY_WORKFLOW_STASH_DEVICE)" \
+		--pool-device "$(RECOVERY_WORKFLOW_POOL_DEVICE)" \
+		--limit "$(RECOVERY_WORKFLOW_LIMIT)" \
+		--output-dir "$(RECOVERY_WORKFLOW_OUTPUT_DIR)"; \
+	if [ "$(RECOVERY_WORKFLOW_APPLY)" = "1" ]; then set -- "$$@" --apply; fi; \
+	PYTHONPATH="$(REPO_DIR)/src" $(PYTHON) scripts/recovery_nonseeding_workflow.py "$$@"
+
+.PHONY: recovery-auto-apply
+recovery-auto-apply:  ## Apply exact-duplicate prune for recovered non-seeding units
+	@$(MAKE) recovery-auto RECOVERY_WORKFLOW_APPLY=1
+
+.PHONY: rehome-plan
+rehome-plan:  ## Create a rehome plan (set REHOME_MODE, REHOME_* vars)
+	@if [ -z "$(REHOME_MODE)" ]; then \
+		echo "❌ REHOME_MODE is required (demote|promote)"; \
+		exit 1; \
+	fi; \
+	if [ "$(REHOME_MODE)" != "demote" ] && [ "$(REHOME_MODE)" != "promote" ]; then \
+		echo "❌ REHOME_MODE must be demote or promote"; \
+		exit 1; \
+	fi; \
+	if [ -z "$(REHOME_SEEDING_ROOTS)" ]; then \
+		echo "❌ REHOME_SEEDING_ROOTS is required"; \
+		exit 1; \
+	fi; \
+	if [ -z "$(REHOME_STASH_DEVICE)" ] || [ -z "$(REHOME_POOL_DEVICE)" ]; then \
+		echo "❌ REHOME_STASH_DEVICE and REHOME_POOL_DEVICE are required"; \
+		exit 1; \
+	fi; \
+	if [ -z "$(REHOME_TORRENT_HASH)$(REHOME_PAYLOAD_HASH)$(REHOME_TAG)" ]; then \
+		echo "❌ One of REHOME_TORRENT_HASH, REHOME_PAYLOAD_HASH, or REHOME_TAG is required"; \
+		exit 1; \
+	fi; \
+	mode_flag="--$(REHOME_MODE)"; \
+	if [ -n "$(REHOME_TORRENT_HASH)" ]; then filter_args="--torrent-hash $(REHOME_TORRENT_HASH)"; fi; \
+	if [ -n "$(REHOME_PAYLOAD_HASH)" ]; then filter_args="--payload-hash $(REHOME_PAYLOAD_HASH)"; fi; \
+	if [ -n "$(REHOME_TAG)" ]; then filter_args="--tag $(REHOME_TAG)"; fi; \
+	$(REHOME_CLI) plan $$mode_flag $$filter_args \
+		--catalog "$(REHOME_CATALOG)" \
+		$(REHOME_SEEDING_ARGS) \
+		$(REHOME_LIBRARY_ARGS) \
+		$(REHOME_CROSS_SEED_ARG) \
+		$(REHOME_TRACKER_ARG) \
+		--stash-device $(REHOME_STASH_DEVICE) \
+		--pool-device $(REHOME_POOL_DEVICE) \
+		$(REHOME_STASH_SEEDING_ARG) \
+		$(REHOME_POOL_SEEDING_ARG) \
+		$(REHOME_POOL_PAYLOAD_ARG) \
+		$(REHOME_OUTPUT_ARG)
+
+.PHONY: rehome-plan-demote
+rehome-plan-demote:  ## Create a demotion plan (stash -> pool)
+	@$(MAKE) rehome-plan REHOME_MODE=demote
+
+.PHONY: rehome-plan-promote
+rehome-plan-promote:  ## Create a promotion plan (pool -> stash reuse only)
+	@$(MAKE) rehome-plan REHOME_MODE=promote
+
+.PHONY: rehome-apply-dry
+rehome-apply-dry:  ## Dry-run a rehome plan (set REHOME_PLAN)
+	@if [ -z "$(REHOME_PLAN)" ]; then \
+		echo "❌ REHOME_PLAN is required (path to plan json)"; \
+		exit 1; \
+	fi; \
+	set -- apply "$(REHOME_PLAN)" --dryrun --catalog "$(REHOME_CATALOG)"; \
+	if [ -n "$(REHOME_SPOT_CHECK)" ] && [ "$(REHOME_SPOT_CHECK)" != "0" ]; then set -- "$$@" --spot-check "$(REHOME_SPOT_CHECK)"; fi; \
+	if [ "$(REHOME_CLEANUP_SOURCE_VIEWS)" = "1" ]; then set -- "$$@" --cleanup-source-views; fi; \
+	if [ "$(REHOME_CLEANUP_EMPTY_DIRS)" = "1" ]; then set -- "$$@" --cleanup-empty-dirs; fi; \
+	if [ "$(REHOME_CLEANUP_DUPLICATE_PAYLOAD)" = "1" ]; then set -- "$$@" --cleanup-duplicate-payload; fi; \
+	$(REHOME_CLI) "$$@"
+
+.PHONY: rehome-apply
+rehome-apply:  ## Execute a rehome plan (set REHOME_PLAN)
+	@if [ -z "$(REHOME_PLAN)" ]; then \
+		echo "❌ REHOME_PLAN is required (path to plan json)"; \
+		echo "💡 Tip: use REHOME_OUTPUT in rehome-plan, or run 'make rehome-last-plan'"; \
+		exit 1; \
+	fi; \
+	set -- apply "$(REHOME_PLAN)" --force --catalog "$(REHOME_CATALOG)"; \
+	if [ -n "$(REHOME_SPOT_CHECK)" ] && [ "$(REHOME_SPOT_CHECK)" != "0" ]; then set -- "$$@" --spot-check "$(REHOME_SPOT_CHECK)"; fi; \
+	if [ "$(REHOME_RESCAN)" = "1" ]; then set -- "$$@" --rescan; fi; \
+	if [ "$(REHOME_CLEANUP_SOURCE_VIEWS)" = "1" ]; then set -- "$$@" --cleanup-source-views; fi; \
+	if [ "$(REHOME_CLEANUP_EMPTY_DIRS)" = "1" ]; then set -- "$$@" --cleanup-empty-dirs; fi; \
+	if [ "$(REHOME_CLEANUP_DUPLICATE_PAYLOAD)" = "1" ]; then set -- "$$@" --cleanup-duplicate-payload; fi; \
+	$(REHOME_CLI) "$$@"
+
+.PHONY: rehome-checklist
+rehome-checklist:  ## Show rehome checklist
+	@echo "Rehome checklist"
+	@echo "  [ ] 1) Plan: make rehome-plan-demote REHOME_TORRENT_HASH=... REHOME_SEEDING_ROOTS=\"/stash/media\" REHOME_STASH_DEVICE=stash REHOME_POOL_DEVICE=pool"
+	@echo "  [ ] 2) Review plan JSON (make rehome-review-plan REHOME_PLAN=... or REHOME_OUTPUT=...)"
+	@echo "  [ ] 3) Dry-run: make rehome-apply-dry REHOME_PLAN=rehome-plan-...json"
+	@echo "  [ ] 4) Execute: make rehome-apply REHOME_PLAN=rehome-plan-...json"
+	@echo "  [ ] 5) Optional: --spot-check N, --rescan, cleanup flags"
+
+.PHONY: rehome-last-plan
+rehome-last-plan:  ## Print most recent rehome plan json in cwd
+	@latest="$$(ls -t rehome-plan-*.json 2>/dev/null | head -1)"; \
+	if [ -z "$$latest" ]; then \
+		echo "❌ No rehome-plan-*.json found in current directory"; \
+		exit 1; \
+	fi; \
+	echo "$$latest"
+
+.PHONY: rehome-review-plan
+rehome-review-plan:  ## Review a rehome plan (set REHOME_PLAN or REHOME_OUTPUT)
+	@plan="$(REHOME_PLAN)"; \
+	if [ -z "$$plan" ] && [ -n "$(REHOME_OUTPUT)" ]; then plan="$(REHOME_OUTPUT)"; fi; \
+	if [ -z "$$plan" ]; then \
+		plan="$$(make -s rehome-last-plan)"; \
+	fi; \
+	if [ ! -f "$$plan" ]; then \
+		echo "❌ Plan not found: $$plan"; \
+		exit 1; \
+	fi; \
+	if command -v jq >/dev/null 2>&1; then \
+		jq . "$$plan"; \
+	else \
+		cat "$$plan"; \
+	fi
+
+.PHONY: export
+export:  ## Export hashall metadata to JSON
+	@echo "📤 Exporting scan JSON..."
+	@python -m hashall.export "$(DB_FILE)"
+
+.PHONY: verify-trees
+verify-trees:  ## Verify that dst matches src
+	@echo "🔍 Verifying two directories..."
+	@python -m hashall.verify-trees sandbox/seed sandbox/backup --force
+
+.PHONY: verify
+verify:  ## Run scan in verify mode
+	@echo "🧪 Verifying hashes..."
+	@python -m hashall.scan sandbox --mode verify
+
+.PHONY: diff
+diff:  ## Run diff tool
+	@echo "🧾 Running treehash diff..."
+	@python -m hashall.diff
+
+.PHONY: version
+version:  ## Show current version
+	@python -c "from hashall import __version__; print(__version__)"
+
+.PHONY: docker-scan
+docker-scan:  ## Run scan inside Docker container
+	@echo "📦 Running scan in Docker..."
+	@scripts/docker_scan_and_export.sh scan
+
+.PHONY: docker-export
+docker-export:  ## Export .json from latest scan inside Docker
+	@echo "📤 Running export in Docker..."
+	@scripts/docker_scan_and_export.sh export
+
+.PHONY: docker-test
+docker-test:  ## Run full scan + export test in Docker
+	@echo "🧪 Running Docker scan + export test..."
+	@scripts/docker_test.sh
+
+# ============================================================================
+# Batch Operations
+# ============================================================================
+
+.PHONY: backup-db
+backup-db:  ## Backup catalog database with timestamp
+	@BACKUP_FILE="$(DB_FILE).backup-$$(date +%Y%m%d-%H%M%S)"; \
+	cp "$(DB_FILE)" "$$BACKUP_FILE" 2>/dev/null && \
+	echo "✅ Database backed up to: $$BACKUP_FILE" || \
+	echo "⚠️  No database found to backup"
+
+# hashall - 0.4.43 - 2026-02-11T17:58:00-0500
