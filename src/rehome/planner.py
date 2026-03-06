@@ -30,6 +30,50 @@ class ExternalConsumer:
     external_link_paths: List[str]
 
 
+def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    """Return True when a table has a named column."""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except sqlite3.Error:
+        return False
+    return any(str(row[1]) == str(column_name) for row in rows)
+
+
+def _resolve_fs_uuid(conn: sqlite3.Connection, device_id: Optional[int]) -> Optional[str]:
+    """Resolve fs_uuid from devices table using current device_id."""
+    if device_id is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT fs_uuid FROM devices WHERE device_id = ?",
+            (int(device_id),),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or row[0] is None:
+        return None
+    text = str(row[0]).strip()
+    return text or None
+
+
+def _resolve_device_id(conn: sqlite3.Connection, fs_uuid: Optional[str], fallback_device_id: Optional[int]) -> Optional[int]:
+    """Resolve current device_id from fs_uuid, falling back to provided device_id."""
+    fs_uuid_text = str(fs_uuid or "").strip()
+    if fs_uuid_text:
+        try:
+            row = conn.execute(
+                "SELECT device_id FROM devices WHERE fs_uuid = ?",
+                (fs_uuid_text,),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row and row[0] is not None:
+            return int(row[0])
+    if fallback_device_id is None:
+        return None
+    return int(fallback_device_id)
+
+
 def _build_view_targets(
     conn: sqlite3.Connection,
     torrent_hashes: List[str],
@@ -178,10 +222,24 @@ class DemotionPlanner:
         self.library_roots = [canonicalize_path(Path(r)) for r in (library_roots or [])]
         self.stash_device = stash_device
         self.pool_device = pool_device
+        self.stash_fs_uuid: Optional[str] = None
+        self.pool_fs_uuid: Optional[str] = None
         self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
         self.pool_seeding_root = canonicalize_path(Path(pool_seeding_root)) if pool_seeding_root else None
         self.pool_payload_root = canonicalize_path(Path(pool_payload_root)) if pool_payload_root else None
         self._scan_roots_cover_cache: Dict[Tuple[str, ...], Optional[bool]] = {}
+
+    def _refresh_identity_cache(self, conn: sqlite3.Connection) -> None:
+        """Refresh planner identity cache using current devices table."""
+        self.stash_fs_uuid = _resolve_fs_uuid(conn, self.stash_device)
+        self.pool_fs_uuid = _resolve_fs_uuid(conn, self.pool_device)
+
+    def _attach_identity(self, plan: Dict) -> Dict:
+        """Attach fs_uuid identity metadata to emitted plan dictionaries."""
+        out = dict(plan)
+        out.setdefault("source_fs_uuid", self.stash_fs_uuid)
+        out.setdefault("target_fs_uuid", self.pool_fs_uuid)
+        return out
 
     def _compute_pool_move_target(self, source_root_path: str) -> tuple[Optional[str], Optional[str]]:
         """
@@ -259,13 +317,31 @@ class DemotionPlanner:
         if root.is_absolute():
             root = canonicalize_path(root)
 
-        # Get device_id from payload
-        device_row = conn.execute("""
-            SELECT device_id FROM payloads WHERE root_path = ?
-        """, (root_path,)).fetchone()
-        if not device_row or device_row[0] is None:
-            raise ValueError("Payload device_id is missing; rescan catalog")
-        device_id = device_row[0]
+        # Resolve current device_id from payload fs_uuid when available.
+        if _table_has_column(conn, "payloads", "fs_uuid"):
+            device_row = conn.execute(
+                """
+                SELECT device_id, fs_uuid
+                FROM payloads
+                WHERE root_path = ?
+                """,
+                (root_path,),
+            ).fetchone()
+            if not device_row:
+                raise ValueError("Payload row missing for root_path; rescan catalog")
+            device_id = _resolve_device_id(conn, device_row[1], device_row[0])
+        else:
+            device_row = conn.execute(
+                """
+                SELECT device_id
+                FROM payloads
+                WHERE root_path = ?
+                """,
+                (root_path,),
+            ).fetchone()
+            device_id = int(device_row[0]) if device_row and device_row[0] is not None else None
+        if device_id is None:
+            raise ValueError("Payload identity is missing (device_id/fs_uuid); rescan catalog")
 
         def _table_exists(name: str) -> bool:
             return conn.execute(
@@ -273,7 +349,7 @@ class DemotionPlanner:
                 (name,),
             ).fetchone() is not None
 
-        def _table_has_column(table: str, column: str) -> bool:
+        def _local_table_has_column(table: str, column: str) -> bool:
             try:
                 rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
             except sqlite3.Error:
@@ -355,7 +431,7 @@ class DemotionPlanner:
                 raise ValueError("Relative payload root with legacy files table")
             root_str = str(root)
             low, high = _prefix_bounds(root_str)
-            legacy_has_status = _table_has_column("files", "status")
+            legacy_has_status = _local_table_has_column("files", "status")
             if legacy_has_status:
                 query = """
                     SELECT DISTINCT path, inode
@@ -571,20 +647,21 @@ class DemotionPlanner:
         if not payload_hash:
             return None
 
-        row = conn.execute("""
-            SELECT root_path
-            FROM payloads
-            WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
-            LIMIT 1
-        """, (payload_hash, self.pool_device)).fetchone()
-
-        if row is None:
-            return None
-        # Verify the path actually exists on disk (catalog may be stale)
-        root_path = row[0]
-        if not Path(root_path).exists():
-            return None
-        return root_path
+        pool_payloads = get_payloads_by_hash(
+            conn,
+            payload_hash,
+            device_id=self.pool_device,
+            fs_uuid=self.pool_fs_uuid,
+            status="complete",
+        )
+        for item in pool_payloads:
+            root_path = str(item.root_path or "").strip()
+            if not root_path:
+                continue
+            # Verify the path actually exists on disk (catalog may be stale)
+            if Path(root_path).exists():
+                return root_path
+        return None
 
     def plan_demotion(
         self,
@@ -603,6 +680,8 @@ class DemotionPlanner:
         close_conn = conn is None
         if conn is None:
             conn = self._get_db_connection()
+        self._refresh_identity_cache(conn)
+        self._refresh_identity_cache(conn)
 
         try:
             # 1. Resolve torrent → payload
@@ -639,7 +718,11 @@ class DemotionPlanner:
 
             # 3. Resolve payload on stash (source of demotion)
             stash_payloads = get_payloads_by_hash(
-                conn, payload.payload_hash, device_id=self.stash_device, status="complete"
+                conn,
+                payload.payload_hash,
+                device_id=self.stash_device,
+                fs_uuid=self.stash_fs_uuid,
+                status="complete",
             )
             if not stash_payloads:
                 return {
@@ -807,6 +890,7 @@ class DemotionPlanner:
                 {
                     "payload_id": p.payload_id,
                     "device_id": p.device_id,
+                    "fs_uuid": p.fs_uuid,
                     "root_path": p.root_path,
                     "file_count": p.file_count,
                     "total_bytes": p.total_bytes,
@@ -817,7 +901,7 @@ class DemotionPlanner:
 
             if pool_root:
                 # REUSE: Payload already on pool
-                return {
+                return self._attach_identity({
                     "version": "1.0",
                     "direction": "demote",
                     "decision": "REUSE",
@@ -836,7 +920,7 @@ class DemotionPlanner:
                     "payload_group": payload_group,
                     "file_count": source_payload.file_count,
                     "total_bytes": source_payload.total_bytes
-                }
+                })
             else:
                 # MOVE: Need to move payload to pool
                 # Construct target path preserving stash-seeding-relative structure.
@@ -861,7 +945,7 @@ class DemotionPlanner:
                         "total_bytes": source_payload.total_bytes
                     }
 
-                return {
+                return self._attach_identity({
                     "version": "1.0",
                     "direction": "demote",
                     "decision": "MOVE",
@@ -880,7 +964,7 @@ class DemotionPlanner:
                     "payload_group": payload_group,
                     "file_count": source_payload.file_count,
                     "total_bytes": source_payload.total_bytes
-                }
+                })
 
         finally:
             if close_conn:
@@ -1050,8 +1134,22 @@ class PromotionPlanner:
         self.library_roots = [canonicalize_path(Path(r)) for r in (library_roots or [])]
         self.stash_device = stash_device
         self.pool_device = pool_device
+        self.stash_fs_uuid: Optional[str] = None
+        self.pool_fs_uuid: Optional[str] = None
         self.stash_seeding_root = canonicalize_path(Path(stash_seeding_root)) if stash_seeding_root else None
         self.pool_seeding_root = canonicalize_path(Path(pool_seeding_root)) if pool_seeding_root else None
+
+    def _refresh_identity_cache(self, conn: sqlite3.Connection) -> None:
+        """Refresh planner identity cache using current devices table."""
+        self.stash_fs_uuid = _resolve_fs_uuid(conn, self.stash_device)
+        self.pool_fs_uuid = _resolve_fs_uuid(conn, self.pool_device)
+
+    def _attach_identity(self, plan: Dict) -> Dict:
+        """Attach fs_uuid identity metadata to emitted plan dictionaries."""
+        out = dict(plan)
+        out.setdefault("source_fs_uuid", self.pool_fs_uuid)
+        out.setdefault("target_fs_uuid", self.stash_fs_uuid)
+        return out
 
     def _get_db_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -1072,14 +1170,18 @@ class PromotionPlanner:
         if not payload_hash:
             return None
 
-        row = conn.execute("""
-            SELECT root_path
-            FROM payloads
-            WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
-            LIMIT 1
-        """, (payload_hash, self.stash_device)).fetchone()
-
-        return row[0] if row else None
+        stash_payloads = get_payloads_by_hash(
+            conn,
+            payload_hash,
+            device_id=self.stash_device,
+            fs_uuid=self.stash_fs_uuid,
+            status="complete",
+        )
+        for item in stash_payloads:
+            root_path = str(item.root_path or "").strip()
+            if root_path:
+                return root_path
+        return None
 
     def plan_promotion(
         self,
@@ -1135,7 +1237,11 @@ class PromotionPlanner:
 
             # 3. Resolve payload on pool (source of promotion)
             pool_payloads = get_payloads_by_hash(
-                conn, payload.payload_hash, device_id=self.pool_device, status="complete"
+                conn,
+                payload.payload_hash,
+                device_id=self.pool_device,
+                fs_uuid=self.pool_fs_uuid,
+                status="complete",
             )
             if not pool_payloads:
                 return {
@@ -1224,6 +1330,7 @@ class PromotionPlanner:
                 {
                     "payload_id": p.payload_id,
                     "device_id": p.device_id,
+                    "fs_uuid": p.fs_uuid,
                     "root_path": p.root_path,
                     "file_count": p.file_count,
                     "total_bytes": p.total_bytes,
@@ -1232,7 +1339,7 @@ class PromotionPlanner:
                 for p in get_payloads_by_hash(conn, source_payload.payload_hash, status=None)
             ]
 
-            return {
+            return self._attach_identity({
                 "version": "1.0",
                 "direction": "promote",
                 "decision": "REUSE",
@@ -1252,7 +1359,7 @@ class PromotionPlanner:
                 "payload_group": payload_group,
                 "file_count": source_payload.file_count,
                 "total_bytes": source_payload.total_bytes
-            }
+            })
 
         finally:
             if close_conn:

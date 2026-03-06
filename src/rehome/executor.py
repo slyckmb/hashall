@@ -300,6 +300,41 @@ class DemotionExecutor:
         preferred_mount = Path(row[1] or row[0])
         return mount_point, preferred_mount
 
+    def _resolve_device_id_for_plan(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        device_id: Optional[int],
+        fs_uuid: Optional[str],
+    ) -> Optional[int]:
+        """Resolve runtime device_id, preferring fs_uuid identity when available."""
+        fs_uuid_text = str(fs_uuid or "").strip()
+        if fs_uuid_text:
+            try:
+                row = conn.execute(
+                    "SELECT device_id FROM devices WHERE fs_uuid = ?",
+                    (fs_uuid_text,),
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            if row and row[0] is not None:
+                return int(row[0])
+        if device_id is None:
+            return None
+        return int(device_id)
+
+    def _resolve_plan_device_id(self, plan: Dict, prefix: str) -> Optional[int]:
+        """Resolve `<prefix>_device_id` from fs_uuid/device_id fields in plan."""
+        conn = self._get_db_connection(read_only=True)
+        try:
+            return self._resolve_device_id_for_plan(
+                conn,
+                device_id=plan.get(f"{prefix}_device_id"),
+                fs_uuid=plan.get(f"{prefix}_fs_uuid"),
+            )
+        finally:
+            conn.close()
+
     def _to_device_relpath(
         self,
         abs_path: Path,
@@ -1899,35 +1934,70 @@ class DemotionExecutor:
         conn = self._get_db_connection()
         try:
             relocations = self._build_relocations(conn, plan)
+            payload_has_fs_uuid = any(
+                str(r[1]) == "fs_uuid" for r in conn.execute("PRAGMA table_info(payloads)").fetchall()
+            )
+            torrent_has_fs_uuid = any(
+                str(r[1]) == "fs_uuid" for r in conn.execute("PRAGMA table_info(torrent_instances)").fetchall()
+            )
+            source_fs_uuid = str(plan.get("source_fs_uuid") or "").strip() or None
+            target_fs_uuid = str(plan.get("target_fs_uuid") or "").strip() or None
+            source_device_id = self._resolve_device_id_for_plan(
+                conn,
+                device_id=plan.get("source_device_id"),
+                fs_uuid=source_fs_uuid,
+            )
+            target_device_id = self._resolve_device_id_for_plan(
+                conn,
+                device_id=plan.get("target_device_id"),
+                fs_uuid=target_fs_uuid,
+            )
 
             if plan.get("decision") == "REUSE":
                 # Reassign torrents to payload on target device
                 target_path = plan.get("target_path")
-                target_device_id = plan.get("target_device_id")
-                source_device_id = plan.get("source_device_id")
                 same_device_reuse = (
                     target_path
                     and target_device_id is not None
                     and source_device_id is not None
                     and int(target_device_id) == int(source_device_id)
                 )
-                target_payload_row = conn.execute(
-                    """
-                    SELECT payload_id
-                    FROM payloads
-                    WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
-                      AND (? IS NULL OR root_path = ?)
-                    ORDER BY CASE WHEN root_path = ? THEN 0 ELSE 1 END, payload_id
-                    LIMIT 1
-                    """,
-                    (
-                        plan.get("payload_hash"),
-                        plan.get("target_device_id"),
-                        target_path,
-                        target_path,
-                        target_path,
-                    ),
-                ).fetchone()
+                if payload_has_fs_uuid and target_fs_uuid:
+                    target_payload_row = conn.execute(
+                        """
+                        SELECT payload_id
+                        FROM payloads
+                        WHERE payload_hash = ? AND fs_uuid = ? AND status = 'complete'
+                          AND (? IS NULL OR root_path = ?)
+                        ORDER BY CASE WHEN root_path = ? THEN 0 ELSE 1 END, payload_id
+                        LIMIT 1
+                        """,
+                        (
+                            plan.get("payload_hash"),
+                            target_fs_uuid,
+                            target_path,
+                            target_path,
+                            target_path,
+                        ),
+                    ).fetchone()
+                else:
+                    target_payload_row = conn.execute(
+                        """
+                        SELECT payload_id
+                        FROM payloads
+                        WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
+                          AND (? IS NULL OR root_path = ?)
+                        ORDER BY CASE WHEN root_path = ? THEN 0 ELSE 1 END, payload_id
+                        LIMIT 1
+                        """,
+                        (
+                            plan.get("payload_hash"),
+                            target_device_id,
+                            target_path,
+                            target_path,
+                            target_path,
+                        ),
+                    ).fetchone()
 
                 target_payload_id: Optional[int] = None
                 if target_payload_row:
@@ -1935,19 +2005,34 @@ class DemotionExecutor:
                 elif same_device_reuse and plan.get("payload_id") is not None:
                     # Normalization case: target path can already exist on disk while
                     # catalog still points to source payload row on the same device.
-                    source_payload_row = conn.execute(
-                        """
-                        SELECT payload_id
-                        FROM payloads
-                        WHERE payload_id = ? AND payload_hash = ? AND device_id = ? AND status = 'complete'
-                        LIMIT 1
-                        """,
-                        (
-                            int(plan.get("payload_id")),
-                            plan.get("payload_hash"),
-                            int(target_device_id),
-                        ),
-                    ).fetchone()
+                    if payload_has_fs_uuid and target_fs_uuid:
+                        source_payload_row = conn.execute(
+                            """
+                            SELECT payload_id
+                            FROM payloads
+                            WHERE payload_id = ? AND payload_hash = ? AND fs_uuid = ? AND status = 'complete'
+                            LIMIT 1
+                            """,
+                            (
+                                int(plan.get("payload_id")),
+                                plan.get("payload_hash"),
+                                target_fs_uuid,
+                            ),
+                        ).fetchone()
+                    else:
+                        source_payload_row = conn.execute(
+                            """
+                            SELECT payload_id
+                            FROM payloads
+                            WHERE payload_id = ? AND payload_hash = ? AND device_id = ? AND status = 'complete'
+                            LIMIT 1
+                            """,
+                            (
+                                int(plan.get("payload_id")),
+                                plan.get("payload_hash"),
+                                int(target_device_id),
+                            ),
+                        ).fetchone()
                     if source_payload_row:
                         target_payload_id = int(source_payload_row[0])
 
@@ -1967,38 +2052,78 @@ class DemotionExecutor:
                     )
 
                 for r in relocations:
-                    conn.execute(
-                        """
-                        UPDATE torrent_instances
-                        SET payload_id = ?, device_id = ?, save_path = ?
-                        WHERE torrent_hash = ?
-                        """,
-                        (target_payload_id, plan.get("target_device_id"),
-                         r.get("target_save_path"), r.get("torrent_hash"))
-                    )
+                    if torrent_has_fs_uuid:
+                        conn.execute(
+                            """
+                            UPDATE torrent_instances
+                            SET payload_id = ?, device_id = ?, fs_uuid = ?, save_path = ?
+                            WHERE torrent_hash = ?
+                            """,
+                            (
+                                target_payload_id,
+                                target_device_id,
+                                target_fs_uuid,
+                                r.get("target_save_path"),
+                                r.get("torrent_hash"),
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE torrent_instances
+                            SET payload_id = ?, device_id = ?, save_path = ?
+                            WHERE torrent_hash = ?
+                            """,
+                            (
+                                target_payload_id,
+                                target_device_id,
+                                r.get("target_save_path"),
+                                r.get("torrent_hash"),
+                            ),
+                        )
 
                 self._sync_files_catalog_for_reuse_cleanup(conn, plan)
 
             elif plan.get("decision") == "MOVE":
                 # Update payload location
-                conn.execute(
-                    """
-                    UPDATE payloads
-                    SET device_id = ?, root_path = ?, updated_at = julianday('now')
-                    WHERE payload_id = ?
-                    """,
-                    (plan.get("target_device_id"), plan.get("target_path"), plan.get("payload_id"))
-                )
-
-                for r in relocations:
+                if payload_has_fs_uuid:
                     conn.execute(
                         """
-                        UPDATE torrent_instances
-                        SET device_id = ?, save_path = ?
-                        WHERE torrent_hash = ?
+                        UPDATE payloads
+                        SET device_id = ?, fs_uuid = ?, root_path = ?, updated_at = julianday('now')
+                        WHERE payload_id = ?
                         """,
-                        (plan.get("target_device_id"), r.get("target_save_path"), r.get("torrent_hash"))
+                        (target_device_id, target_fs_uuid, plan.get("target_path"), plan.get("payload_id")),
                     )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE payloads
+                        SET device_id = ?, root_path = ?, updated_at = julianday('now')
+                        WHERE payload_id = ?
+                        """,
+                        (target_device_id, plan.get("target_path"), plan.get("payload_id"))
+                    )
+
+                for r in relocations:
+                    if torrent_has_fs_uuid:
+                        conn.execute(
+                            """
+                            UPDATE torrent_instances
+                            SET device_id = ?, fs_uuid = ?, save_path = ?
+                            WHERE torrent_hash = ?
+                            """,
+                            (target_device_id, target_fs_uuid, r.get("target_save_path"), r.get("torrent_hash")),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE torrent_instances
+                            SET device_id = ?, save_path = ?
+                            WHERE torrent_hash = ?
+                            """,
+                            (target_device_id, r.get("target_save_path"), r.get("torrent_hash"))
+                        )
 
                 self._sync_files_catalog_for_move(conn, plan)
 
@@ -2013,7 +2138,11 @@ class DemotionExecutor:
         REUSE plans can remove source payload roots during cleanup without a follow-up
         scan. This reconciles source file rows immediately when those roots are gone.
         """
-        source_device_id = plan.get("source_device_id")
+        source_device_id = self._resolve_device_id_for_plan(
+            conn,
+            device_id=plan.get("source_device_id"),
+            fs_uuid=plan.get("source_fs_uuid"),
+        )
         target_path = Path(plan.get("target_path") or "").resolve() if plan.get("target_path") else None
         if source_device_id is None:
             return
@@ -2066,8 +2195,16 @@ class DemotionExecutor:
         This keeps catalog state aligned when a payload has already been moved on disk
         before a rehome apply run is executed (idempotent recovery path).
         """
-        source_device_id = plan.get("source_device_id")
-        target_device_id = plan.get("target_device_id")
+        source_device_id = self._resolve_device_id_for_plan(
+            conn,
+            device_id=plan.get("source_device_id"),
+            fs_uuid=plan.get("source_fs_uuid"),
+        )
+        target_device_id = self._resolve_device_id_for_plan(
+            conn,
+            device_id=plan.get("target_device_id"),
+            fs_uuid=plan.get("target_fs_uuid"),
+        )
         if source_device_id is None or target_device_id is None:
             return
 
@@ -2261,6 +2398,9 @@ class DemotionExecutor:
         t_start = time.monotonic()
         phase_times: Dict[str, float] = {}
         target_path = Path(plan['target_path'])
+        target_device_id = self._resolve_plan_device_id(plan, "target")
+        if target_device_id is None:
+            raise RuntimeError("Missing target identity (device_id/fs_uuid) for spot-check")
 
         # 1. Verify existing payload on stash
         t0 = time.monotonic()
@@ -2271,7 +2411,7 @@ class DemotionExecutor:
             raise RuntimeError(f"Stash payload total bytes mismatch at {target_path}")
 
         # Spot-check (optional)
-        self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
+        self._spot_check_payload(target_path, target_device_id, spot_check)
         phase_times["verify"] = time.monotonic() - t0
 
         # Build views (if mapping provided)
@@ -2330,6 +2470,9 @@ class DemotionExecutor:
         phase_times: Dict[str, float] = {}
         target_path = Path(plan['target_path'])
         source_path = Path(plan['source_path'])
+        target_device_id = self._resolve_plan_device_id(plan, "target")
+        if target_device_id is None:
+            raise RuntimeError("Missing target identity (device_id/fs_uuid) for spot-check")
 
         # 1. Verify existing payload on pool
         t0 = time.monotonic()
@@ -2340,7 +2483,7 @@ class DemotionExecutor:
             raise RuntimeError(f"Pool payload total bytes mismatch at {target_path}")
 
         # Spot-check (optional)
-        self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
+        self._spot_check_payload(target_path, target_device_id, spot_check)
         phase_times["verify"] = time.monotonic() - t0
 
         # Build views (if mapping provided)
@@ -2407,6 +2550,9 @@ class DemotionExecutor:
         phase_times: Dict[str, float] = {}
         source_path = Path(plan['source_path'])
         target_path = Path(plan['target_path'])
+        target_device_id = self._resolve_plan_device_id(plan, "target")
+        if target_device_id is None:
+            raise RuntimeError("Missing target identity (device_id/fs_uuid) for spot-check")
         execute_plan = dict(plan)
         execute_plan["view_targets"] = self._filter_move_view_targets(plan, source_path)
 
@@ -2453,7 +2599,7 @@ class DemotionExecutor:
             raise RuntimeError("Target total bytes mismatch after move")
 
         # Spot-check (optional)
-        self._spot_check_payload(target_path, plan["target_device_id"], spot_check)
+        self._spot_check_payload(target_path, target_device_id, spot_check)
         phase_times["verify_target_and_spotcheck"] = time.monotonic() - t0
 
         # 4. Build views and relocate atomically

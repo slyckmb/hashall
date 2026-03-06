@@ -563,6 +563,7 @@ def payload_sync(
                     torrent_hash=torrent.hash,
                     payload_id=payload_id,
                     device_id=payload.device_id,
+                    fs_uuid=payload.fs_uuid,
                     save_path=torrent.save_path,
                     root_name=torrent.name,
                     category=torrent.category,
