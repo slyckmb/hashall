@@ -111,8 +111,8 @@ Single living document for current operational status, handoff context, and next
 - One mutating qB workflow at a time.
 - No unintended sustained downloading state flips.
 - Prefer deterministic, idempotent loops.
-- Any full refresh run must include all three main archives:
-  `/stash/media` (covers `/data/media` collection), `/pool/data`, `/mnt/hotspare6tb`.
+- Any full refresh run must include all active roots:
+  `/stash/media` (covers `/data/media` collection), `/pool/data`, `/pool/media`, `/mnt/hotspare6tb`.
 
 ## Active Toolchain
 
@@ -303,6 +303,24 @@ Legacy docs remain stubs pointing here:
 - `qbit-start-seeding-gradual.sh` hardening was first applied in a different worktree (`main`) and has not yet been ported in this chatrap worktree; re-apply/verify in this branch before daemon re-enable.
 - Refresh caveat to preserve:
   - `/home/michael/.logs/hashall/rehome/refresh/20260305-195619.log` completed but upgrade stage mostly incomplete (`queued=190 completed=5`), so refresh success does not imply payload-root recovery.
+
+## Identity Convergence Update (2026-03-06 13:55 EST)
+
+- Root cause confirmed for remaining unresolved identity rows:
+  - `/pool/media` is a separate ZFS dataset (`device_id=141`) from `/pool/data` (`device_id=231`).
+  - refresh step-2 was only scanning `/pool/data` and hotspare, leaving `/pool/media` unmapped in `devices`.
+- Mitigation executed:
+  - small probe scan under `/pool/media` registered device `141` with fs_uuid `zfs-4673783476987974510` (`alias=pool2`).
+  - final identity repair apply completed with `actions_planned=100 actions_applied=100 unresolved=0`.
+  - dry-run verification now returns zero candidates:
+    - `out/reports/fsuuid-identity/identity-repair-dryrun-20260306-135054-316604.json`
+  - post-final audit metrics now all clean (null/unknown/mismatch counts all `0`):
+    - `out/reports/fsuuid-identity/identity-drift-audit-post-final-20260306-1350.json`
+- Preventive tooling update in branch:
+  - `bin/db-refresh-step2-scan-pool-hotspare.sh` now scans `/pool/media` in addition to `/pool/data` and hotspare.
+  - wrappers updated:
+    - `bin/full-hashall-db-refresh.sh`
+    - `bin/codex-says-run-this-next.sh`
 
 ### Immediate Next Commands (Post-Compact)
 

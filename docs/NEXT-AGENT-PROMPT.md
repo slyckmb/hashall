@@ -20,8 +20,9 @@ Prompt-critical context (2026-03-06):
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
-- Current unresolved identity scope after apply passes:
-  - 100 remaining candidates are all `/pool/media` rooted rows waiting on valid device mapping in `devices`.
+- Identity convergence status:
+  - `/pool/media` device mapping was registered (`device_id=141`, fs_uuid `zfs-4673783476987974510`).
+  - identity repair now converges with `payload_candidates=0`, `torrent_candidates=0`.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

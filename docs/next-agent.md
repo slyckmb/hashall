@@ -23,9 +23,10 @@ If context is compacted, recover with this sequence:
 4. Preserve and remediate known drift:
    - `payloads`/`torrent_instances` rows with missing or stale `device_id` values.
    - parked negative `device_id` row in `devices`.
-5. Current unresolved identity bucket:
-   - 100 rows remain and all are `/pool/media` scoped.
-   - no further auto-repair actions exist until `/pool/media` has valid `devices` mapping.
+5. Identity repair status now:
+   - `/pool/media` mapping has been registered in `devices` (`device_id=141`).
+   - identity repair dry-run returns zero candidates and zero unresolved.
+   - keep refresh step-2 scanning `/pool/media` to prevent recurrence.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

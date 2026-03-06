@@ -17,8 +17,8 @@ Critical qB repair continuity (2026-03-06):
   - continue fs_uuid-first identity redesign in Hashall core.
 - Hashall identity remediation status:
   - `hashall doctor repair-identity` and `bin/hashall-fs-identity-repair.py` are available.
-  - `114` catalog identity repairs have been applied safely.
-  - remaining unresolved identity rows are `/pool/media`-scoped and require device mapping correction.
+  - `214` catalog identity repairs have been applied safely.
+  - current identity drift candidates are `0` after `/pool/media` device mapping registration.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/qbit-repair-handoff.md`

@@ -19,16 +19,16 @@ Critical now (2026-03-06):
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
   - `hashall` semver now `0.4.133`
 - Live catalog identity repair executed in safe passes:
-  - total applied actions: `114`
+  - total applied actions: `214` (including final `/pool/media` convergence batch)
   - full details and report paths in `docs/operations/RUN-STATE.md`.
 - Verification:
   - targeted suites for payload/rehome/payload-sync/catalog-sync/stage4 + identity repair passed in this worktree.
 - Catalog evidence to preserve:
-  - unresolved identity rows are now isolated to `/pool/media` scope (100 rows);
-  - unknown/legacy `device_id` remains primarily `141` in that scope;
+  - prior unresolved `/pool/media` scope has been remediated after device registration;
+  - current identity drift candidates are now `0`;
   - parked negative `device_id` exists in `devices` (`-905882091`).
-- Current blocking prerequisite for final convergence:
-  - ensure `/pool/media` has valid `devices` mapping (`fs_uuid`, device_id) before rerunning identity repair.
+- Root-cause mitigation applied:
+  - refresh step-2 now scans `/pool/media` in addition to `/pool/data` and hotspare.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/handoff.md`
