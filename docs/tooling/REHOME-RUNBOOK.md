@@ -117,6 +117,62 @@ Reason:
    - cleanup legacy views/temporary repair roots
    - reduce old-root participation in published `mirror_roots`
 
+## Pilot Dry-Run Commands
+
+Use the existing `rehome` dry-run/apply pair first. Do not invent an untracked apply path.
+
+1. Refresh first:
+
+```bash
+rehome refresh --verbose
+```
+
+2. Generate pilot MOVE candidates from the old pool dataset to the new one without applying:
+
+```bash
+rehome auto --from pool-data --to pool-media --limit 1
+```
+
+Notes:
+- default mode is dry-run
+- plan JSON is written under:
+  - `~/.logs/hashall/reports/rehome-runs/plans/`
+- the command prints the next `rehome apply ... --dryrun` step
+
+3. Dry-run the specific generated plan:
+
+```bash
+rehome apply ~/.logs/hashall/reports/rehome-runs/plans/<plan>.json --dryrun
+```
+
+4. Only after reviewing the dry-run output and confirming:
+- source root is under `/pool/data/media/torrents/seeding`
+- target save paths are under `/pool/media/torrents/seeding`
+- no blocked reasons are ignored
+- no unexpected alias/root drift appears
+
+then execute the exact same plan:
+
+```bash
+rehome apply ~/.logs/hashall/reports/rehome-runs/plans/<plan>.json --force
+```
+
+5. Immediate post-apply checks:
+- qB save path matches expected target save path
+- torrent reaches seed-ready state, not `stoppedDL`/`missingFiles`
+- no download-like flip is observed by the guard tooling
+- source cleanup is deferred until follow-up validation passes
+
+## Overnight-Safe Dry-Run Posture
+
+For unattended planning-only runs:
+
+```bash
+rehome auto --from pool-data --to pool-media --limit 25
+```
+
+That is still dry-run only. It should generate plans and reports but must not mutate qB, fastresume, or filesystem state.
+
 ## Operational Artifacts
 
 - Plans: generated JSON plan files.
