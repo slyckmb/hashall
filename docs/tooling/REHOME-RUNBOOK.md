@@ -40,7 +40,7 @@ Single operational runbook for rehome planning, apply flow, and safety gates.
 
 ## Observed Failure Modes And Required Mitigations
 
-- Hidden interactive child prompt inside `rehome refresh`
+- Hidden interactive child prompt inside `hashall refresh`
   - Failure: refresh appeared hung during delegated `hashall link execute`
   - Root cause: child command waited for confirmation on stdin
   - Mitigation: refresh must run non-interactively with `--yes`
@@ -91,7 +91,7 @@ Reason:
    - active/target must advertise `/pool/media/torrents/seeding`
    - legacy `/pool/data/...` roots remain explicit as mirrors/source roots while migration is incomplete
 
-2. Run `rehome refresh --verbose`
+2. Run `hashall refresh --verbose`
    - require preflight clean
    - watch both:
      - `~/.logs/hashall/rehome/refresh/*.log`
@@ -124,13 +124,13 @@ Use the existing `rehome` dry-run/apply pair first. Do not invent an untracked a
 1. Refresh first:
 
 ```bash
-rehome refresh --verbose
+hashall refresh --verbose
 ```
 
 2. Generate pilot MOVE candidates from the old pool dataset to the new one without applying:
 
 ```bash
-rehome auto --from pool-data --to pool-media --limit 1
+hashall rehome auto --from pool-data --to pool-media --limit 1
 ```
 
 Important:
@@ -141,12 +141,12 @@ Notes:
 - default mode is dry-run
 - plan JSON is written under:
   - `~/.logs/hashall/reports/rehome-runs/plans/`
-- the command prints the next `rehome apply ... --dryrun` step
+- the command prints the next `hashall rehome apply ... --dryrun` step
 
 3. Dry-run the specific generated plan:
 
 ```bash
-rehome apply ~/.logs/hashall/reports/rehome-runs/plans/<plan>.json --dryrun
+hashall rehome apply ~/.logs/hashall/reports/rehome-runs/plans/<plan>.json --dryrun
 ```
 
 4. Only after reviewing the dry-run output and confirming:
@@ -158,7 +158,7 @@ rehome apply ~/.logs/hashall/reports/rehome-runs/plans/<plan>.json --dryrun
 then execute the exact same plan:
 
 ```bash
-rehome apply ~/.logs/hashall/reports/rehome-runs/plans/<plan>.json --force
+hashall rehome apply ~/.logs/hashall/reports/rehome-runs/plans/<plan>.json --force
 ```
 
 5. Immediate post-apply checks:
@@ -172,7 +172,7 @@ rehome apply ~/.logs/hashall/reports/rehome-runs/plans/<plan>.json --force
 For unattended planning-only runs:
 
 ```bash
-rehome auto --from pool-data --to pool-media --limit 25
+hashall rehome auto --from pool-data --to pool-media --limit 25
 ```
 
 That is still dry-run only. It should generate plans and reports but must not mutate qB, fastresume, or filesystem state.

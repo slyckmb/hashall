@@ -1231,7 +1231,7 @@ def run_auto(
             f"dry-run  {planned_count}/{taking} planned  "
             f"{planned_count}/{taking} checked"
         )
-        print(f"To apply: rehome auto --limit {limit} --apply")
+        print(f"To apply: hashall rehome auto --limit {limit} --apply")
 
     run_record["summary"] = {
         "planned": planned_count,

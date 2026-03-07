@@ -3895,5 +3895,14 @@ def devices_preferred_mount(device, mount_point, db):
     conn.close()
 
 
+# Canonical CLI surface:
+# - `hashall rehome ...` exposes the full rehome command tree
+# - `hashall refresh` is a direct top-level alias for the rehome refresh flow
+from rehome.cli import cli as rehome_cli, refresh_cmd as rehome_refresh_cmd
+
+cli.add_command(rehome_cli, name="rehome")
+cli.add_command(rehome_refresh_cmd, name="refresh")
+
+
 if __name__ == "__main__":
     cli()

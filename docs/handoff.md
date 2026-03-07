@@ -8,14 +8,17 @@ Current branch/worktree:
 - `chatrap/codex-hashall-20260305-181919`
 - `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260305-181919`
 
-Current versions:
+Current version:
 - `hashall 0.4.153`
-- `rehome 0.6.19`
+
+Canonical CLI:
+- `hashall refresh`
+- `hashall rehome ...`
 
 Newest critical uncommitted/just-landed focus to preserve:
 - `REUSE` no longer defaults to qB `setLocation`; it now uses offline fastresume repointing
 - new helper module: `src/hashall/fastresume.py`
-- `rehome auto` `REUSE` apply line now reflects actual cleanup state (`cleanup pending` vs `source gone`)
+- `hashall rehome auto` `REUSE` apply line now reflects actual cleanup state (`cleanup pending` vs `source gone`)
 
 Current operational facts:
 - `~/.hashall/seed-root-state.json` is the canonical machine-readable seed-root contract.

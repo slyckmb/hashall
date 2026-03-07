@@ -19,7 +19,7 @@ Single living document for current operational status, handoff context, and next
 
 - New source-of-truth publisher added:
   - `src/rehome/seed_state.py`
-  - `rehome seed-root-state show [--write]`
+  - `hashall rehome seed-root-state show [--write]`
 - Published contract path:
   - `~/.hashall/seed-root-state.json`
 - Ownership model:
@@ -39,13 +39,13 @@ Single living document for current operational status, handoff context, and next
   - `aliases`
   - `mirror_roots`
 - Update timing now improved:
-  - `rehome config set`
-  - `rehome config add-root`
-  - `rehome config remove-root`
-  - `rehome config sync-roots --apply`
-  - `rehome config migrate`
+  - `hashall rehome config set`
+  - `hashall rehome config add-root`
+  - `hashall rehome config remove-root`
+  - `hashall rehome config sync-roots --apply`
+  - `hashall rehome config migrate`
   all republish `~/.hashall/seed-root-state.json` automatically
-  - `rehome refresh` now also republishes at managed-run start so external consumers see the current advertised roots before scan/dedup/payload-sync work begins
+  - `hashall refresh` now also republishes at managed-run start so external consumers see the current advertised roots before scan/dedup/payload-sync work begins
 - Contract currently publishes:
   - `active.seeding_root`
   - `target.seeding_root`
@@ -113,7 +113,7 @@ Single living document for current operational status, handoff context, and next
 ## Rehome Auto Explicit-Source Fix (2026-03-07 12:26 EST)
 
 - Symptom:
-  - `rehome auto --from pool-data --to pool-media --limit N` falsely BLOCKed all candidates with:
+  - `hashall rehome auto --from pool-data --to pool-media --limit N` falsely BLOCKed all candidates with:
     - `Seeding/library roots are not covered by scan_roots; rescan required`
 - Root cause:
   - `auto_cmd` resolved the explicit source `device_id` but dropped the associated source root path
@@ -386,7 +386,7 @@ Single living document for current operational status, handoff context, and next
 ## Refresh Dedup Parser Fix (2026-03-07 00:00 EST)
 
 - Operational anomaly confirmed from refresh log:
-  - `rehome refresh` reported dedup mode `execute`, created `hashall link plan` plans, then skipped execution with:
+  - `hashall refresh` reported dedup mode `execute`, created `hashall link plan` plans, then skipped execution with:
     - `no plan_id in link plan output ... skipping execute`
 - Root cause:
   - `src/rehome/auto.py` only parsed `plan_id=<n>`
@@ -692,5 +692,5 @@ Legacy docs remain stubs pointing here:
   - `bin/qb-cache-agent.py` and `bin/qb-cache-daemon.py` now probe both canonical name variants before exec
   - cache-backed callers should continue working without requiring an immediate coordinated rename in the external `qbitui` repo
 - Current migration blocker remains unchanged:
-  - `rehome auto` dry-run planning is now good for `pool-data -> pool-media`
+  - `hashall rehome auto` dry-run planning is now good for `pool-data -> pool-media`
   - do not scale live apply until `REUSE` post-apply reporting/verify semantics are fixed

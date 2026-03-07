@@ -10,7 +10,7 @@ Unified roadmap + active backlog for development and operations.
 ## Near-Term Priorities
 
 1. Establish one canonical machine-readable seed-root-state contract owned by `hashall`.
-2. Keep `rehome refresh` observable and non-brittle during long delegated steps.
+2. Keep `hashall refresh` observable and non-brittle during long delegated steps.
 3. Finish removing durable `device_id` assumptions from migration/rehome logic.
 4. Harden qB data migration and repair workflows before any further large batch moves.
 5. Define and validate the production process for `/pool/data/media/torrents/seeding -> /pool/media/torrents/seeding`.
@@ -41,7 +41,7 @@ Unified roadmap + active backlog for development and operations.
 
 ### P1 Refresh Monitoring and Observability
 
-- [x] Monitor live `rehome refresh` runs and fix anomalies that appear during active execution.
+- [x] Monitor live `hashall refresh` runs and fix anomalies that appear during active execution.
 - [x] Build a compact anomaly ledger from `~/.logs/hashall/rehome/refresh/` with root cause, impact, fix, and status.
 - [x] Investigate and fix the post-`Plan #59` `ActionInfo` failure in `hashall link execute` seen during refresh-driven dedup on `spare`.
 - [x] Remove hidden interactive prompts from orchestrated subprocesses.
@@ -73,7 +73,7 @@ Unified roadmap + active backlog for development and operations.
   - post-apply qB state validation
   - download-prevention guardrails
   - scope verification against filesystem and qB save path
-- [x] Fix `rehome auto --apply` `REUSE` execution/report semantics so it does not:
+- [x] Fix `hashall rehome auto --apply` `REUSE` execution/report semantics so it does not:
   - claim source deletion when source retention is intentional
   - credit freed bytes before cleanup actually occurs
   - fail inline verify merely because retained source still exists
@@ -124,7 +124,7 @@ Unified roadmap + active backlog for development and operations.
 
 ### Exit Criteria
 
-- [ ] `rehome refresh` no longer shows silent dedup or payload-sync quality anomalies.
+- [ ] `hashall refresh` no longer shows silent dedup or payload-sync quality anomalies.
 - [ ] A canonical seed-root-state file exists, is machine-readable, and is safe for `traktor` to consume read-only.
 - [ ] No critical workflow depends on brittle numeric `device_id` for durable identity.
 - [ ] Canonical docs are reduced to one run-state doc, one plan doc, and one short handoff doc.
@@ -162,10 +162,10 @@ Unified roadmap + active backlog for development and operations.
   - fs_uuid-backed files-table migration is now applied to `~/.hashall/catalog.db`
   - preflight passes after live apply
   - remaining follow-up is monitoring, cleanup, and any future reduction of compatibility-surface assumptions
-  - `rehome auto --from pool-data --to pool-media --limit 25` dry-run now returns real `REUSE ... OK` plans after the explicit `--from` source-root fix
+  - `hashall rehome auto --from pool-data --to pool-media --limit 25` dry-run now returns real `REUSE ... OK` plans after the explicit `--from` source-root fix
   - selective `qb-*` bin normalization is complete
   - `qb-*` cache shims now support both the normalized `qb-*` names and the still-installed `qbitui` canonical `qbit-*` names
-  - `rehome auto` now reports `REUSE` apply/verify correctly and waits for stable qB ready state after recheck
+  - `hashall rehome auto` now reports `REUSE` apply/verify correctly and waits for stable qB ready state after recheck
   - immediate `REUSE` relocation state is now written into `rehome_runs` and cleanup-required follow-up tags
   - `REUSE` now defaults to offline fastresume repointing instead of qB `setLocation`
   - remaining blocker before wider pool-data -> pool-media apply is a clean live pilot on the new fastresume transport

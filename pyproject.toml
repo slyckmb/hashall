@@ -28,7 +28,6 @@ dev = [
 
 [project.scripts]
 hashall = "hashall.cli:cli"
-rehome = "rehome.cli:cli"
 
 [build-system]
 requires = ["setuptools"]
@@ -51,4 +50,4 @@ version_pattern = "MAJOR.MINOR.PATCH"
 [tool.bumpver.file_patterns]
 "pyproject.toml" = ['version = "{version}"']
 "src/hashall/__init__.py" = ['__version__ = "{version}"']
-"src/rehome/__init__.py" = ['__version__ = "0.6.19"']
+"src/rehome/__init__.py" = ['__version__ = "{version}"']

@@ -203,16 +203,17 @@ def cli():
 
     \b
     Everyday workflow:
-      rehome refresh                   scan all roots + dedup + sync qBit
-      rehome auto --limit 5            find top-5 MOVE candidates (dry-run)
-      rehome auto --limit 5 --apply    execute
+      hashall refresh                   scan all roots + dedup + sync qBit
+      hashall rehome auto --limit 5     find top-5 MOVE candidates (dry-run)
+      hashall rehome auto --limit 5 --apply
+                                        execute
 
     \b
     Config (persisted in ~/.hashall/rehome.toml):
-      rehome config show
-      rehome config set <key> <value>
-      rehome config add-root <path> <alias>
-      rehome config remove-root <path>
+      hashall rehome config show
+      hashall rehome config set <key> <value>
+      hashall rehome config add-root <path> <alias>
+      hashall rehome config remove-root <path>
     """
     _emit_banner()
 
@@ -436,7 +437,7 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
         click.echo(f"   Total torrents: {total_torrents}")
 
     click.echo()
-    click.echo(f"Next step: rehome apply {output_path} --dryrun")
+    click.echo(f"Next step: hashall rehome apply {output_path} --dryrun")
 
 
 @cli.command("plan-batch")
@@ -995,7 +996,7 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
     click.echo()
     if dryrun:
         click.echo("✅ Dry-run completed successfully")
-        click.echo(f"To execute: rehome apply {plan_file} --force")
+        click.echo(f"To execute: hashall rehome apply {plan_file} --force")
     else:
         click.echo("✅ Plan executed successfully")
         # Mandatory post-apply summary: query qBittorrent for final torrent states.
@@ -1211,7 +1212,7 @@ def normalize_plan_cmd(
             )
 
     click.echo()
-    click.echo(f"Next step: rehome apply {output_path} --dryrun")
+    click.echo(f"Next step: hashall rehome apply {output_path} --dryrun")
 
 
 @cli.command("auto")
@@ -1240,10 +1241,10 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 
     \b
     Examples:
-      rehome auto --limit 5                         # all sources → default dest
-      rehome auto --from spare --to pool            # spare→pool only
-      rehome auto --to active --from pool           # pool→stash (promotion)
-      rehome auto --limit 5 --apply                 # execute
+      hashall rehome auto --limit 5                 # all sources → default dest
+      hashall rehome auto --from spare --to pool    # spare→pool only
+      hashall rehome auto --to active --from pool   # pool→stash (promotion)
+      hashall rehome auto --limit 5 --apply         # execute
     """
     from rehome.config import load_config, parse_managed_roots
     from rehome.auto import run_auto, run_refresh
@@ -1503,7 +1504,7 @@ def config_show(catalog):
             f"  [DEPRECATION] Config file uses old key names: {', '.join(old_keys_present)}",
             err=True,
         )
-        click.echo("  Run: rehome config migrate  (rewrites file with new key names)\n", err=True)
+        click.echo("  Run: hashall rehome config migrate  (rewrites file with new key names)\n", err=True)
 
     scalar_keys = ("catalog", "active_device", "active_root", "content_root",
                    "default_dest_device", "default_dest_root")
@@ -1551,7 +1552,7 @@ def config_show(catalog):
                     stat = "(not found in DB)"
                 click.echo(f"  {alias:<20} {path}  {stat}")
         else:
-            click.echo("\nManaged storage roots: (none — use: rehome config add-root <path> <alias>)")
+            click.echo("\nManaged storage roots: (none — use: hashall rehome config add-root <path> <alias>)")
     finally:
         if conn:
             conn.close()
@@ -1572,7 +1573,7 @@ def config_set(key, value):
     if key not in all_valid:
         known = ", ".join(sorted(scalar_keys))
         click.echo(f"❌ Unknown key '{key}'. Known keys: {known}", err=True)
-        click.echo("  (For list keys use: rehome config add-root / remove-root)", err=True)
+        click.echo("  (For list keys use: hashall rehome config add-root / remove-root)", err=True)
         raise click.Abort()
     canonical = _KEY_RENAMES.get(key, key)
     save_config_key(key, value)
@@ -1594,7 +1595,7 @@ def config_add_root(path, alias, catalog):
 
     \b
     Example:
-      rehome config add-root /mnt/hotspare6tb spare
+      hashall rehome config add-root /mnt/hotspare6tb spare
     """
     from rehome.config import add_scan_root, load_config
 
@@ -1636,7 +1637,7 @@ def config_remove_root(path):
 
     \b
     Example:
-      rehome config remove-root /mnt/hotspare6tb
+      hashall rehome config remove-root /mnt/hotspare6tb
     """
     from rehome.config import remove_scan_root
     removed = remove_scan_root(path)
@@ -1716,7 +1717,7 @@ def config_sync_roots(do_apply, min_files, catalog):
                 f"  {str(alias):<20} {mount:<30} "
                 f"files={int(tf or 0):>8,}  {_fmt_bytes(int(tb or 0)):<10}  last={str(last or '')[:10]}"
             )
-            click.echo(f"  → rehome config add-root {mount} {alias}")
+            click.echo(f"  → hashall rehome config add-root {mount} {alias}")
             if do_apply:
                 add_scan_root(mount, str(alias))
                 click.echo(f"  ✅ added")
