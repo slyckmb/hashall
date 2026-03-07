@@ -48,6 +48,7 @@ Unified roadmap + active backlog for development and operations.
 - [x] Fix false refresh `PARTIAL` results when payload sync reports zero upgrade work via legacy `upgrade stage:` output.
 - [x] Improve long-running command progress visibility and heartbeat feedback.
 - [ ] Surface secondary logs to operators during quiet periods, especially `~/.logs/hashall/hashall.log`.
+- [x] Keep renamed `qb-*` cache entrypoints compatible with the currently installed `qbitui` canonical script names.
 
 ### P2 `device_id` to `fs_uuid` Transition Hardening
 
@@ -65,12 +66,18 @@ Unified roadmap + active backlog for development and operations.
   - save-path / content-path mismatch handling
   - hardlink / inode preservation assumptions
 - [x] Make stoppedDL drain/apply derive default allowed roots from the published seed-root contract instead of scattered hard-coded pool roots.
+- [x] Restore the still-useful qB operational scripts from `bin/archive/legacy-pipeline/` and normalize active command names to `qb-*` consistently.
 - [ ] Harden qBit migration/rehome workflows with explicit safety gates:
   - fail-closed on ambiguity
   - dry-run-first with machine-readable plan output
   - post-apply qB state validation
   - download-prevention guardrails
   - scope verification against filesystem and qB save path
+- [ ] Fix `rehome auto --apply` `REUSE` execution/report semantics so it does not:
+  - claim source deletion when source retention is intentional
+  - credit freed bytes before cleanup actually occurs
+  - fail inline verify merely because retained source still exists
+- [ ] Re-run a single-item live `REUSE` pilot after the reporting/verify fix, then reassess whether batch apply is safe.
 
 ### P4 Pool Dataset Migration Process
 
@@ -146,6 +153,10 @@ Unified roadmap + active backlog for development and operations.
   - fs_uuid-backed files-table migration is now applied to `~/.hashall/catalog.db`
   - preflight passes after live apply
   - remaining follow-up is monitoring, cleanup, and any future reduction of compatibility-surface assumptions
+  - `rehome auto --from pool-data --to pool-media --limit 25` dry-run now returns real `REUSE ... OK` plans after the explicit `--from` source-root fix
+  - selective `qb-*` bin normalization is complete
+  - `qb-*` cache shims now support both the normalized `qb-*` names and the still-installed `qbitui` canonical `qbit-*` names
+  - remaining blocker before wider pool-data -> pool-media apply is `REUSE` post-apply reporting/verification correctness in `rehome auto`
 
 ## Active Engineering Backlog
 

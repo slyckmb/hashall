@@ -620,3 +620,22 @@ Legacy docs remain stubs pointing here:
 - qB still has active downloading-like torrents unrelated to `missingFiles` count:
   - latest watch snapshot (`21:06:52`): `checking=16 missing=0 down=6 stoppedDL=15`
 - Keep daemon halt/reset discipline in place until downloading-like inventory is explicitly reviewed and allowlisted or paused by policy.
+
+## qB Bin Normalization and Cache Shim Fix (2026-03-07 13:15 EST)
+
+- Selective `bin/` refactor completed:
+  - restored still-useful archived tools to active `bin/`:
+    - `bin/qb-missing-audit.sh`
+    - `bin/qb-missing-remediate.sh`
+    - `bin/qb-checking-watch.sh`
+  - normalized active `qbit-*` helpers to `qb-*`
+  - left the rest of `bin/archive/legacy-pipeline/` archived because those wrappers are campaign-specific
+- Follow-up regression discovered immediately after rename:
+  - `bin/qb-start-seeding-gradual.sh --cache ...` failed to fetch torrent state
+  - root cause: local shims were renamed to `qb-cache-agent.py` / `qb-cache-daemon.py`, but installed `qbitui` canonical scripts on glider still use `qbit-cache-agent.py` / `qbit-cache-daemon.py`
+- Fix applied:
+  - `bin/qb-cache-agent.py` and `bin/qb-cache-daemon.py` now probe both canonical name variants before exec
+  - cache-backed callers should continue working without requiring an immediate coordinated rename in the external `qbitui` repo
+- Current migration blocker remains unchanged:
+  - `rehome auto` dry-run planning is now good for `pool-data -> pool-media`
+  - do not scale live apply until `REUSE` post-apply reporting/verify semantics are fixed
