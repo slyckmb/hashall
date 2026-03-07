@@ -78,12 +78,14 @@ Unified roadmap + active backlog for development and operations.
   - credit freed bytes before cleanup actually occurs
   - fail inline verify merely because retained source still exists
 - [x] Harden qB post-relocation readiness checks so a stale immediate `stoppedUP` sample does not incorrectly pass before delayed `checkingUP` begins.
-- [ ] Audit and harden immediate catalog sync after rehome apply so known moves/relocations are persisted without waiting for full refresh:
+- [x] Record immediate `REUSE` relocation state in the catalog without waiting for full refresh:
   - update affected `torrent_instances` immediately
   - reconcile known file-row changes immediately
-  - publish authoritative target payload ownership immediately
+  - persist source/target relocation state in `rehome_runs`
   - represent retained-source / cleanup-pending state explicitly for `REUSE`
-- [ ] Re-run a single-item live `REUSE` pilot after the catalog-sync hardening work, then reassess whether batch apply is safe.
+- [x] Upgrade old `rehome_runs` schemas in place so new relocation-state fields are persisted on existing live catalogs.
+- [x] Fix qB recheck guard to tolerate brief queued `stoppedDL/0%` states after a recheck request before qB flips into `checkingUP`.
+- [ ] Re-run a single-item live `REUSE` pilot on the patched executor/guard path, then reassess whether batch apply is safe.
 
 ### P4 Pool Dataset Migration Process
 
@@ -163,7 +165,8 @@ Unified roadmap + active backlog for development and operations.
   - selective `qb-*` bin normalization is complete
   - `qb-*` cache shims now support both the normalized `qb-*` names and the still-installed `qbitui` canonical `qbit-*` names
   - `rehome auto` now reports `REUSE` apply/verify correctly and waits for stable qB ready state after recheck
-  - remaining blocker before wider pool-data -> pool-media apply is immediate catalog-sync clarity for `REUSE` source-side payload state and cleanup-pending follow-through
+  - immediate `REUSE` relocation state is now written into `rehome_runs` and cleanup-required follow-up tags
+  - remaining blocker before wider pool-data -> pool-media apply is a clean live pilot on the patched recheck-queue guard path
 
 ## Active Engineering Backlog
 

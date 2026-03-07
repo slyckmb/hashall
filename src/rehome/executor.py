@@ -96,6 +96,12 @@ class DemotionExecutor:
             )
         except ValueError:
             self.recheck_ready_stable_seconds = 10.0
+        try:
+            self.recheck_queue_grace_seconds = max(
+                0.0, float(os.getenv("HASHALL_REHOME_QB_RECHECK_QUEUE_GRACE_SECONDS", "20"))
+            )
+        except ValueError:
+            self.recheck_queue_grace_seconds = 20.0
 
     def _get_db_connection(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Get database connection."""
@@ -378,12 +384,19 @@ class DemotionExecutor:
 
     def _resolve_plan_device_id(self, plan: Dict, prefix: str) -> Optional[int]:
         """Resolve `<prefix>_device_id` from fs_uuid/device_id fields in plan."""
+        fs_uuid = str(plan.get(f"{prefix}_fs_uuid") or "").strip()
+        device_id = plan.get(f"{prefix}_device_id")
+        if not fs_uuid:
+            if device_id is None:
+                return None
+            return int(device_id)
+
         conn = self._get_db_connection(read_only=True)
         try:
             return self._resolve_device_id_for_plan(
                 conn,
-                device_id=plan.get(f"{prefix}_device_id"),
-                fs_uuid=plan.get(f"{prefix}_fs_uuid"),
+                device_id=device_id,
+                fs_uuid=fs_uuid,
             )
         finally:
             conn.close()
@@ -776,6 +789,7 @@ class DemotionExecutor:
                     raise RuntimeError(
                         f"Failed qB recheck request for torrent {torrent_hash[:16]} error={last_error}"
                     )
+        recheck_requested_at = time.monotonic() if self.force_recheck_after_relocate else None
 
         deadline = time.monotonic() + timeout_seconds
         last_debug = 0.0
@@ -833,6 +847,32 @@ class DemotionExecutor:
                 return
 
             ready_since = None
+            now = time.monotonic()
+
+            # qB can accept a recheck request, leave the torrent briefly in a
+            # queued stoppedDL/0% state, and only then flip into checkingUP.
+            # Treat that short post-request queue interval as transient instead
+            # of failing immediately on the first pre-check sample.
+            queue_waiting_after_recheck = (
+                self.force_recheck_after_relocate
+                and recheck_requested_at is not None
+                and (now - recheck_requested_at) < self.recheck_queue_grace_seconds
+                and state in {"stoppeddl", "pauseddl", "stoppedup", "pausedup"}
+                and (progress < 0.9999 or amount_left > 0)
+            )
+            if queue_waiting_after_recheck:
+                if (now - last_debug) >= 5.0:
+                    remaining = max(0.0, self.recheck_queue_grace_seconds - (now - recheck_requested_at))
+                    self._log(
+                        f"  recheck_wait hash={torrent_hash[:16]} "
+                        f"state={state or 'unknown'} progress={progress:.4f} "
+                        f"amount_left={amount_left} reason=recheck_queue_wait "
+                        f"remaining_s={remaining:.1f}",
+                        "warning",
+                    )
+                    last_debug = now
+                time.sleep(interval_seconds)
+                continue
 
             # Hard failures: do not wait for torrents that cannot recover on their own.
             if reason in {"state_error", "state_downloading", "progress_below_100", "amount_left_nonzero"}:
@@ -850,7 +890,6 @@ class DemotionExecutor:
                     f"state={state} progress={progress:.4f}"
                 )
 
-            now = time.monotonic()
             if (now - last_debug) >= 5.0:
                 self._log(
                     f"  recheck_wait hash={torrent_hash[:16]} "

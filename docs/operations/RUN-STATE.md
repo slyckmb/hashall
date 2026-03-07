@@ -146,6 +146,31 @@ Single living document for current operational status, handoff context, and next
   - the remaining deficiency is inline catalog-state clarity for retained source payloads after `REUSE`
   - next hardening step is to make apply-time catalog sync publish that state explicitly instead of relying on later refresh/GC to clarify it
 
+## Rehome Immediate-State Hardening (2026-03-07 14:45 EST)
+
+- `rehome_runs` is now upgraded in place and persisted with first-class relocation fields:
+  - `source_path`
+  - `target_path`
+  - `source_device_id`
+  - `target_device_id`
+  - `source_fs_uuid`
+  - `target_fs_uuid`
+  - `target_payload_id`
+  - `cleanup_source_required`
+  - `cleanup_source_path`
+- `REUSE` now sets `cleanup_source_deferred` when the retained source still exists, which means:
+  - follow-up cleanup/tag flows can see the pending source-removal work
+  - live apply runs no longer depend on later refresh/orphan-GC just to expose source/target relocation intent
+- New qB behavior observed during live pilot:
+  - after a recheck request, later torrents in the batch can sit briefly in `stoppedDL 0%` before qB flips them into `checkingUP`
+  - this is a queued recheck state, not necessarily a stale fastresume failure
+- Guard fix applied:
+  - recheck guard now tolerates a short queued `stoppedDL/0%` interval immediately after a recheck request
+  - after the grace window expires, true `stoppedDL/pausedDL` still fails hard as before
+- Validation status:
+  - targeted executor/audit/auto/catalog-sync suites are green
+  - the next required gate is a fresh single-item live `REUSE` pilot on the patched guard path
+
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 
 - Branch/worktree in active use for this incident:
