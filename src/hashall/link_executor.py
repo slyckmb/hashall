@@ -1125,7 +1125,6 @@ def execute_plan(
 
     actions = []
     for row in cursor.fetchall():
-        from hashall.link_query import ActionInfo
         actions.append(ActionInfo(
             id=row[0], plan_id=row[1], action_type=row[2], status=row[3],
             canonical_path=row[4], duplicate_path=row[5],

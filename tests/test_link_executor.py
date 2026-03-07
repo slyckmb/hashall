@@ -14,6 +14,7 @@ import pytest
 from hashall.link_executor import (
     compute_sha256,
     compute_fast_hash_sample,
+    execute_plan,
     verify_files_exist,
     verify_file_unchanged,
     verify_hash_matches,
@@ -333,6 +334,108 @@ def test_execution_result_creation():
     assert result.actions_executed == 10
     assert result.actions_failed == 2
     assert len(result.errors) == 2
+
+
+def test_execute_plan_dry_run_does_not_raise_actioninfo_unboundlocalerror(tmp_path: Path):
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE link_plans (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            status TEXT,
+            created_at TEXT,
+            device_id INTEGER,
+            device_alias TEXT,
+            mount_point TEXT,
+            total_opportunities INTEGER,
+            total_bytes_saveable INTEGER,
+            total_bytes_saved INTEGER,
+            actions_total INTEGER,
+            actions_executed INTEGER,
+            actions_failed INTEGER,
+            actions_skipped INTEGER,
+            started_at TEXT,
+            completed_at TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE link_actions (
+            id INTEGER PRIMARY KEY,
+            plan_id INTEGER,
+            action_type TEXT,
+            status TEXT,
+            canonical_path TEXT,
+            duplicate_path TEXT,
+            canonical_inode INTEGER,
+            duplicate_inode INTEGER,
+            device_id INTEGER,
+            file_size INTEGER,
+            sha256 TEXT,
+            bytes_to_save INTEGER,
+            bytes_saved INTEGER,
+            executed_at TEXT,
+            error_message TEXT
+        )
+    """)
+
+    canonical = tmp_path / "canonical.bin"
+    duplicate = tmp_path / "duplicate.bin"
+    canonical.write_text("same-content")
+    duplicate.write_text("same-content")
+
+    cursor.execute(
+        """
+        INSERT INTO link_plans (
+            id, name, status, created_at, device_id, device_alias, mount_point,
+            total_opportunities, total_bytes_saveable, total_bytes_saved,
+            actions_total, actions_executed, actions_failed, actions_skipped,
+            started_at, completed_at
+        ) VALUES (1, 'refresh-test', 'pending', '2026-03-07 00:00:00', 99, 'spare', ?, 1, 12, 0, 1, 0, 0, 0, NULL, NULL)
+        """,
+        (str(tmp_path),),
+    )
+    cursor.execute(
+        """
+        INSERT INTO link_actions (
+            id, plan_id, action_type, status, canonical_path, duplicate_path,
+            canonical_inode, duplicate_inode, device_id, file_size, sha256,
+            bytes_to_save, bytes_saved, executed_at, error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1,
+            1,
+            "HARDLINK",
+            "pending",
+            str(canonical),
+            str(duplicate),
+            canonical.stat().st_ino,
+            duplicate.stat().st_ino,
+            99,
+            canonical.stat().st_size,
+            None,
+            canonical.stat().st_size,
+            0,
+            None,
+            None,
+        ),
+    )
+    conn.commit()
+
+    result = execute_plan(
+        conn,
+        1,
+        dry_run=True,
+        verify_mode="none",
+        create_backup=False,
+        use_jdupes=False,
+    )
+
+    assert result.plan_id == 1
+    assert result.actions_executed == 1
+    assert result.actions_failed == 0
+    assert result.actions_skipped == 0
 
 
 def test_update_action_status_commit_false_defers_commit():
