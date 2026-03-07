@@ -524,7 +524,7 @@ def run_refresh(
                         print(
                             "  [refresh] still running "
                             f"label={label} elapsed={elapsed_hb}s "
-                            "watch=~/.logs/hashall/hashall.log"
+                            "watch='tail -n0 -F ~/.logs/hashall/hashall.log'"
                         )
                         next_heartbeat = now_monotonic + heartbeat_s
                     time.sleep(1.0)
@@ -682,7 +682,7 @@ def run_refresh(
                                 "--yes",
                             ] + db_args
                             label = f"link execute plan_id={plan_id} ({managed_alias})"
-                            print("  [refresh] delegated progress may continue in ~/.logs/hashall/hashall.log")
+                            print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
                             ok, _ = _run_step(label, execute_cmd)
                             overall_ok = overall_ok and ok
                         else:
@@ -708,7 +708,7 @@ def run_refresh(
                                     "--yes",
                                 ] + db_args
                                 label = f"link execute plan_id={plan_id} ({dev_alias})"
-                                print("  [refresh] delegated progress may continue in ~/.logs/hashall/hashall.log")
+                                print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
                                 ok, _ = _run_step(label, execute_cmd)
                                 overall_ok = overall_ok and ok
                             else:

@@ -132,6 +132,19 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
     assert published["cfg"]["managed_roots"] == []
 
 
+def test_hashall_cli_run_header_includes_run_start_metadata(monkeypatch, capsys) -> None:
+    import hashall.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_RUN_HEADER_EMITTED", False)
+    monkeypatch.setattr(cli_mod, "_LOG_PATH", Path("/tmp/hashall.log"))
+    monkeypatch.setattr(cli_mod.sys, "argv", ["hashall", "payload", "sync"])
+
+    cli_mod._emit_run_header()
+    out = capsys.readouterr().out
+    assert "run_start pid=" in out
+    assert "argv=payload sync" in out
+
+
 def test_run_catalog_preflight_reports_unknown_device_refs(tmp_path: Path) -> None:
     db_path = tmp_path / "catalog.db"
     conn = sqlite3.connect(str(db_path))

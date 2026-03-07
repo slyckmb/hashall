@@ -58,7 +58,7 @@ Single operational runbook for rehome planning, apply flow, and safety gates.
 - Long quiet periods during delegated work
   - Failure mode: operator cannot distinguish progress from hang
   - Mitigation:
-    - watch `~/.logs/hashall/hashall.log`
+    - watch `tail -n0 -F ~/.logs/hashall/hashall.log`
     - keep delegated-step progress lines visible
     - continue improving heartbeat output in orchestrators
 

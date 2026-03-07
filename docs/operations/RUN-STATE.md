@@ -85,6 +85,7 @@ Single living document for current operational status, handoff context, and next
   - symptom: operator uncertainty about hang vs progress
   - current mitigation: watch `~/.logs/hashall/hashall.log`
   - fix: refresh now emits periodic `still running` heartbeat lines for non-captured delegated subprocesses
+  - operator note: use `tail -n0 -F ~/.logs/hashall/hashall.log` to avoid replaying stale terminal lines from the previous run
   - status: mitigated
 
 - Zero-upgrade payload sync marked refresh `PARTIAL`

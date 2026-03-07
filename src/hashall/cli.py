@@ -160,9 +160,14 @@ def _emit_run_header() -> None:
         return
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     script = Path(sys.argv[0]).name or "hashall"
+    argv_text = " ".join(str(arg) for arg in sys.argv[1:])
+    run_boundary = "═" * 68
+    print(run_boundary)
     print(f"🧾 {script} v{__version__} @ {timestamp}")
+    print(f"🧾 run_start pid={os.getpid()} argv={argv_text or '<none>'}")
     if _LOG_PATH:
         print(f"🧾 log: {_LOG_PATH}")
+    print(run_boundary)
     _RUN_HEADER_EMITTED = True
 
 
