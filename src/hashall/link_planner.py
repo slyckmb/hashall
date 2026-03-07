@@ -10,6 +10,7 @@ from typing import Callable, List, Optional, Tuple
 import sqlite3
 from pathlib import Path
 
+from hashall.device import get_files_table_name
 from hashall.link_analysis import analyze_device, DuplicateGroup
 from hashall.payload import get_payload_file_rows, PayloadFileRow
 
@@ -285,9 +286,11 @@ def create_payload_empty_plan(
     device_alias, mount_point = dev_row[1], dev_row[2]
 
     # Check if device table exists
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(cursor, device_id=device_id)
+    if not table_name:
+        raise ValueError(f"Table for device {device_id} does not exist in catalog")
     cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        "SELECT name FROM sqlite_master WHERE name=?",
         (table_name,)
     )
     if not cursor.fetchone():

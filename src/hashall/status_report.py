@@ -25,6 +25,7 @@ import threading
 import time
 from typing import Optional
 
+from hashall.device import get_files_table_name
 from hashall.fs_utils import get_filesystem_uuid, get_mount_source
 from hashall.model import connect_db
 from hashall.payload_completion import load_completed_torrent_hashes
@@ -200,9 +201,9 @@ def _pocket_for_path(ctx: RootContext, table_path: str, depth: int) -> str:
 
 
 def _collect_root_file_metrics(conn: sqlite3.Connection, ctx: RootContext) -> dict:
-    table_name = f"files_{ctx.device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=ctx.device_id)
     table_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        "SELECT 1 FROM sqlite_master WHERE name = ?",
         (table_name,),
     ).fetchone()
     if not table_exists:
@@ -283,9 +284,9 @@ def _collect_duplicate_pockets(
     pocket_depth: int,
     top_n: int,
 ) -> list[dict]:
-    table_name = f"files_{ctx.device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=ctx.device_id)
     table_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        "SELECT 1 FROM sqlite_master WHERE name = ?",
         (table_name,),
     ).fetchone()
     if not table_exists:
@@ -680,14 +681,14 @@ def _collect_recovery_no_growth(
             "samples": [],
         }
 
-    stash_table = f"files_{stash_ctx.device_id}"
-    pool_table = f"files_{pool_ctx.device_id}"
+    stash_table = get_files_table_name(conn.cursor(), device_id=stash_ctx.device_id)
+    pool_table = get_files_table_name(conn.cursor(), device_id=pool_ctx.device_id)
     stash_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        "SELECT 1 FROM sqlite_master WHERE name = ?",
         (stash_table,),
     ).fetchone()
     pool_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        "SELECT 1 FROM sqlite_master WHERE name = ?",
         (pool_table,),
     ).fetchone()
     if not stash_exists or not pool_exists:

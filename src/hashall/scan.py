@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from tqdm import tqdm
 from hashall.model import connect_db, init_db_schema
-from hashall.device import register_or_update_device, ensure_files_table
+from hashall.device import register_or_update_device, ensure_files_table, get_files_table_name
 from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source, get_zfs_metadata
 from hashall.pathing import canonicalize_path, is_under
 from hashall.hash_progress import HashProgressReporter
@@ -135,7 +135,9 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
         return {}
 
     rel_root_str = str(rel_root)
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(cursor, device_id=device_id)
+    if not table_name:
+        return {}
 
     # Query files under root_path with status='active'
     # Special case: if rel_root is ".", get all files (root == mount point)
@@ -289,8 +291,7 @@ def find_quick_hash_collisions(device_id: int, db_path: Path) -> Dict[str, list]
     """
     conn = connect_db(db_path)
     cursor = conn.cursor()
-    ensure_files_table(cursor, device_id)
-    table_name = f"files_{device_id}"
+    table_name = ensure_files_table(cursor, device_id)
 
     # Pull all collision rows in one query (avoid one query per quick_hash).
     rows = _run_with_db_lock_retry(
@@ -334,8 +335,7 @@ def count_quick_hash_collision_groups(device_id: int, db_path: Path) -> int:
     """Count quick-hash collision groups for a device."""
     conn = connect_db(db_path)
     cursor = conn.cursor()
-    ensure_files_table(cursor, device_id)
-    table_name = f"files_{device_id}"
+    table_name = ensure_files_table(cursor, device_id)
 
     row = _run_with_db_lock_retry(
         lambda: cursor.execute(f"""
@@ -360,8 +360,7 @@ def count_quick_hash_distinct_inode_collision_groups(device_id: int, db_path: Pa
     """Count quick-hash collision groups with 2+ distinct inode/path keys."""
     conn = connect_db(db_path)
     cursor = conn.cursor()
-    ensure_files_table(cursor, device_id)
-    table_name = f"files_{device_id}"
+    table_name = ensure_files_table(cursor, device_id)
 
     row = _run_with_db_lock_retry(
         lambda: cursor.execute(f"""
@@ -386,8 +385,7 @@ def count_quick_hash_pending_upgrade_groups(device_id: int, db_path: Path) -> in
     """Count collision groups that still need full-hash upgrade."""
     conn = connect_db(db_path)
     cursor = conn.cursor()
-    ensure_files_table(cursor, device_id)
-    table_name = f"files_{device_id}"
+    table_name = ensure_files_table(cursor, device_id)
 
     row = _run_with_db_lock_retry(
         lambda: cursor.execute(f"""
@@ -428,8 +426,7 @@ def upgrade_collision_group(quick_hash: str, device_id: int, db_path: Path, moun
     """
     conn = connect_db(db_path)
     cursor = conn.cursor()
-    ensure_files_table(cursor, device_id)
-    table_name = f"files_{device_id}"
+    table_name = ensure_files_table(cursor, device_id)
 
     # Get all files with this quick_hash (include inode for deduplication)
     rows = _run_with_db_lock_retry(
@@ -621,8 +618,7 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
     """
     conn = connect_db(db_path)
     cursor = conn.cursor()
-    ensure_files_table(cursor, device_id)
-    table_name = f"files_{device_id}"
+    table_name = ensure_files_table(cursor, device_id)
 
     row = _run_with_db_lock_retry(
         lambda: cursor.execute(
@@ -1248,7 +1244,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         _emit(quiet, f"   Preferred mount: {effective_mount}")
 
     # 5. Ensure per-device files table exists
-    table_name = ensure_files_table(cursor, device_id)
+    table_name = ensure_files_table(cursor, device_id, fs_uuid=fs_uuid)
 
     # 6. Track scan root
     cursor.execute("""

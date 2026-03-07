@@ -3,6 +3,8 @@ import sqlite3
 from hashlib import sha256
 from pathlib import Path
 
+from hashall.device import get_files_table_name
+
 def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
     """
     Computes a SHA256-based treehash representing the file structure of a scan session.
@@ -46,7 +48,10 @@ def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
 
         device_id = session[1]
         root_path = Path(session[2])
-        table_name = f"files_{device_id}"
+        table_name = get_files_table_name(cursor, device_id=device_id)
+        if not table_name:
+            conn.close()
+            raise ValueError(f"Missing device table for device_id={device_id}")
         if not _table_exists(table_name):
             conn.close()
             raise ValueError(f"Missing device table: {table_name}")

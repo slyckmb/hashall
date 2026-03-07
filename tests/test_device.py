@@ -15,6 +15,8 @@ from hashall.device import (
     repair_all_files_table_indexes,
     suggest_device_alias,
     register_or_update_device,
+    files_table_name_for_fs_uuid,
+    get_files_table_name,
     _get_fs_type
 )
 from hashall.model import connect_db
@@ -170,6 +172,32 @@ def test_ensure_files_table_can_insert_data(test_db):
     assert result[4] == 98765
     assert result[5] == "active"  # Default value
     assert result[6] == "/test"
+
+
+def test_ensure_files_table_uses_stable_fs_uuid_binding_when_available(test_db):
+    cursor = test_db
+    cursor.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+        VALUES ('zfs-stable-1', 141, 'pool2', '/pool/media', '/pool/media')
+        """
+    )
+
+    table_name = ensure_files_table(cursor, 141, fs_uuid="zfs-stable-1")
+    expected = files_table_name_for_fs_uuid("zfs-stable-1")
+    assert table_name == expected
+
+    relation = cursor.execute(
+        "SELECT type FROM sqlite_master WHERE name = ?",
+        (table_name,),
+    ).fetchone()
+    assert relation[0] == "table"
+
+    compat = cursor.execute(
+        "SELECT type FROM sqlite_master WHERE name = 'files_141'"
+    ).fetchone()
+    assert compat is not None
+    assert compat[0] == "view"
 
 
 def test_ensure_files_table_multiple_devices(test_db):
@@ -584,9 +612,9 @@ def test_update_device_changed_device_id(mock_get_fs_type, mock_get_zfs_metadata
     assert device1['device_id'] == 52
 
     # Create files table for old device_id
-    ensure_files_table(cursor, 52)
+    stable_table = ensure_files_table(cursor, 52, fs_uuid='zfs-88888')
     cursor.execute(f"""
-        INSERT INTO files_52 (path, size, mtime, sha1, inode)
+        INSERT INTO {stable_table} (path, size, mtime, sha1, inode)
         VALUES ('test.txt', 100, 1234567890.0, 'abcdef', 9999)
     """)
     cursor.connection.commit()
@@ -619,24 +647,66 @@ def test_update_device_changed_device_id(mock_get_fs_type, mock_get_zfs_metadata
     assert history[0]['device_id'] == 52
     assert 'changed_at' in history[0]
 
-    # Verify files table was renamed
-    old_table_exists = cursor.execute("""
-        SELECT name FROM sqlite_master WHERE type='table' AND name='files_52'
-    """).fetchone()
-    assert old_table_exists is None
+    stable_name = files_table_name_for_fs_uuid('zfs-88888')
+    stable_exists = cursor.execute("""
+        SELECT name FROM sqlite_master WHERE type='table' AND name=?
+    """, (stable_name,)).fetchone()
+    assert stable_exists is not None
 
-    new_table_exists = cursor.execute("""
-        SELECT name FROM sqlite_master WHERE type='table' AND name='files_53'
+    old_compat = cursor.execute("""
+        SELECT name FROM sqlite_master WHERE type='view' AND name='files_52'
     """).fetchone()
-    assert new_table_exists is not None
+    assert old_compat is None
 
-    # Verify data was preserved in renamed table
+    new_compat = cursor.execute("""
+        SELECT name FROM sqlite_master WHERE type='view' AND name='files_53'
+    """).fetchone()
+    assert new_compat is not None
+
+    # Verify data was preserved through the new compatibility view
     data = cursor.execute("""
         SELECT path, size FROM files_53 WHERE path='test.txt'
     """).fetchone()
     assert data is not None
     assert data[0] == 'test.txt'
     assert data[1] == 100
+
+
+def test_get_files_table_name_prefers_devices_binding(test_db):
+    cursor = test_db
+    cursor.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+        VALUES ('zfs-route-1', 231, 'pool', '/pool/data', '/pool/data')
+        """
+    )
+    expected = ensure_files_table(cursor, 231, fs_uuid='zfs-route-1')
+    resolved = get_files_table_name(cursor, device_id=231)
+    assert resolved == expected
+
+
+def test_get_files_table_name_lookup_is_read_only_when_files_table_missing(test_db):
+    cursor = test_db
+    conn = cursor.connection
+    cursor.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+        VALUES ('zfs-readonly-1', 245, 'pool', '/pool/media', '/pool/media')
+        """
+    )
+    legacy_table = ensure_files_table(cursor, 245)
+    conn.commit()
+
+    cursor.execute("UPDATE devices SET files_table = NULL WHERE fs_uuid = 'zfs-readonly-1'")
+    conn.commit()
+
+    resolved = get_files_table_name(cursor, device_id=245)
+    assert resolved == legacy_table
+
+    files_table = conn.execute(
+        "SELECT files_table FROM devices WHERE fs_uuid = 'zfs-readonly-1'"
+    ).fetchone()[0]
+    assert files_table is None
 
 
 @patch('hashall.fs_utils.get_zfs_metadata')

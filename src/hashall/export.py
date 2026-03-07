@@ -3,6 +3,8 @@ from pathlib import Path
 import orjson
 import sqlite3
 
+from hashall.device import get_files_table_name
+
 def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -42,8 +44,11 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
     files_data = []
 
     # Prefer per-device tables when available
-    if session_device_id is not None and _table_exists(f"files_{session_device_id}"):
-        table_name = f"files_{session_device_id}"
+    table_name = None
+    if session_device_id is not None:
+        table_name = get_files_table_name(conn.cursor(), device_id=int(session_device_id))
+
+    if table_name is not None and _table_exists(table_name):
 
         mount_point = None
         if _table_exists("devices"):

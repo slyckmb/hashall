@@ -30,6 +30,7 @@ from typing import Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
+from hashall.device import get_files_table_name
 from hashall.link_query import get_plan, get_plan_actions, ActionInfo
 from hashall.fs_utils import get_zfs_metadata
 
@@ -334,7 +335,9 @@ def _fetch_file_metadata(
     db_path: str
 ) -> Optional[Tuple[int, float, Optional[str], Optional[str]]]:
     cursor = conn.cursor()
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(cursor, device_id=device_id)
+    if not table_name:
+        return None
     cursor.execute(
         f"SELECT size, mtime, sha256, sha1 FROM {table_name} WHERE path = ? AND status = 'active'",
         (db_path,)
@@ -370,7 +373,9 @@ def _maybe_refresh_files_for_action(
     size = st_c.st_size
     mtime = st_c.st_mtime
 
-    table_name = f"files_{action.device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=action.device_id)
+    if not table_name:
+        return
     canonical_db = _db_path_for_action(action.canonical_path, mount_point)
     duplicate_db = _db_path_for_action(action.duplicate_path, mount_point)
 

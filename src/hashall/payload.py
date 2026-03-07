@@ -19,6 +19,7 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 from hashall.fs_utils import get_filesystem_uuid
+from hashall.device import get_files_table_name
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.scan import compute_full_hashes
 
@@ -250,7 +251,9 @@ def get_files_for_path(
     root_path = root_path.rstrip('/')
 
     # Use device-specific table
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return []
 
     # Check if table exists
     cursor = conn.cursor()
@@ -327,7 +330,9 @@ def get_fast_files_for_path(conn: sqlite3.Connection, device_id: int, root_path:
     Get all files under a given root path from the per-device table, using quick_hash.
     """
     root_path = root_path.rstrip("/")
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return []
 
     cursor = conn.cursor()
     cursor.execute(
@@ -397,7 +402,9 @@ def count_missing_sha256_for_path(conn: sqlite3.Connection, device_id: int, root
 
     Uses the same root resolution as get_files_for_path/build_payload.
     """
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return 0
     cursor = conn.cursor()
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -447,7 +454,9 @@ def summarize_missing_sha256_for_path(
         except (OSError, IOError):
             return {"files": 0, "bytes": 0}
 
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return {"files": 0, "bytes": 0}
     cursor = conn.cursor()
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -496,7 +505,9 @@ def count_active_files_for_path(conn: sqlite3.Connection, device_id: int, root_p
     if device_id is None:
         return 0
 
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return 0
     cursor = conn.cursor()
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -801,7 +812,9 @@ def get_payload_file_rows(
         except (OSError, IOError):
             return []
 
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return []
     cursor = conn.cursor()
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -987,7 +1000,9 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
         except (OSError, IOError):
             return 0
 
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return 0
     if not conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         (table_name,),
