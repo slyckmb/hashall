@@ -14,6 +14,7 @@ from dataclasses import dataclass
 # Import hashall modules
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from hashall.device import get_files_table_name
 from hashall.payload import (
     get_torrent_instance,
     get_payload_by_id,
@@ -345,7 +346,7 @@ class DemotionPlanner:
 
         def _table_exists(name: str) -> bool:
             return conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name=?",
                 (name,),
             ).fetchone() is not None
 
@@ -356,9 +357,9 @@ class DemotionPlanner:
                 return False
             return any(row[1] == column for row in rows)
 
-        # Prefer per-device table if present, otherwise fallback to legacy files table
-        table_name = f"files_{device_id}"
-        use_device_table = _table_exists(table_name)
+        # Prefer the resolved per-device files relation (table or compatibility view).
+        table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+        use_device_table = bool(table_name and _table_exists(table_name))
         use_legacy_table = _table_exists("files")
 
         if not use_device_table and not use_legacy_table:

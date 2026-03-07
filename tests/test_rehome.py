@@ -319,6 +319,71 @@ class TestExternalConsumerDetection:
         assert plan["decision"] == "BLOCK"
         assert any("outside" in r.lower() or "external" in r.lower() for r in plan["reasons"])
 
+    def test_external_consumer_detection_uses_fs_uuid_backed_files_relation(self, tmp_path):
+        """Planner should resolve devices.files_table and not require a physical files_<device_id> table."""
+        db_path = tmp_path / "catalog.db"
+        conn = sqlite3.connect(db_path)
+
+        payload_root = "/stash/torrents/seeding/Movie.2024"
+
+        conn.executescript(f"""
+            CREATE TABLE devices (
+                fs_uuid TEXT PRIMARY KEY,
+                device_id INTEGER UNIQUE,
+                device_alias TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT,
+                files_table TEXT
+            );
+
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload_hash TEXT,
+                device_id INTEGER,
+                fs_uuid TEXT,
+                root_path TEXT NOT NULL,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'incomplete'
+            );
+
+            CREATE TABLE files_fs_test_50 (
+                path TEXT PRIMARY KEY,
+                inode INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                sha1 TEXT,
+                status TEXT DEFAULT 'active'
+            );
+
+            INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, files_table)
+            VALUES ('fs-test-50', 50, 'stash', '/stash', '/stash', 'files_fs_test_50');
+
+            INSERT INTO files_fs_test_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('torrents/seeding/Movie.2024/video.mkv', 1001, 1000000, 1234567890, 'abc123', 'active'),
+                ('media/exports/Movie.2024.mkv', 1001, 1000000, 1234567890, 'abc123', 'active');
+
+            INSERT INTO payloads (payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status)
+            VALUES ('payload_hash_123', 50, 'fs-test-50', '{payload_root}', 1, 1000000, 'complete');
+        """)
+        conn.commit()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/torrents/seeding"],
+            library_roots=[],
+            stash_device=50,
+            pool_device=49,
+            pool_payload_root="/pool/torrents/content"
+        )
+
+        consumers = planner._detect_external_consumers(conn, payload_root)
+        conn.close()
+
+        assert len(consumers) == 1
+        assert consumers[0].file_path.endswith("video.mkv")
+        assert any("media/exports/Movie.2024.mkv" in ext for ext in consumers[0].external_link_paths)
+
     def test_block_when_library_roots_not_scanned(self, tmp_path):
         """Block demotion when library roots are missing from scan_roots."""
         db_path = TestDatabase.create_test_db(tmp_path)
@@ -844,6 +909,39 @@ class TestFsUuidIdentity:
         assert plan["decision"] == "MOVE"
         assert plan.get("source_fs_uuid") == "fs-test-50"
         assert plan.get("target_fs_uuid") == "fs-test-49"
+
+
+def test_executor_resolves_fs_uuid_backed_files_relation(tmp_path):
+    """Executor helper should resolve devices.files_table without a physical files_<device_id> table."""
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            device_alias TEXT,
+            mount_point TEXT NOT NULL,
+            preferred_mount_point TEXT,
+            files_table TEXT
+        );
+
+        CREATE TABLE files_fs_test_50 (
+            path TEXT PRIMARY KEY,
+            sha256 TEXT,
+            status TEXT
+        );
+
+        INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, files_table)
+        VALUES ('fs-test-50', 50, 'stash', '/stash', '/stash', 'files_fs_test_50');
+        """
+    )
+    conn.commit()
+
+    executor = DemotionExecutor.__new__(DemotionExecutor)
+    assert executor._get_device_table_name(conn, 50) == "files_fs_test_50"
+
+    conn.close()
 
 
 if __name__ == "__main__":

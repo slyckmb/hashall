@@ -18,7 +18,7 @@ from urllib.parse import quote
 # Import hashall and qBittorrent modules
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from hashall.device import ensure_files_table
+from hashall.device import ensure_files_table, get_files_table_name
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.qbittorrent import get_qbittorrent_client
 from hashall.payload import get_payload_file_rows
@@ -392,15 +392,10 @@ class DemotionExecutor:
         return Path(row[0])
 
     def _get_device_table_name(self, conn: sqlite3.Connection, device_id: Optional[int]) -> Optional[str]:
-        """Return per-device file table name when it exists."""
+        """Return the resolved files relation for a device when it exists."""
         if device_id is None:
             return None
-        table_name = f"files_{device_id}"
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-            (table_name,),
-        ).fetchone()
-        return table_name if exists else None
+        return get_files_table_name(conn.cursor(), device_id=int(device_id))
 
     def _get_known_sha256_for_abs_path(
         self,
@@ -411,7 +406,7 @@ class DemotionExecutor:
         preferred_mount: Optional[Path],
         cache: Dict[str, Optional[str]],
     ) -> Optional[str]:
-        """Resolve SHA256 for an absolute path from files_<device_id>, cached by path."""
+        """Resolve SHA256 for an absolute path from the resolved device files relation."""
         key = str(abs_path.resolve())
         if key in cache:
             return cache[key]
@@ -1328,7 +1323,13 @@ class DemotionExecutor:
                 )
                 return
 
-            table_name = f"files_{device_id}"
+            table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+            if not table_name:
+                self._log(
+                    f"spot_check skipped: no files relation found device_id={device_id}",
+                    "warning",
+                )
+                return
             hash_source_supported = "hash_source" in {
                 str(r[1]) for r in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
             }
