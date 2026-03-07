@@ -48,6 +48,14 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
             self.stderr = ""
             self.returncode = returncode
 
+    class _FakePopen:
+        def __init__(self, cmd):
+            commands.append(list(cmd))
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
     def _fake_run(cmd, capture_output=False, text=False):
         commands.append(list(cmd))
         label = " ".join(cmd)
@@ -99,6 +107,7 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
         ),
     )
     monkeypatch.setattr(auto_mod.subprocess, "run", _fake_run)
+    monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr("rehome.runlog.RunLogger", _FakeRunLogger)
     monkeypatch.setattr("rehome.seed_state.publish_seed_root_state", _fake_publish_seed_root_state)
 

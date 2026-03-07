@@ -46,7 +46,7 @@ Unified roadmap + active backlog for development and operations.
 - [x] Investigate and fix the post-`Plan #59` `ActionInfo` failure in `hashall link execute` seen during refresh-driven dedup on `spare`.
 - [x] Remove hidden interactive prompts from orchestrated subprocesses.
 - [x] Fix false refresh `PARTIAL` results when payload sync reports zero upgrade work via legacy `upgrade stage:` output.
-- [ ] Improve long-running command progress visibility and heartbeat feedback.
+- [x] Improve long-running command progress visibility and heartbeat feedback.
 - [ ] Surface secondary logs to operators during quiet periods, especially `~/.logs/hashall/hashall.log`.
 
 ### P2 `device_id` to `fs_uuid` Transition Hardening

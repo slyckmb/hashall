@@ -12,6 +12,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -505,7 +506,28 @@ def run_refresh(
                     logger.write_raw(result.stderr)
                 stdout = result.stdout or ""
             else:
-                result = subprocess.run(cmd)
+                try:
+                    heartbeat_s = max(5, int(os.environ.get("REHOME_REFRESH_HEARTBEAT_S", "30")))
+                except ValueError:
+                    heartbeat_s = 30
+                started_monotonic = time.monotonic()
+                next_heartbeat = started_monotonic + heartbeat_s
+                proc = subprocess.Popen(cmd)
+                while True:
+                    rc = proc.poll()
+                    if rc is not None:
+                        result = subprocess.CompletedProcess(cmd, rc)
+                        break
+                    now_monotonic = time.monotonic()
+                    if now_monotonic >= next_heartbeat:
+                        elapsed_hb = int(now_monotonic - started_monotonic)
+                        print(
+                            "  [refresh] still running "
+                            f"label={label} elapsed={elapsed_hb}s "
+                            "watch=~/.logs/hashall/hashall.log"
+                        )
+                        next_heartbeat = now_monotonic + heartbeat_s
+                    time.sleep(1.0)
                 stdout = ""
             elapsed = (datetime.now() - t0).total_seconds()
             ok = result.returncode == 0

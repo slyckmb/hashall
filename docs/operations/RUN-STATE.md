@@ -84,8 +84,8 @@ Single living document for current operational status, handoff context, and next
 - Long quiet periods during delegated work
   - symptom: operator uncertainty about hang vs progress
   - current mitigation: watch `~/.logs/hashall/hashall.log`
-  - follow-up: improve heartbeat/progress feedback further
-  - status: partially mitigated
+  - fix: refresh now emits periodic `still running` heartbeat lines for non-captured delegated subprocesses
+  - status: mitigated
 
 - Zero-upgrade payload sync marked refresh `PARTIAL`
   - symptom: refresh ended `PARTIAL` even though payload sync reported `complete payloads: 5145`, `incomplete payloads: 0`, `missing in catalog: 0`
