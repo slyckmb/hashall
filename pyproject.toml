@@ -1,7 +1,7 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 [project]
 name = "hashall"
-version = "0.4.148"
+version = "0.4.153"
 description = "Smart CLI tool to scan, export, verify and repair file hashes."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -45,9 +45,10 @@ packages = ["hashall", "rehome"]
 package-dir = {"" = "src"}
 
 [tool.bumpver]
-current_version = "0.4.148"
+current_version = "0.4.153"
 version_pattern = "MAJOR.MINOR.PATCH"
 
 [tool.bumpver.file_patterns]
 "pyproject.toml" = ['version = "{version}"']
 "src/hashall/__init__.py" = ['__version__ = "{version}"']
+"src/rehome/__init__.py" = ['__version__ = "0.6.19"']
