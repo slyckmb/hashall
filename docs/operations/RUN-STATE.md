@@ -12,6 +12,7 @@ Single living document for current operational status, handoff context, and next
 1. Keep qB stoppedDL repair loop safe and convergent.
 2. Keep hashall catalog refresh + dedup pipeline robust across `stash`, `data`, and `spare`.
 3. Eliminate refresh/runtime failures caused by device alias drift and negative device IDs.
+4. Remove remaining storage-layer dependence on volatile `device_id` by binding file tables to stable `fs_uuid`.
 
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 
@@ -105,6 +106,129 @@ Single living document for current operational status, handoff context, and next
   - payload candidates: `31` (`29` with stale `device_id=141`, `2` with `device_id=NULL`)
   - torrent candidates: `69` (`67` with stale `device_id=141`, `2` with `device_id=NULL`)
   - no remaining auto-fix actions from repair tool without a valid `/pool/media` device mapping in `devices`.
+
+## Stable Files Table Binding WIP (2026-03-06 20:40 EST)
+
+- Strategic objective:
+  - stop using runtime `device_id` as the physical identity of `files_*` tables.
+  - preserve `device_id` only for kernel/runtime hardlink-boundary facts and backward compatibility.
+- Chosen design:
+  - add `devices.files_table` as the stable physical table binding derived from `fs_uuid`.
+  - use stable physical tables named from `fs_uuid` instead of renaming `files_<device_id>` on reboot/device rotation.
+  - keep `files_<device_id>` as compatibility views over the stable physical table.
+  - this is an intermediate hardening step before any future unified-files-table redesign.
+- New migration added but not yet committed:
+  - `src/hashall/migrations/0013_stable_files_table_binding.sql`
+  - adds `devices.files_table`
+  - backfills deterministic stable table names from `fs_uuid`
+  - adds unique index on `devices.files_table`
+- Core code already patched in working tree (uncommitted):
+  - `src/hashall/device.py`
+    - new stable files-table helpers (`files_table_name_for_fs_uuid`, `get_files_table_name`, compatibility-view helpers)
+    - `ensure_files_table()` now resolves stable physical table when `fs_uuid` is known
+    - `register_or_update_device()` no longer treats `device_id` rotation as a reason to rename the physical files table
+  - callers updated to resolve files table through helper instead of raw `f"files_{device_id}"`:
+    - `src/hashall/scan.py`
+    - `src/hashall/payload.py`
+    - `src/hashall/export.py`
+    - `src/hashall/link_executor.py`
+    - `src/hashall/link_analysis.py`
+    - `src/hashall/diff.py`
+    - `src/hashall/link_planner.py`
+    - `src/hashall/treehash.py`
+    - `src/hashall/sha256_migration.py`
+    - `src/hashall/status_report.py`
+    - `src/hashall/cli.py`
+  - new CLI entrypoint in working tree:
+    - `hashall devices migrate-files-tables`
+- Current dirty/uncommitted file set that must not be lost:
+  - `src/hashall/cli.py`
+  - `src/hashall/device.py`
+  - `src/hashall/diff.py`
+  - `src/hashall/export.py`
+  - `src/hashall/link_analysis.py`
+  - `src/hashall/link_executor.py`
+  - `src/hashall/link_planner.py`
+  - `src/hashall/payload.py`
+  - `src/hashall/scan.py`
+  - `src/hashall/sha256_migration.py`
+  - `src/hashall/status_report.py`
+  - `src/hashall/treehash.py`
+  - `tests/test_device.py`
+  - `src/hashall/migrations/0013_stable_files_table_binding.sql` (new)
+- Test state for this WIP:
+  - targeted compile checks for touched modules pass.
+  - targeted test set result before compact:
+    - `76 passed`
+    - `1 failed`
+  - failing test:
+    - `tests/test_cli_payload_sync.py::TestPayloadSyncCLI::test_payload_sync_remaps_alternate_mountpoints_for_prefix_filtering`
+  - exact failure signature:
+    - `sqlite3.OperationalError: attempt to write a readonly database`
+    - triggered from `src/hashall/payload.py -> get_files_for_path() -> src/hashall/device.py:get_files_table_name()`
+    - occurs during `payload sync --dry-run` after canonical mount remap, meaning the new helper is still trying to perform write-side setup on a read-only/query-only path.
+- Safety boundary:
+  - do **not** run live `hashall devices migrate-files-tables` or any live files-table rebinding on `~/.hashall/catalog.db` until the read-only failure is fixed and targeted tests are green.
+  - no live migration of physical files tables has been executed in this WIP.
+- Current version note:
+  - `hashall` semver is `0.4.135`.
+  - code for this rollout is now committed; docs were updated after live validation.
+- Progress tracker:
+  - canonical checklist lives in `docs/project/PLAN.md` under `fs_uuid Files-Table Migration`.
+
+## Copied-DB Validation (2026-03-06 22:22 EST)
+
+- Validation target:
+  - live catalog copied to `/tmp/hashall-catalog-fsuuid-validate-20260306-222228.sqlite3`
+- Dry-run result on copied DB:
+  - `mode=dry-run devices=13 actions={"rename_legacy_table": 13}`
+  - report: `out/reports/fsuuid-files-table-validate/migrate-files-tables-dryrun-20260306-222228.json`
+- Apply result on copied DB:
+  - `mode=apply devices=13 actions={"rename_legacy_table": 13}`
+  - snapshot of copied DB before apply:
+    - `out/reports/fsuuid-files-table-validate/catalog-copy-pre-apply-20260306-222228.sqlite3`
+  - apply report:
+    - `out/reports/fsuuid-files-table-validate/migrate-files-tables-apply-20260306-222228.json`
+- Post-apply checks on copied DB:
+  - `devices` rows: `13`
+  - physical stable tables (`files_fs_%`): `13`
+  - compatibility views (`files_%`): `13`
+  - sample report rows confirm `post_target_relation=table` and `post_legacy_relation=view`
+  - post-apply preflight on copied DB reports `ok=true`
+    - output capture: `out/reports/fsuuid-files-table-validate/preflight-after-apply-20260306-222228.json`
+- Important boundary:
+  - this validation was performed on a copied DB only.
+  - live `~/.hashall/catalog.db` has **not** been modified by this validation.
+
+## Live Files-Table Migration Execution (2026-03-06 22:43 EST)
+
+- Code commits that enabled this rollout:
+  - `7d896d6` `feat(identity): bind files tables to stable fs_uuid-backed storage`
+  - `86d0e4b` `feat(devices): add guarded files-table migration workflow`
+- Live dry-run against `~/.hashall/catalog.db`:
+  - `mode=dry-run devices=13 actions={"rename_legacy_table": 13}`
+  - report: `out/reports/fsuuid-files-table-live/migrate-files-tables-live-dryrun-20260306-224323.json`
+- Live apply against `~/.hashall/catalog.db`:
+  - snapshot written before mutation:
+    - `out/reports/fsuuid-files-table-live/catalog-live-pre-apply-20260306-224323.sqlite3`
+  - apply report:
+    - `out/reports/fsuuid-files-table-live/migrate-files-tables-live-apply-20260306-224323.json`
+  - result: `mode=apply devices=13 actions={"rename_legacy_table": 13}`
+- Live post-apply verification:
+  - `devices` rows: `13`
+  - stable physical tables (`files_fs_%`): `13`
+  - compatibility views (`files_%`): `13`
+  - representative devices show `post_target_relation=table` and `post_legacy_relation=view`
+  - post-apply preflight reports `ok=true`
+    - output capture: `out/reports/fsuuid-files-table-live/preflight-live-after-apply-20260306-224323.json`
+- Current catalog state:
+  - every registered device now has `devices.files_table` populated
+  - live catalog physical storage is now fs_uuid-bound
+  - legacy `files_<device_id>` access remains available via compatibility views
+- New operational rule:
+  - do not mutate files-table bindings by hand
+  - use `hashall devices migrate-files-tables` for planning/reporting
+  - use `doctor preflight` to reject volatile `dev-*` identity before apply-style operations
 
 ## Non-Negotiables
 

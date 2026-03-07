@@ -522,18 +522,19 @@ catalog.db
 ├── devices                    (registry: fs_uuid, device_id, alias, mount_point, preferred_mount_point)
 ├── scan_roots                 (tracks which paths have been scanned)
 ├── scan_sessions              (audit trail with incremental metrics)
-├── files_49                   (files on device 49: pool - created dynamically)
-├── files_50                   (files on device 50: stash - created dynamically)
+├── files_fs_<normalized-fs_uuid>   (physical files table bound to a stable filesystem UUID)
+├── files_<device_id>               (compatibility view over the physical files table)
 ├── payloads                   (torrent content fingerprints)
 ├── torrent_instances          (qBittorrent torrent → payload mapping)
 └── link_plans                 (deduplication plans)
 ```
 
-**Why Per-Device Tables?**
+**Why Filesystem-Bound Tables?**
 - Hardlinks only work within a device (natural boundary)
-- Faster queries (no device_id filter needed on every query)
+- Physical files-table identity must survive reboot/remount `device_id` churn
 - Clear data isolation
 - Scalable (add new devices without schema changes)
+- Compatibility views preserve legacy `files_<device_id>` tooling during migration
 
 **Key Concepts:**
 - **Filesystem UUID tracking:** Persistent device identity across reboots
@@ -862,7 +863,7 @@ The system must be:
 
 **`~noHL` Tag:** qBittorrent tag applied by qbit_manage indicating "no hardlinks". Torrents with this tag have no external consumers (not hardlinked to media libraries). Prime candidates for demotion.
 
-**Unified Catalog:** Single database (`~/.hashall/catalog.db`) that tracks all files across all storage devices with per-device tables.
+**Unified Catalog:** Single database (`~/.hashall/catalog.db`) that tracks all files across all storage devices using stable fs_uuid-bound files tables plus `files_<device_id>` compatibility views.
 
 **View (Torrent View):** A directory structure for a torrent composed of hardlinks to a canonical payload. Multiple views can point to same payload with zero additional disk usage.
 
@@ -873,7 +874,7 @@ The system must be:
 ### 11.1 Completed ✅
 
 **hashall (Catalog System) - v0.5.0+:**
-- ✅ Unified catalog model with per-device tables
+- ✅ Unified catalog model with filesystem-bound files tables and compatibility views
 - ✅ Filesystem UUID tracking (persistent across reboots)
 - ✅ Incremental scanning (10-100x speedup on rescans)
 - ✅ SHA256 file hashing (SHA1 legacy retained)

@@ -14,6 +14,10 @@ Latest qB repair ops markers (2026-03-06):
 - current identity-repair state:
   - new tooling live (`hashall doctor repair-identity`, `bin/hashall-fs-identity-repair.py v0.1.1`)
   - 214 repairs applied total; unresolved set now cleared (`0`).
+- Current active engineering focus:
+  - Hashall storage-layer hardening, not new qB mutation.
+  - stable fs_uuid-backed files-table binding is now live.
+  - qB repair tooling should continue to route catalog access through the binding layer and not assume numeric physical table names.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/qbit-repair-ops-log.md`

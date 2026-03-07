@@ -22,6 +22,14 @@ Latest critical operations note (2026-03-06):
 - Residual catalog risks:
   - parked negative `device_id` row remains in `devices` (`-905882091`).
   - ensure refresh step-2 continues scanning `/pool/media` to avoid reintroducing unknown device rows.
+- New architecture WIP now active and uncommitted:
+  - move physical `files_*` storage binding from volatile `device_id` to stable `fs_uuid` via `devices.files_table`.
+  - keep `files_<device_id>` only as compatibility views.
+  - migration: `src/hashall/migrations/0013_stable_files_table_binding.sql`.
+- Rollout status:
+  - blocker cleared, targeted suite green, migration workflow hardened with dry-run/apply/snapshot/report.
+  - copied-DB rehearsal succeeded.
+  - live `~/.hashall/catalog.db` migration completed with snapshot and post-apply preflight `ok=true`.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`

@@ -19,6 +19,10 @@ Critical qB repair continuity (2026-03-06):
   - `hashall doctor repair-identity` and `bin/hashall-fs-identity-repair.py` are available.
   - `214` catalog identity repairs have been applied safely.
   - current identity drift candidates are `0` after `/pool/media` device mapping registration.
+- Current adjacent Hashall-core refactor to preserve:
+  - stable files-table binding rollout is complete.
+  - do not mistake this for a qB workflow issue; the main Hashall architecture shift has already been applied to the live catalog.
+  - qB follow-up work should assume `files_<device_id>` is now a compatibility layer, not the physical source of truth.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/qbit-repair-handoff.md`
