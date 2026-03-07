@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # qb-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.3.9
+# Version: 1.3.11
 # Date:    2026-03-06
 #
 # After each batch waits for state to settle, then checks the protected watch
@@ -28,7 +28,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.10"
+SCRIPT_VERSION="1.3.11"
 SCRIPT_DATE="2026-03-06"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -430,7 +430,7 @@ PYEOF
   LC_ALL=C sort -u "$TMPBASE_DL" -o "$TMPBASE_DL"
   BASE_DL_COUNT=$(grep -c . "$TMPBASE_DL" 2>/dev/null || true)
   if [[ "$BASE_DL_COUNT" -gt 0 ]]; then
-    log "  baseline downloading-like in watch scope: $BASE_DL_COUNT (strict gate: any downloading-like state halts)"
+    log "  baseline downloading-like in watch scope: $BASE_DL_COUNT (gate: only newly flipped downloading-like state halts)"
   fi
 
   # Collect stoppedUP hashes (100% progress, not seeding yet)
@@ -621,20 +621,21 @@ PYEOF
 
       log "  check: ok=$N_OK  downloading_total=$CURR_DL_COUNT  downloading_new=$NEW_DL_COUNT  downloading_preexisting=$PREEXIST_DL_COUNT  other_bad=$N_BAD  still_stoppedUP=$N_STOP"
 
-      if [[ "$CURR_DL_COUNT" -gt 0 ]]; then
+      if [[ "$NEW_DL_COUNT" -gt 0 ]]; then
         log ""
-        log "WARNING: downloading-like state detected in protected scope — stopping affected torrents immediately:"
-        BAD_HASHES=$(python3 - "$TMPCHECK" << 'PYEOF' | tee -a "$LOG" | grep '^HASHES:' | sed 's/^HASHES://'
+        log "WARNING: newly flipped downloading-like state detected in protected scope — stopping affected torrents immediately:"
+        BAD_HASHES=""
+        if [[ -s "$TMPFLIP_DL" ]]; then
+          BAD_HASHES="$(paste -sd'|' "$TMPFLIP_DL")"
+          python3 - "$TMPCHECK" "$TMPFLIP_DL" << 'PYEOF' | tee -a "$LOG" >/dev/null
 import json, sys
 d = json.load(open(sys.argv[1]))
-selected = []
+flips = set(open(sys.argv[2]).read().split())
 for h, s, p in d.get('downloading', []):
-    selected.append((h, s, p))
-for h, s, p in selected:
-    print(f'  {h[:12]}  {s}  {p:.4f}')
-print('HASHES:' + '|'.join(h for h, s, p in selected))
+    if h in flips:
+        print(f'  {h[:12]}  {s}  {p:.4f}')
 PYEOF
-)
+        fi
         if [[ -n "$BAD_HASHES" ]]; then
           curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
               --data-urlencode "hashes=$BAD_HASHES" >/dev/null 2>&1 || true
@@ -649,6 +650,10 @@ PYEOF
         failures=$(( failures + CURR_DL_COUNT ))
         ramp_halted=true
         break
+      fi
+
+      if [[ "$PREEXIST_DL_COUNT" -gt 0 ]]; then
+        log "  note: preexisting downloading-like torrents remain in protected scope but did not newly flip this batch"
       fi
 
       if [[ "$N_BAD" -gt 0 ]]; then

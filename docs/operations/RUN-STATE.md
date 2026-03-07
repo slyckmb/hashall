@@ -215,6 +215,25 @@ Single living document for current operational status, handoff context, and next
     - no download-like state
     - clean `apply ... cleanup pending` / `verify ... catalog OK` result
 
+## qb-start-seeding Gradual Gate Fix (2026-03-07 16:55 EST)
+
+- Symptom:
+  - `bin/qb-start-seeding-gradual.sh --daemon --apply ...` halted immediately even when:
+    - `downloading_new=0`
+    - `downloading_preexisting>0`
+  - this broke the script’s original job of gradually resuming `stoppedUP` torrents
+- Root cause:
+  - the ramp safety gate halted on any downloading-like torrent in protected scope
+  - it ignored its own baseline split between:
+    - preexisting downloading-like hashes
+    - newly flipped downloading-like hashes
+- Fix:
+  - ramp now halts only when `downloading_new>0`
+  - it still halts on `other_bad` states (`missingFiles`, `error`)
+  - preexisting downloading-like torrents are logged as a note but do not block ramp-start
+- Version:
+  - `bin/qb-start-seeding-gradual.sh` -> `v1.3.11`
+
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 
 - Branch/worktree in active use for this incident:
