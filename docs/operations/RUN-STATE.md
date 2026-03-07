@@ -1,6 +1,6 @@
 # Run State (Canonical)
 
-Last updated: 2026-03-06
+Last updated: 2026-03-07
 Status: canonical living state
 
 ## Purpose
@@ -218,6 +218,26 @@ Single living document for current operational status, handoff context, and next
   - `devices` rows: `13`
   - stable physical tables (`files_fs_%`): `13`
   - compatibility views (`files_%`): `13`
+
+## Refresh Dedup Parser Fix (2026-03-07 00:00 EST)
+
+- Operational anomaly confirmed from refresh log:
+  - `rehome refresh` reported dedup mode `execute`, created `hashall link plan` plans, then skipped execution with:
+    - `no plan_id in link plan output ... skipping execute`
+- Root cause:
+  - `src/rehome/auto.py` only parsed `plan_id=<n>`
+  - current `hashall link plan` output emits `Plan #<n>`
+  - result: refresh silently skipped `hashall link execute` for all generated plans
+- Fix applied in active worktree:
+  - added shared link-plan id parser that accepts both `plan_id=<n>` and `Plan #<n>` output forms
+  - switched both refresh dedup call sites (managed roots and active/dest roots) to use the shared parser
+  - improved skip log text to `no parsable plan_id ...`
+- Regression coverage added:
+  - `tests/test_rehome_refresh_safety.py`
+  - covers machine-readable parser form, human summary/header form, and orchestration path proving `run_refresh()` issues `link execute` after a `Plan #<n>` result
+- Version bumps for this fix:
+  - `hashall`: `0.4.136`
+  - `rehome`: `0.6.2`
   - representative devices show `post_target_relation=table` and `post_legacy_relation=view`
   - post-apply preflight reports `ok=true`
     - output capture: `out/reports/fsuuid-files-table-live/preflight-live-after-apply-20260306-224323.json`

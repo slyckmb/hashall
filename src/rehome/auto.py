@@ -302,6 +302,13 @@ _UPGRADE_SUMMARY_RE = re.compile(
     r"upgrade_summary\s+queued=(\d+)\s+started=(\d+)\s+completed=(\d+)\s+failed=(\d+)"
 )
 
+_LINK_PLAN_ID_PATTERNS = (
+    re.compile(r"\bplan_id=(\d+)\b", re.IGNORECASE),
+    re.compile(r"\bPlan #(\d+)\b"),
+    re.compile(r"\blink show-plan (\d+)\b"),
+    re.compile(r"\blink execute (\d+)\b"),
+)
+
 
 def _parse_upgrade_summary(stdout: str) -> Optional[dict[str, int]]:
     """Parse `upgrade_summary ...` counters from payload sync output."""
@@ -316,6 +323,23 @@ def _parse_upgrade_summary(stdout: str) -> Optional[dict[str, int]]:
         "completed": int(match.group(3)),
         "failed": int(match.group(4)),
     }
+
+
+def _parse_link_plan_id(stdout: str) -> Optional[str]:
+    """
+    Parse a link plan id from `hashall link plan` output.
+
+    Accept both older machine-readable output (``plan_id=12``) and the
+    current human summary/header form (``Plan #12``).
+    """
+    text = str(stdout or "")
+    for pattern in _LINK_PLAN_ID_PATTERNS:
+        match = None
+        for found in pattern.finditer(text):
+            match = found
+        if match is not None:
+            return match.group(1)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -610,21 +634,20 @@ def run_refresh(
                             [python, "-m", "hashall.cli", "link", "plan", plan_name,
                              "--device", managed_alias, "--min-size", "1048576"] + db_args,
                             capture=True,
-                        )
-                        overall_ok = overall_ok and ok
+                    )
+                    overall_ok = overall_ok and ok
 
-                        if ok:
-                            m = re.search(r"plan_id=(\d+)", stdout)
-                            if m:
-                                plan_id = m.group(1)
-                                execute_cmd = [
-                                    python, "-m", "hashall.cli", "link", "execute", plan_id,
-                                ] + db_args
-                                label = f"link execute plan_id={plan_id} ({managed_alias})"
-                                ok, _ = _run_step(label, execute_cmd)
-                                overall_ok = overall_ok and ok
-                            else:
-                                print(f"  [refresh] no plan_id in link plan output for {managed_alias} — skipping execute")
+                    if ok:
+                        plan_id = _parse_link_plan_id(stdout)
+                        if plan_id:
+                            execute_cmd = [
+                                python, "-m", "hashall.cli", "link", "execute", plan_id,
+                            ] + db_args
+                            label = f"link execute plan_id={plan_id} ({managed_alias})"
+                            ok, _ = _run_step(label, execute_cmd)
+                            overall_ok = overall_ok and ok
+                        else:
+                            print(f"  [refresh] no parsable plan_id in link plan output for {managed_alias} — skipping execute")
 
                 # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
                 if not skip_dedup:
@@ -639,9 +662,8 @@ def run_refresh(
                         overall_ok = overall_ok and ok
 
                         if ok:
-                            m = re.search(r"plan_id=(\d+)", stdout)
-                            if m:
-                                plan_id = m.group(1)
+                            plan_id = _parse_link_plan_id(stdout)
+                            if plan_id:
                                 execute_cmd = [
                                     python, "-m", "hashall.cli", "link", "execute", plan_id,
                                 ] + db_args
@@ -649,7 +671,7 @@ def run_refresh(
                                 ok, _ = _run_step(label, execute_cmd)
                                 overall_ok = overall_ok and ok
                             else:
-                                print(f"  [refresh] no plan_id in link plan output for {dev_alias} — skipping execute")
+                                print(f"  [refresh] no parsable plan_id in link plan output for {dev_alias} — skipping execute")
 
                 # ── Step 5: payload sync --upgrade-missing ────────────────────────────
                 ok, payload_stdout = _run_step(
