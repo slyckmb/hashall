@@ -133,6 +133,10 @@ rehome refresh --verbose
 rehome auto --from pool-data --to pool-media --limit 1
 ```
 
+Important:
+- this explicit `--from` path was fixed on 2026-03-07
+- older builds could drop the source root and falsely BLOCK with a misleading `scan_roots` coverage error
+
 Notes:
 - default mode is dry-run
 - plan JSON is written under:

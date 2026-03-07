@@ -2,7 +2,10 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+from click.testing import CliRunner
 import rehome.auto as auto_mod
+import rehome.cli as cli_mod
+import rehome.config as config_mod
 
 from rehome.auto import _parse_link_plan_id, _parse_upgrade_summary, _run_catalog_preflight
 
@@ -143,6 +146,52 @@ def test_hashall_cli_run_header_includes_run_start_metadata(monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "run_start pid=" in out
     assert "argv=payload sync" in out
+
+
+def test_auto_cmd_preserves_explicit_source_root(monkeypatch, tmp_path: Path) -> None:
+    catalog_path = tmp_path / "catalog.db"
+    catalog_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(cli_mod, "DEFAULT_CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {
+            "catalog": str(catalog_path),
+            "active_device": "stash",
+            "default_dest_device": "pool-media",
+            "default_dest_root": "/pool/media/torrents/seeding",
+            "active_root": "/stash/media",
+            "content_root": "/stash/media",
+            "managed_roots": ["/pool/data:pool-data"],
+        },
+    )
+    monkeypatch.setattr(config_mod, "parse_managed_roots", lambda _raw: [("/pool/data", "pool-data")])
+
+    class _Conn:
+        def close(self):
+            return None
+
+    from hashall import model as model_mod
+    from hashall import device as device_mod
+    monkeypatch.setattr(model_mod, "connect_db", lambda *args, **kwargs: _Conn())
+    resolve_map = {"stash": 44, "pool-media": 141, "pool-data": 231}
+    monkeypatch.setattr(device_mod, "resolve_device_id", lambda _conn, alias: resolve_map[alias])
+
+    captured = {}
+
+    def _fake_run_auto(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(auto_mod, "run_auto", _fake_run_auto)
+    monkeypatch.setattr(auto_mod, "run_refresh", lambda **kwargs: 0)
+
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.cli, ["auto", "--from", "pool-data", "--to", "pool-media", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    assert captured["source_device_id"] == 231
+    assert captured["extra_sources"] == [(231, "pool-data", "/pool/data")]
 
 
 def test_run_catalog_preflight_reports_unknown_device_refs(tmp_path: Path) -> None:

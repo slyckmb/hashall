@@ -1294,6 +1294,15 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
     # Resolve managed roots to (device_id, alias, path) triples
     managed_pairs = parse_managed_roots(cfg.get("managed_roots") or [])
     extra_sources: list[tuple[int, str, str]] = []
+    explicit_source_tuple: Optional[tuple[int, str, str]] = None
+    if explicit_source_id is not None:
+        if explicit_source_id == active_id:
+            explicit_source_tuple = (explicit_source_id, active_alias, active_r)
+        else:
+            for xpath, xalias in managed_pairs:
+                if xalias == from_alias:
+                    explicit_source_tuple = (explicit_source_id, xalias, xpath)
+                    break
     if explicit_source_id is None:
         _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
         try:
@@ -1340,7 +1349,9 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
         plan_log_dir=plan_log_dir,
         run_log_dir=run_log_dir,
         source_device_id=explicit_source_id,
-        extra_sources=extra_sources if explicit_source_id is None else None,
+        extra_sources=extra_sources if explicit_source_id is None else (
+            [explicit_source_tuple] if explicit_source_tuple is not None else None
+        ),
         verbose=verbose,
         debug=debug,
     )

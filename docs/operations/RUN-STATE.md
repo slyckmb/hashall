@@ -110,6 +110,19 @@ Single living document for current operational status, handoff context, and next
   - stop qB repair tooling from drifting away from hashall’s published migration state
   - avoid reopening the prior cross-filesystem / alias-root donor-selection bug
 
+## Rehome Auto Explicit-Source Fix (2026-03-07 12:26 EST)
+
+- Symptom:
+  - `rehome auto --from pool-data --to pool-media --limit N` falsely BLOCKed all candidates with:
+    - `Seeding/library roots are not covered by scan_roots; rescan required`
+- Root cause:
+  - `auto_cmd` resolved the explicit source `device_id` but dropped the associated source root path
+  - `run_auto()` then built a source tuple with an empty `source_root`
+- Fix:
+  - explicit `--from` now carries its configured `(device_id, alias, root_path)` tuple into `run_auto()`
+- Live verification:
+  - exact command now returns `REUSE ... OK` and passes `check dryrun`
+
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 
 - Branch/worktree in active use for this incident:
