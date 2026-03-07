@@ -244,6 +244,53 @@ def test_atomic_relocation_requests_recheck_before_resume(tmp_path, monkeypatch)
     assert executor.qbit_client.recheck_calls == ["t1"]
 
 
+def test_recheck_guard_waits_for_stable_ready_after_delayed_checking(tmp_path, monkeypatch):
+    class DelayedCheckingClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self._seq = [
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="checkingUP", progress=0.25, amount_left=768, size=1024, completed=256),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+            ]
+            self.info_calls = 0
+
+        def get_torrent_info(self, torrent_hash: str):
+            idx = min(self.info_calls, len(self._seq) - 1)
+            self.info_calls += 1
+            return self._seq[idx]
+
+    fake_clock = {"t": 0.0}
+
+    def _fake_monotonic():
+        return fake_clock["t"]
+
+    def _fake_sleep(seconds):
+        fake_clock["t"] += seconds
+
+    monkeypatch.setattr("time.monotonic", _fake_monotonic)
+    monkeypatch.setattr("time.sleep", _fake_sleep)
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = DelayedCheckingClient()
+    executor.recheck_ready_stable_seconds = 4.0
+    executor._get_torrent_info_with_retry = lambda *args, **kwargs: SimpleNamespace(
+        size=1024, completed=1024, state="stoppedUP", progress=1.0, amount_left=0
+    )
+
+    executor._ensure_qb_seed_ready_after_relocate(
+        "t1",
+        min_timeout_seconds=10.0,
+        interval_seconds=2.0,
+    )
+
+    assert executor.qbit_client.recheck_calls == ["t1"]
+    assert executor.qbit_client.info_calls >= 6
+
+
 def test_atomic_relocation_retries_torrent_info_before_failing(tmp_path, monkeypatch):
     class FlakyInfoQbitClient(FakeQbitClient):
         def __init__(self):

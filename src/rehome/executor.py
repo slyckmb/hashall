@@ -90,6 +90,12 @@ class DemotionExecutor:
             )
         except ValueError:
             self.recheck_max_seconds = 7200.0
+        try:
+            self.recheck_ready_stable_seconds = max(
+                0.0, float(os.getenv("HASHALL_REHOME_QB_READY_STABLE_SECONDS", "10"))
+            )
+        except ValueError:
+            self.recheck_ready_stable_seconds = 10.0
 
     def _get_db_connection(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Get database connection."""
@@ -729,6 +735,7 @@ class DemotionExecutor:
         last_state = "unknown"
         last_progress = -1.0
         last_amount_left = -1
+        ready_since: Optional[float] = None
 
         while time.monotonic() <= deadline:
             info = self.qbit_client.get_torrent_info(torrent_hash)
@@ -754,11 +761,31 @@ class DemotionExecutor:
 
             ready, reason = self._is_qb_seed_ready(info)
             if ready:
+                if self.force_recheck_after_relocate and self.recheck_ready_stable_seconds > 0:
+                    now = time.monotonic()
+                    if ready_since is None:
+                        ready_since = now
+                    stable_for = now - ready_since
+                    if stable_for < self.recheck_ready_stable_seconds:
+                        if (now - last_debug) >= 5.0:
+                            remaining = max(0.0, self.recheck_ready_stable_seconds - stable_for)
+                            self._log(
+                                f"  recheck_wait hash={torrent_hash[:16]} "
+                                f"state={state or 'unknown'} progress={progress:.4f} "
+                                f"amount_left={amount_left} reason=ready_stabilizing "
+                                f"remaining_s={remaining:.1f}",
+                                "warning",
+                            )
+                            last_debug = now
+                        time.sleep(interval_seconds)
+                        continue
                 self._log(
                     f"  recheck_guard hash={torrent_hash[:16]} status=ready "
                     f"state={state} progress={progress:.4f} amount_left={amount_left}"
                 )
                 return
+
+            ready_since = None
 
             # Hard failures: do not wait for torrents that cannot recover on their own.
             if reason in {"state_error", "state_downloading", "progress_below_100", "amount_left_nonzero"}:
