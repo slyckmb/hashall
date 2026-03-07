@@ -7,7 +7,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from rehome.cli import cli
-from rehome.seed_state import build_seed_root_state, publish_seed_root_state
+from rehome.seed_state import (
+    CONTRACT_OWNER,
+    REQUIRED_TOP_LEVEL_FIELDS,
+    build_seed_root_state,
+    publish_seed_root_state,
+    validate_seed_root_state,
+)
 
 
 def test_build_seed_root_state_surfaces_active_target_and_legacy_mirrors():
@@ -26,7 +32,9 @@ def test_build_seed_root_state_surfaces_active_target_and_legacy_mirrors():
 
     assert state["schema_version"] == 1
     assert state["generation"] == 8
-    assert state["writer"] == "hashall"
+    assert state["writer"] == CONTRACT_OWNER
+    for field in REQUIRED_TOP_LEVEL_FIELDS:
+        assert field in state
     assert state["active"]["seeding_root"] == "/pool/media/torrents/seeding"
     assert state["target"]["seeding_root"] == "/pool/media/torrents/seeding"
     assert state["cross_seed"]["link_root"] == "/pool/media/torrents/seeding/cross-seed"
@@ -35,6 +43,7 @@ def test_build_seed_root_state_surfaces_active_target_and_legacy_mirrors():
     assert "/pool/data/seeds" in state["mirror_roots"]
     assert "/data/media/torrents/seeding" in state["mirror_roots"]
     assert "/stash/media/torrents/seeding" in state["mirror_roots"]
+    validate_seed_root_state(state)
 
 
 def test_publish_seed_root_state_increments_generation(tmp_path: Path):
@@ -52,6 +61,7 @@ def test_publish_seed_root_state_increments_generation(tmp_path: Path):
     assert first["generation"] == 1
     assert second["generation"] == 2
     assert path.exists()
+    validate_seed_root_state(second)
 
 
 def test_seed_root_state_cli_show_and_write(monkeypatch, tmp_path: Path):
@@ -111,3 +121,24 @@ def test_config_set_republishes_seed_root_state(monkeypatch, tmp_path: Path):
     assert result.exit_code == 0
     assert "published seed-root-state" in result.output
     assert output_path.exists()
+
+
+def test_validate_seed_root_state_rejects_wrong_writer():
+    state = {
+        "schema_version": 1,
+        "updated_at": "2026-03-07T11:00:00-05:00",
+        "generation": 1,
+        "writer": "traktor",
+        "active": {"seeding_root": "/pool/media/torrents/seeding"},
+        "target": {"seeding_root": "/pool/media/torrents/seeding"},
+        "cross_seed": {"link_root": "/pool/media/torrents/seeding/cross-seed"},
+        "migration": {"state": "steady"},
+        "aliases": [],
+        "mirror_roots": ["/pool/media/torrents/seeding"],
+    }
+
+    try:
+        validate_seed_root_state(state)
+        assert False, "expected validator to reject wrong writer"
+    except ValueError as exc:
+        assert "writer" in str(exc)

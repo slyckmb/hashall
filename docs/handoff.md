@@ -16,6 +16,7 @@ Critical now (2026-03-06):
   - remove brittle `device_id` dependence from identity paths; move payload/torrent/rehome identity to `fs_uuid`.
 - New coordination objective:
   - publish `~/.hashall/seed-root-state.json` from `hashall` as the only machine-readable seeding-root contract for external tools.
+  - contract ownership is explicit in code/tests/docs: `hashall` sole writer, external tools read-only, fail-closed on invalid schema/owner/required fields.
 - New refresh bug fixed in this worktree:
   - `hashall link execute` no longer trips `UnboundLocalError` on `ActionInfo` after refresh-created plans (observed after `Plan #59` on `spare`).
 - Identity repair tooling now implemented:

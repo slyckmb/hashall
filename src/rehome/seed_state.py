@@ -1,4 +1,11 @@
-"""Published seed-root coordination state for external consumers."""
+"""Published seed-root coordination state for external consumers.
+
+Ownership contract:
+- hashall is the sole writer of this artifact
+- external tools (for example traktor) are read-only consumers
+- the artifact must be machine-readable, versioned, and safe to reject
+  fail-closed when required fields are missing or invalid
+"""
 
 from __future__ import annotations
 
@@ -13,6 +20,49 @@ from rehome.config import load_config, parse_managed_roots
 
 SEED_ROOT_STATE_PATH = Path.home() / ".hashall" / "seed-root-state.json"
 SCHEMA_VERSION = 1
+CONTRACT_OWNER = "hashall"
+REQUIRED_TOP_LEVEL_FIELDS = (
+    "schema_version",
+    "updated_at",
+    "generation",
+    "writer",
+    "active",
+    "target",
+    "cross_seed",
+    "migration",
+    "aliases",
+    "mirror_roots",
+)
+
+
+def validate_seed_root_state(state: dict) -> None:
+    """Raise ValueError when a published contract is missing required fields."""
+    missing = [field for field in REQUIRED_TOP_LEVEL_FIELDS if field not in state]
+    if missing:
+        raise ValueError(f"seed-root-state missing required field(s): {', '.join(missing)}")
+    if int(state.get("schema_version", 0) or 0) != SCHEMA_VERSION:
+        raise ValueError(
+            f"seed-root-state schema_version={state.get('schema_version')} expected={SCHEMA_VERSION}"
+        )
+    if str(state.get("writer") or "").strip() != CONTRACT_OWNER:
+        raise ValueError(
+            f"seed-root-state writer={state.get('writer')!r} expected={CONTRACT_OWNER!r}"
+        )
+    for section_name, key_name in (
+        ("active", "seeding_root"),
+        ("target", "seeding_root"),
+        ("cross_seed", "link_root"),
+        ("migration", "state"),
+    ):
+        section = state.get(section_name)
+        if not isinstance(section, dict):
+            raise ValueError(f"seed-root-state section {section_name!r} must be an object")
+        if not str(section.get(key_name) or "").strip():
+            raise ValueError(f"seed-root-state {section_name}.{key_name} is required")
+    if not isinstance(state.get("aliases"), list):
+        raise ValueError("seed-root-state aliases must be a list")
+    if not isinstance(state.get("mirror_roots"), list):
+        raise ValueError("seed-root-state mirror_roots must be a list")
 
 
 def _dedupe(items: Iterable[str]) -> list[str]:
@@ -155,7 +205,7 @@ def build_seed_root_state(
         "schema_version": SCHEMA_VERSION,
         "updated_at": now.isoformat(timespec="seconds"),
         "generation": previous_generation + 1,
-        "writer": "hashall",
+        "writer": CONTRACT_OWNER,
         "active": {
             "seeding_root": active_root,
             "device_alias": active_alias,
@@ -176,6 +226,7 @@ def build_seed_root_state(
         "aliases": _build_aliases(active_root, target_root),
         "mirror_roots": mirror_roots,
     }
+    validate_seed_root_state(state)
     return state
 
 

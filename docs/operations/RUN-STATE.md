@@ -25,6 +25,19 @@ Single living document for current operational status, handoff context, and next
 - Ownership model:
   - `hashall` writes
   - `traktor` should consume read-only
+- Consumer rule:
+  - consumers should fail closed if `schema_version`, `writer`, or required sections are missing/invalid
+- Required top-level contract fields:
+  - `schema_version`
+  - `updated_at`
+  - `generation`
+  - `writer`
+  - `active`
+  - `target`
+  - `cross_seed`
+  - `migration`
+  - `aliases`
+  - `mirror_roots`
 - Update timing now improved:
   - `rehome config set`
   - `rehome config add-root`
