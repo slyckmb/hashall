@@ -87,6 +87,28 @@ Single living document for current operational status, handoff context, and next
   - follow-up: improve heartbeat/progress feedback further
   - status: partially mitigated
 
+- Zero-upgrade payload sync marked refresh `PARTIAL`
+  - symptom: refresh ended `PARTIAL` even though payload sync reported `complete payloads: 5145`, `incomplete payloads: 0`, `missing in catalog: 0`
+  - root cause: refresh quality gate only accepted `upgrade_summary ...`; live payload sync emitted `upgrade stage: queued=0 started=0 completed=0 failed=0`
+  - fix: refresh parser now accepts both markers
+  - status: fixed for future runs
+
+## qB Repair Root-Policy Update (2026-03-07 13:05 EST)
+
+- `qb-stoppeddl-drain.py` and `qb-stoppeddl-apply.py` now derive default root policy from:
+  - `~/.hashall/seed-root-state.json`
+- Default behavior is intentionally conservative:
+  - admit pool-backed target root
+  - admit pool-backed migration source roots
+  - do not automatically admit `/data/media` or `/stash/media` alias roots from the contract
+- CLI flags still override the contract-derived defaults:
+  - `--allowed-save-roots`
+  - `--allowed-donor-roots` (`drain`)
+  - `--no-seed-root-state`
+- Purpose:
+  - stop qB repair tooling from drifting away from hashall’s published migration state
+  - avoid reopening the prior cross-filesystem / alias-root donor-selection bug
+
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 
 - Branch/worktree in active use for this incident:

@@ -45,6 +45,7 @@ Unified roadmap + active backlog for development and operations.
 - [x] Build a compact anomaly ledger from `~/.logs/hashall/rehome/refresh/` with root cause, impact, fix, and status.
 - [x] Investigate and fix the post-`Plan #59` `ActionInfo` failure in `hashall link execute` seen during refresh-driven dedup on `spare`.
 - [x] Remove hidden interactive prompts from orchestrated subprocesses.
+- [x] Fix false refresh `PARTIAL` results when payload sync reports zero upgrade work via legacy `upgrade stage:` output.
 - [ ] Improve long-running command progress visibility and heartbeat feedback.
 - [ ] Surface secondary logs to operators during quiet periods, especially `~/.logs/hashall/hashall.log`.
 
@@ -63,6 +64,7 @@ Unified roadmap + active backlog for development and operations.
   - cross-filesystem donor selection
   - save-path / content-path mismatch handling
   - hardlink / inode preservation assumptions
+- [x] Make stoppedDL drain/apply derive default allowed roots from the published seed-root contract instead of scattered hard-coded pool roots.
 - [ ] Harden qBit migration/rehome workflows with explicit safety gates:
   - fail-closed on ambiguity
   - dry-run-first with machine-readable plan output
