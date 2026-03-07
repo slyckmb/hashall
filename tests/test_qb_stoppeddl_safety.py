@@ -1,4 +1,5 @@
 from importlib.machinery import SourceFileLoader
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -166,3 +167,83 @@ def test_drain_alias_variants_do_not_expand_to_pool_data_from_data_media() -> No
     mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-drain.py", "qb_stoppeddl_drain_mod")
     variants = mod.alias_variants("/data/media/torrents/seeding/cross-seed/example")
     assert "/pool/data/seeds/cross-seed/example" not in variants
+
+
+def test_drain_seed_root_policy_uses_pool_roots_only(tmp_path: Path) -> None:
+    mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-drain.py", "qb_stoppeddl_drain_mod")
+    state_path = tmp_path / "seed-root-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "updated_at": "2026-03-07T12:00:00-05:00",
+                "generation": 1,
+                "writer": "hashall",
+                "active": {"seeding_root": "/pool/media/torrents/seeding", "device_alias": "pool-media"},
+                "target": {"seeding_root": "/pool/media/torrents/seeding", "device_alias": "pool-media"},
+                "cross_seed": {"link_root": "/pool/media/torrents/seeding/cross-seed", "category": "cross-seed"},
+                "migration": {
+                    "state": "in_progress",
+                    "source_roots": [
+                        "/pool/data/media/torrents/seeding",
+                        "/data/media/torrents/seeding",
+                    ],
+                    "target_root": "/pool/media/torrents/seeding",
+                },
+                "aliases": [],
+                "mirror_roots": [
+                    "/pool/media/torrents/seeding",
+                    "/pool/data/media/torrents/seeding",
+                    "/data/media/torrents/seeding",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy = mod.load_seed_root_policy(state_path)
+    assert policy["allowed_save_roots"] == [
+        "/pool/media/torrents/seeding",
+        "/pool/data/media/torrents/seeding",
+    ]
+    assert policy["allowed_donor_roots"] == [
+        "/pool/media/torrents/seeding",
+        "/pool/data/media/torrents/seeding",
+    ]
+
+
+def test_apply_seed_root_policy_uses_pool_roots_only(tmp_path: Path) -> None:
+    mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-apply.py", "qb_stoppeddl_apply_mod")
+    state_path = tmp_path / "seed-root-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "updated_at": "2026-03-07T12:00:00-05:00",
+                "generation": 1,
+                "writer": "hashall",
+                "active": {"seeding_root": "/pool/media/torrents/seeding", "device_alias": "pool-media"},
+                "target": {"seeding_root": "/pool/media/torrents/seeding", "device_alias": "pool-media"},
+                "cross_seed": {"link_root": "/pool/media/torrents/seeding/cross-seed", "category": "cross-seed"},
+                "migration": {
+                    "state": "in_progress",
+                    "source_roots": [
+                        "/pool/data/media/torrents/seeding",
+                        "/stash/media/torrents/seeding",
+                    ],
+                    "target_root": "/pool/media/torrents/seeding",
+                },
+                "aliases": [],
+                "mirror_roots": [
+                    "/pool/media/torrents/seeding",
+                    "/pool/data/media/torrents/seeding",
+                    "/stash/media/torrents/seeding",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy = mod.load_seed_root_policy(state_path)
+    assert policy["allowed_save_roots"] == [
+        "/pool/media/torrents/seeding",
+        "/pool/data/media/torrents/seeding",
+    ]

@@ -20,8 +20,9 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from hashall.qbittorrent import get_qbittorrent_client
+from rehome.seed_state import SEED_ROOT_STATE_PATH, validate_seed_root_state
 
-SEMVER = "0.2.10"
+SEMVER = "0.2.11"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
@@ -228,6 +229,40 @@ def parse_path_list(text: str) -> List[str]:
         seen.add(p)
         out.append(p)
     return out
+
+
+def _dedupe_paths(paths: List[str]) -> List[str]:
+    seen: Set[str] = set()
+    out: List[str] = []
+    for value in paths:
+        p = str(value or "").strip()
+        if not p:
+            continue
+        if p != "/" and p.endswith("/"):
+            p = p.rstrip("/")
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def load_seed_root_policy(path: Path) -> Dict[str, List[str]]:
+    state = json.loads(path.read_text(encoding="utf-8"))
+    validate_seed_root_state(state)
+    candidate_roots: List[str] = []
+    target = str((state.get("target") or {}).get("seeding_root") or "").strip()
+    if target.startswith("/pool/"):
+        candidate_roots.append(target)
+    migration = state.get("migration") or {}
+    for root in migration.get("source_roots") or []:
+        root_s = str(root or "").strip()
+        if root_s.startswith("/pool/"):
+            candidate_roots.append(root_s)
+    allowed = _dedupe_paths(candidate_roots)
+    if not allowed:
+        raise ValueError(f"seed-root-state {path} did not yield any pool-backed roots")
+    return {"allowed_save_roots": allowed}
 
 
 def is_under_root(path: str, root: str) -> bool:
@@ -782,12 +817,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hashes-file", default="", help="Optional hash file filter")
     p.add_argument(
         "--allowed-save-roots",
-        default=DEFAULT_ALLOWED_SAVE_ROOTS,
+        default="",
         help=(
             "Comma-separated absolute save roots allowed for recommended paths/locations "
-            f"(default: {DEFAULT_ALLOWED_SAVE_ROOTS})"
+            "(default: seed-root-state pool roots, else built-in safe defaults)"
         ),
     )
+    p.add_argument(
+        "--seed-root-state",
+        default=str(SEED_ROOT_STATE_PATH),
+        help=(
+            "Path to hashall seed-root-state.json used to derive safe save roots "
+            "(default: ~/.hashall/seed-root-state.json)"
+        ),
+    )
+    p.add_argument(
+        "--no-seed-root-state",
+        dest="use_seed_root_state",
+        action="store_false",
+        help="Do not derive default save-root policy from seed-root-state.json",
+    )
+    p.set_defaults(use_seed_root_state=True)
     p.add_argument(
         "--forbid-save-roots",
         default=DEFAULT_FORBID_SAVE_ROOTS,
@@ -1131,7 +1181,21 @@ def main() -> int:
         return 2
 
     allow_classes = parse_classes(args.allow_class)
-    allowed_roots = parse_path_list(args.allowed_save_roots)
+    seed_root_policy: Dict[str, List[str]] = {}
+    seed_root_state_path = Path(args.seed_root_state).expanduser()
+    if bool(args.use_seed_root_state) and seed_root_state_path.exists():
+        try:
+            seed_root_policy = load_seed_root_policy(seed_root_state_path)
+            print(
+                "seed_root_policy "
+                f"path={seed_root_state_path} "
+                f"allowed_save_roots={','.join(seed_root_policy['allowed_save_roots'])}"
+            )
+        except Exception as exc:
+            print(f"WARN seed_root_policy_unusable path={seed_root_state_path} detail={exc}")
+    allowed_roots = parse_path_list(args.allowed_save_roots) or seed_root_policy.get(
+        "allowed_save_roots", parse_path_list(DEFAULT_ALLOWED_SAVE_ROOTS)
+    )
     forbidden_roots = parse_path_list(args.forbid_save_roots)
     allow_hashes = set(parse_hash_tokens(args.hashes) + read_hash_file(args.hashes_file))
     default_ignore_file = bucket_dir / "download-whitelist-hashes.txt"

@@ -23,8 +23,9 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from hashall.qbittorrent import QBittorrentClient, QBitTorrent, get_qbittorrent_client
+from rehome.seed_state import SEED_ROOT_STATE_PATH, validate_seed_root_state
 
-SEMVER = "0.1.23"
+SEMVER = "0.1.24"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_ALLOWED_SAVE_ROOTS = "/pool/media,/pool/data"
 DEFAULT_FORBID_SAVE_ROOTS = "/data/media,/stash/media"
@@ -136,6 +137,43 @@ def parse_path_list(text: str) -> List[str]:
         seen.add(p)
         out.append(p)
     return out
+
+
+def _dedupe_paths(paths: Iterable[str]) -> List[str]:
+    seen: Set[str] = set()
+    out: List[str] = []
+    for value in paths:
+        p = str(value or "").strip()
+        if not p:
+            continue
+        if p != "/" and p.endswith("/"):
+            p = p.rstrip("/")
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def load_seed_root_policy(path: Path) -> Dict[str, List[str]]:
+    state = json.loads(path.read_text(encoding="utf-8"))
+    validate_seed_root_state(state)
+    candidate_roots: List[str] = []
+    target = str((state.get("target") or {}).get("seeding_root") or "").strip()
+    if target.startswith("/pool/"):
+        candidate_roots.append(target)
+    migration = state.get("migration") or {}
+    for root in migration.get("source_roots") or []:
+        root_s = str(root or "").strip()
+        if root_s.startswith("/pool/"):
+            candidate_roots.append(root_s)
+    allowed = _dedupe_paths(candidate_roots)
+    if not allowed:
+        raise ValueError(f"seed-root-state {path} did not yield any pool-backed roots")
+    return {
+        "allowed_save_roots": allowed,
+        "allowed_donor_roots": list(allowed),
+    }
 
 
 def is_under_root(path: str, root: str) -> bool:
@@ -824,10 +862,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hashes-file", default="", help="Optional hash file")
     p.add_argument(
         "--allowed-save-roots",
-        default=DEFAULT_ALLOWED_SAVE_ROOTS,
+        default="",
         help=(
             "Comma-separated absolute candidate roots allowed in drain selection "
-            f"(default: {DEFAULT_ALLOWED_SAVE_ROOTS})"
+            "(default: seed-root-state pool roots, else built-in safe defaults)"
         ),
     )
     p.add_argument(
@@ -840,12 +878,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--allowed-donor-roots",
-        default=DEFAULT_ALLOWED_DONOR_ROOTS,
+        default="",
         help=(
             "Comma-separated absolute candidate roots allowed as donor verification sources "
-            f"(default: {DEFAULT_ALLOWED_DONOR_ROOTS})"
+            "(default: seed-root-state pool roots, else built-in safe defaults)"
         ),
     )
+    p.add_argument(
+        "--seed-root-state",
+        default=str(SEED_ROOT_STATE_PATH),
+        help=(
+            "Path to hashall seed-root-state.json used to derive safe pool roots "
+            "(default: ~/.hashall/seed-root-state.json)"
+        ),
+    )
+    p.add_argument(
+        "--no-seed-root-state",
+        dest="use_seed_root_state",
+        action="store_false",
+        help="Do not derive default root policy from seed-root-state.json",
+    )
+    p.set_defaults(use_seed_root_state=True)
     p.add_argument(
         "--forbid-donor-roots",
         default=DEFAULT_FORBID_DONOR_ROOTS,
@@ -1109,9 +1162,26 @@ def main() -> int:
     selected_hashes = parse_hash_tokens(args.hashes)
     selected_hashes.extend(read_hash_file(args.hashes_file))
     selected_hashes = list(dict.fromkeys(selected_hashes))
-    allowed_roots = parse_path_list(args.allowed_save_roots)
+    seed_root_policy: Dict[str, List[str]] = {}
+    seed_root_state_path = Path(args.seed_root_state).expanduser()
+    if bool(args.use_seed_root_state) and seed_root_state_path.exists():
+        try:
+            seed_root_policy = load_seed_root_policy(seed_root_state_path)
+            print(
+                "seed_root_policy "
+                f"path={seed_root_state_path} "
+                f"allowed_save_roots={','.join(seed_root_policy['allowed_save_roots'])} "
+                f"allowed_donor_roots={','.join(seed_root_policy['allowed_donor_roots'])}"
+            )
+        except Exception as exc:
+            print(f"WARN seed_root_policy_unusable path={seed_root_state_path} detail={exc}")
+    allowed_roots = parse_path_list(args.allowed_save_roots) or seed_root_policy.get(
+        "allowed_save_roots", parse_path_list(DEFAULT_ALLOWED_SAVE_ROOTS)
+    )
     forbidden_roots = parse_path_list(args.forbid_save_roots)
-    allowed_donor_roots = parse_path_list(args.allowed_donor_roots)
+    allowed_donor_roots = parse_path_list(args.allowed_donor_roots) or seed_root_policy.get(
+        "allowed_donor_roots", parse_path_list(DEFAULT_ALLOWED_DONOR_ROOTS)
+    )
     forbidden_donor_roots = parse_path_list(args.forbid_donor_roots)
     default_ignore_file = bucket_dir / "download-whitelist-hashes.txt"
     ignore_hashes = parse_hash_tokens(args.ignore_hashes)
