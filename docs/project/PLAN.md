@@ -21,9 +21,9 @@ Unified roadmap + active backlog for development and operations.
 
 ### P0 Seed-Root Coordination Contract
 
-- [ ] Add a canonical published state file at `~/.hashall/seed-root-state.json`.
-- [ ] Make `hashall` the sole writer and `traktor` a read-only consumer.
-- [ ] Define a stable schema with:
+- [x] Add a canonical published state file at `~/.hashall/seed-root-state.json`.
+- [x] Make `hashall` the sole writer and `traktor` a read-only consumer.
+- [x] Define a stable schema with:
   - `schema_version`
   - `updated_at`
   - `generation`
@@ -34,17 +34,17 @@ Unified roadmap + active backlog for development and operations.
   - `migration.state`
   - `migration.source_root` / `migration.source_roots`
   - explicit path aliases / mirror roots
-- [ ] Keep `device_id` out of the external contract; use stable alias and/or `fs_uuid` only.
-- [ ] Require atomic writes and fail-closed consumer behavior on missing/invalid state.
-- [ ] Add a CLI surface to inspect/export the published state.
-- [ ] Document ownership and update timing so `traktor` can use it safely for cross-seed reconciliation.
+- [x] Keep `device_id` out of the external contract; use stable alias and/or `fs_uuid` only.
+- [x] Require atomic writes and fail-closed consumer behavior on missing/invalid state.
+- [x] Add a CLI surface to inspect/export the published state.
+- [x] Document ownership and update timing so `traktor` can use it safely for cross-seed reconciliation.
 
 ### P1 Refresh Monitoring and Observability
 
-- [ ] Monitor live `rehome refresh` runs and fix anomalies that appear during active execution.
-- [ ] Build a compact anomaly ledger from `~/.logs/hashall/rehome/refresh/` with root cause, impact, fix, and status.
-- [ ] Investigate and fix the post-`Plan #59` `ActionInfo` failure in `hashall link execute` seen during refresh-driven dedup on `spare`.
-- [ ] Remove hidden interactive prompts from orchestrated subprocesses.
+- [x] Monitor live `rehome refresh` runs and fix anomalies that appear during active execution.
+- [x] Build a compact anomaly ledger from `~/.logs/hashall/rehome/refresh/` with root cause, impact, fix, and status.
+- [x] Investigate and fix the post-`Plan #59` `ActionInfo` failure in `hashall link execute` seen during refresh-driven dedup on `spare`.
+- [x] Remove hidden interactive prompts from orchestrated subprocesses.
 - [ ] Improve long-running command progress visibility and heartbeat feedback.
 - [ ] Surface secondary logs to operators during quiet periods, especially `~/.logs/hashall/hashall.log`.
 
@@ -72,15 +72,15 @@ Unified roadmap + active backlog for development and operations.
 
 ### P4 Pool Dataset Migration Process
 
-- [ ] Define the production process to finish the dataset migration from:
+- [x] Define the production process to finish the dataset migration from:
   - `/pool/data/media/torrents/seeding`
   - to `/pool/media/torrents/seeding`
-- [ ] Decide whether the dataset migration should use:
+- [x] Decide whether the dataset migration should use:
   - existing rehome/hashall tooling after hardening
   - a new dedicated qB dataset-rehome tool
   - or a hybrid approach
 - [ ] Produce a pilot-safe migration lane for one payload class, validate end to end, then scale by batch.
-- [ ] Make cross-seed root reconciliation consume the published seed-root-state contract rather than inferring paths ad hoc.
+- [x] Make cross-seed root reconciliation consume the published seed-root-state contract rather than inferring paths ad hoc.
 
 ### P5 Docs Consolidation
 

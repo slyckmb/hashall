@@ -61,6 +61,32 @@ Single living document for current operational status, handoff context, and next
   - post-`Plan #59` dedup execution on `spare` failed due to `ActionInfo` local shadowing in `hashall.link_executor.execute_plan()`
   - fixed in active worktree and covered by regression test
 
+## Refresh Anomaly Ledger (2026-03-07)
+
+- Hidden delegated confirmation prompt
+  - symptom: refresh appeared stalled with no visible progress
+  - root cause: `hashall link execute` was launched without `--yes`
+  - fix: refresh now invokes non-interactive execute and points operators to `~/.logs/hashall/hashall.log`
+  - status: fixed
+
+- Post-`Plan #59` `ActionInfo` crash
+  - symptom: `hashall link execute` failed on `spare` immediately after plan creation
+  - root cause: local import shadowed `ActionInfo` inside `execute_plan()`
+  - fix: removed local shadowing import; added regression
+  - status: fixed
+
+- Mixed-root dedup observed during migration
+  - symptom: refresh dedup operates on both `/pool/data/media/...` and legacy `/pool/data/seeds/...`
+  - root cause: migration is not converged; legacy repair roots are still catalog-visible and dedup-eligible
+  - mitigation: do not treat dedup completion as migration convergence; qB migration still requires separate guarded workflow
+  - status: active operational constraint
+
+- Long quiet periods during delegated work
+  - symptom: operator uncertainty about hang vs progress
+  - current mitigation: watch `~/.logs/hashall/hashall.log`
+  - follow-up: improve heartbeat/progress feedback further
+  - status: partially mitigated
+
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 
 - Branch/worktree in active use for this incident:
