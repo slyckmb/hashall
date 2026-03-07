@@ -360,6 +360,7 @@ def _inline_verify(
     """
     affected = plan.get("affected_torrents") or []
     source_path = plan.get("source_path")
+    decision = str(plan.get("decision") or "").strip().upper()
 
     state_counts: dict[str, int] = {}
     progress_vals: list[float] = []
@@ -402,8 +403,10 @@ def _inline_verify(
 
     # Source path gone
     source_gone = source_path is None or not Path(source_path).exists()
+    cleanup_pending = decision == "REUSE" and not source_gone
+    source_ok = True if decision == "REUSE" else source_gone
 
-    ok = (not alarm_hashes) and catalog_ok and source_gone
+    ok = (not alarm_hashes) and catalog_ok and source_ok
 
     # Build summary string
     state_str = " ".join(
@@ -411,7 +414,12 @@ def _inline_verify(
     ) or "?"
     pct_str = f"{max(progress_vals) * 100:.0f}%" if progress_vals else "?"
     catalog_str = "catalog OK" if catalog_ok else "catalog MISMATCH"
-    src_str = "source gone" if source_gone else "source STILL EXISTS"
+    if source_gone:
+        src_str = "source gone"
+    elif cleanup_pending:
+        src_str = "cleanup pending"
+    else:
+        src_str = "source STILL EXISTS"
     summary = f"{state_str} · {pct_str} · {catalog_str} · {src_str}"
     if alarm_hashes:
         summary += f" · ALARM({','.join(alarm_hashes)})"
@@ -999,6 +1007,7 @@ def run_auto(
         applied_count = 0
         verified_count = 0
         freed_bytes = 0
+        cleanup_pending_count = 0
         exit_code = 0
 
         try:
@@ -1125,15 +1134,44 @@ def run_auto(
                     try:
                         executor.execute(plan)
                         apply_elapsed = (datetime.now() - t_apply).total_seconds()
-                        print(f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · source deleted"
-                              f"{'':>10}  OK")
-                        cand_rec["apply"] = {"ok": True, "elapsed_s": round(apply_elapsed, 3), "freed_bytes": src_bytes, "error": None}
+                        decision = str(plan.get("decision") or "").strip().upper()
+                        if decision == "REUSE":
+                            print(
+                                f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · cleanup pending"
+                                f"{'':>9}  OK"
+                            )
+                            cand_rec["apply"] = {
+                                "ok": True,
+                                "elapsed_s": round(apply_elapsed, 3),
+                                "freed_bytes": 0,
+                                "source_cleanup": "pending_manual_cleanup",
+                                "error": None,
+                            }
+                            cleanup_pending_count += 1
+                        else:
+                            print(
+                                f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · source deleted"
+                                f"{'':>10}  OK"
+                            )
+                            cand_rec["apply"] = {
+                                "ok": True,
+                                "elapsed_s": round(apply_elapsed, 3),
+                                "freed_bytes": src_bytes,
+                                "source_cleanup": "source_deleted",
+                                "error": None,
+                            }
+                            freed_bytes += src_bytes
                         applied_count += 1
-                        freed_bytes += src_bytes
                     except Exception as e:
                         apply_elapsed = (datetime.now() - t_apply).total_seconds()
                         print(f"  apply   FAIL after {_fmt_elapsed(apply_elapsed)}: {e}")
-                        cand_rec["apply"] = {"ok": False, "elapsed_s": round(apply_elapsed, 3), "freed_bytes": 0, "error": str(e)}
+                        cand_rec["apply"] = {
+                            "ok": False,
+                            "elapsed_s": round(apply_elapsed, 3),
+                            "freed_bytes": 0,
+                            "source_cleanup": "unknown",
+                            "error": str(e),
+                        }
                         apply_ok = False
                         exit_code = 1
 
@@ -1177,11 +1215,14 @@ def run_auto(
     sep = "─" * 57
     print(sep)
     if do_apply:
-        print(
+        summary_line = (
             f"applied  {applied_count}/{taking}   "
             f"verified  {verified_count}/{taking}   "
             f"freed  {_fmt_bytes(freed_bytes)} from sources"
         )
+        if cleanup_pending_count:
+            summary_line += f"   cleanup pending  {cleanup_pending_count}"
+        print(summary_line)
     else:
         print(
             f"dry-run  {planned_count}/{taking} planned  "
@@ -1195,6 +1236,7 @@ def run_auto(
         "applied": applied_count,
         "verified": verified_count,
         "freed_bytes": freed_bytes,
+        "cleanup_pending": cleanup_pending_count,
         "exit_code": exit_code,
     }
 
