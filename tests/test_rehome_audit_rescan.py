@@ -17,6 +17,8 @@ class FakeQbitClient:
     def __init__(self, default_path: str):
         self.default_path = default_path
         self.save_paths = {}
+        self.add_calls = []
+        self.remove_calls = []
 
     def pause_torrent(self, torrent_hash: str) -> bool:
         self.save_paths.setdefault(torrent_hash, self.default_path)
@@ -42,9 +44,11 @@ class FakeQbitClient:
         return []
 
     def add_tags(self, torrent_hash: str, tags) -> bool:
+        self.add_calls.append((torrent_hash, tuple(tags)))
         return True
 
     def remove_tags(self, torrent_hash: str, tags) -> bool:
+        self.remove_calls.append((torrent_hash, tuple(tags)))
         return True
 
 
@@ -134,18 +138,66 @@ def _setup_db_and_plan(tmp_path: Path):
 def test_rehome_audit_run_recorded(tmp_path, monkeypatch):
     db_path, plan, source_root, target_root = _setup_db_and_plan(tmp_path)
 
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE rehome_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            finished_at TEXT,
+            direction TEXT,
+            decision TEXT,
+            payload_hash TEXT,
+            payload_id INTEGER,
+            torrent_count INTEGER,
+            status TEXT,
+            message TEXT
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fake_qb = FakeQbitClient(default_path=str(source_root.parent))
     executor = DemotionExecutor(catalog_path=db_path)
-    executor.qbit_client = FakeQbitClient(default_path=str(source_root.parent))
+    executor.qbit_client = fake_qb
 
     executor.execute(plan)
 
     conn = sqlite3.connect(db_path)
     try:
-        row = conn.execute("SELECT status FROM rehome_runs ORDER BY id DESC LIMIT 1").fetchone()
+        row = conn.execute(
+            """
+            SELECT status, source_path, target_path, payload_id, target_payload_id,
+                   source_device_id, target_device_id, cleanup_source_required,
+                   cleanup_source_path
+            FROM rehome_runs
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        columns = {
+            str(col[1]) for col in conn.execute("PRAGMA table_info(rehome_runs)").fetchall()
+        }
     finally:
         conn.close()
 
-    assert row[0] == "success"
+    assert row == (
+        "success",
+        str(source_root),
+        str(target_root),
+        1,
+        2,
+        50,
+        49,
+        1,
+        str(source_root),
+    )
+    assert {"source_path", "target_path", "target_payload_id", "cleanup_source_required", "cleanup_source_path"} <= columns
+    assert any(
+        torrent_hash == "torrent_audit" and "rehome_cleanup_source_required" in tags
+        for torrent_hash, tags in fake_qb.add_calls
+    )
 
 
 def test_rehome_rescan_invoked(tmp_path, monkeypatch):

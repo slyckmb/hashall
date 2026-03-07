@@ -108,6 +108,53 @@ class DemotionExecutor:
         )
         return sqlite3.connect(catalog_uri, uri=True)
 
+    def _ensure_rehome_runs_schema(self, conn: sqlite3.Connection) -> None:
+        """Create or upgrade the rehome_runs audit table in-place."""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rehome_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                finished_at TEXT,
+                direction TEXT,
+                decision TEXT,
+                payload_hash TEXT,
+                payload_id INTEGER,
+                target_payload_id INTEGER,
+                torrent_count INTEGER,
+                status TEXT,
+                message TEXT,
+                source_path TEXT,
+                target_path TEXT,
+                source_device_id INTEGER,
+                target_device_id INTEGER,
+                source_fs_uuid TEXT,
+                target_fs_uuid TEXT,
+                cleanup_source_required INTEGER DEFAULT 0,
+                cleanup_source_path TEXT
+            )
+            """
+        )
+        existing_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(rehome_runs)").fetchall()
+        }
+        required_columns = {
+            "target_payload_id": "INTEGER",
+            "source_path": "TEXT",
+            "target_path": "TEXT",
+            "source_device_id": "INTEGER",
+            "target_device_id": "INTEGER",
+            "source_fs_uuid": "TEXT",
+            "target_fs_uuid": "TEXT",
+            "cleanup_source_required": "INTEGER DEFAULT 0",
+            "cleanup_source_path": "TEXT",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name in existing_columns:
+                continue
+            conn.execute(f"ALTER TABLE rehome_runs ADD COLUMN {column_name} {column_type}")
+        conn.commit()
+
     def _log(self, message: str, prefix: str = "info"):
         """Log a message with key=value format."""
         prefixes = {
@@ -1934,7 +1981,7 @@ class DemotionExecutor:
             if run_id is not None:
                 run_conn = self._get_db_connection()
                 try:
-                    self._record_rehome_run_finish(run_conn, run_id, status="success", message="")
+                    self._record_rehome_run_finish(run_conn, run_id, plan, status="success", message="")
                 finally:
                     run_conn.close()
 
@@ -1951,7 +1998,7 @@ class DemotionExecutor:
             if run_id is not None:
                 run_conn = self._get_db_connection()
                 try:
-                    self._record_rehome_run_finish(run_conn, run_id, status="failed", message=str(e))
+                    self._record_rehome_run_finish(run_conn, run_id, plan, status="failed", message=str(e))
                 finally:
                     run_conn.close()
             self._log(f"Execution failed: {e}", "error")
@@ -2067,6 +2114,8 @@ class DemotionExecutor:
                 if target_payload_id is None:
                     raise RuntimeError("Target payload not found for catalog sync")
 
+                plan["target_payload_id"] = target_payload_id
+
                 # Same-device REUSE may intentionally "re-point" the canonical payload
                 # root to an existing target view path (normalization flow).
                 if same_device_reuse:
@@ -2113,6 +2162,7 @@ class DemotionExecutor:
                 self._sync_files_catalog_for_reuse_cleanup(conn, plan)
 
             elif plan.get("decision") == "MOVE":
+                plan["target_payload_id"] = plan.get("payload_id")
                 # Update payload location
                 if payload_has_fs_uuid:
                     conn.execute(
@@ -2354,53 +2404,73 @@ class DemotionExecutor:
 
     def _record_rehome_run_start(self, conn: sqlite3.Connection, plan: Dict) -> int:
         """Insert a rehome run record and return its ID."""
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rehome_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                finished_at TEXT,
-                direction TEXT,
-                decision TEXT,
-                payload_hash TEXT,
-                payload_id INTEGER,
-                torrent_count INTEGER,
-                status TEXT,
-                message TEXT
-            )
-            """
-        )
+        self._ensure_rehome_runs_schema(conn)
         cursor = conn.execute(
             """
             INSERT INTO rehome_runs (
-                direction, decision, payload_hash, payload_id, torrent_count, status, message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                direction, decision, payload_hash, payload_id, target_payload_id,
+                torrent_count, status, message, source_path, target_path,
+                source_device_id, target_device_id, source_fs_uuid, target_fs_uuid,
+                cleanup_source_required, cleanup_source_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 plan.get("direction"),
                 plan.get("decision"),
                 plan.get("payload_hash"),
                 plan.get("payload_id"),
+                plan.get("target_payload_id"),
                 len(plan.get("affected_torrents", [])),
                 "running",
                 "",
+                str(plan.get("source_path") or "") or None,
+                str(plan.get("target_path") or "") or None,
+                plan.get("source_device_id"),
+                plan.get("target_device_id"),
+                str(plan.get("source_fs_uuid") or "") or None,
+                str(plan.get("target_fs_uuid") or "") or None,
+                1 if bool(plan.get("cleanup_source_deferred")) else 0,
+                str(plan.get("cleanup_source_deferred_path") or "") or None,
             )
         )
         conn.commit()
         return cursor.lastrowid
 
     def _record_rehome_run_finish(self, conn: sqlite3.Connection, run_id: int,
-                                  status: str, message: str) -> None:
+                                  plan: Dict, status: str, message: str) -> None:
         """Update rehome run record on completion."""
+        self._ensure_rehome_runs_schema(conn)
         conn.execute(
             """
             UPDATE rehome_runs
             SET finished_at = CURRENT_TIMESTAMP,
                 status = ?,
-                message = ?
+                message = ?,
+                target_payload_id = ?,
+                source_path = ?,
+                target_path = ?,
+                source_device_id = ?,
+                target_device_id = ?,
+                source_fs_uuid = ?,
+                target_fs_uuid = ?,
+                cleanup_source_required = ?,
+                cleanup_source_path = ?
             WHERE id = ?
             """,
-            (status, message, run_id)
+            (
+                status,
+                message,
+                plan.get("target_payload_id"),
+                str(plan.get("source_path") or "") or None,
+                str(plan.get("target_path") or "") or None,
+                plan.get("source_device_id"),
+                plan.get("target_device_id"),
+                str(plan.get("source_fs_uuid") or "") or None,
+                str(plan.get("target_fs_uuid") or "") or None,
+                1 if bool(plan.get("cleanup_source_deferred")) else 0,
+                str(plan.get("cleanup_source_deferred_path") or "") or None,
+                run_id,
+            )
         )
         conn.commit()
 
@@ -2542,7 +2612,13 @@ class DemotionExecutor:
         # 3. Cleanup stash-side views
         t0 = time.monotonic()
         self._log(f"step=cleanup_stash path={source_path} relocated={len(relocations)}")
-        self._log(f"  MANUAL_ACTION_REQUIRED: Verify torrents work, then delete {source_path}", "warning")
+        cleanup_required = source_path.exists() and source_path.resolve() != target_path.resolve()
+        plan["cleanup_source_deferred"] = cleanup_required
+        if cleanup_required:
+            plan["cleanup_source_deferred_path"] = str(source_path)
+            self._log(f"  MANUAL_ACTION_REQUIRED: Verify torrents work, then delete {source_path}", "warning")
+        else:
+            plan.pop("cleanup_source_deferred_path", None)
         phase_times["cleanup_notice"] = time.monotonic() - t0
 
         phase_times["total"] = time.monotonic() - t_start
