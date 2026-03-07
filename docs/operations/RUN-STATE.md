@@ -32,6 +32,7 @@ Single living document for current operational status, handoff context, and next
   - `rehome config sync-roots --apply`
   - `rehome config migrate`
   all republish `~/.hashall/seed-root-state.json` automatically
+  - `rehome refresh` now also republishes at managed-run start so external consumers see the current advertised roots before scan/dedup/payload-sync work begins
 - Contract currently publishes:
   - `active.seeding_root`
   - `target.seeding_root`

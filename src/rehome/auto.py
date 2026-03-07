@@ -462,6 +462,19 @@ def run_refresh(
     active_device = active_device or stash_device or ""
     dest_device = dest_device or pool_device or ""
     managed_roots = managed_roots or extra_roots or []
+    published_seed_state_path: Optional[Path] = None
+    try:
+        from rehome.seed_state import publish_seed_root_state
+        _cfg = {
+            "active_device": active_device,
+            "active_root": active_root,
+            "default_dest_device": dest_device,
+            "default_dest_root": dest_root,
+            "managed_roots": [f"{path}:{alias}" for path, alias in managed_roots],
+        }
+        published_seed_state_path, _seed_state = publish_seed_root_state(cfg=_cfg)
+    except Exception:
+        published_seed_state_path = None
 
     from rehome.runlog import RunLogger
 
@@ -520,6 +533,8 @@ def run_refresh(
             print(f"  dedup    {dedup_mode}")
             if logger.verbose:
                 print(f"  log      {log_path}")
+            if published_seed_state_path is not None:
+                print(f"  seed-state  {published_seed_state_path}")
             print(f"\n  Scan roots ({len(all_roots)}):")
             for i, (path, alias, role) in enumerate(all_roots, 1):
                 print(f"    [{i}] {alias:<20} {role:<7}  {path}")

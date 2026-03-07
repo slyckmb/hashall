@@ -76,6 +76,12 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
         def __exit__(self, *args):
             return None
 
+    published = {}
+
+    def _fake_publish_seed_root_state(cfg=None, path=None):
+        published["cfg"] = dict(cfg or {})
+        return (Path("/tmp/seed-root-state.json"), {"writer": "hashall"})
+
     monkeypatch.setattr(auto_mod, "_validate_refresh_roots", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         auto_mod,
@@ -87,6 +93,7 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
     )
     monkeypatch.setattr(auto_mod.subprocess, "run", _fake_run)
     monkeypatch.setattr("rehome.runlog.RunLogger", _FakeRunLogger)
+    monkeypatch.setattr("rehome.seed_state.publish_seed_root_state", _fake_publish_seed_root_state)
 
     exit_code = auto_mod.run_refresh(
         catalog_path=db_path,
@@ -105,6 +112,8 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
     command_lines = [" ".join(cmd) for cmd in commands]
     assert any("link execute 55 --yes" in line for line in command_lines)
     assert any("link execute 56 --yes" in line for line in command_lines)
+    assert published["cfg"]["default_dest_root"] == "/pool/media/torrents/seeding"
+    assert published["cfg"]["managed_roots"] == []
 
 
 def test_run_catalog_preflight_reports_unknown_device_refs(tmp_path: Path) -> None:
