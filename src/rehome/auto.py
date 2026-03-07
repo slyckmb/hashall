@@ -299,7 +299,7 @@ def _run_catalog_preflight(catalog_path: Path) -> tuple[bool, dict[str, Any]]:
 
 
 _UPGRADE_SUMMARY_RE = re.compile(
-    r"upgrade_summary\s+queued=(\d+)\s+started=(\d+)\s+completed=(\d+)\s+failed=(\d+)"
+    r"(?:upgrade_summary|upgrade stage:)\s+queued=(\d+)\s+started=(\d+)\s+completed=(\d+)\s+failed=(\d+)"
 )
 
 _LINK_PLAN_ID_PATTERNS = (

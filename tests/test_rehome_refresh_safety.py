@@ -18,6 +18,13 @@ def test_parse_upgrade_summary_returns_none_without_marker() -> None:
     assert _parse_upgrade_summary("no summary line") is None
 
 
+def test_parse_upgrade_summary_extracts_legacy_upgrade_stage_counts() -> None:
+    parsed = _parse_upgrade_summary(
+        "noise\nupgrade stage: queued=0 started=0 completed=0 failed=0\n"
+    )
+    assert parsed == {"queued": 0, "started": 0, "completed": 0, "failed": 0}
+
+
 def test_parse_link_plan_id_extracts_machine_marker() -> None:
     assert _parse_link_plan_id("noise\nplan_id=12\n") == "12"
 
