@@ -1,6 +1,6 @@
 # Project Plan (Canonical)
 
-Last updated: 2026-02-28
+Last updated: 2026-03-07
 Status: active
 
 ## Purpose
@@ -15,6 +15,58 @@ Unified roadmap + active backlog for development and operations.
 4. Keep documentation canonical and low-friction for agent handoffs.
 
 ## Active Task Tracker
+
+### Refresh / Migration Hardening Program (2026-03-07)
+
+- [ ] Monitor live `rehome refresh` runs and fix any anomalies that appear during active execution.
+- [ ] Build a compact anomaly ledger from `~/.logs/hashall/rehome/refresh/` with root cause, impact, fix, and status.
+- [ ] Audit all remaining `device_id`-first code paths and complete the transition to `fs_uuid` as durable identity.
+- [ ] Verify runtime-only use of `device_id` is limited to hardlink-boundary and current-mount lookup concerns.
+- [ ] Collapse operational docs to a minimal canonical handoff set:
+  - `docs/operations/RUN-STATE.md`
+  - `docs/project/PLAN.md`
+  - `docs/handoff.md`
+  - archive all other handoff/status variants or turn them into pointers
+- [ ] Audit qBit repair, rehome, and migration tooling for silent-failure patterns:
+  - parser drift
+  - unsafe default apply behavior
+  - stale cache / stale qB state assumptions
+  - cross-filesystem donor selection
+  - save-path / content-path mismatch handling
+  - hardlink / inode preservation assumptions
+- [ ] Harden qBit migration/rehome workflows with explicit safety gates:
+  - fail-closed on ambiguity
+  - dry-run-first with machine-readable plan output
+  - post-apply qB state validation
+  - download-prevention guardrails
+  - scope verification against filesystem and qB save path
+- [ ] Define the production process to finish the dataset migration from:
+  - `/pool/data/media/torrents/seeding`
+  - to `/pool/media/torrents/seeding`
+- [ ] Decide whether the dataset migration should use:
+  - existing rehome/hashall tooling after hardening
+  - a new dedicated qB dataset-rehome tool
+  - or a hybrid approach
+- [ ] Produce a pilot-safe migration lane for one payload class, validate end to end, then scale by batch.
+- [ ] Evaluate rehome readiness for resuming `~noHL` stash -> pool moves and document blockers separately from dataset-migration blockers.
+
+### Ordered Execution Plan
+
+1. Keep the active refresh under observation and capture any new anomalies in real time.
+2. Finish the fs_uuid transition audit so identity drift is no longer a confounding variable.
+3. Reduce docs to the minimum canonical set before more changes land.
+4. Audit and harden qBit migration/rehome tooling algorithms and safety model.
+5. Choose and validate the dataset-migration process/tooling for `/pool/data/...` -> `/pool/media/...`.
+6. Reassess `~noHL` rehome readiness after the above hardening removes shared failure modes.
+
+### Exit Criteria
+
+- [ ] `rehome refresh` no longer shows silent dedup or payload-sync quality anomalies.
+- [ ] No critical workflow depends on brittle numeric `device_id` for durable identity.
+- [ ] Canonical docs are reduced to one run-state doc, one plan doc, and one short handoff doc.
+- [ ] qBit repair and migration workflows have explicit dry-run, scope verification, and post-apply safety gates.
+- [ ] A validated, low-risk process exists for `/pool/data/media/torrents/seeding` -> `/pool/media/torrents/seeding`.
+- [ ] A separate, validated resume plan exists for `~noHL` stash -> pool movement.
 
 ### fs_uuid Files-Table Migration
 
