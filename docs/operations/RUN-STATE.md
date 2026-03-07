@@ -25,6 +25,13 @@ Single living document for current operational status, handoff context, and next
 - Ownership model:
   - `hashall` writes
   - `traktor` should consume read-only
+- Update timing now improved:
+  - `rehome config set`
+  - `rehome config add-root`
+  - `rehome config remove-root`
+  - `rehome config sync-roots --apply`
+  - `rehome config migrate`
+  all republish `~/.hashall/seed-root-state.json` automatically
 - Contract currently publishes:
   - `active.seeding_root`
   - `target.seeding_root`

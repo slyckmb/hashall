@@ -84,3 +84,30 @@ def test_seed_root_state_cli_show_and_write(monkeypatch, tmp_path: Path):
     assert write_result.exit_code == 0
     assert "wrote seed-root-state" in write_result.output
     assert output_path.exists()
+
+
+def test_config_set_republishes_seed_root_state(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "rehome.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'active_device = "stash"',
+                'active_root = "/stash/media"',
+                'default_dest_device = "pool-media"',
+                'default_dest_root = "/pool/media/torrents/seeding"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "seed-root-state.json"
+
+    monkeypatch.setattr("rehome.config.CONFIG_PATH", config_path)
+    monkeypatch.setattr("rehome.seed_state.SEED_ROOT_STATE_PATH", output_path)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["config", "set", "default_dest_root", "/pool/media/torrents/seeding"])
+
+    assert result.exit_code == 0
+    assert "published seed-root-state" in result.output
+    assert output_path.exists()

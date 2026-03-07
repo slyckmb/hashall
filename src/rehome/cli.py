@@ -1422,6 +1422,18 @@ def _db_device_stats(conn: sqlite3.Connection, alias: str) -> Optional[tuple]:
     ).fetchone()
 
 
+def _publish_seed_root_state_if_possible() -> Optional[Path]:
+    """Refresh the published seed-root-state file after config mutations."""
+    try:
+        from rehome.seed_state import publish_seed_root_state
+
+        written_path, _state = publish_seed_root_state()
+        return written_path
+    except Exception as exc:
+        click.echo(f"  WARNING: failed to publish seed-root-state: {exc}", err=True)
+        return None
+
+
 @cli.group("config")
 def config_group():
     """Manage rehome defaults (~/.hashall/rehome.toml)."""
@@ -1557,6 +1569,9 @@ def config_set(key, value):
         click.echo(f"✅ {canonical} = {value!r}  (note: '{key}' is a deprecated alias for '{canonical}')")
     else:
         click.echo(f"✅ {canonical} = {value!r}")
+    written_path = _publish_seed_root_state_if_possible()
+    if written_path:
+        click.echo(f"↺ published seed-root-state: {written_path}")
 
 
 @config_group.command("add-root")
@@ -1598,6 +1613,9 @@ def config_add_root(path, alias, catalog):
 
     add_scan_root(path, alias)
     click.echo(f"✅ added managed root: {path} → {alias}")
+    written_path = _publish_seed_root_state_if_possible()
+    if written_path:
+        click.echo(f"↺ published seed-root-state: {written_path}")
 
 
 @config_group.command("remove-root")
@@ -1613,6 +1631,9 @@ def config_remove_root(path):
     removed = remove_scan_root(path)
     if removed:
         click.echo(f"✅ removed managed root: {path}")
+        written_path = _publish_seed_root_state_if_possible()
+        if written_path:
+            click.echo(f"↺ published seed-root-state: {written_path}")
     else:
         click.echo(f"⚠️  no entry found for path: {path}", err=True)
         raise click.exceptions.Exit(1)
@@ -1692,6 +1713,10 @@ def config_sync_roots(do_apply, min_files, catalog):
 
         if do_apply:
             click.echo(f"\nsync-roots complete: {added} added, {len(tracked_rows)} already tracked.")
+            if added > 0:
+                written_path = _publish_seed_root_state_if_possible()
+                if written_path:
+                    click.echo(f"↺ published seed-root-state: {written_path}")
         else:
             click.echo(f"\n(dry-run) Re-run with --apply to add automatically.")
     else:
@@ -1726,6 +1751,9 @@ def config_migrate():
     click.echo(f"✅ Migrated {len(old_keys)} old key(s): {', '.join(sorted(old_keys))}")
     from rehome.config import CONFIG_PATH
     click.echo(f"   Config written to: {CONFIG_PATH}")
+    written_path = _publish_seed_root_state_if_possible()
+    if written_path:
+        click.echo(f"↺ published seed-root-state: {written_path}")
 
 
 if __name__ == "__main__":
