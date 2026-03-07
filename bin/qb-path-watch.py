@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Script name: qb-path-watch.py
-# Version: 0.2.1
-# Last-updated: 2026-03-06T00:00:00-05:00
+# Version: 0.3.0
+# Last-updated: 2026-03-07T15:20:00-05:00
 
 # v0.2.1: Rename script to qb-path-watch.py.
 # v0.2.1: Rename credential env vars to QBITTORRENTAPI_USERNAME and QBITTORRENTAPI_PASSWORD.
+# v0.3.0: Add shared qB cache support and make cache reads the default path.
 
 import argparse
 import json
@@ -20,8 +21,12 @@ import http.cookiejar
 
 
 SCRIPT_NAME = "qb-path-watch.py"
-SCRIPT_VERSION = "0.2.1"
-SCRIPT_UPDATED = "2026-03-06T00:00:00-05:00"
+SCRIPT_VERSION = "0.3.0"
+SCRIPT_UPDATED = "2026-03-07T15:20:00-05:00"
+CACHE_AGENT_DEFAULT = os.environ.get(
+    "QBIT_CACHE_AGENT",
+    os.path.join(os.path.dirname(__file__), "qb-cache-agent.py"),
+)
 
 
 def print_lifecycle(status: str) -> None:
@@ -86,6 +91,41 @@ def parse_args() -> argparse.Namespace:
         default="/pool/media/torrents/seeding",
         help="Filesystem path to measure for new disk usage",
     )
+    parser.add_argument(
+        "--use-cache",
+        dest="use_cache",
+        action="store_true",
+        default=True,
+        help="Read torrents/info from the shared qB cache agent (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-use-cache",
+        dest="use_cache",
+        action="store_false",
+        help="Disable shared cache and query the qB WebUI API directly",
+    )
+    parser.add_argument(
+        "--cache-agent-cmd",
+        default=CACHE_AGENT_DEFAULT,
+        help=f"Path to qb/qbit cache agent (default: {CACHE_AGENT_DEFAULT})",
+    )
+    parser.add_argument(
+        "--cache-max-age",
+        type=int,
+        default=15,
+        help="Max cache age seconds (default: 15)",
+    )
+    parser.add_argument(
+        "--cache-wait-fresh",
+        type=int,
+        default=5,
+        help="Seconds to wait for a fresh cache snapshot when stale (default: 5)",
+    )
+    parser.add_argument(
+        "--cache-client-id",
+        default=f"{SCRIPT_NAME}:{os.getpid()}",
+        help="Client id to use when leasing the shared cache",
+    )
 
     return parser.parse_args()
 
@@ -130,6 +170,39 @@ def fetch_torrents(opener: urllib.request.OpenerDirector, host: str) -> list[dic
     if not isinstance(data, list):
         raise ValueError("api_response_not_json_list")
 
+    return data
+
+
+def fetch_torrents_from_cache(args: argparse.Namespace) -> list[dict]:
+    cmd = [
+        args.cache_agent_cmd,
+        "--max-age",
+        str(args.cache_max_age),
+        "--wait-fresh",
+        str(args.cache_wait_fresh),
+        "--client-id",
+        args.cache_client_id,
+        "--requested-interval",
+        str(max(args.interval, 1)),
+        "--ensure-daemon",
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        detail = stderr or stdout or f"exit_{result.returncode}"
+        raise RuntimeError(f"cache_agent_failed detail={detail}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"cache_agent_json_decode_failed reason={exc}") from exc
+    if not isinstance(data, list):
+        raise ValueError("cache_agent_response_not_json_list")
     return data
 
 
@@ -188,14 +261,29 @@ def main() -> int:
         print("error=invalid_interval value_must_be_gt_0", file=sys.stderr)
         return 1
 
-    if not args.username:
+    if args.cache_max_age < 0:
+        print("error=invalid_cache_max_age value_must_be_gte_0", file=sys.stderr)
+        return 1
+
+    if args.cache_wait_fresh < 0:
+        print("error=invalid_cache_wait_fresh value_must_be_gte_0", file=sys.stderr)
+        return 1
+
+    if args.use_cache and not os.path.exists(args.cache_agent_cmd):
+        print(
+            f"error=missing_cache_agent hint='set --cache-agent-cmd' path={args.cache_agent_cmd}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not args.use_cache and not args.username:
         print(
             "error=missing_username hint='pass --username or set QBITTORRENTAPI_USERNAME'",
             file=sys.stderr,
         )
         return 1
 
-    if not args.password:
+    if not args.use_cache and not args.password:
         print(
             "error=missing_password hint='pass --password or set QBITTORRENTAPI_PASSWORD'",
             file=sys.stderr,
@@ -207,19 +295,30 @@ def main() -> int:
     opener, _cookie_jar = build_opener()
 
     try:
-        login(opener, args.host, args.username, args.password)
-        print("auth_status=ok method=session_cookie")
+        if args.use_cache:
+            print(
+                "fetch_mode=shared_cache "
+                f"cache_agent={args.cache_agent_cmd} "
+                f"cache_max_age={args.cache_max_age} "
+                f"cache_wait_fresh={args.cache_wait_fresh}"
+            )
+        else:
+            login(opener, args.host, args.username, args.password)
+            print("auth_status=ok method=session_cookie")
 
         while True:
-            try:
-                torrents = fetch_torrents(opener, args.host)
-            except urllib.error.HTTPError as exc:
-                if exc.code in (401, 403):
-                    print(f"auth_status=retry reason=http_{exc.code}", file=sys.stderr)
-                    login(opener, args.host, args.username, args.password)
+            if args.use_cache:
+                torrents = fetch_torrents_from_cache(args)
+            else:
+                try:
                     torrents = fetch_torrents(opener, args.host)
-                else:
-                    raise
+                except urllib.error.HTTPError as exc:
+                    if exc.code in (401, 403):
+                        print(f"auth_status=retry reason=http_{exc.code}", file=sys.stderr)
+                        login(opener, args.host, args.username, args.password)
+                        torrents = fetch_torrents(opener, args.host)
+                    else:
+                        raise
 
             summarize(
                 torrents=torrents,
