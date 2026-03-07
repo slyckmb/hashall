@@ -659,18 +659,60 @@ class DemotionExecutor:
                 })
             return relocations
 
-        # Fallback: move all torrents to the payload's parent directory
-        fallback_target = str(Path(plan["target_path"]).parent)
+        # Fallback: derive qB save_path from the plan target path and the
+        # torrent's own file layout. This matters for single-entry torrents
+        # whose only file still has an internal subpath component, where
+        # parent(target_path) is too deep and would make qB build
+        # save_path/file.name/file.name.
+        fallback_target = Path(plan["target_path"]).resolve()
         for torrent_hash in plan["affected_torrents"]:
             source_save = self._get_torrent_save_path(conn, torrent_hash)
             if not source_save:
                 raise RuntimeError(f"Missing save_path for torrent {torrent_hash}")
+            files = self.qbit_client.get_torrent_files(torrent_hash)
+            target_save_path = self._derive_target_save_path_for_torrent(
+                fallback_target,
+                files or [],
+            )
             relocations.append({
                 "torrent_hash": torrent_hash,
                 "source_save_path": str(source_save) if source_save else None,
-                "target_save_path": fallback_target,
+                "target_save_path": str(target_save_path),
             })
         return relocations
+
+    @staticmethod
+    def _derive_target_save_path_for_torrent(target_path: Path, files: List[object]) -> Path:
+        """
+        Derive the qB save_path for a target payload using the torrent's file layout.
+
+        qB save_path is not always simply parent(target_path):
+        - multi-file torrents: save_path is the parent of the payload root
+        - flat single-file torrents: save_path is the parent of the file
+        - single-entry torrents with nested file paths: save_path is higher,
+          above the embedded relative path components
+        """
+        target_path = Path(target_path).resolve()
+        if not files:
+            return target_path.parent
+
+        if len(files) != 1:
+            return target_path.parent
+
+        rel_name = str(getattr(files[0], "name", "") or "").strip()
+        rel_parts = [p for p in Path(rel_name).parts if p not in ("", ".", "/")]
+        if not rel_parts:
+            return target_path.parent
+
+        current = target_path
+        if current.exists() and current.is_dir():
+            current = current / rel_parts[-1]
+
+        # qB content_path is save_path / rel_name for single-entry torrents.
+        # Walk back once per relative component to get the correct save_path.
+        for _ in rel_parts:
+            current = current.parent
+        return current
 
     def _get_torrent_info_with_retry(
         self,

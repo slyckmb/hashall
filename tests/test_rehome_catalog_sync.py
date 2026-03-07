@@ -1150,3 +1150,34 @@ def test_execute_reuse_fastresume_transport_avoids_qb_set_location(tmp_path, mon
     assert new_save_path.encode("utf-8") in raw
     assert b"qBt-downloadPath0:" in raw or b"qBt-downloadPath" in raw
     assert executor.qbit_client.set_location_calls == 0
+
+
+def test_reuse_fallback_derives_save_path_for_single_entry_nested_file(tmp_path):
+    target_file = (
+        tmp_path
+        / "pool"
+        / "media"
+        / "torrents"
+        / "seeding"
+        / "cross-seed"
+        / "seedpool (API)"
+        / "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX"
+        / "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX.mkv"
+    )
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_bytes(b"payload")
+
+    class _File:
+        name = "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX/Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX.mkv"
+
+    derived = DemotionExecutor._derive_target_save_path_for_torrent(target_file, [_File()])
+
+    assert derived == (
+        tmp_path
+        / "pool"
+        / "media"
+        / "torrents"
+        / "seeding"
+        / "cross-seed"
+        / "seedpool (API)"
+    )
