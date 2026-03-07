@@ -375,7 +375,7 @@ Single living document for current operational status, handoff context, and next
   - `bin/qb-stoppeddl-apply.py`
   - `bin/qb-stoppeddl-apply-watch.sh`
   - `bin/qb-stoppeddl-roundloop.sh`
-  - `bin/qbit-start-seeding-gradual.sh`
+  - `bin/qb-start-seeding-gradual.sh`
 - Full DB refresh pipeline:
   - `bin/codex-says-run-this-next.sh` (canonical)
   - `bin/full-hashall-db-refresh.sh` (equivalent explicit wrapper)
@@ -401,12 +401,12 @@ Single living document for current operational status, handoff context, and next
 ## Incident Update (2026-03-06 08:45 EST)
 
 - Pilot failure root cause is confirmed:
-  - active guard daemon (`qbit-start-seeding-gradual.sh --daemon --guard-only`) stopped hashes in `checkingDL` during repair recheck, producing false `postcheck_timeout`.
+  - active guard daemon (`qb-start-seeding-gradual.sh --daemon --guard-only`) stopped hashes in `checkingDL` during repair recheck, producing false `postcheck_timeout`.
   - evidence:
     - apply pilot report: `/tmp/qb-stoppeddl-bucket-live/reports/apply-pilot-r2-20260306-074556.json`
     - guard stop log: `/home/michael/.logs/hashall/reports/qbit-triage/start-seeding-gradual-guard-20260306-074602.log`
 - New hardening now on this branch/worktree:
-  - `bin/qbit-start-seeding-gradual.sh` `v1.3.8`
+  - `bin/qb-start-seeding-gradual.sh` `v1.3.8`
     - `checkingDL` is no longer treated as dangerous by default.
     - supports repair recheck allowlist file: `/tmp/qb-stoppeddl-bucket-live/guard-recheck-allowlist.json`.
     - optional `--guard-include-checkingdl` retains old strict behavior when explicitly requested.
@@ -514,7 +514,7 @@ Legacy docs remain stubs pointing here:
 
 ### Seeding Daemon Safety Hardening
 
-- `bin/qbit-start-seeding-gradual.sh` hardened to fail-closed (`v1.3.4`):
+- `bin/qb-start-seeding-gradual.sh` hardened to fail-closed (`v1.3.4`):
   - halt if any downloading-like state exists in protected scope,
   - halt on `missingFiles`/`error` state set,
   - stop affected hashes immediately.
@@ -525,9 +525,9 @@ Legacy docs remain stubs pointing here:
 ### Immediate Next Actions
 
 1. Apply remaining safe actionable lane (8 items):
-   - `bin/rehome-57_qb-missing-remediate.sh --plan /home/michael/.logs/hashall/reports/rehome-normalize/nohl-qb-missing-remediate-plan-20260305-204458.json --mode apply --only-reason root_name_unique_candidate --limit 8 --max-apply-actions 8`
+   - `bin/qb-missing-remediate.sh --plan /home/michael/.logs/hashall/reports/rehome-normalize/nohl-qb-missing-remediate-plan-20260305-204458.json --mode apply --only-reason root_name_unique_candidate --limit 8 --max-apply-actions 8`
 2. Re-audit:
-   - `bin/rehome-56_qb-missing-audit.sh`
+   - `bin/qb-missing-audit.sh`
 3. Keep seeding daemon halted until:
    - actionable lane is cleared,
    - ambiguous/false-missing lanes are explicitly triaged.
@@ -553,7 +553,7 @@ Legacy docs remain stubs pointing here:
 - Seeding daemon is intentionally in HALT state and must stay halted during ambiguity triage:
   - halt indicator: `/home/michael/.logs/hashall/reports/qbit-triage/daemon-halt-reset`
   - do not reset until ambiguous/false-missing lanes are resolved or explicitly accepted.
-- `qbit-start-seeding-gradual.sh` hardening was first applied in a different worktree (`main`) and has not yet been ported in this chatrap worktree; re-apply/verify in this branch before daemon re-enable.
+- `qb-start-seeding-gradual.sh` hardening was first applied in a different worktree (`main`) and has not yet been ported in this chatrap worktree; re-apply/verify in this branch before daemon re-enable.
 - Refresh caveat to preserve:
   - `/home/michael/.logs/hashall/rehome/refresh/20260305-195619.log` completed but upgrade stage mostly incomplete (`queued=190 completed=5`), so refresh success does not imply payload-root recovery.
 
@@ -578,7 +578,7 @@ Legacy docs remain stubs pointing here:
 ### Immediate Next Commands (Post-Compact)
 
 1. Reconfirm current missing state:
-   - `bin/rehome-56_qb-missing-audit.sh`
+   - `bin/qb-missing-audit.sh`
 2. False-missing lane (recheck-first):
    - run targeted remediation for non-relocation-safe items (no broad moves).
 3. Ambiguous lane:

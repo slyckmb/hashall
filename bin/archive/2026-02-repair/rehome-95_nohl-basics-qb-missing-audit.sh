@@ -26,7 +26,7 @@ echo "What this does: classify missing torrents and generate remediation plan."
 hr
 echo "run_id=${stamp} step=basics-qb-missing-audit output_prefix=${OUTPUT_PREFIX} limit=${LIMIT} fast=${FAST} debug=${DEBUG}"
 
-cmd=(bin/rehome-56_qb-missing-audit.sh --output-prefix "$OUTPUT_PREFIX" --limit "$LIMIT")
+cmd=(bin/qb-missing-audit.sh --output-prefix "$OUTPUT_PREFIX" --limit "$LIMIT")
 if [[ "$FAST" == "1" ]]; then
   cmd+=(--fast)
 fi

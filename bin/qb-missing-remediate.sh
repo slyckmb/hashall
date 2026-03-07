@@ -8,7 +8,7 @@ hr() {
 usage() {
   cat <<'USAGE'
 Usage:
-  bin/rehome-57_qb-missing-remediate.sh [options]
+  bin/qb-missing-remediate.sh [options]
 
 Options:
   --plan PATH               Remediation plan JSON (default: latest nohl-qb-missing-remediate-plan-*.json)
@@ -107,7 +107,7 @@ if [[ -z "$PLAN_JSON" ]]; then
   PLAN_JSON="$(latest_plan "$OUTPUT_PREFIX")"
 fi
 if [[ -z "$PLAN_JSON" || ! -f "$PLAN_JSON" ]]; then
-  echo "Missing remediation plan; run rehome-56 first or pass --plan" >&2
+  echo "Missing remediation plan; run qb-missing-audit.sh first or pass --plan" >&2
   exit 3
 fi
 

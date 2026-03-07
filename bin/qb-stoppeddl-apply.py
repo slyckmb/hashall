@@ -22,7 +22,7 @@ if str(SRC_DIR) not in sys.path:
 from hashall.qbittorrent import get_qbittorrent_client
 from rehome.seed_state import SEED_ROOT_STATE_PATH, validate_seed_root_state
 
-SEMVER = "0.2.11"
+SEMVER = "0.2.12"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
@@ -633,7 +633,7 @@ def detect_gradual_daemons() -> List[Dict[str, str]]:
         if len(parts) != 2:
             continue
         pid, args = parts[0].strip(), parts[1].strip()
-        if "qbit-start-seeding-gradual.sh" not in args:
+        if "qb-start-seeding-gradual.sh" not in args:
             continue
         if "--daemon" not in args:
             continue
@@ -906,13 +906,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--fail-if-guard-daemon",
         dest="fail_if_guard_daemon",
         action="store_true",
-        help="Abort apply when qbit-start-seeding-gradual daemon is running (default: enabled)",
+        help="Abort apply when qb-start-seeding-gradual daemon is running (default: enabled)",
     )
     p.add_argument(
         "--allow-guard-daemon",
         dest="fail_if_guard_daemon",
         action="store_false",
-        help="Allow apply while qbit-start-seeding-gradual daemon is active (not recommended)",
+        help="Allow apply while qb-start-seeding-gradual daemon is active (not recommended)",
     )
     p.set_defaults(fail_if_guard_daemon=True)
     p.add_argument(

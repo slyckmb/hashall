@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# qbit-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.3.8
+# qb-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
+# Version: 1.3.9
 # Date:    2026-03-06
 #
 # After each batch waits for state to settle, then checks the protected watch
@@ -10,7 +10,7 @@
 # Idempotent: only targets stoppedUP (100%) torrents; already-started ones
 # are stalledUP/uploading and are skipped automatically.
 #
-# Usage: bin/qbit-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--guard-include-checkingdl] [--guard-recheck-allowlist-file PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
+# Usage: bin/qb-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--guard-include-checkingdl] [--guard-recheck-allowlist-file PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
 #   --apply        Execute changes (dry-run if omitted)
 #   --resume       Skip torrents already in stalledUP/uploading/queuedUP
 #   --daemon       Continuous watch loop: poll QB, run ramp when stoppedUP >= --min-batch
@@ -28,7 +28,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.8"
+SCRIPT_VERSION="1.3.9"
 SCRIPT_DATE="2026-03-06"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -50,7 +50,7 @@ USE_CACHE=false
 CACHE_MAX_AGE=15
 GUARD_STOP_COOLDOWN=120
 GUARD_INCLUDE_CHECKINGDL=false
-CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qbit-cache-agent.py}"
+CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qb-cache-agent.py}"
 CACHE_CLIENT_ID="${SCRIPT_NAME}:$$"
 IGNORE_HASHES=""
 IGNORE_HASHES_FILE=""
@@ -66,7 +66,7 @@ EOF
 
 usage_help() {
   cat <<'EOF'
-qbit-start-seeding-gradual.sh
+qb-start-seeding-gradual.sh
 
 Purpose:
   Gradually start stoppedUP torrents in escalating batches with safety checks.
@@ -74,7 +74,7 @@ Purpose:
   stoppedUP threshold is met.
 
 Usage:
-  bin/qbit-start-seeding-gradual.sh [OPTIONS]
+  bin/qb-start-seeding-gradual.sh [OPTIONS]
 
 Options:
   --apply
@@ -147,25 +147,25 @@ Options:
 
 Examples:
   # Show detailed help
-  bin/qbit-start-seeding-gradual.sh --help
+  bin/qb-start-seeding-gradual.sh --help
 
   # One-shot dry-run
-  bin/qbit-start-seeding-gradual.sh --resume
+  bin/qb-start-seeding-gradual.sh --resume
 
   # Daemon mode, live apply, check every 60s
-  bin/qbit-start-seeding-gradual.sh --daemon --apply --min-batch 1 --poll 60
+  bin/qb-start-seeding-gradual.sh --daemon --apply --min-batch 1 --poll 60
 
   # Same, but read qB state via shared cache (max age 5s)
-  bin/qbit-start-seeding-gradual.sh --daemon --apply --min-batch 1 --poll 60 --cache --cache-max-age 5
+  bin/qb-start-seeding-gradual.sh --daemon --apply --min-batch 1 --poll 60 --cache --cache-max-age 5
 
   # Guard-only daemon: never starts, only auto-stops download-like flips
-  bin/qbit-start-seeding-gradual.sh --daemon --guard-only --apply --poll 5 --cache --cache-max-age 5
+  bin/qb-start-seeding-gradual.sh --daemon --guard-only --apply --poll 5 --cache --cache-max-age 5
 
   # Guard-only with 5-minute stop cooldown per hash
-  bin/qbit-start-seeding-gradual.sh --daemon --guard-only --apply --poll 5 --guard-stop-cooldown 300
+  bin/qb-start-seeding-gradual.sh --daemon --guard-only --apply --poll 5 --guard-stop-cooldown 300
 
   # Ignore a known legacy downloader by hash prefix
-  bin/qbit-start-seeding-gradual.sh --daemon --apply --ignore-hashes 102b7bf38155
+  bin/qb-start-seeding-gradual.sh --daemon --apply --ignore-hashes 102b7bf38155
 EOF
 }
 
