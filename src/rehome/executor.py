@@ -19,6 +19,7 @@ from urllib.parse import quote
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from hashall.device import ensure_files_table, get_files_table_name
+from hashall.fastresume import patch_fastresume_file
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.qbittorrent import get_qbittorrent_client
 from hashall.payload import get_payload_file_rows
@@ -102,6 +103,16 @@ class DemotionExecutor:
             )
         except ValueError:
             self.recheck_queue_grace_seconds = 20.0
+        self.reuse_transport = os.getenv(
+            "HASHALL_REHOME_REUSE_TRANSPORT", "fastresume"
+        ).strip().lower() or "fastresume"
+        self.fastresume_dir = Path(
+            os.getenv(
+                "HASHALL_REHOME_FASTRESUME_DIR",
+                "/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup",
+            )
+        ).expanduser()
+        self.qb_container = os.getenv("HASHALL_REHOME_QB_CONTAINER", "qbittorrent_vpn").strip()
 
     def _get_db_connection(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Get database connection."""
@@ -906,6 +917,186 @@ class DemotionExecutor:
             f"state={last_state} progress={last_progress:.4f} amount_left={last_amount_left} "
             f"timeout_s={int(timeout_seconds)}"
         )
+
+    def _docker_qb_ctl(self, action: str) -> None:
+        if action not in {"stop", "start"}:
+            raise ValueError(f"unsupported_qb_container_action:{action}")
+        if not self.qb_container:
+            raise RuntimeError("qB container name is required for fastresume REUSE transport")
+        proc = subprocess.run(
+            ["docker", action, self.qb_container],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            detail = ((proc.stderr or "") + " " + (proc.stdout or "")).strip()
+            raise RuntimeError(
+                f"docker_{action}_failed container={self.qb_container} detail={detail or proc.returncode}"
+            )
+
+    def _wait_qb_online_after_restart(self, timeout_seconds: float = 120.0) -> None:
+        import time
+
+        deadline = time.monotonic() + max(10.0, timeout_seconds)
+        self.qbit_client._authenticated = False  # type: ignore[attr-defined]
+        while time.monotonic() <= deadline:
+            if self.qbit_client.test_connection() and self.qbit_client.login():
+                return
+            time.sleep(2.0)
+        raise RuntimeError(
+            f"qB did not come back online after restart within {int(timeout_seconds)}s"
+        )
+
+    def _restore_fastresume_backups(self, backups: Dict[Path, Path]) -> None:
+        for fastresume_path, backup_path in backups.items():
+            if not backup_path.exists():
+                continue
+            shutil.copy2(backup_path, fastresume_path)
+
+    def _repoint_torrents_via_fastresume_batch(self, relocations: List[Dict]) -> None:
+        """
+        Repoint qB torrent metadata without invoking qB move semantics.
+
+        This is the safe REUSE path:
+        1. Pause and stabilize all torrents
+        2. Stop qB
+        3. Patch fastresume save_path/qBt-savePath/qBt-downloadPath offline
+        4. Start qB
+        5. Recheck and validate against the already-existing target payload/views
+        """
+        import time
+
+        paused: List[str] = []
+        patched: List[Tuple[str, Path, Path]] = []
+        resume_candidates: List[str] = []
+        verify_timeout_by_hash: Dict[str, float] = {}
+        atm_disabled_by_us: List[str] = []
+        backup_suffix = ".rehome-fastresume-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        total = len(relocations)
+        progress_every = 5 if total <= 50 else 25
+
+        if self.reuse_transport != "fastresume":
+            raise RuntimeError(f"unsupported reuse transport: {self.reuse_transport}")
+        if not self.fastresume_dir.exists():
+            raise RuntimeError(f"fastresume_dir_not_found path={self.fastresume_dir}")
+
+        try:
+            for idx, r in enumerate(relocations, start=1):
+                torrent_hash = r["torrent_hash"]
+                info = self._get_torrent_info_with_retry(torrent_hash, attempts=3, delay_seconds=1.0)
+                if not info:
+                    raise RuntimeError(f"qB info unavailable for torrent {torrent_hash[:16]}")
+                verify_timeout_by_hash[torrent_hash] = self._relocation_verify_timeout_seconds(info)
+                if not self._is_qb_state_paused_or_stopped(str(getattr(info, "state", "") or "")):
+                    resume_candidates.append(torrent_hash)
+                auto_enabled = bool(getattr(info, "auto_tmm", False))
+                if self.disable_atm_on_rehome:
+                    self._log(
+                        f"  auto_tmm_before hash={torrent_hash[:16]} enabled={str(auto_enabled).lower()}"
+                    )
+                    if auto_enabled:
+                        if not self.qbit_client.set_auto_management(torrent_hash, False):
+                            raise RuntimeError(f"Failed to disable ATM for torrent {torrent_hash[:16]}")
+                        atm_disabled_by_us.append(torrent_hash)
+                if not self.qbit_client.pause_torrent(torrent_hash):
+                    raise RuntimeError(f"Failed to pause torrent {torrent_hash[:16]}")
+                if not self._wait_for_stable_qb_state(torrent_hash, timeout_seconds=60.0):
+                    raise RuntimeError(
+                        f"Torrent {torrent_hash[:16]} did not reach stable state within 60s"
+                    )
+                paused.append(torrent_hash)
+                fr_path = self.fastresume_dir / f"{torrent_hash}.fastresume"
+                if not fr_path.exists():
+                    raise RuntimeError(f"missing fastresume for torrent {torrent_hash[:16]} path={fr_path}")
+                if idx == 1 or idx == total or idx % progress_every == 0:
+                    self._log(f"  relocate_progress phase=pause done={idx}/{total}")
+
+            self._log(
+                f"  fastresume_batch stop_qb container={self.qb_container} rows={len(relocations)}"
+            )
+            self._docker_qb_ctl("stop")
+
+            for idx, r in enumerate(relocations, start=1):
+                torrent_hash = r["torrent_hash"]
+                fr_path = self.fastresume_dir / f"{torrent_hash}.fastresume"
+                backup_path = fr_path.with_name(fr_path.name + backup_suffix)
+                patch_fastresume_file(fr_path, r["target_save_path"], backup_suffix)
+                patched.append((torrent_hash, fr_path, backup_path))
+                if idx == 1 or idx == total or idx % progress_every == 0:
+                    self._log(f"  relocate_progress phase=fastresume_patch done={idx}/{total}")
+
+            self._log(f"  fastresume_batch start_qb container={self.qb_container}")
+            self._docker_qb_ctl("start")
+            self._wait_qb_online_after_restart()
+
+            for idx, r in enumerate(relocations, start=1):
+                torrent_hash = r["torrent_hash"]
+                expected_path = canonicalize_path(Path(r["target_save_path"]).resolve())
+                verify_timeout = verify_timeout_by_hash.get(torrent_hash, 180.0)
+                torrent_info, actual_path = self._wait_for_save_path(
+                    torrent_hash,
+                    expected_path,
+                    timeout_seconds=max(verify_timeout, 120.0),
+                    interval_seconds=1.0,
+                )
+                if not torrent_info or actual_path != expected_path:
+                    raise RuntimeError(
+                        f"Torrent {torrent_hash[:16]} save_path verification failed after fastresume repoint "
+                        f"expected={expected_path} actual={actual_path}"
+                    )
+                if self.disable_atm_on_rehome:
+                    self._log(
+                        f"  auto_tmm_after hash={torrent_hash[:16]} "
+                        f"enabled={str(bool(getattr(torrent_info, 'auto_tmm', False))).lower()}"
+                    )
+                self._validate_qb_content_path(
+                    torrent_hash,
+                    attempts=5,
+                    delay_seconds=1.0,
+                )
+                self._ensure_qb_seed_ready_after_relocate(
+                    torrent_hash,
+                    min_timeout_seconds=max(verify_timeout, 300.0),
+                    interval_seconds=2.0,
+                )
+                if idx == 1 or idx == total or idx % progress_every == 0:
+                    self._log(f"  relocate_progress phase=verify done={idx}/{total}")
+
+            if self.resume_after_relocate:
+                resume_total = len(resume_candidates)
+                for idx, h in enumerate(resume_candidates, start=1):
+                    if not self.qbit_client.resume_torrent(h):
+                        raise RuntimeError(f"Failed to resume torrent {h[:16]}")
+                    if idx == 1 or idx == resume_total or idx % progress_every == 0:
+                        self._log(f"  relocate_progress phase=resume done={idx}/{resume_total}")
+            else:
+                self._log(
+                    f"  relocate_progress phase=resume skipped=policy_keep_paused count={len(paused)}"
+                )
+        except Exception:
+            if patched:
+                try:
+                    self._docker_qb_ctl("stop")
+                except Exception as stop_exc:
+                    self._log(f"  fastresume_rollback stop_failed error={stop_exc}", "warning")
+                try:
+                    self._restore_fastresume_backups({fr: bak for _, fr, bak in patched})
+                    self._log(f"  fastresume_rollback restored={len(patched)}", "warning")
+                except Exception as restore_exc:
+                    self._log(f"  fastresume_rollback restore_failed error={restore_exc}", "warning")
+                try:
+                    self._docker_qb_ctl("start")
+                    self._wait_qb_online_after_restart()
+                except Exception as start_exc:
+                    self._log(f"  fastresume_rollback start_failed error={start_exc}", "warning")
+            if atm_disabled_by_us and hasattr(self.qbit_client, "set_auto_management"):
+                for h in atm_disabled_by_us:
+                    try:
+                        self.qbit_client.set_auto_management(h, True)
+                    except Exception:
+                        pass
+            raise
 
     def _relocate_torrents_atomic(self, relocations: List[Dict]) -> None:
         """
@@ -2570,7 +2761,7 @@ class DemotionExecutor:
             conn.close()
         phase_times["build_relocations"] = time.monotonic() - t0
 
-        # Relocate all torrents atomically
+        # Relocate all torrents atomically.
         t0 = time.monotonic()
         self._log("step=relocate_siblings")
         self._relocate_torrents_atomic(relocations)
@@ -2642,10 +2833,18 @@ class DemotionExecutor:
             conn.close()
         phase_times["build_relocations"] = time.monotonic() - t0
 
-        # Relocate all torrents atomically
+        # Repoint all torrents to the existing pool payload/views without asking
+        # qB to move bytes. REUSE must be metadata-only.
         t0 = time.monotonic()
         self._log("step=relocate_siblings")
-        self._relocate_torrents_atomic(relocations)
+        if self.reuse_transport == "fastresume":
+            self._log("  reuse_transport=fastresume")
+            self._repoint_torrents_via_fastresume_batch(relocations)
+        elif self.reuse_transport == "set_location":
+            self._log("  reuse_transport=set_location", "warning")
+            self._relocate_torrents_atomic(relocations)
+        else:
+            raise RuntimeError(f"unsupported reuse transport: {self.reuse_transport}")
         phase_times["relocate"] = time.monotonic() - t0
 
         # 3. Cleanup stash-side views

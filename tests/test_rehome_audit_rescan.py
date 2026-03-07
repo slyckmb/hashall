@@ -160,6 +160,7 @@ def test_rehome_audit_run_recorded(tmp_path, monkeypatch):
 
     fake_qb = FakeQbitClient(default_path=str(source_root.parent))
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = fake_qb
 
     executor.execute(plan)
@@ -211,6 +212,7 @@ def test_rehome_rescan_invoked(tmp_path, monkeypatch):
     monkeypatch.setattr("hashall.scan.scan_path", fake_scan_path)
 
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClient(default_path=str(source_root.parent))
 
     executor.execute(plan, rescan=True)

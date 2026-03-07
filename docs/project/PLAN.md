@@ -85,7 +85,8 @@ Unified roadmap + active backlog for development and operations.
   - represent retained-source / cleanup-pending state explicitly for `REUSE`
 - [x] Upgrade old `rehome_runs` schemas in place so new relocation-state fields are persisted on existing live catalogs.
 - [x] Fix qB recheck guard to tolerate brief queued `stoppedDL/0%` states after a recheck request before qB flips into `checkingUP`.
-- [ ] Re-run a single-item live `REUSE` pilot on the patched executor/guard path, then reassess whether batch apply is safe.
+- [x] Replace qB `setLocation` as the default `REUSE` transport with offline fastresume repointing.
+- [ ] Run a fresh single-item live `REUSE` pilot on the new fastresume transport before any further `REUSE` batch scaling.
 
 ### P4 Pool Dataset Migration Process
 
@@ -166,7 +167,8 @@ Unified roadmap + active backlog for development and operations.
   - `qb-*` cache shims now support both the normalized `qb-*` names and the still-installed `qbitui` canonical `qbit-*` names
   - `rehome auto` now reports `REUSE` apply/verify correctly and waits for stable qB ready state after recheck
   - immediate `REUSE` relocation state is now written into `rehome_runs` and cleanup-required follow-up tags
-  - remaining blocker before wider pool-data -> pool-media apply is a clean live pilot on the patched recheck-queue guard path
+  - `REUSE` now defaults to offline fastresume repointing instead of qB `setLocation`
+  - remaining blocker before wider pool-data -> pool-media apply is a clean live pilot on the new fastresume transport
 
 ## Active Engineering Backlog
 

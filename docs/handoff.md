@@ -9,12 +9,13 @@ Current branch/worktree:
 - `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260305-181919`
 
 Current versions:
-- `hashall 0.4.145`
-- `rehome 0.6.11`
+- `hashall 0.4.153`
+- `rehome 0.6.19`
 
-Newest committed fixes to preserve:
-- `f1d3208` `fix(rehome-refresh): accept zero-upgrade payload sync summaries`
-- `e6d6feb` `feat(qb-repair): derive stoppedDL root policy from seed-root-state`
+Newest critical uncommitted/just-landed focus to preserve:
+- `REUSE` no longer defaults to qB `setLocation`; it now uses offline fastresume repointing
+- new helper module: `src/hashall/fastresume.py`
+- `rehome auto` `REUSE` apply line now reflects actual cleanup state (`cleanup pending` vs `source gone`)
 
 Current operational facts:
 - `~/.hashall/seed-root-state.json` is the canonical machine-readable seed-root contract.
@@ -24,10 +25,9 @@ Current operational facts:
 - The earlier hidden confirmation prompt and `Plan #59` `ActionInfo` crash are also fixed.
 
 Still open:
-- improve long-running refresh heartbeat/progress visibility
-- continue qB migration/rehome audit beyond stoppedDL drain/apply
-- produce the pilot-safe dataset migration lane for `/pool/data/media/torrents/seeding -> /pool/media/torrents/seeding`
-- reduce status docs further if more non-canonical variants remain
+- run a fresh live `REUSE qty1` pilot on the new fastresume transport
+- if clean, scale `pool-data -> pool-media` `REUSE` cautiously before planning `MOVE`
+- after pool migration convergence, resume `~noHL` planning/execution
 
 Historical snapshot:
 - `docs/archive/2026-doc-reduction/snapshot/docs/handoff.md`

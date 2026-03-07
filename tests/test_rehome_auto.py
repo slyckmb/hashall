@@ -48,7 +48,15 @@ class _FakeExecutor:
         return None
 
     def execute(self, plan: dict):
+        plan["cleanup_source_deferred"] = True
+        plan["cleanup_source_deferred_path"] = plan.get("source_path")
         return None
+
+
+class _FakeExecutorSourceGone(_FakeExecutor):
+    def execute(self, plan: dict):
+        plan["cleanup_source_deferred"] = False
+        plan.pop("cleanup_source_deferred_path", None)
 
 
 class _FakeRunLogger:
@@ -232,3 +240,83 @@ def test_run_auto_reuse_apply_reports_cleanup_pending(
     apply_record = _FakeRunLogger.dumped_extra["candidates"][0]["apply"]
     assert apply_record["freed_bytes"] == 0
     assert apply_record["source_cleanup"] == "pending_manual_cleanup"
+
+
+def test_run_auto_reuse_apply_reports_source_gone_when_not_deferred(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    plan = {
+        "direction": "demote",
+        "decision": "REUSE",
+        "payload_hash": "payload_hash_123",
+        "target_path": "/pool/media/torrents/seeding/cross-seed/Test/Item",
+        "source_path": "/pool/data/media/torrents/seeding/cross-seed/Test/Item",
+        "source_device_id": 231,
+        "target_device_id": 141,
+        "affected_torrents": ["abc123"],
+        "view_targets": [
+            {
+                "torrent_hash": "abc123",
+                "target_save_path": "/pool/media/torrents/seeding/cross-seed/Test",
+            }
+        ],
+        "reasons": ["Payload already exists on pool-media"],
+    }
+
+    monkeypatch.setattr("rehome.runlog.RunLogger", _FakeRunLogger)
+    monkeypatch.setattr("hashall.model.connect_db", lambda *args, **kwargs: _DummyConn())
+    monkeypatch.setattr("rehome.executor.DemotionExecutor", _FakeExecutorSourceGone)
+    monkeypatch.setattr("rehome.cli._acquire_rehome_lock", lambda: _DummyLock())
+    monkeypatch.setattr(
+        auto_mod,
+        "_device_info",
+        lambda _conn, device_id: {
+            44: {"alias": "stash", "mount": "/stash"},
+            141: {"alias": "pool-media", "mount": "/pool/media"},
+            231: {"alias": "pool-data", "mount": "/pool/data"},
+        }[device_id],
+    )
+    monkeypatch.setattr(
+        auto_mod,
+        "_find_move_candidates",
+        lambda *args, **kwargs: [
+            {
+                "payload_hash": "payload_hash_123",
+                "source_bytes": 50 * 1024**3,
+                "source_files": 5,
+                "torrent_count": 1,
+                "source_device_id": 231,
+            }
+        ],
+    )
+    monkeypatch.setattr(auto_mod, "_make_planner", lambda **kwargs: _FakePlanner(plan))
+    monkeypatch.setattr(
+        auto_mod,
+        "_inline_verify",
+        lambda *args, **kwargs: (True, "stoppedup×1 · 100% · catalog OK · source gone"),
+    )
+
+    _FakeRunLogger.dumped_extra = None
+    exit_code = auto_mod.run_auto(
+        catalog_path=tmp_path / "catalog.db",
+        active_device_id=44,
+        dest_device_id=141,
+        dest_root="/pool/media/torrents/seeding",
+        active_root="/stash/media",
+        content_root="/stash/media",
+        limit=1,
+        do_apply=True,
+        plan_log_dir=tmp_path / "plans",
+        source_device_id=231,
+        extra_sources=[(231, "pool-data", "/pool/data")],
+        verbose=False,
+        debug=False,
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "source gone" in out
+    assert "cleanup pending" not in out
+
+    apply_record = _FakeRunLogger.dumped_extra["candidates"][0]["apply"]
+    assert apply_record["source_cleanup"] == "already_absent"

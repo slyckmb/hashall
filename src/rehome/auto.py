@@ -1135,19 +1135,22 @@ def run_auto(
                         executor.execute(plan)
                         apply_elapsed = (datetime.now() - t_apply).total_seconds()
                         decision = str(plan.get("decision") or "").strip().upper()
+                        cleanup_pending = bool(plan.get("cleanup_source_deferred"))
                         if decision == "REUSE":
+                            cleanup_label = "cleanup pending" if cleanup_pending else "source gone"
                             print(
-                                f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · cleanup pending"
+                                f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · {cleanup_label}"
                                 f"{'':>9}  OK"
                             )
                             cand_rec["apply"] = {
                                 "ok": True,
                                 "elapsed_s": round(apply_elapsed, 3),
                                 "freed_bytes": 0,
-                                "source_cleanup": "pending_manual_cleanup",
+                                "source_cleanup": "pending_manual_cleanup" if cleanup_pending else "already_absent",
                                 "error": None,
                             }
-                            cleanup_pending_count += 1
+                            if cleanup_pending:
+                                cleanup_pending_count += 1
                         else:
                             print(
                                 f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · source deleted"

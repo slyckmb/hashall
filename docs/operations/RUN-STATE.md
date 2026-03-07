@@ -161,6 +161,13 @@ Single living document for current operational status, handoff context, and next
 - `REUSE` now sets `cleanup_source_deferred` when the retained source still exists, which means:
   - follow-up cleanup/tag flows can see the pending source-removal work
   - live apply runs no longer depend on later refresh/orphan-GC just to expose source/target relocation intent
+- New transport rule:
+  - `REUSE` must not ask qB to move bytes
+  - default `REUSE` transport is now offline fastresume repointing
+  - qB `setLocation` is retained only as an explicit escape hatch via `HASHALL_REHOME_REUSE_TRANSPORT=set_location`
+- Reason for the transport change:
+  - live `REUSE` pilots showed qB `MV/moving` states while using `setLocation`
+  - that is operationally unsafe on this host because prior qB mass-move behavior caused OOM/orphaned transfers
 - New qB behavior observed during live pilot:
   - after a recheck request, later torrents in the batch can sit briefly in `stoppedDL 0%` before qB flips them into `checkingUP`
   - this is a queued recheck state, not necessarily a stale fastresume failure
@@ -169,7 +176,7 @@ Single living document for current operational status, handoff context, and next
   - after the grace window expires, true `stoppedDL/pausedDL` still fails hard as before
 - Validation status:
   - targeted executor/audit/auto/catalog-sync suites are green
-  - the next required gate is a fresh single-item live `REUSE` pilot on the patched guard path
+  - the next required gate is a fresh single-item live `REUSE` pilot on the fastresume transport
 
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 
