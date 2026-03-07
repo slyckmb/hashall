@@ -73,11 +73,17 @@ Unified roadmap + active backlog for development and operations.
   - post-apply qB state validation
   - download-prevention guardrails
   - scope verification against filesystem and qB save path
-- [ ] Fix `rehome auto --apply` `REUSE` execution/report semantics so it does not:
+- [x] Fix `rehome auto --apply` `REUSE` execution/report semantics so it does not:
   - claim source deletion when source retention is intentional
   - credit freed bytes before cleanup actually occurs
   - fail inline verify merely because retained source still exists
-- [ ] Re-run a single-item live `REUSE` pilot after the reporting/verify fix, then reassess whether batch apply is safe.
+- [x] Harden qB post-relocation readiness checks so a stale immediate `stoppedUP` sample does not incorrectly pass before delayed `checkingUP` begins.
+- [ ] Audit and harden immediate catalog sync after rehome apply so known moves/relocations are persisted without waiting for full refresh:
+  - update affected `torrent_instances` immediately
+  - reconcile known file-row changes immediately
+  - publish authoritative target payload ownership immediately
+  - represent retained-source / cleanup-pending state explicitly for `REUSE`
+- [ ] Re-run a single-item live `REUSE` pilot after the catalog-sync hardening work, then reassess whether batch apply is safe.
 
 ### P4 Pool Dataset Migration Process
 
@@ -156,7 +162,8 @@ Unified roadmap + active backlog for development and operations.
   - `rehome auto --from pool-data --to pool-media --limit 25` dry-run now returns real `REUSE ... OK` plans after the explicit `--from` source-root fix
   - selective `qb-*` bin normalization is complete
   - `qb-*` cache shims now support both the normalized `qb-*` names and the still-installed `qbitui` canonical `qbit-*` names
-  - remaining blocker before wider pool-data -> pool-media apply is `REUSE` post-apply reporting/verification correctness in `rehome auto`
+  - `rehome auto` now reports `REUSE` apply/verify correctly and waits for stable qB ready state after recheck
+  - remaining blocker before wider pool-data -> pool-media apply is immediate catalog-sync clarity for `REUSE` source-side payload state and cleanup-pending follow-through
 
 ## Active Engineering Backlog
 

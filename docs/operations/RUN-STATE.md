@@ -123,6 +123,29 @@ Single living document for current operational status, handoff context, and next
 - Live verification:
   - exact command now returns `REUSE ... OK` and passes `check dryrun`
 
+## Rehome Auto Pilot Catalog Check (2026-03-07 18:20 EST)
+
+- Verified against the `20260307-140001` live `REUSE` pilot for payload hash:
+  - `0d1fb0f6460297d84db8339f335eb22a4b13ef50cbc02ba2ed16d3a8d4657786`
+- Immediate catalog updates that already happen correctly:
+  - all affected `torrent_instances` now point to target `payload_id=13569`
+  - all affected `torrent_instances` now carry:
+    - `device_id=141`
+    - `fs_uuid=zfs-4673783476987974510`
+    - `save_path=/pool/media/torrents/seeding/cross-seed/hawke-uno`
+  - target file rows are present and active in `files_141`
+  - previously deleted legacy `seeds/*` source rows remain deleted in `files_231`
+- Gap confirmed:
+  - source-side payload rows under `/pool/data/media/torrents/seeding/...` remain `complete` and catalog-visible after `REUSE`
+  - this is accurate at the raw filesystem level because source content still exists, but it does not give operators a strong catalog-level signal that:
+    - qB ownership has moved to the target payload
+    - source retention is temporary
+    - cleanup is pending rather than refresh-missing
+- Operational conclusion:
+  - the system is not fully "waiting on refresh" today; live torrent ownership and target mapping are updated immediately
+  - the remaining deficiency is inline catalog-state clarity for retained source payloads after `REUSE`
+  - next hardening step is to make apply-time catalog sync publish that state explicitly instead of relying on later refresh/GC to clarify it
+
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 
 - Branch/worktree in active use for this incident:
