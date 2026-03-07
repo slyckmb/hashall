@@ -28,7 +28,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.9"
+SCRIPT_VERSION="1.3.10"
 SCRIPT_DATE="2026-03-06"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -984,12 +984,12 @@ PYEOF
   echo "$STATUS_LINE" | tee -a "$DAEMON_LOG"
 
   if [[ "$GUARD_ONLY" == true ]]; then
-    RUN_TS="$(date +%Y%m%d-%H%M%S)"
-    LOG="$LOGDIR/start-seeding-gradual-guard-${RUN_TS}.log"
     if run_guard_pass; then
-      echo "$(date '+%F %T') [daemon] Guard pass clean — log: $LOG" | tee -a "$DAEMON_LOG"
+      echo "$(date '+%F %T') [daemon] Guard pass clean" | tee -a "$DAEMON_LOG"
     else
       rc=$?
+      RUN_TS="$(date +%Y%m%d-%H%M%S)"
+      LOG="$LOGDIR/start-seeding-gradual-guard-${RUN_TS}.log"
       if [[ "$rc" -eq 2 ]]; then
         echo "$(date '+%F %T') [daemon] Guard pass stopped downloading-like torrents — log: $LOG" | tee -a "$DAEMON_LOG"
       else
