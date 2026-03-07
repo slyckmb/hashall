@@ -8,6 +8,12 @@ from typing import Dict, Optional, Sequence
 from pathlib import Path
 
 
+def filesystem_uuid_is_stable(fs_uuid: Optional[str]) -> bool:
+    """Return True when fs_uuid is a durable identifier, not a device-id fallback."""
+    value = str(fs_uuid or "").strip()
+    return bool(value) and not value.startswith("dev-")
+
+
 def get_filesystem_uuid(path: str) -> str:
     """
     Get persistent filesystem UUID for a path.

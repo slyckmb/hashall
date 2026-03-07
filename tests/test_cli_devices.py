@@ -5,6 +5,7 @@ Tests for hashall devices CLI commands.
 import unittest
 import tempfile
 import sqlite3
+import json
 from pathlib import Path
 from click.testing import CliRunner
 from hashall.cli import cli
@@ -42,6 +43,138 @@ class TestDevicesCLI(unittest.TestCase):
         result = runner.invoke(cli, ['devices', 'repair-indexes', '--db', str(self.db_path)])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("index_repair", result.output)
+
+    def test_devices_migrate_files_tables_dry_run_is_default_and_non_mutating(self):
+        """migrate-files-tables should default to dry-run and not mutate the DB."""
+        from hashall.device import ensure_files_table
+
+        cursor = self.conn.cursor()
+        ensure_files_table(cursor, 49)
+        cursor.execute(
+            """
+            INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("zfs-pool-49", 49, "pool", "/pool", "/pool"),
+        )
+        cursor.execute("UPDATE devices SET files_table = NULL WHERE device_id = 49")
+        self.conn.commit()
+
+        relations_before = {
+            (name, rel_type)
+            for name, rel_type in self.conn.execute(
+                "SELECT name, type FROM sqlite_master WHERE name LIKE 'files_%'"
+            ).fetchall()
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['devices', 'migrate-files-tables', '--db', str(self.db_path)])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("mode=dry-run", result.output)
+
+        row = self.conn.execute(
+            "SELECT files_table FROM devices WHERE device_id = 49"
+        ).fetchone()
+        self.assertIsNone(row[0])
+
+        relations_after = {
+            (name, rel_type)
+            for name, rel_type in self.conn.execute(
+                "SELECT name, type FROM sqlite_master WHERE name LIKE 'files_%'"
+            ).fetchall()
+        }
+        self.assertEqual(relations_before, relations_after)
+        self.assertIn(("files_49", "table"), relations_after)
+        self.assertNotIn(("files_fs_zfs_pool_49", "table"), relations_after)
+
+    def test_devices_migrate_files_tables_apply_creates_snapshot_and_binding(self):
+        """migrate-files-tables apply should snapshot first and bind stable tables."""
+        from hashall.device import ensure_files_table
+
+        cursor = self.conn.cursor()
+        ensure_files_table(cursor, 50)
+        cursor.execute(
+            "INSERT INTO files_50 (path, size, mtime, sha256, inode, status) VALUES (?, ?, ?, ?, ?, 'active')",
+            ("sample.bin", 123, 1.0, "hash-sample", 5001),
+        )
+        cursor.execute(
+            """
+            INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("zfs-pool-50", 50, "pool", "/pool", "/pool"),
+        )
+        cursor.execute("UPDATE devices SET files_table = NULL WHERE device_id = 50")
+        self.conn.commit()
+
+        snapshot_path = self.db_path.parent / "catalog-snapshot.sqlite3"
+        report_path = self.db_path.parent / "migrate-report.json"
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                'devices', 'migrate-files-tables',
+                '--db', str(self.db_path),
+                '--apply',
+                '--snapshot-db', str(snapshot_path),
+                '--report-json', str(report_path),
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("mode=apply", result.output)
+        self.assertTrue(snapshot_path.exists())
+        self.assertTrue(report_path.exists())
+
+        files_table = self.conn.execute(
+            "SELECT files_table FROM devices WHERE device_id = 50"
+        ).fetchone()[0]
+        self.assertEqual(files_table, "files_fs_zfs_pool_50")
+
+        relations = {
+            (name, rel_type)
+            for name, rel_type in self.conn.execute(
+                "SELECT name, type FROM sqlite_master WHERE name IN ('files_50', 'files_fs_zfs_pool_50')"
+            ).fetchall()
+        }
+        self.assertIn(("files_fs_zfs_pool_50", "table"), relations)
+        self.assertIn(("files_50", "view"), relations)
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["mode"], "apply")
+        self.assertEqual(report["summary"]["devices"], 1)
+        self.assertEqual(report["devices"][0]["post_binding"], "files_fs_zfs_pool_50")
+        preserved = self.conn.execute(
+            "SELECT path, sha256 FROM files_50 WHERE path = 'sample.bin'"
+        ).fetchone()
+        self.assertEqual(tuple(preserved), ("sample.bin", "hash-sample"))
+
+    def test_devices_migrate_files_tables_apply_rejects_volatile_fs_uuid(self):
+        """apply should refuse devices that still use dev-* fallback identity."""
+        from hashall.device import ensure_files_table
+
+        cursor = self.conn.cursor()
+        ensure_files_table(cursor, 51)
+        cursor.execute(
+            """
+            INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("dev-51", 51, "pool", "/pool", "/pool"),
+        )
+        cursor.execute("UPDATE devices SET files_table = NULL WHERE device_id = 51")
+        self.conn.commit()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ['devices', 'migrate-files-tables', '--db', str(self.db_path), '--apply'],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("volatile dev-* fs_uuid fallback", result.output)
 
     def test_devices_list_empty_database(self):
         """Test 'devices list' with no devices registered."""
