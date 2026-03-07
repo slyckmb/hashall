@@ -642,8 +642,10 @@ def run_refresh(
                         if plan_id:
                             execute_cmd = [
                                 python, "-m", "hashall.cli", "link", "execute", plan_id,
+                                "--yes",
                             ] + db_args
                             label = f"link execute plan_id={plan_id} ({managed_alias})"
+                            print("  [refresh] delegated progress may continue in ~/.logs/hashall/hashall.log")
                             ok, _ = _run_step(label, execute_cmd)
                             overall_ok = overall_ok and ok
                         else:
@@ -666,8 +668,10 @@ def run_refresh(
                             if plan_id:
                                 execute_cmd = [
                                     python, "-m", "hashall.cli", "link", "execute", plan_id,
+                                    "--yes",
                                 ] + db_args
                                 label = f"link execute plan_id={plan_id} ({dev_alias})"
+                                print("  [refresh] delegated progress may continue in ~/.logs/hashall/hashall.log")
                                 ok, _ = _run_step(label, execute_cmd)
                                 overall_ok = overall_ok and ok
                             else:

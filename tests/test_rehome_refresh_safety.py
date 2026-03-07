@@ -103,8 +103,8 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
 
     assert exit_code == 0
     command_lines = [" ".join(cmd) for cmd in commands]
-    assert any("link execute 55" in line for line in command_lines)
-    assert any("link execute 56" in line for line in command_lines)
+    assert any("link execute 55 --yes" in line for line in command_lines)
+    assert any("link execute 56 --yes" in line for line in command_lines)
 
 
 def test_run_catalog_preflight_reports_unknown_device_refs(tmp_path: Path) -> None:

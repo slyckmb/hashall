@@ -30,10 +30,17 @@ Unified roadmap + active backlog for development and operations.
 - [ ] Audit qBit repair, rehome, and migration tooling for silent-failure patterns:
   - parser drift
   - unsafe default apply behavior
+  - interactive prompts inside non-interactive orchestrators
+  - long silent pauses with no heartbeat/progress feedback
   - stale cache / stale qB state assumptions
   - cross-filesystem donor selection
   - save-path / content-path mismatch handling
   - hardlink / inode preservation assumptions
+- [ ] Review the current refresh long-pause behavior and fix operator feedback:
+  - identify where orchestration can block on hidden confirmation prompts
+  - emit heartbeat/progress lines during long-running steps
+  - surface “waiting for confirmation” explicitly if a subprocess is interactive
+  - identify secondary logs to watch during quiet periods
 - [ ] Harden qBit migration/rehome workflows with explicit safety gates:
   - fail-closed on ambiguity
   - dry-run-first with machine-readable plan output
