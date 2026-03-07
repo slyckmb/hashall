@@ -13,6 +13,32 @@ Single living document for current operational status, handoff context, and next
 2. Keep hashall catalog refresh + dedup pipeline robust across `stash`, `data`, and `spare`.
 3. Eliminate refresh/runtime failures caused by device alias drift and negative device IDs.
 4. Remove remaining storage-layer dependence on volatile `device_id` by binding file tables to stable `fs_uuid`.
+5. Publish one canonical machine-readable seed-root-state contract so `traktor` and related tooling stop inferring root/link state ad hoc.
+
+## Seed-Root Contract Update (2026-03-07 11:35 EST)
+
+- New source-of-truth publisher added:
+  - `src/rehome/seed_state.py`
+  - `rehome seed-root-state show [--write]`
+- Published contract path:
+  - `~/.hashall/seed-root-state.json`
+- Ownership model:
+  - `hashall` writes
+  - `traktor` should consume read-only
+- Contract currently publishes:
+  - `active.seeding_root`
+  - `target.seeding_root`
+  - `cross_seed.link_root`
+  - `migration.state`
+  - `migration.source_roots`
+  - `aliases`
+  - `mirror_roots`
+- Current operational intent:
+  - advertise `/pool/media/torrents/seeding` as the active/target seeding root
+  - surface legacy `/pool/data/media/torrents/seeding`, `/pool/data/seeds`, and `/data/media/torrents/seeding` explicitly as migration mirrors/source roots
+- Related refresh anomaly now tracked/fixed:
+  - post-`Plan #59` dedup execution on `spare` failed due to `ActionInfo` local shadowing in `hashall.link_executor.execute_plan()`
+  - fixed in active worktree and covered by regression test
 
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 

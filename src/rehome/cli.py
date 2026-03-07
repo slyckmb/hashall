@@ -1427,6 +1427,38 @@ def config_group():
     """Manage rehome defaults (~/.hashall/rehome.toml)."""
 
 
+@cli.group("seed-root-state")
+def seed_root_state_group():
+    """Inspect or publish the canonical seed-root coordination contract."""
+
+
+@seed_root_state_group.command("show")
+@click.option("--write", "do_write", is_flag=True, help="Write the published state file atomically")
+@click.option("--output", type=click.Path(path_type=Path), default=None,
+              help="Override output path (default: ~/.hashall/seed-root-state.json)")
+@click.option("--compact", is_flag=True, help="Print compact JSON instead of pretty JSON")
+def seed_root_state_show(do_write, output, compact):
+    """Print the seed-root-state contract, optionally writing it to disk."""
+    from rehome.seed_state import (
+        SEED_ROOT_STATE_PATH,
+        build_seed_root_state,
+        publish_seed_root_state,
+        _existing_generation,
+    )
+
+    output_path = output or SEED_ROOT_STATE_PATH
+    if do_write:
+        written_path, state = publish_seed_root_state(output_path)
+        click.echo(f"✅ wrote seed-root-state: {written_path}")
+    else:
+        state = build_seed_root_state(previous_generation=_existing_generation(output_path))
+
+    if compact:
+        click.echo(json.dumps(state, sort_keys=True))
+    else:
+        click.echo(json.dumps(state, indent=2, sort_keys=True))
+
+
 @config_group.command("show")
 @click.option("--catalog", default=None, help="Override config catalog path")
 def config_show(catalog):

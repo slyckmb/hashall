@@ -9,44 +9,69 @@ Unified roadmap + active backlog for development and operations.
 
 ## Near-Term Priorities
 
-1. Stabilize qB stoppedDL recovery loop.
-2. Reduce repeated verification cost while increasing first-pass precision.
-3. Finish fs_uuid-first files-table binding so reboot/remount `device_id` churn stops breaking catalog identity.
-4. Keep documentation canonical and low-friction for agent handoffs.
+1. Establish one canonical machine-readable seed-root-state contract owned by `hashall`.
+2. Keep `rehome refresh` observable and non-brittle during long delegated steps.
+3. Finish removing durable `device_id` assumptions from migration/rehome logic.
+4. Harden qB data migration and repair workflows before any further large batch moves.
+5. Define and validate the production process for `/pool/data/media/torrents/seeding -> /pool/media/torrents/seeding`.
+6. Consolidate status docs to the minimum canonical handoff set.
+7. Reassess readiness to resume `~noHL` migration from stash to pool.
 
 ## Active Task Tracker
 
-### Refresh / Migration Hardening Program (2026-03-07)
+### P0 Seed-Root Coordination Contract
 
-- [ ] Monitor live `rehome refresh` runs and fix any anomalies that appear during active execution.
+- [ ] Add a canonical published state file at `~/.hashall/seed-root-state.json`.
+- [ ] Make `hashall` the sole writer and `traktor` a read-only consumer.
+- [ ] Define a stable schema with:
+  - `schema_version`
+  - `updated_at`
+  - `generation`
+  - `writer`
+  - `active.seeding_root`
+  - `target.seeding_root`
+  - `cross_seed.link_root`
+  - `migration.state`
+  - `migration.source_root` / `migration.source_roots`
+  - explicit path aliases / mirror roots
+- [ ] Keep `device_id` out of the external contract; use stable alias and/or `fs_uuid` only.
+- [ ] Require atomic writes and fail-closed consumer behavior on missing/invalid state.
+- [ ] Add a CLI surface to inspect/export the published state.
+- [ ] Document ownership and update timing so `traktor` can use it safely for cross-seed reconciliation.
+
+### P1 Refresh Monitoring and Observability
+
+- [ ] Monitor live `rehome refresh` runs and fix anomalies that appear during active execution.
 - [ ] Build a compact anomaly ledger from `~/.logs/hashall/rehome/refresh/` with root cause, impact, fix, and status.
+- [ ] Investigate and fix the post-`Plan #59` `ActionInfo` failure in `hashall link execute` seen during refresh-driven dedup on `spare`.
+- [ ] Remove hidden interactive prompts from orchestrated subprocesses.
+- [ ] Improve long-running command progress visibility and heartbeat feedback.
+- [ ] Surface secondary logs to operators during quiet periods, especially `~/.logs/hashall/hashall.log`.
+
+### P2 `device_id` to `fs_uuid` Transition Hardening
+
 - [ ] Audit all remaining `device_id`-first code paths and complete the transition to `fs_uuid` as durable identity.
 - [ ] Verify runtime-only use of `device_id` is limited to hardlink-boundary and current-mount lookup concerns.
-- [ ] Collapse operational docs to a minimal canonical handoff set:
-  - `docs/operations/RUN-STATE.md`
-  - `docs/project/PLAN.md`
-  - `docs/handoff.md`
-  - archive all other handoff/status variants or turn them into pointers
+- [ ] Validate that migration/rehome logic resolves files relations through the stable binding layer.
+
+### P3 qB Migration and Repair Hardening
+
 - [ ] Audit qBit repair, rehome, and migration tooling for silent-failure patterns:
   - parser drift
   - unsafe default apply behavior
-  - interactive prompts inside non-interactive orchestrators
-  - long silent pauses with no heartbeat/progress feedback
   - stale cache / stale qB state assumptions
   - cross-filesystem donor selection
   - save-path / content-path mismatch handling
   - hardlink / inode preservation assumptions
-- [ ] Review the current refresh long-pause behavior and fix operator feedback:
-  - identify where orchestration can block on hidden confirmation prompts
-  - emit heartbeat/progress lines during long-running steps
-  - surface “waiting for confirmation” explicitly if a subprocess is interactive
-  - identify secondary logs to watch during quiet periods
 - [ ] Harden qBit migration/rehome workflows with explicit safety gates:
   - fail-closed on ambiguity
   - dry-run-first with machine-readable plan output
   - post-apply qB state validation
   - download-prevention guardrails
   - scope verification against filesystem and qB save path
+
+### P4 Pool Dataset Migration Process
+
 - [ ] Define the production process to finish the dataset migration from:
   - `/pool/data/media/torrents/seeding`
   - to `/pool/media/torrents/seeding`
@@ -55,20 +80,34 @@ Unified roadmap + active backlog for development and operations.
   - a new dedicated qB dataset-rehome tool
   - or a hybrid approach
 - [ ] Produce a pilot-safe migration lane for one payload class, validate end to end, then scale by batch.
+- [ ] Make cross-seed root reconciliation consume the published seed-root-state contract rather than inferring paths ad hoc.
+
+### P5 Docs Consolidation
+
+- [ ] Collapse operational docs to a minimal canonical handoff set:
+  - `docs/operations/RUN-STATE.md`
+  - `docs/project/PLAN.md`
+  - `docs/handoff.md`
+- [ ] Archive all other handoff/status variants or turn them into pointers.
+
+### P6 `~noHL` Migration Readiness
+
 - [ ] Evaluate rehome readiness for resuming `~noHL` stash -> pool moves and document blockers separately from dataset-migration blockers.
 
 ### Ordered Execution Plan
 
-1. Keep the active refresh under observation and capture any new anomalies in real time.
-2. Finish the fs_uuid transition audit so identity drift is no longer a confounding variable.
-3. Reduce docs to the minimum canonical set before more changes land.
+1. Establish the seed-root-state contract and publisher so other tools stop inferring roots ad hoc.
+2. Keep the active refresh under observation and capture any new anomalies in real time.
+3. Finish the fs_uuid transition audit so identity drift is no longer a confounding variable.
 4. Audit and harden qBit migration/rehome tooling algorithms and safety model.
 5. Choose and validate the dataset-migration process/tooling for `/pool/data/...` -> `/pool/media/...`.
-6. Reassess `~noHL` rehome readiness after the above hardening removes shared failure modes.
+6. Reduce docs to the minimum canonical set.
+7. Reassess `~noHL` rehome readiness after the above hardening removes shared failure modes.
 
 ### Exit Criteria
 
 - [ ] `rehome refresh` no longer shows silent dedup or payload-sync quality anomalies.
+- [ ] A canonical seed-root-state file exists, is machine-readable, and is safe for `traktor` to consume read-only.
 - [ ] No critical workflow depends on brittle numeric `device_id` for durable identity.
 - [ ] Canonical docs are reduced to one run-state doc, one plan doc, and one short handoff doc.
 - [ ] qBit repair and migration workflows have explicit dry-run, scope verification, and post-apply safety gates.

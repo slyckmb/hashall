@@ -14,6 +14,10 @@ Critical now (2026-03-06):
   - `active=0 total_entries=0`.
 - Active architecture objective:
   - remove brittle `device_id` dependence from identity paths; move payload/torrent/rehome identity to `fs_uuid`.
+- New coordination objective:
+  - publish `~/.hashall/seed-root-state.json` from `hashall` as the only machine-readable seeding-root contract for external tools.
+- New refresh bug fixed in this worktree:
+  - `hashall link execute` no longer trips `UnboundLocalError` on `ActionInfo` after refresh-created plans (observed after `Plan #59` on `spare`).
 - Identity repair tooling now implemented:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
