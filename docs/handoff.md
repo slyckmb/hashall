@@ -15,10 +15,18 @@ Canonical CLI:
 - `hashall refresh`
 - `hashall rehome ...`
 
+Current installed surface:
+- the separate `rehome` console script has been removed from packaging and from the venv
+- all operator docs/examples should now use `hashall ...` only
+
 Newest critical uncommitted/just-landed focus to preserve:
 - `REUSE` no longer defaults to qB `setLocation`; it now uses offline fastresume repointing
 - new helper module: `src/hashall/fastresume.py`
 - `hashall rehome auto` `REUSE` apply line now reflects actual cleanup state (`cleanup pending` vs `source gone`)
+- `stash` device identity was surgically repaired in the live catalog:
+  - `devices.fs_uuid`: `dev-44` -> `zfs-4624186565346049802`
+  - stale `/stash/media*` `scan_roots` / `scan_sessions` `dev-44` rows were rewritten
+  - `hashall doctor preflight --db ~/.hashall/catalog.db` is clean again
 
 Current operational facts:
 - `~/.hashall/seed-root-state.json` is the canonical machine-readable seed-root contract.
@@ -28,6 +36,7 @@ Current operational facts:
 - The earlier hidden confirmation prompt and `Plan #59` `ActionInfo` crash are also fixed.
 
 Still open:
+- let the current `hashall refresh --verbose` complete after the `stash` fs_uuid repair and inspect for anomalies
 - run a fresh live `REUSE qty1` pilot on the new fastresume transport
 - if clean, scale `pool-data -> pool-media` `REUSE` cautiously before planning `MOVE`
 - after pool migration convergence, resume `~noHL` planning/execution

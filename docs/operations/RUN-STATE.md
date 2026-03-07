@@ -15,6 +15,39 @@ Single living document for current operational status, handoff context, and next
 4. Remove remaining storage-layer dependence on volatile `device_id` by binding file tables to stable `fs_uuid`.
 5. Publish one canonical machine-readable seed-root-state contract so `traktor` and related tooling stop inferring root/link state ad hoc.
 
+## Canonical CLI and Packaging Update (2026-03-07 16:26 EST)
+
+- Canonical operator surface is now:
+  - `hashall refresh`
+  - `hashall rehome ...`
+- The separate `rehome` console script has been removed from packaging.
+- Runtime versioning is now unified:
+  - `src/rehome/__init__.py` imports `hashall.__version__`
+  - installed package metadata now matches the live code version `0.4.153`
+- Operational rule:
+  - do not document or suggest `rehome ...` as the primary CLI anymore
+  - use `hashall ...` in runbooks, handoff notes, and operator commands
+
+## Stash fs_uuid Repair (2026-03-07 16:04 EST)
+
+- Refresh had been blocked by:
+  - `device_fs_uuid_stable devices contain volatile dev-* fs_uuid fallbacks (1 rows)`
+- Root cause:
+  - the `stash` device row in `devices` was stale:
+    - `device_alias=stash`
+    - `fs_uuid=dev-44`
+  - live lookup on this host already resolves `/stash/media` to:
+    - `zfs-4624186565346049802`
+- Live DB repair applied:
+  - `devices.fs_uuid` for `stash`: `dev-44` -> `zfs-4624186565346049802`
+  - stale `/stash/media*` `scan_roots` rows rewritten
+  - stale `/stash/media*` `scan_sessions` rows rewritten
+- Post-fix verification:
+  - `hashall doctor preflight --db ~/.hashall/catalog.db` -> `ok=True`
+  - `hashall refresh --verbose` now progresses past doctor preflight and into the `/stash/media` scan
+- Backup artifact:
+  - `/tmp/catalog.db.pre-stash-fsuuid-fix.20260307-160432`
+
 ## Seed-Root Contract Update (2026-03-07 11:35 EST)
 
 - New source-of-truth publisher added:
@@ -177,6 +210,10 @@ Single living document for current operational status, handoff context, and next
 - Validation status:
   - targeted executor/audit/auto/catalog-sync suites are green
   - the next required gate is a fresh single-item live `REUSE` pilot on the fastresume transport
+  - acceptance rule for that pilot:
+    - no qB `MV/moving`
+    - no download-like state
+    - clean `apply ... cleanup pending` / `verify ... catalog OK` result
 
 ## Compact-Critical Snapshot (2026-03-06 12:30 EST)
 

@@ -49,6 +49,7 @@ Unified roadmap + active backlog for development and operations.
 - [x] Improve long-running command progress visibility and heartbeat feedback.
 - [ ] Surface secondary logs to operators during quiet periods, especially `~/.logs/hashall/hashall.log`.
 - [x] Keep renamed `qb-*` cache entrypoints compatible with the currently installed `qbitui` canonical script names.
+- [x] Repair the last live volatile-identity blocker on `stash` so `hashall doctor preflight` and `hashall refresh` can run again.
 
 ### P2 `device_id` to `fs_uuid` Transition Hardening
 
@@ -99,6 +100,8 @@ Unified roadmap + active backlog for development and operations.
   - or a hybrid approach
 - [ ] Produce a pilot-safe migration lane for one payload class, validate end to end, then scale by batch.
 - [x] Make cross-seed root reconciliation consume the published seed-root-state contract rather than inferring paths ad hoc.
+- [ ] Verify one fresh live `REUSE qty1` pilot on the new offline fastresume transport with no `MV/moving` state before further scaling.
+- [ ] After that pilot, scale `REUSE` in small batches and only then define the separate `MOVE`/cleanup lane.
 
 ### P5 Docs Consolidation
 
@@ -168,7 +171,9 @@ Unified roadmap + active backlog for development and operations.
   - `hashall rehome auto` now reports `REUSE` apply/verify correctly and waits for stable qB ready state after recheck
   - immediate `REUSE` relocation state is now written into `rehome_runs` and cleanup-required follow-up tags
   - `REUSE` now defaults to offline fastresume repointing instead of qB `setLocation`
-  - remaining blocker before wider pool-data -> pool-media apply is a clean live pilot on the new fastresume transport
+  - `stash` catalog identity is repaired to stable `zfs-4624186565346049802`; `hashall doctor preflight` is clean again
+  - canonical operator surface is now `hashall ...`; the separate `rehome` console script is no longer shipped
+  - remaining blocker before wider pool-data -> pool-media apply is a clean live pilot on the new fastresume transport with no qB `MV/moving` state
 
 ## Active Engineering Backlog
 
