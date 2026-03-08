@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.2"
+SCRIPT_VERSION = "0.1.3"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -769,6 +769,16 @@ class QBZFSRelocationTool:
             / manifest_path.stem
             / stage_name
         )
+
+    def _prune_empty_stage_parents(self, manifest_path: Path, stage_path: Path, source_root: str) -> None:
+        stage_root = Path(normalize_save_path(source_root)) / DEFAULT_CLEANUP_STAGE_DIRNAME / manifest_path.stem
+        current = stage_path.parent
+        while current != stage_root.parent and current.exists():
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
 
     def _load_cleanup_verify_summary(
         self,
@@ -2169,6 +2179,7 @@ class QBZFSRelocationTool:
                         stage_path.rename(source_path)
                         row["cleanup_staged_path"] = ""
                         row["cleanup_status"] = "restored"
+                        self._prune_empty_stage_parents(manifest_path, stage_path, str(row.get("source_root") or ""))
                         restore_status = "restored"
                     else:
                         row["cleanup_status"] = "observe_failed"
@@ -2212,6 +2223,7 @@ class QBZFSRelocationTool:
                     shutil.rmtree(stage_path)
                 else:
                     stage_path.unlink()
+                self._prune_empty_stage_parents(manifest_path, stage_path, str(row.get("source_root") or ""))
                 row["cleanup_status"] = "cleaned"
                 row["cleanup_ready"] = False
                 row["cleanup_staged_path"] = ""

@@ -6,7 +6,7 @@ Canonical state document:
 Prompt-critical context (2026-03-06):
 
 - New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
-  - `bin/qb-zfs-relocate.py` (`v0.1.2`)
+  - `bin/qb-zfs-relocate.py` (`v0.1.3`)
   - `src/hashall/qb_zfs_relocate.py`
   - guarded phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
   - shared parser: `src/hashall/bencode.py`
@@ -24,7 +24,7 @@ Prompt-critical context (2026-03-06):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.157`.
+  - `hashall` version now `0.4.158`.
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -41,6 +41,7 @@ Prompt-critical context (2026-03-06):
   - next-agent work should treat fs_uuid-backed files tables as the current production model.
   - qB relocation has already completed live 2-item migrate pilots successfully on 2026-03-08 (`resume_ok=2`, `exit_code=0` for both runs).
   - cleanup dry-runs against both successful migrate manifests returned `blocked=0`, `dryrun=2`.
+  - live cleanup has now completed for both successful batches; the four source payloads are gone from `/pool/data/media/torrents/seeding`.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

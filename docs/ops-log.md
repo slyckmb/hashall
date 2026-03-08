@@ -34,7 +34,7 @@ Latest critical operations note (2026-03-06):
 Latest tooling note (2026-03-08):
 
 - Guarded qB dataset relocation workflow added:
-  - `bin/qb-zfs-relocate.py` (`v0.1.2`)
+  - `bin/qb-zfs-relocate.py` (`v0.1.3`)
   - `src/hashall/qb_zfs_relocate.py`
   - phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
   - migrate now supports `--auto-cleanup=safe` with staged `rename -> observe -> delete`
@@ -52,6 +52,7 @@ Latest tooling note (2026-03-08):
   - successful migrate runs observed at `12:03` and `12:30` on 2026-03-08
   - both completed with `resume_ok=2` and `exit_code=0`
   - cleanup dry-runs against both successful manifests returned `blocked=0`, `dryrun=2`, `source_missing=0`
+  - live cleanup has now completed for both successful manifests; four source payloads were removed from `/pool/data/media/torrents/seeding`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`

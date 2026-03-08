@@ -1050,6 +1050,7 @@ def test_cleanup_apply_stages_observes_and_deletes_source(tmp_path):
         }
     )
     tool = QBZFSRelocationTool(qb_client=client, runner=FakeRunner(), verifier=FakeVerifier())
+    stage_path = tool._cleanup_stage_path(manifest_path, row)
 
     rc = tool.cleanup(
         manifest_path=manifest_path,
@@ -1064,6 +1065,8 @@ def test_cleanup_apply_stages_observes_and_deletes_source(tmp_path):
     actions = [json.loads(line)["action"] for line in cleanup_journal.read_text(encoding="utf-8").splitlines()]
     assert rc == 0
     assert not source_path.exists()
+    assert not stage_path.exists()
+    assert not stage_path.parent.exists()
     assert manifest["rows"][0]["cleanup_status"] == "cleaned"
     assert actions == ["stage", "observe", "delete"]
 
@@ -1111,6 +1114,7 @@ def test_cleanup_apply_can_resume_from_existing_staged_path(tmp_path):
     assert rc == 0
     assert not source_path.exists()
     assert not stage_path.exists()
+    assert not stage_path.parent.exists()
     assert manifest["rows"][0]["cleanup_status"] == "cleaned"
 
 

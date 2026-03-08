@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""qb-zfs-relocate v0.1.2. Last updated: 2026-03-08."""
+"""qb-zfs-relocate v0.1.3. Last updated: 2026-03-08."""
 
 from __future__ import annotations
 
