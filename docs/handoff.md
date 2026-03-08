@@ -1,45 +1,54 @@
-# Handoff Entry (Compact-Safe)
+# Handoff (Canonical)
 
-Canonical living state:
-- `docs/operations/RUN-STATE.md`
+Use these three docs only:
+
 - `docs/project/PLAN.md`
+- `docs/operations/RUN-STATE.md`
+- `docs/handoff.md`
 
-Current branch/worktree:
-- `chatrap/codex-hashall-20260305-181919`
-- `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260305-181919`
+## Current State
 
-Current version:
-- `hashall 0.4.153`
+- Branch: `chatrap/codex-hashall-20260305-181919`
+- Worktree: `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260305-181919`
+- Canonical CLI: `hashall`
+- Package version: `0.4.153`
 
-Canonical CLI:
-- `hashall refresh`
-- `hashall rehome ...`
+## What Is Done
 
-Current installed surface:
-- the separate `rehome` console script has been removed from packaging and from the venv
-- all operator docs/examples should now use `hashall ...` only
+- `hashall` is now the sole operator CLI.
+- `rehome` console script removed from packaging.
+- `stash` fs_uuid repaired live from `dev-44` to `zfs-4624186565346049802`.
+- `hashall refresh --verbose` is healthy again.
+- `REUSE` no longer uses qB `setLocation` by default.
+- latest `REUSE` pilot succeeded with offline fastresume repointing.
+- qB gradual seeding daemon fixed to halt only on newly flipped downloading-like states.
 
-Newest critical uncommitted/just-landed focus to preserve:
-- `REUSE` no longer defaults to qB `setLocation`; it now uses offline fastresume repointing
-- new helper module: `src/hashall/fastresume.py`
-- `hashall rehome auto` `REUSE` apply line now reflects actual cleanup state (`cleanup pending` vs `source gone`)
-- `stash` device identity was surgically repaired in the live catalog:
-  - `devices.fs_uuid`: `dev-44` -> `zfs-4624186565346049802`
-  - stale `/stash/media*` `scan_roots` / `scan_sessions` `dev-44` rows were rewritten
-  - `hashall doctor preflight --db ~/.hashall/catalog.db` is clean again
+## What Is True Now
 
-Current operational facts:
-- `~/.hashall/seed-root-state.json` is the canonical machine-readable seed-root contract.
-- `hashall` is the sole writer; external tools are read-only consumers.
-- `qb-stoppeddl-drain.py` and `qb-stoppeddl-apply.py` now default their allowed roots from that contract, but only admit pool-backed roots by default.
-- The refresh failure where payload sync ended `PARTIAL` on zero upgrade work is fixed for future runs.
-- The earlier hidden confirmation prompt and `Plan #59` `ActionInfo` crash are also fixed.
+- qB must not be the byte mover.
+- `REUSE` is the correct model once donor already exists at target.
+- `MOVE` must be refactored to match the same attach/repoint path after external transfer.
+- Current `MOVE` apply is not safe for scale yet.
 
-Still open:
-- let the current `hashall refresh --verbose` complete after the `stash` fs_uuid repair and inspect for anomalies
-- run a fresh live `REUSE qty1` pilot on the new fastresume transport
-- if clean, scale `pool-data -> pool-media` `REUSE` cautiously before planning `MOVE`
-- after pool migration convergence, resume `~noHL` planning/execution
+## Immediate Next Work
 
-Historical snapshot:
-- `docs/archive/2026-doc-reduction/snapshot/docs/handoff.md`
+1. Finish the remaining pool `REUSE` batches in small steps.
+2. Fix cleanup-source path/provenance drift.
+3. Refactor `MOVE` into:
+   - donor acquisition by external transfer
+   - shared offline attach/repoint
+4. Pilot `MOVE`.
+5. Then resume planning for `~noHL`.
+
+## Key Logs
+
+- `~/.logs/hashall/hashall.log`
+- `~/.logs/hashall/rehome/refresh/`
+- `~/.logs/hashall/rehome/auto/`
+- `~/.logs/hashall/reports/qbit-triage/`
+
+## Do Not Forget
+
+- use `hashall ...`, not `rehome ...`
+- do not reintroduce qB `setLocation` as the normal migration primitive
+- do not scale `MOVE` before the shared attach refactor lands
