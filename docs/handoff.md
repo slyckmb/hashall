@@ -2,6 +2,17 @@
 
 ## Key Facts
 
+- `qb-zfs-relocate` is now implemented for guarded qB dataset relocation:
+  - entrypoint: `bin/qb-zfs-relocate.py`
+  - core module: `src/hashall/qb_zfs_relocate.py`
+  - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
+  - shared fastresume/bencode path now uses `src/hashall/bencode.py`
+- Source-layout CLI bootstrap is now present:
+  - `python3 -m hashall` works from repo root via local `hashall/` + `rehome/` bootstrap packages.
+- Guarded relocation coverage is in place:
+  - targeted regression set now includes `tests/test_qb_zfs_relocate.py`
+  - last local verification for the relocation/tooling slice: `34 passed`
+  - note: this was code/test validation only; no live qB relocation batch was executed here.
 - Operate through `hashall` (script-level commands) rather than the removed `rehome` entrypoint.
 - Pool migration now relies on a shared donor-acquisition + offline fastresume attach constructor for both `REUSE` and `MOVE`.
 - `REUSE` applies already succeed via offline fastresume with no `MV`/`moving`, while cleanup notices still need refinement.
@@ -12,11 +23,10 @@
 
 ## Immediate Next Work
 
-1. Fix cleanup-source path/provenance so operator messaging references the actual migrated source root.
-2. Confirm the stash → pool-media pilot completes cleanly.
-3. If clean, scale stash/pool-media `REUSE` cautiously, verifying each batch and watching for any unexpected `MV`/download states.
-4. Pilot `MOVE` only once the planner surfaces a real donor-acquisition case and the pilot passes cleanly.
-5. After that, resume planning for the `~noHL` migration lane.
+1. Run a real `qb-zfs-relocate plan` dry-run against the intended qB selection and confirm manifest path semantics on live metadata.
+2. Confirm the chosen verifier source (`BT_backup/*.torrent` vs export fallback) is complete in the live environment before any copy/patch attempt.
+3. Validate qB stop/start control wiring (`--qb-container` or command hooks) on the real host before patch mode.
+4. After that, continue the existing stash/pool-media `REUSE` and `MOVE` operator follow-up work as previously planned.
 
 ## Key Logs
 

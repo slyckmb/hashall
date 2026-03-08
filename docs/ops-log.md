@@ -31,5 +31,21 @@ Latest critical operations note (2026-03-06):
   - copied-DB rehearsal succeeded.
   - live `~/.hashall/catalog.db` migration completed with snapshot and post-apply preflight `ok=true`.
 
+Latest tooling note (2026-03-08):
+
+- Guarded qB dataset relocation workflow added:
+  - `bin/qb-zfs-relocate.py` (`v0.1.0`)
+  - `src/hashall/qb_zfs_relocate.py`
+  - phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
+- Shared bencode/fastresume groundwork added:
+  - `src/hashall/bencode.py`
+  - strict full-consumption decode now backs fastresume mutation.
+- Repo-local CLI bootstrap added:
+  - `python3 -m hashall` now resolves from repo root via local bootstrap packages.
+- Latest local validation for this tooling slice:
+  - `pytest tests/test_bencode.py tests/test_fastresume.py tests/test_qbittorrent.py tests/test_rehome_catalog_sync.py tests/test_qb_zfs_relocate.py tests/test_cli_all.py -q`
+  - result: `34 passed`
+- No live relocation transaction was run in this session; next operational step is a manifest + dry-run on the target selection.
+
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`

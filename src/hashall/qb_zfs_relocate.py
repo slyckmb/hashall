@@ -971,10 +971,13 @@ class QBZFSRelocationTool:
         recheck_on_failure: bool,
     ) -> int:
         manifest = self._load_manifest(manifest_path)
+        allowed_patch_statuses = {"patched", "no_change"}
+        if not apply:
+            allowed_patch_statuses.add("dryrun")
         rows = [
             row
             for row in row_selection(manifest["rows"])
-            if row.get("actionable") and row.get("patch_status") in {"patched", "no_change"}
+            if row.get("actionable") and row.get("patch_status") in allowed_patch_statuses
         ]
         if not rows:
             raise RelocationError("no_patch_ready_rows_for_resume")
@@ -987,6 +990,9 @@ class QBZFSRelocationTool:
             info = self.qb_client.get_torrent_info(row["hash"])
             if info is None:
                 row["resume_status"] = "missing_info"
+                continue
+            if not apply and row.get("patch_status") == "dryrun":
+                eligible.append(row)
                 continue
             if normalize_save_path(info.save_path) != normalize_save_path(row["new_save_path"]):
                 row["resume_status"] = "save_path_mismatch"

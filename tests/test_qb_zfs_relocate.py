@@ -370,6 +370,78 @@ def test_cleanup_requires_confirm_cleanup(tmp_path):
         tool.cleanup(manifest_path=manifest_path, apply=True, confirm_cleanup=False)
 
 
+def test_end_to_end_dryrun_flow_records_phase_history(tmp_path):
+    torrent_hash = "e2edryrun"
+    bt_backup = tmp_path / "BT_backup"
+    bt_backup.mkdir()
+    _write_fastresume(bt_backup / f"{torrent_hash}.fastresume", str(tmp_path / "old_ds" / "site"))
+    _write_multi_file_torrent(bt_backup / f"{torrent_hash}.torrent", "Dryrun Set")
+    dest_content = tmp_path / "new_ds" / "site" / "Dryrun Set"
+    dest_content.mkdir(parents=True, exist_ok=True)
+    (dest_content / "sample.bin").write_bytes(b"payload")
+    source_content = tmp_path / "old_ds" / "site" / "Dryrun Set"
+    source_content.mkdir(parents=True, exist_ok=True)
+    info = _torrent_info(
+        torrent_hash,
+        "Dryrun Set",
+        str(tmp_path / "old_ds" / "site"),
+        str(source_content),
+    )
+    client = FakeClient({torrent_hash: info})
+    controller = FakeController(stopped=True)
+    runner = FakeRunner()
+    tool = QBZFSRelocationTool(
+        qb_client=client,
+        runner=runner,
+        verifier=FakeVerifier(),
+        process_controller=controller,
+    )
+    manifest_path = tmp_path / "e2e-manifest.json"
+    journal_path = tmp_path / "patch-journal.jsonl"
+
+    assert tool.plan(
+        manifest_path=manifest_path,
+        hashes=[torrent_hash],
+        source_root=str(tmp_path / "old_ds"),
+        dest_root=str(tmp_path / "new_ds"),
+        fastresume_dir=bt_backup,
+        torrent_dir=bt_backup,
+        export_torrents_dir=None,
+    ) == 0
+    assert tool.copy(manifest_path=manifest_path, apply=False) == 0
+    assert tool.verify(manifest_path=manifest_path, timeout_seconds=30.0, quick_only=False) == 0
+    assert tool.validate(
+        manifest_path=manifest_path,
+        allow_partials=False,
+        for_patch=True,
+        journal_path=journal_path,
+    ) == 0
+    assert tool.patch(
+        manifest_path=manifest_path,
+        journal_path=journal_path,
+        apply=False,
+        auto_stop_qb=False,
+    ) == 0
+    assert tool.resume(
+        manifest_path=manifest_path,
+        apply=False,
+        pilot_size=1,
+        observe_seconds=0.0,
+        resume_remaining=False,
+        recheck_on_failure=False,
+    ) == 0
+    assert tool.cleanup(
+        manifest_path=manifest_path,
+        apply=False,
+        confirm_cleanup=False,
+    ) == 0
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    phases = [entry["phase"] for entry in manifest["phase_history"]]
+    assert phases == ["plan", "copy", "verify", "validate", "patch", "resume", "cleanup"]
+    assert any(cmd[0] == "rsync" and "--dry-run" in cmd for cmd in runner.commands)
+
+
 def test_cli_help_lists_required_phases():
     result = subprocess.run(
         ["python3", "bin/qb-zfs-relocate.py", "--help"],
