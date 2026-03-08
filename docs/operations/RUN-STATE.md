@@ -55,6 +55,11 @@ After donor exists and verifies, both lanes must use the same constructor:
 qB must not be used as the byte mover.
 qB `setLocation` is not acceptable as the mainline migration primitive on this host.
 
+Status:
+
+- implemented in code for both `REUSE` and `MOVE`
+- current donor transfer implementation remains the external `rsync` helper
+
 ## Current `REUSE` State
 
 `REUSE` now defaults to offline fastresume repointing.
@@ -76,21 +81,27 @@ Operational conclusion:
 
 - `REUSE` is safe enough to continue in small batches
 - do not jump straight to a large batch
+- latest planner state for `pool-data -> pool-media`:
+  - `hashall rehome auto --from pool-data --to pool-media --limit 10`
+  - `0 MOVE groups available`
+  - pool-data phase is exhausted at planner level
 
 ## Current `MOVE` Risk
 
-Current `MOVE` is not safe yet.
+Current `MOVE` code path has been refactored onto the same offline attach path as `REUSE`.
 
-Reason:
+Reason this is still not batch-safe yet:
 
-- after external copy, executor still uses qB relocation semantics
-- that can recreate the qB move/oom/orphaned-transfer behavior seen earlier
+- it has not been live-piloted yet on this host
+- cleanup-source provenance drift is still open
+- the operational gate is now pilot validation, not architecture
 
 Operational guidance:
 
-- do not run current `MOVE` apply at scale
-- interim safe model is `copy-then-REUSE`
-- next code task is to make `MOVE` use the same offline attach constructor as `REUSE`
+- do not run `MOVE` at scale yet
+- next step is one live `MOVE` pilot
+- if clean, scale in small batches
+- if the planner reports no `MOVE` groups, skip directly to the next source domain instead of forcing a synthetic move
 
 ## Refresh / Identity State
 
@@ -125,8 +136,9 @@ Current script version:
 ## Known Remaining Gaps
 
 1. cleanup-source path/provenance can still point at legacy `/pool/data/seeds/...`
-2. `MOVE` still needs the shared offline attach constructor
+2. `MOVE` needs a live pilot before it can be treated as batch-safe
 3. known migration changes should update catalog state immediately where possible, not wait for later full refresh
+4. active `stash -> pool-media` pilot `rehome_runs.id=338` is long-running and still in sequential qB recheck as of 2026-03-07 21:10 EST
 
 ## Primary Logs
 
@@ -143,11 +155,8 @@ tail -n0 -F ~/.logs/hashall/hashall.log
 
 ## Next-Agent Checklist
 
-1. Keep finishing remaining `REUSE` groups in small batches.
-2. Fix cleanup-source path selection/provenance.
-3. Refactor `MOVE` to:
-   - acquire donor externally
-   - attach via shared offline fastresume path
-   - avoid `setLocation`
-4. Pilot `MOVE` only after that refactor.
-5. Then plan `~noHL`.
+1. Fix cleanup-source path selection/provenance on completed pool-data runs.
+2. Confirm active `stash -> pool-media` pilot `338` completes cleanly.
+3. If clean, continue `stash -> pool-media` in small `REUSE` batches.
+4. Pilot `MOVE` only if/when the planner surfaces a real move case again.
+5. Then continue `~noHL`.

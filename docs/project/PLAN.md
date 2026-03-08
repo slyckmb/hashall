@@ -35,6 +35,9 @@ Unified roadmap + active backlog for development and operations.
   - catalog sync
   - cleanup tracking
 - qB `setLocation` must not be used in the mainline path.
+- Status:
+  - implemented in code for both `REUSE` and `MOVE`
+  - current transfer implementation is the existing external `rsync` helper behind donor acquisition
 
 ### P1 Finish Pool `REUSE`
 
@@ -46,16 +49,22 @@ Unified roadmap + active backlog for development and operations.
   - `catalog OK`
   - `cleanup pending` if source retained
 - Track and fix cleanup provenance drift when cleanup paths resolve to legacy `/pool/data/seeds/...` instead of `/pool/data/media/torrents/seeding/...`.
+- Current planner state:
+  - `hashall rehome auto --from pool-data --to pool-media --limit 10`
+  - reports `0 MOVE groups available`
+  - pool-data phase is effectively exhausted at planner level
 
 ### P2 Make `MOVE` Safe
 
-- Current `MOVE` still uses qB relocation semantics after external copy and is not safe for this host.
-- Replace current `MOVE` attach logic with the same offline fastresume constructor used by `REUSE`.
+- `MOVE` now uses the same offline fastresume attach constructor as `REUSE` after donor acquisition.
 - Keep external transfer separate and dumb:
   - `rsync` / sink / filesystem copy only
   - verify donor at target
   - then attach torrents
 - Do not allow qB to perform payload moves.
+- Next gate:
+  - one live `MOVE` pilot
+  - then small-batch scaling only if there is no `MV/moving`, no download-like flip, and clean source cleanup semantics
 
 ### P3 Refresh / Identity Stability
 
@@ -83,18 +92,17 @@ Unified roadmap + active backlog for development and operations.
 
 - After pool migration is solid, reassess `~noHL` from `/data/media/torrents/seeding -> /pool/media/torrents/seeding`.
 - Reuse the same donor-acquisition + shared attach architecture.
-- Do not resume `~noHL` until pool migration path is proven and documented.
+- Current next gate:
+  - live `stash -> pool-media` `REUSE` pilot is running
+  - do not scale `~noHL` until that pilot completes cleanly
 
 ## Immediate Execution Plan
 
-1. Finish the last pool `REUSE` batches.
-2. Fix cleanup-source path selection so operator messaging points at the actual migrated source root.
-3. Refactor `MOVE`:
-   - donor acquisition by external transfer
-   - shared offline attach/repoint
-   - no `setLocation`
-4. Pilot `MOVE` only after that refactor.
-5. Then plan and execute `~noHL`.
+1. Close the remaining cleanup-source provenance drift on completed pool-data `REUSE` runs.
+2. Confirm the active `stash -> pool-media` `REUSE` pilot completes cleanly.
+3. If clean, scale `stash -> pool-media` in small batches.
+4. Run a live `MOVE` pilot only if/when the planner surfaces a real donor-acquisition case again.
+5. Then finish `~noHL`.
 
 ## Current Operating Rules
 
@@ -109,7 +117,7 @@ Unified roadmap + active backlog for development and operations.
 
 ## Active Risks
 
-- `MOVE` is still unsafe because it uses qB relocation after copy.
+- `MOVE` has been refactored off qB relocation semantics, but it is still unproven live.
 - Cleanup source path/provenance can still drift to old aliases.
 - Large batch operations can still hide qB/API transient failures if not inspected after each batch.
 

@@ -21,24 +21,25 @@ Use these three docs only:
 - `hashall refresh --verbose` is healthy again.
 - `REUSE` no longer uses qB `setLocation` by default.
 - latest `REUSE` pilot succeeded with offline fastresume repointing.
+- `MOVE` now uses the same offline donor-attach path instead of qB relocation semantics after copy.
+- `pool-data -> pool-media` now shows `0 MOVE groups available` in dry-run; planner considers that phase exhausted.
 - qB gradual seeding daemon fixed to halt only on newly flipped downloading-like states.
 
 ## What Is True Now
 
 - qB must not be the byte mover.
 - `REUSE` is the correct model once donor already exists at target.
-- `MOVE` must be refactored to match the same attach/repoint path after external transfer.
-- Current `MOVE` apply is not safe for scale yet.
+- `MOVE` now matches the same attach/repoint path after external transfer.
+- Current `MOVE` code still needs one live pilot before it is safe to scale.
+- active next live gate is `stash -> pool-media` `REUSE` pilot `rehome_runs.id=338`
 
 ## Immediate Next Work
 
-1. Finish the remaining pool `REUSE` batches in small steps.
-2. Fix cleanup-source path/provenance drift.
-3. Refactor `MOVE` into:
-   - donor acquisition by external transfer
-   - shared offline attach/repoint
-4. Pilot `MOVE`.
-5. Then resume planning for `~noHL`.
+1. Fix cleanup-source path/provenance drift.
+2. Confirm `stash -> pool-media` pilot `338` completes cleanly.
+3. If clean, scale stash/noHL `REUSE` cautiously.
+4. Pilot `MOVE` only if the planner surfaces a real move case again.
+5. Then continue `~noHL`.
 
 ## Key Logs
 
@@ -51,4 +52,4 @@ Use these three docs only:
 
 - use `hashall ...`, not `rehome ...`
 - do not reintroduce qB `setLocation` as the normal migration primitive
-- do not scale `MOVE` before the shared attach refactor lands
+- do not scale `MOVE` before the first live pilot proves the new path
