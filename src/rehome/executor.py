@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 import json
 from datetime import datetime
 from urllib.parse import quote
+from dataclasses import dataclass
 
 # Import hashall and qBittorrent modules
 import sys
@@ -25,6 +26,16 @@ from hashall.qbittorrent import get_qbittorrent_client
 from hashall.payload import get_payload_file_rows
 from hashall.scan import compute_sha256
 from rehome.view_builder import build_torrent_view
+
+
+@dataclass(frozen=True)
+class TargetDonor:
+    source_path: Path
+    target_path: Path
+    target_device_id: int
+    acquisition_mode: str
+    move_strategy: str = "existing"
+    moved_payload: bool = False
 
 
 class DemotionExecutor:
@@ -2816,47 +2827,103 @@ class DemotionExecutor:
         )
         self._log("PROMOTE_REUSE execution complete", "success")
 
-    def _execute_reuse(
+    def _ensure_target_donor(
         self,
         plan: Dict,
         spot_check: int = 0,
-        *,
-        preloaded_files: Optional[Dict[str, List]] = None,
-    ) -> None:
-        """
-        Execute a REUSE plan.
-
-        Steps:
-        1. Verify existing payload on pool
-        2. For each sibling torrent:
-           a. Build torrent view on pool (hardlinks to existing payload)
-           b. Relocate torrent in qBittorrent
-           c. Verify torrent can access files
-        3. Remove stash-side torrent views (after all relocations succeed)
-        """
-        import time
-
-        t_start = time.monotonic()
-        phase_times: Dict[str, float] = {}
-        target_path = Path(plan['target_path'])
-        source_path = Path(plan['source_path'])
+    ) -> TargetDonor:
+        source_path = Path(plan["source_path"])
+        target_path = Path(plan["target_path"])
         target_device_id = self._resolve_plan_device_id(plan, "target")
         if target_device_id is None:
             raise RuntimeError("Missing target identity (device_id/fs_uuid) for spot-check")
 
-        # 1. Verify existing payload on pool
-        t0 = time.monotonic()
-        self._log(f"step=verify_pool_payload path={target_path}")
-        if not self._verify_file_count(target_path, plan['file_count']):
-            raise RuntimeError(f"Pool payload file count mismatch at {target_path}")
-        if not self._verify_total_bytes(target_path, plan['total_bytes']):
-            raise RuntimeError(f"Pool payload total bytes mismatch at {target_path}")
+        decision = str(plan.get("decision") or "").upper()
+        if decision == "REUSE":
+            self._log(f"step=verify_pool_payload path={target_path}")
+            if not self._verify_file_count(target_path, plan["file_count"]):
+                raise RuntimeError(f"Pool payload file count mismatch at {target_path}")
+            if not self._verify_total_bytes(target_path, plan["total_bytes"]):
+                raise RuntimeError(f"Pool payload total bytes mismatch at {target_path}")
+            self._spot_check_payload(target_path, target_device_id, spot_check)
+            return TargetDonor(
+                source_path=source_path,
+                target_path=target_path,
+                target_device_id=int(target_device_id),
+                acquisition_mode="existing",
+            )
 
-        # Spot-check (optional)
+        if decision != "MOVE":
+            raise RuntimeError(f"unsupported donor acquisition decision: {decision}")
+
+        self._log(f"step=verify_source path={source_path}")
+        moved_payload = False
+        move_strategy = "rename"
+
+        if source_path.exists():
+            if not self._verify_file_count(source_path, plan["file_count"]):
+                raise RuntimeError("Source file count mismatch")
+            if not self._verify_total_bytes(source_path, plan["total_bytes"]):
+                raise RuntimeError("Source total bytes mismatch")
+
+            is_cross_fs = self._is_cross_filesystem(source_path, target_path.parent)
+            if target_path.exists() and not is_cross_fs:
+                raise RuntimeError(f"Target path already exists before move: {target_path}")
+
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if is_cross_fs:
+                    move_strategy = "rsync_copy"
+                    self._copy_with_rsync_progress(source_path, target_path)
+                else:
+                    self._log(f"step=move_payload method=rename source={source_path} target={target_path}")
+                    shutil.move(str(source_path), str(target_path))
+                moved_payload = True
+            except Exception as e:
+                raise RuntimeError(f"Failed to move payload: {e}")
+        else:
+            if not target_path.exists():
+                raise RuntimeError(f"Source path does not exist: {source_path}")
+            move_strategy = "idempotent_reconcile"
+            self._log("step=verify_source source_missing=true mode=idempotent_reconcile", "warning")
+
+        self._log(f"step=verify_target path={target_path}")
+        if not self._verify_file_count(target_path, plan["file_count"]):
+            raise RuntimeError("Target file count mismatch after move")
+        if not self._verify_total_bytes(target_path, plan["total_bytes"]):
+            raise RuntimeError("Target total bytes mismatch after move")
         self._spot_check_payload(target_path, target_device_id, spot_check)
-        phase_times["verify"] = time.monotonic() - t0
 
-        # Build views (if mapping provided)
+        return TargetDonor(
+            source_path=source_path,
+            target_path=target_path,
+            target_device_id=int(target_device_id),
+            acquisition_mode="copied" if move_strategy != "idempotent_reconcile" else "existing",
+            move_strategy=move_strategy,
+            moved_payload=moved_payload,
+        )
+
+    def _build_execute_plan_for_donor(self, plan: Dict, donor: TargetDonor) -> Dict:
+        execute_plan = dict(plan)
+        if str(plan.get("decision") or "").upper() == "MOVE":
+            filtered_view_targets = self._filter_move_view_targets(plan, donor.source_path)
+            execute_plan["view_targets"] = filtered_view_targets
+            plan["view_targets"] = filtered_view_targets
+        return execute_plan
+
+    def _attach_torrents_to_donor(
+        self,
+        plan: Dict,
+        donor: TargetDonor,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+        allow_set_location_fallback: bool = False,
+    ) -> Dict[str, float]:
+        import time
+
+        phase_times: Dict[str, float] = {}
+        target_path = donor.target_path
+
         t0 = time.monotonic()
         self._log("step=build_views")
         self._build_views(
@@ -2875,23 +2942,20 @@ class DemotionExecutor:
             conn.close()
         phase_times["build_relocations"] = time.monotonic() - t0
 
-        # Repoint all torrents to the existing pool payload/views without asking
-        # qB to move bytes. REUSE must be metadata-only.
         t0 = time.monotonic()
         self._log("step=relocate_siblings")
         if self.reuse_transport == "fastresume":
             self._log("  reuse_transport=fastresume")
             self._repoint_torrents_via_fastresume_batch(relocations)
-        elif self.reuse_transport == "set_location":
+        elif allow_set_location_fallback and self.reuse_transport == "set_location":
             self._log("  reuse_transport=set_location", "warning")
             self._relocate_torrents_atomic(relocations)
         else:
-            raise RuntimeError(f"unsupported reuse transport: {self.reuse_transport}")
+            raise RuntimeError(f"unsupported attach transport: {self.reuse_transport}")
         phase_times["relocate"] = time.monotonic() - t0
+        return phase_times
 
-        # 3. Cleanup stash-side views
-        t0 = time.monotonic()
-        self._log(f"step=cleanup_stash path={source_path} relocated={len(relocations)}")
+    def _mark_cleanup_pending(self, plan: Dict, source_path: Path, target_path: Path) -> None:
         cleanup_required = source_path.exists() and source_path.resolve() != target_path.resolve()
         plan["cleanup_source_deferred"] = cleanup_required
         if cleanup_required:
@@ -2899,149 +2963,37 @@ class DemotionExecutor:
             self._log(f"  MANUAL_ACTION_REQUIRED: Verify torrents work, then delete {source_path}", "warning")
         else:
             plan.pop("cleanup_source_deferred_path", None)
-        phase_times["cleanup_notice"] = time.monotonic() - t0
 
-        phase_times["total"] = time.monotonic() - t_start
-        self._log(
-            "phase_timing_s "
-            + " ".join(f"{k}={v:.1f}" for k, v in phase_times.items())
-        )
-        self._log("REUSE execution complete", "success")
-
-    def _execute_move(
-        self,
-        plan: Dict,
-        spot_check: int = 0,
-        *,
-        preloaded_files: Optional[Dict[str, List]] = None,
-    ) -> None:
-        """
-        Execute a MOVE plan.
-
-        Steps:
-        1. Verify source exists
-        2. Move payload root from stash to pool
-        3. Verify file count and bytes at target
-        4. For each sibling torrent:
-           a. Build torrent view on pool
-           b. Relocate torrent in qBittorrent
-           c. Verify torrent can access files
-        5. Verify source is removed
-        """
-        import time
-
-        t_start = time.monotonic()
-        phase_times: Dict[str, float] = {}
-        source_path = Path(plan['source_path'])
-        target_path = Path(plan['target_path'])
-        target_device_id = self._resolve_plan_device_id(plan, "target")
-        if target_device_id is None:
-            raise RuntimeError("Missing target identity (device_id/fs_uuid) for spot-check")
-        execute_plan = dict(plan)
-        execute_plan["view_targets"] = self._filter_move_view_targets(plan, source_path)
-
-        moved_payload = False
-        move_strategy = "rename"
-
-        # 1. Verify source / idempotent target
-        t0 = time.monotonic()
-        self._log(f"step=verify_source path={source_path}")
-        if source_path.exists():
-            if not self._verify_file_count(source_path, plan['file_count']):
-                raise RuntimeError("Source file count mismatch")
-            if not self._verify_total_bytes(source_path, plan['total_bytes']):
-                raise RuntimeError("Source total bytes mismatch")
-
-            is_cross_fs = self._is_cross_filesystem(source_path, target_path.parent)
-            if target_path.exists() and not is_cross_fs:
-                raise RuntimeError(f"Target path already exists before move: {target_path}")
-
-            # 2. Move payload root
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                if is_cross_fs:
-                    move_strategy = "rsync_copy"
-                    self._copy_with_rsync_progress(source_path, target_path)
-                else:
-                    self._log(f"step=move_payload method=rename source={source_path} target={target_path}")
-                    shutil.move(str(source_path), str(target_path))
-                moved_payload = True
-            except Exception as e:
-                raise RuntimeError(f"Failed to move payload: {e}")
-        else:
-            if not target_path.exists():
-                raise RuntimeError(f"Source path does not exist: {source_path}")
-            self._log("step=verify_source source_missing=true mode=idempotent_reconcile", "warning")
-        phase_times["verify_and_move"] = time.monotonic() - t0
-
-        # 3. Verify target
-        t0 = time.monotonic()
-        self._log(f"step=verify_target path={target_path}")
-        if not self._verify_file_count(target_path, plan['file_count']):
-            raise RuntimeError("Target file count mismatch after move")
-        if not self._verify_total_bytes(target_path, plan['total_bytes']):
-            raise RuntimeError("Target total bytes mismatch after move")
-
-        # Spot-check (optional)
-        self._spot_check_payload(target_path, target_device_id, spot_check)
-        phase_times["verify_target_and_spotcheck"] = time.monotonic() - t0
-
-        # 4. Build views and relocate atomically
-        try:
-            t0 = time.monotonic()
-            self._log("step=build_views")
-            self._build_views(
-                target_path,
-                execute_plan.get("view_targets") or [],
-                execute_plan,
-                preloaded_files=preloaded_files,
-            )
-            phase_times["build_views"] = time.monotonic() - t0
-
-            t0 = time.monotonic()
-            conn = self._get_db_connection()
-            try:
-                relocations = self._build_relocations(conn, execute_plan)
-            finally:
-                conn.close()
-            phase_times["build_relocations"] = time.monotonic() - t0
-
-            t0 = time.monotonic()
-            self._log("step=relocate_siblings")
-            self._relocate_torrents_atomic(relocations)
-            phase_times["relocate"] = time.monotonic() - t0
-        except Exception as e:
-            # Rollback: restore source state if sibling relocation fails
-            self._log("relocation_failed rolling_back_payload", "error")
-            if moved_payload:
-                if move_strategy == "rename":
+    def _rollback_move_donor(self, execute_plan: Dict, donor: TargetDonor) -> None:
+        self._log("relocation_failed rolling_back_payload", "error")
+        if donor.moved_payload:
+            if donor.move_strategy == "rename":
+                try:
+                    shutil.move(str(donor.target_path), str(donor.source_path))
+                    self._log(f"  Rolled back payload to {donor.source_path}", "warning")
+                except Exception as rollback_error:
+                    self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
+            else:
+                if donor.target_path.exists():
                     try:
-                        shutil.move(str(target_path), str(source_path))
-                        self._log(f"  Rolled back payload to {source_path}", "warning")
+                        if donor.target_path.is_dir():
+                            shutil.rmtree(donor.target_path)
+                        else:
+                            donor.target_path.unlink()
+                        self._log(f"  Removed copied target after failure: {donor.target_path}", "warning")
                     except Exception as rollback_error:
                         self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
-                else:
-                    # rsync strategy leaves source in place until relocation succeeds.
-                    if target_path.exists():
-                        try:
-                            if target_path.is_dir():
-                                shutil.rmtree(target_path)
-                            else:
-                                target_path.unlink()
-                            self._log(f"  Removed copied target after failure: {target_path}", "warning")
-                        except Exception as rollback_error:
-                            self._log(f"  ROLLBACK FAILED: {rollback_error}", "error")
-            else:
-                self._log("  rollback skipped reason=idempotent_mode_no_move", "warning")
-            self._rollback_partial_target_views(execute_plan)
-            raise
+        else:
+            self._log("  rollback skipped reason=idempotent_mode_no_move", "warning")
+        self._rollback_partial_target_views(execute_plan)
 
-        # For rsync-based cross-filesystem moves, remove source only after relocation succeeded.
+    def _cleanup_move_source_after_success(self, plan: Dict, donor: TargetDonor) -> str:
         cleanup_source_status = "deleted"
+        source_path = donor.source_path
         plan["cleanup_source_deferred"] = False
         plan.pop("cleanup_source_deferred_path", None)
-        t0 = time.monotonic()
-        if move_strategy == "rsync_copy" and source_path.exists():
+
+        if donor.move_strategy == "rsync_copy" and source_path.exists():
             self._log(f"step=cleanup_source_after_rsync path={source_path}")
             try:
                 self._delete_path(source_path)
@@ -3078,19 +3030,77 @@ class DemotionExecutor:
                         )
                 else:
                     raise RuntimeError(f"Failed to remove source after rsync move: {e}") from e
+        return cleanup_source_status
+
+    def _execute_reuse(
+        self,
+        plan: Dict,
+        spot_check: int = 0,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
+        import time
+
+        t_start = time.monotonic()
+        donor = self._ensure_target_donor(plan, spot_check=spot_check)
+        phase_times: Dict[str, float] = {"verify": time.monotonic() - t_start}
+        execute_plan = self._build_execute_plan_for_donor(plan, donor)
+        attach_times = self._attach_torrents_to_donor(
+            execute_plan,
+            donor,
+            preloaded_files=preloaded_files,
+            allow_set_location_fallback=True,
+        )
+        phase_times.update(attach_times)
+
+        t0 = time.monotonic()
+        self._log(f"step=cleanup_stash path={donor.source_path} relocated={len(plan.get('affected_torrents') or [])}")
+        self._mark_cleanup_pending(plan, donor.source_path, donor.target_path)
+        phase_times["cleanup_notice"] = time.monotonic() - t0
+        phase_times["total"] = time.monotonic() - t_start
+        self._log(
+            "phase_timing_s "
+            + " ".join(f"{k}={v:.1f}" for k, v in phase_times.items())
+        )
+        self._log("REUSE execution complete", "success")
+
+    def _execute_move(
+        self,
+        plan: Dict,
+        spot_check: int = 0,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
+        import time
+
+        t_start = time.monotonic()
+        donor = self._ensure_target_donor(plan, spot_check=spot_check)
+        phase_times: Dict[str, float] = {"verify_and_move": time.monotonic() - t_start}
+        execute_plan = self._build_execute_plan_for_donor(plan, donor)
+
+        try:
+            attach_times = self._attach_torrents_to_donor(
+                execute_plan,
+                donor,
+                preloaded_files=preloaded_files,
+                allow_set_location_fallback=False,
+            )
+            phase_times.update(attach_times)
+        except Exception:
+            self._rollback_move_donor(execute_plan, donor)
+            raise
+
+        t0 = time.monotonic()
+        cleanup_source_status = self._cleanup_move_source_after_success(plan, donor)
         phase_times["cleanup"] = time.monotonic() - t0
 
-        # 5. Verify source is removed
         t0 = time.monotonic()
-        self._log(f"step=verify_source_removed path={source_path}")
-        if source_path.exists():
+        self._log(f"step=verify_source_removed path={donor.source_path}")
+        if donor.source_path.exists():
             if cleanup_source_status == "deferred":
-                self._log(
-                    f"cleanup_required=true path={source_path}",
-                    "warning",
-                )
+                self._log(f"cleanup_required=true path={donor.source_path}", "warning")
             else:
-                raise RuntimeError(f"Source still exists after move: {source_path}")
+                raise RuntimeError(f"Source still exists after move: {donor.source_path}")
         self._log(f"cleanup_source_status={cleanup_source_status}")
         phase_times["verify_source_removed"] = time.monotonic() - t0
         phase_times["total"] = time.monotonic() - t_start
@@ -3098,7 +3108,6 @@ class DemotionExecutor:
             "phase_timing_s "
             + " ".join(f"{k}={v:.1f}" for k, v in phase_times.items())
         )
-
         self._log("MOVE execution complete", "success")
 
     def _apply_cleanup(self, plan: Dict, cleanup_source_views: bool,

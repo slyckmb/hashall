@@ -579,11 +579,15 @@ def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, m
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        executor,
+        "_relocate_torrents_atomic",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("MOVE must not call setLocation relocation")),
+    )
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -615,15 +619,13 @@ def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path,
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-
-    def fail_relocation(*_args, **_kwargs):
+    def fail_attach(*_args, **_kwargs):
         raise RuntimeError("relocation failed")
 
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", fail_relocation)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", fail_attach)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -650,24 +652,21 @@ def test_execute_move_relocation_failure_cleans_partial_views(tmp_path, monkeypa
     side_view_path = side_view_parent / "payload.mkv"
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: False)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
 
-    def fake_build_views(payload_root, view_targets, plan, **_kwargs):
-        for target in view_targets:
+    def fail_attach(exec_plan, donor, **_kwargs):
+        payload_root = donor.target_path
+        for target in exec_plan.get("view_targets") or []:
             dst = Path(target["target_save_path"]) / target["root_name"]
             if dst == payload_root:
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.link(payload_root, dst)
+        raise RuntimeError("relocation failed")
 
-    monkeypatch.setattr(executor, "_build_views", fake_build_views)
-    monkeypatch.setattr(
-        executor,
-        "_relocate_torrents_atomic",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("relocation failed")),
-    )
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", fail_attach)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -715,12 +714,11 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
     monkeypatch.setattr("rehome.executor.get_payload_file_rows", lambda *_args, **_kwargs: [])
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -743,18 +741,17 @@ def test_execute_move_filters_view_target_that_recreates_source(tmp_path, monkey
     target_path = tmp_path / "pool" / "data" / "seeds" / "thegeeks" / "book.epub"
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: False)
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
 
     captured = {}
 
-    def fake_build_relocations(_conn, exec_plan):
+    def fake_attach(exec_plan, donor, **_kwargs):
         captured["view_targets"] = list(exec_plan.get("view_targets") or [])
-        return []
+        return {}
 
-    monkeypatch.setattr(executor, "_build_relocations", fake_build_relocations)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", fake_attach)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -894,9 +891,7 @@ def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tm
         (target_path / "video.mkv").write_bytes(b"x")
 
     monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
 
     calls = {"delete": 0, "repair": 0}
 
@@ -914,6 +909,7 @@ def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tm
     monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", fake_repair)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -943,9 +939,7 @@ def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_pa
         (target_path / "video.mkv").write_bytes(b"x")
 
     monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         executor,
         "_delete_path",
@@ -954,6 +948,7 @@ def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_pa
     monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", lambda _path: False)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,

@@ -198,8 +198,12 @@ def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
     }
 
     executor = DemotionExecutor(catalog_path=db_path)
-    executor.reuse_transport = "set_location"
+    executor.reuse_transport = "fastresume"
     executor.qbit_client = FakeQbitClient(default_path=str(source_file.parent))
+    executor._repoint_torrents_via_fastresume_batch = lambda relocations: [
+        executor.qbit_client.save_paths.__setitem__(row["torrent_hash"], row["target_save_path"])
+        for row in relocations
+    ]
 
     # Source file is already gone, target file already present.
     assert not source_file.exists()
