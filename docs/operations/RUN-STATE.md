@@ -1,162 +1,52 @@
-# Run State (Canonical)
+# Operational Run State
 
 Last updated: 2026-03-07
-Status: canonical living state
 
-## Purpose
+## Pool Migration Status
 
-Single living document for current operational state, handoff context, and next-agent execution guidance.
-
-## Current Mission
-
-1. Finish `pool-data -> pool-media`.
-2. Keep qB out of the payload-move path.
-3. Preserve stable catalog identity and healthy refresh runs.
-4. Resume `~noHL` only after the pool migration path is solid.
-
-## Canonical CLI
-
-`hashall` is now the sole operator entrypoint.
-
-Use:
-
-- `hashall refresh --verbose`
-- `hashall rehome auto --from pool-data --to pool-media --limit N`
-- `hashall rehome auto --from pool-data --to pool-media --limit N --apply`
-- `hashall rehome config ...`
-- `hashall rehome seed-root-state show`
-
-The standalone `rehome` console script has been removed from packaging.
-
-## Critical Architecture Decision
-
-Migration must be split into:
-
-1. donor acquisition
-2. shared attach/repoint
-
-Meaning:
-
-- `REUSE`:
-  - donor already exists at target
-- `MOVE`:
-  - donor is transferred externally first
-
-After donor exists and verifies, both lanes must use the same constructor:
-
-- build/verify target payload
-- patch fastresume offline
-- restart qB if needed
-- recheck
-- verify seed-ready
-- sync catalog
-- record cleanup state
-
-qB must not be used as the byte mover.
-qB `setLocation` is not acceptable as the mainline migration primitive on this host.
-
-Status:
-
-- implemented in code for both `REUSE` and `MOVE`
-- current donor transfer implementation remains the external `rsync` helper
-
-## Current `REUSE` State
-
-`REUSE` now defaults to offline fastresume repointing.
-
-Important fixes already landed:
-
-- queued recheck guard no longer fails immediately on temporary `stoppeddl 0%`
-- `REUSE` no longer reports false freed bytes
-- `REUSE` reports `cleanup pending` correctly
-- single-file nested-path fallback save-path derivation is fixed
-- latest successful pilot:
-  - log: `~/.logs/hashall/rehome/auto/20260307-164026.log`
-  - result:
-    - `apply ... cleanup pending OK`
-    - `verify ... stoppedup×9 ... catalog OK ... cleanup pending OK`
-    - `freed 0 B from sources`
-
-Operational conclusion:
-
-- `REUSE` is safe enough to continue in small batches
-- do not jump straight to a large batch
-- latest planner state for `pool-data -> pool-media`:
-  - `hashall rehome auto --from pool-data --to pool-media --limit 10`
-  - `0 MOVE groups available`
-  - pool-data phase is exhausted at planner level
+- Donor acquisition and offline attach are the shared backbone for both `REUSE` and `MOVE`.
+- The current rsync-based donor transfer is still the data mover; qB is metadata-only.
+- `REUSE` continues in small batches; each apply must finish with `stoppedup`/`stalledup`, no new downloads, and clean cleanup messages.
+- `pool-data -> pool-media` dry-runs show `0 MOVE groups available` when filtering by the strict safety criteria, but the catalog still contains many `/pool/data` payloads and the watcher reports >1.3 T of old-root usage.
+- Active gate: stash → pool-media `REUSE` pilot `rehome_runs.id=338` is running, and we do not scale `~noHL` until it finishes cleanly.
 
 ## Current `MOVE` Risk
 
-Current `MOVE` code path has been refactored onto the same offline attach path as `REUSE`.
-
-Reason this is still not batch-safe yet:
-
-- it has not been live-piloted yet on this host
-- cleanup-source provenance drift is still open
-- the operational gate is now pilot validation, not architecture
-
-Operational guidance:
-
-- do not run `MOVE` at scale yet
-- next step is one live `MOVE` pilot
-- if clean, scale in small batches
-- if the planner reports no `MOVE` groups, skip directly to the next source domain instead of forcing a synthetic move
+- `MOVE` has been refactored to use the same offline fastresume attach constructor after donor acquisition.
+- The new path still needs a live pilot before it can be trusted at scale.
+- Operational guard: do not run `MOVE` apply at scale until a pilot shows no `MV`/`moving`, no download-like flip, and proper cleanup provenance.
+- If the planner returns `0 MOVE groups`, move to the next source domain instead of forcing a synthetic move.
+- The interim safe model for any copy is `copy-then-REUSE` (external transfer first, then shared attach).
 
 ## Refresh / Identity State
 
-`stash` fs_uuid repair was applied live:
+- `hashall refresh --verbose` is healthy again and validates `stash`, `pool-media`, `pool-data`, and `spare` roots.
+- Stable `fs_uuid` entries are enforced; `device_id` stays as runtime metadata.
+- The catalog now updates known movers immediately rather than waiting for a later refresh.
 
-- old: `dev-44`
-- new: `zfs-4624186565346049802`
+## qB Guarding
 
-Verification:
+- `qb-start-seeding-gradual.sh` now halts only on newly flipped downloading-like torrents; preexisting download-like states no longer trigger safety gates.
+- StoppedDL drain/apply wraps and path watchers continue to use the shared cache agent for observability.
 
-- `hashall doctor preflight --db /home/michael/.hashall/catalog.db` -> clean
-- refresh log:
-  - `~/.logs/hashall/rehome/refresh/20260307-160508.log`
-  - status: `refresh OK`
-  - processed: `5147`
-  - complete payloads: `5140`
-  - incomplete payloads: `7`
-  - missing in catalog: `0`
+## Known Gaps
 
-## qB Guard / Repair State
+1. Cleanup-source path/provenance still sometimes references legacy `/pool/data/seeds/...` roots instead of the actual migrated source.
+2. `MOVE` has been refactored off qB relocation semantics but still awaits a pilot validation.
+3. Catalog updates for migration actions should be immediate, not wait for another refresh pass.
+4. The active stash → pool-media pilot (`rehome_runs.id=338`) is long-running; inspect the sequential rechecks once it finishes.
 
-`qb-start-seeding-gradual.sh` now:
-
-- resumes `stoppedUP` gradually
-- halts only on newly flipped downloading-like torrents
-- does not halt on preexisting downloading-like states
-
-Current script version:
-
-- `bin/qb-start-seeding-gradual.sh` -> `v1.3.11`
-
-## Known Remaining Gaps
-
-1. cleanup-source path/provenance can still point at legacy `/pool/data/seeds/...`
-2. `MOVE` needs a live pilot before it can be treated as batch-safe
-3. known migration changes should update catalog state immediately where possible, not wait for later full refresh
-4. active `stash -> pool-media` pilot `rehome_runs.id=338` is long-running and still in sequential qB recheck as of 2026-03-07 21:10 EST
-
-## Primary Logs
+## Logs to Watch
 
 - `~/.logs/hashall/hashall.log`
 - `~/.logs/hashall/rehome/refresh/`
 - `~/.logs/hashall/rehome/auto/`
 - `~/.logs/hashall/reports/qbit-triage/`
 
-For shared runtime log tailing, prefer:
+## Immediate Checklist
 
-```bash
-tail -n0 -F ~/.logs/hashall/hashall.log
-```
-
-## Next-Agent Checklist
-
-1. Fix cleanup-source path selection/provenance on completed pool-data runs.
-2. Confirm active `stash -> pool-media` pilot `338` completes cleanly.
-3. If clean, continue `stash -> pool-media` in small `REUSE` batches.
-4. Pilot `MOVE` only if/when the planner surfaces a real move case again.
-5. Then continue `~noHL`.
+1. Fix cleanup-source path/provenance so operator messaging cites the actual migrated root.
+2. Confirm the stash → pool-media pilot completes cleanly.
+3. If clean, continue stash/pool-media `REUSE` batches incrementally.
+4. Only pilot `MOVE` once the planner surfaces a donor-acquisition candidate and the pilot passes without `MV`/download issues.
+5. After that, resume planning for `~noHL`.

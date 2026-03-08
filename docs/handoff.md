@@ -1,45 +1,22 @@
-# Handoff (Canonical)
+# Handoff Notes
 
-Use these three docs only:
+## Key Facts
 
-- `docs/project/PLAN.md`
-- `docs/operations/RUN-STATE.md`
-- `docs/handoff.md`
-
-## Current State
-
-- Branch: `chatrap/codex-hashall-20260305-181919`
-- Worktree: `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260305-181919`
-- Canonical CLI: `hashall`
-- Package version: `0.4.153`
-
-## What Is Done
-
-- `hashall` is now the sole operator CLI.
-- `rehome` console script removed from packaging.
-- `stash` fs_uuid repaired live from `dev-44` to `zfs-4624186565346049802`.
-- `hashall refresh --verbose` is healthy again.
-- `REUSE` no longer uses qB `setLocation` by default.
-- latest `REUSE` pilot succeeded with offline fastresume repointing.
-- `MOVE` now uses the same offline donor-attach path instead of qB relocation semantics after copy.
-- `pool-data -> pool-media` now shows `0 MOVE groups available` in dry-run; planner considers that phase exhausted.
-- qB gradual seeding daemon fixed to halt only on newly flipped downloading-like states.
-
-## What Is True Now
-
-- qB must not be the byte mover.
-- `REUSE` is the correct model once donor already exists at target.
-- `MOVE` now matches the same attach/repoint path after external transfer.
-- Current `MOVE` code still needs one live pilot before it is safe to scale.
-- active next live gate is `stash -> pool-media` `REUSE` pilot `rehome_runs.id=338`
+- Operate through `hashall` (script-level commands) rather than the removed `rehome` entrypoint.
+- Pool migration now relies on a shared donor-acquisition + offline fastresume attach constructor for both `REUSE` and `MOVE`.
+- `REUSE` applies already succeed via offline fastresume with no `MV`/`moving`, while cleanup notices still need refinement.
+- `MOVE` uses the same offline attach path but remains unproven live; the next gate is one live `MOVE` pilot.
+- `pool-data -> pool-media` dry-runs report `0 MOVE groups available`, yet numerous `/pool/data` payloads still exist; watch the inventory carefully.
+- qB gradual-seeding daemon and path watchers are tuned to avoid halting on preexisting download-like states.
+- Active gate: stash → pool-media `REUSE` pilot `rehome_runs.id=338` is running; do not scale `~noHL` until it finishes cleanly.
 
 ## Immediate Next Work
 
-1. Fix cleanup-source path/provenance drift.
-2. Confirm `stash -> pool-media` pilot `338` completes cleanly.
-3. If clean, scale stash/noHL `REUSE` cautiously.
-4. Pilot `MOVE` only if the planner surfaces a real move case again.
-5. Then continue `~noHL`.
+1. Fix cleanup-source path/provenance so operator messaging references the actual migrated source root.
+2. Confirm the stash → pool-media pilot completes cleanly.
+3. If clean, scale stash/pool-media `REUSE` cautiously, verifying each batch and watching for any unexpected `MV`/download states.
+4. Pilot `MOVE` only once the planner surfaces a real donor-acquisition case and the pilot passes cleanly.
+5. After that, resume planning for the `~noHL` migration lane.
 
 ## Key Logs
 
@@ -48,8 +25,9 @@ Use these three docs only:
 - `~/.logs/hashall/rehome/auto/`
 - `~/.logs/hashall/reports/qbit-triage/`
 
-## Do Not Forget
+## Operational Reminders
 
-- use `hashall ...`, not `rehome ...`
-- do not reintroduce qB `setLocation` as the normal migration primitive
-- do not scale `MOVE` before the first live pilot proves the new path
+- `hashall refresh --verbose` keeps catalog scans updated; run it after any donor copy.
+- `hashall rehome auto --from <src> --to <dst> --limit <n> [--apply]` remains the canonical mover.
+- Do not let qB run `setLocation` as part of normal migration; we rely on offline fastresume repointing.
+- Keep the guard log tailing commands handy for monitoring long runs.
