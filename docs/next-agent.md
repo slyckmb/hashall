@@ -6,7 +6,7 @@ Primary run-state source:
 If context is compacted, recover with this sequence:
 
 0. Recover the new guarded qB relocation tooling state:
-   - `bin/qb-zfs-relocate.py` (`v0.1.3`)
+   - `bin/qb-zfs-relocate.py` (`v0.1.4`)
    - `src/hashall/qb_zfs_relocate.py`
    - `src/hashall/bencode.py`
    - repo-root `python3 -m hashall` bootstrap now works via local `hashall/` + `rehome/` packages.
@@ -25,7 +25,7 @@ If context is compacted, recover with this sequence:
    - new repair path now available:
      - `hashall doctor repair-identity`
      - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-     - `hashall` semver is `0.4.158`
+     - `hashall` semver is `0.4.159`
 4. Preserve and remediate known drift:
    - `payloads`/`torrent_instances` rows with missing or stale `device_id` values.
    - parked negative `device_id` row in `devices`.
@@ -49,6 +49,7 @@ If context is compacted, recover with this sequence:
    - cleanup is now staged-safe and can run standalone from a manifest or via `migrate --auto-cleanup=safe`
    - cleanup dry-runs for both successful migrate batches returned `blocked=0`
    - live cleanup has now completed for both successful batches and removed the four migrated source payloads
+   - resume observe now respects its configured soak window; the wrapper default is `60s`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

@@ -34,10 +34,12 @@ Latest critical operations note (2026-03-06):
 Latest tooling note (2026-03-08):
 
 - Guarded qB dataset relocation workflow added:
-  - `bin/qb-zfs-relocate.py` (`v0.1.3`)
+  - `bin/qb-zfs-relocate.py` (`v0.1.4`)
   - `src/hashall/qb_zfs_relocate.py`
   - phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
   - migrate now supports `--auto-cleanup=safe` with staged `rename -> observe -> delete`
+  - resume observation now honors the configured soak window instead of short-circuiting immediately on first healthy check
+  - pool-data wrapper default `PILOT_OBSERVE_SECONDS` is now `60`
   - cleanup now live-validates qB state, verify evidence, path safety, and overlap rules before any delete path
   - wrappers now write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
 - Shared bencode/fastresume groundwork added:

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from hashall.bencode import bencode_encode
+from hashall import qb_zfs_relocate
 from hashall.qb_zfs_relocate import QBZFSRelocationTool, load_hashes_file, write_json
 
 
@@ -969,6 +970,66 @@ def test_resume_starts_qb_and_batches_pilot_then_remaining(tmp_path):
     assert client.resume_calls == [[torrent_hash_a], [torrent_hash_b]]
     assert statuses[torrent_hash_a] == "pilot_ok"
     assert statuses[torrent_hash_b] == "resumed_ok"
+
+
+def test_resume_observe_honors_nonzero_soak_window(tmp_path):
+    torrent_hash = "resumeobserve"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["patch_status"] = "patched"
+    manifest_path = tmp_path / "resume-observe-manifest.json"
+    write_json(
+        manifest_path,
+        {
+            "rows": [row],
+            "global_issues": [],
+            "phase_history": [],
+            "selection": {"hashes": [torrent_hash]},
+        },
+    )
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["new_save_path"],
+                row["dest_content_path"],
+                state="stalledUP",
+            )
+        }
+    )
+    controller = FakeController(stopped=True)
+    sleeps: list[float] = []
+    fake_now = [100.0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        fake_now[0] += seconds
+
+    tool = QBZFSRelocationTool(
+        qb_client=client,
+        runner=FakeRunner(),
+        verifier=FakeVerifier(),
+        process_controller=controller,
+        sleep_fn=fake_sleep,
+    )
+    original_time = qb_zfs_relocate.time.time
+    try:
+        qb_zfs_relocate.time.time = lambda: fake_now[0]
+        rc = tool.resume(
+            manifest_path=manifest_path,
+            apply=True,
+            pilot_size=1,
+            observe_seconds=2.0,
+            resume_remaining=True,
+            recheck_on_failure=False,
+        )
+    finally:
+        qb_zfs_relocate.time.time = original_time
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert sleeps == [1.0, 1.0]
+    assert manifest["rows"][0]["resume_status"] == "pilot_ok"
 
 
 def test_cleanup_requires_confirm_cleanup(tmp_path):

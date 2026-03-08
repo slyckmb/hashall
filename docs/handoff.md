@@ -7,12 +7,13 @@
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
   - shared fastresume/bencode path now uses `src/hashall/bencode.py`
-  - script semver is now `v0.1.3`
+  - script semver is now `v0.1.4`
   - wrapper-driven runs now write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json` and keep `current-manifest.txt` + `latest-manifest.json` pointers
   - `migrate` can now opt into staged safe cleanup via `--auto-cleanup=safe`
 - Source-layout CLI bootstrap is now present:
   - `python3 -m hashall` works from repo root via local `hashall/` + `rehome/` bootstrap packages.
-  - package semver is now `0.4.158`
+  - package semver is now `0.4.159`
+  - wrapper default pilot resume observe window is now `60s`
 - Guarded relocation coverage is in place:
   - targeted regression set now includes `tests/test_qb_zfs_relocate.py`
   - last local verification for the relocation/tooling slice: `28 passed` in `tests/test_qb_zfs_relocate.py`

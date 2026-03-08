@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.3"
+SCRIPT_VERSION = "0.1.4"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -1667,6 +1667,7 @@ class QBZFSRelocationTool:
         observe_seconds: float,
         recheck_on_failure: bool,
     ) -> None:
+        observe_seconds = max(0.0, float(observe_seconds))
         deadline = time.time() + observe_seconds
         problems: List[str] = []
         first_pass = True
@@ -1686,7 +1687,8 @@ class QBZFSRelocationTool:
                 state = str(info.state or "").lower()
                 if state in BAD_RESUME_STATES:
                     problems.append(f"bad_state:{row['hash']}:{state}")
-            if not problems:
+            remaining_seconds = max(0.0, deadline - time.time())
+            if not problems and remaining_seconds <= 0.0:
                 emit_log(
                     "observe_end",
                     phase="resume",
@@ -1704,7 +1706,7 @@ class QBZFSRelocationTool:
                     batch=batch_name,
                     rows=len(rows),
                     elapsed=format_hms(now - started_at),
-                    eta=format_hms(max(0.0, deadline - time.time())),
+                    eta=format_hms(remaining_seconds),
                     problems=len(problems),
                 )
                 last_emit_at = now
@@ -1715,6 +1717,16 @@ class QBZFSRelocationTool:
                 state = str(getattr(info, "state", "") or "").lower()
                 if state in BAD_RESUME_STATES:
                     self.qb_client.recheck_torrent(row["hash"])
+        if not problems:
+            emit_log(
+                "observe_end",
+                phase="resume",
+                batch=batch_name,
+                rows=len(rows),
+                elapsed=format_hms(time.monotonic() - started_at),
+                status="ok",
+            )
+            return
         emit_log(
             "observe_end",
             phase="resume",
