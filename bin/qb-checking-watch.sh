@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Version: 1.2.0
+# Version: 1.2.1
 set -euo pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QBIT_URL="${QBIT_URL:-http://localhost:9003}"
 QBIT_USER="${QBIT_USER:-admin}"
@@ -17,7 +17,7 @@ MAX_ITERATIONS=0
 DASHBOARD=0
 USE_CACHE=0
 CACHE_MAX_AGE=15
-CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qbit-cache-agent.py}"
+CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qb-cache-agent.py}"
 CACHE_CLIENT_ID="$(basename "$0"):$$"
 declare -a ALLOW_HASHES=()
 

@@ -8,7 +8,7 @@ hr() {
 usage() {
   cat <<'USAGE'
 Usage:
-  bin/rehome-56_qb-missing-audit.sh [options]
+  bin/qb-missing-audit.sh [options]
 
 Options:
   --db PATH                 Catalog DB path (default: /home/michael/.hashall/catalog.db)

@@ -25,7 +25,7 @@ Hashall is a unified file-catalog and payload-identity system for safe deduplica
 
 - Device registry (`devices`) with stable filesystem identity.
 - Scan history and roots (`scan_sessions`, `scan_roots`).
-- Per-device file tables (`files_<device_id>`).
+- Filesystem-bound physical files tables plus `files_<device_id>` compatibility views.
 - Payload tables (`payloads`, `torrent_instances`).
 - Planning/execution tables for link/rehome workflows.
 

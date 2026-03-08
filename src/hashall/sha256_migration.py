@@ -12,7 +12,7 @@ from pathlib import Path
 import time
 
 from hashall.model import connect_db
-from hashall.device import ensure_files_table
+from hashall.device import ensure_files_table, get_files_table_name
 from hashall.scan import compute_full_hashes, compute_sha256
 
 
@@ -88,9 +88,7 @@ def backfill_sha256(
         device_id = row["device_id"]
         device_alias = row["device_alias"]
         mount_point = Path(row["mount_point"])
-        table_name = f"files_{device_id}"
-
-        ensure_files_table(cursor, device_id)
+        table_name = ensure_files_table(cursor, device_id)
         conn.commit()
 
         total_missing = cursor.execute(
@@ -264,9 +262,7 @@ def verify_sha256(
         device_id = row["device_id"]
         device_alias = row["device_alias"]
         mount_point = Path(row["mount_point"])
-        table_name = f"files_{device_id}"
-
-        ensure_files_table(cursor, device_id)
+        table_name = ensure_files_table(cursor, device_id)
         conn.commit()
 
         total = cursor.execute(

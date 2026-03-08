@@ -42,7 +42,7 @@ hr
 echo "run_id=${stamp} step=basics-qb-missing-remediate-dryrun plan=${PLAN} output_prefix=${OUTPUT_PREFIX} limit=${LIMIT} heartbeat_s=${HEARTBEAT_S} fast=${FAST} debug=${DEBUG}"
 
 cmd=(
-  bin/rehome-57_qb-missing-remediate.sh
+  bin/qb-missing-remediate.sh
   --plan "$PLAN"
   --mode dryrun
   --limit "$LIMIT"

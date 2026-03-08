@@ -14,7 +14,7 @@ step() {
 step "1. Scan /stash/media (includes /data/media collection)" \
   "$repo_root/bin/db-refresh-step1-scan-stash.sh"
 
-step "2. Scan /pool/data + /mnt/hotspare6tb" \
+step "2. Scan /pool/data + /pool/media + /mnt/hotspare6tb" \
   "$repo_root/bin/db-refresh-step2-scan-pool-hotspare.sh"
 
 step "3. SHA256 collision & upgrade" \

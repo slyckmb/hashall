@@ -10,6 +10,7 @@ from typing import Callable, List, Optional
 import sqlite3
 import json
 
+from hashall.device import get_files_table_name
 
 @dataclass
 class DuplicateGroup:
@@ -120,9 +121,11 @@ def analyze_device(
     device_alias, mount_point = dev_row[1], dev_row[2]
 
     # Check if device table exists
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(cursor, device_id=device_id)
+    if not table_name:
+        raise ValueError(f"Table for device {device_id} does not exist in catalog")
     cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        "SELECT name FROM sqlite_master WHERE name=?",
         (table_name,)
     )
     if not cursor.fetchone():
@@ -226,25 +229,59 @@ def analyze_cross_device(conn: sqlite3.Connection, min_size: int = 0) -> CrossDe
     """
     cursor = conn.cursor()
 
-    tables = [
-        row[0] for row in cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'files_%'"
-        ).fetchall()
-    ]
-
     def _table_has_sha256(name: str) -> bool:
         cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({name})")}
         return "sha256" in cols
 
+    table_bindings: list[tuple[int, str]] = []
+    seen_tables: set[str] = set()
+
+    has_devices = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    if has_devices:
+        device_rows = cursor.execute(
+            """
+            SELECT device_id, fs_uuid
+            FROM devices
+            WHERE device_id IS NOT NULL
+            ORDER BY device_id
+            """
+        ).fetchall()
+        for device_id, fs_uuid in device_rows:
+            table_name = get_files_table_name(
+                cursor,
+                device_id=int(device_id),
+                fs_uuid=str(fs_uuid or "").strip() or None,
+            )
+            if not table_name or table_name in seen_tables:
+                continue
+            relation = cursor.execute(
+                "SELECT type FROM sqlite_master WHERE name = ?",
+                (table_name,),
+            ).fetchone()
+            if not relation or relation[0] not in {"table", "view"}:
+                continue
+            seen_tables.add(table_name)
+            table_bindings.append((int(device_id), table_name))
+
+    if not table_bindings:
+        tables = [
+            row[0] for row in cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'files_%'"
+            ).fetchall()
+        ]
+        for table in tables:
+            parts = table.split("_", 1)
+            if len(parts) != 2 or not parts[1].isdigit():
+                continue
+            table_bindings.append((int(parts[1]), table))
+
     selects = []
     params = []
-    for table in tables:
-        parts = table.split("_", 1)
-        if len(parts) != 2 or not parts[1].isdigit():
-            continue
+    for device_id, table in table_bindings:
         if not _table_has_sha256(table):
             continue
-        device_id = int(parts[1])
         selects.append(
             f"SELECT {device_id} as device_id, path, size, sha256 "
             f"FROM {table} WHERE status = 'active' AND sha256 IS NOT NULL AND size >= ?"

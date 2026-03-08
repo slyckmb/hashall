@@ -18,6 +18,7 @@ from hashall.export import export_json
 from hashall.verify_trees import verify_trees
 from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
+from hashall.device import get_files_table_name
 from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
@@ -159,9 +160,14 @@ def _emit_run_header() -> None:
         return
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     script = Path(sys.argv[0]).name or "hashall"
+    argv_text = " ".join(str(arg) for arg in sys.argv[1:])
+    run_boundary = "═" * 68
+    print(run_boundary)
     print(f"🧾 {script} v{__version__} @ {timestamp}")
+    print(f"🧾 run_start pid={os.getpid()} argv={argv_text or '<none>'}")
     if _LOG_PATH:
         print(f"🧾 log: {_LOG_PATH}")
+    print(run_boundary)
     _RUN_HEADER_EMITTED = True
 
 
@@ -247,6 +253,117 @@ def verify_trees_cmd(src, dst, repair, rsync_source, db, force, no_export):
         rsync_source=Path(rsync_source) if rsync_source else None,
         auto_export=not no_export,
     )
+
+
+@cli.group()
+def doctor():
+    """Safety and integrity diagnostics."""
+    pass
+
+
+@doctor.command("preflight")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--json-output", is_flag=True, help="Emit JSON report.")
+@click.option(
+    "--strict/--no-strict",
+    default=True,
+    show_default=True,
+    help="Return non-zero when error-severity checks fail.",
+)
+def doctor_preflight(db, json_output, strict):
+    """Run fail-closed catalog integrity checks used by migration/repair tooling."""
+    from hashall.model import connect_db
+    from hashall.preflight import run_catalog_preflight
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    report = run_catalog_preflight(conn)
+    conn.close()
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        summary = report.get("summary", {})
+        click.echo(
+            "preflight "
+            f"ok={bool(report.get('ok'))} "
+            f"total_checks={int(summary.get('total_checks', 0) or 0)} "
+            f"failed_error={int(summary.get('failed_error', 0) or 0)} "
+            f"failed_warning={int(summary.get('failed_warning', 0) or 0)}"
+        )
+        for check in report.get("checks", []):
+            status = "OK" if bool(check.get("ok")) else "FAIL"
+            severity = str(check.get("severity") or "info").upper()
+            name = str(check.get("name") or "unknown")
+            msg = str(check.get("message") or "")
+            click.echo(f"  [{status}] [{severity}] {name} - {msg}")
+
+    if strict and not bool(report.get("ok")):
+        raise click.ClickException("catalog preflight failed (error-severity checks)")
+
+
+@doctor.command("repair-identity")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--apply", is_flag=True, help="Apply inferred device_id/fs_uuid repairs.")
+@click.option(
+    "--max-actions",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Limit number of update actions (0 means no limit).",
+)
+@click.option(
+    "--allow-bind-alias/--no-allow-bind-alias",
+    default=True,
+    show_default=True,
+    help="Allow /data/media <-> /stash/media bind-alias inference.",
+)
+@click.option(
+    "--report-json",
+    type=click.Path(),
+    default=None,
+    help="Write full JSON report to this path.",
+)
+@click.option("--json-output", is_flag=True, help="Print full JSON report to stdout.")
+def doctor_repair_identity(db, apply, max_actions, allow_bind_alias, report_json, json_output):
+    """Repair stale identity rows using fs_uuid-first inference."""
+    from hashall.identity_repair import run_identity_repair, write_report
+
+    result = run_identity_repair(
+        Path(db),
+        apply_mode=bool(apply),
+        max_actions=max(0, int(max_actions or 0)),
+        allow_bind_aliases=bool(allow_bind_alias),
+    )
+
+    if report_json:
+        out_path = write_report(result, Path(report_json))
+        click.echo(f"report_json={out_path}")
+
+    if json_output:
+        click.echo(result.to_json().rstrip())
+        return
+
+    click.echo(
+        "identity_repair "
+        f"apply={str(bool(apply)).lower()} "
+        f"payload_candidates={result.payload_candidates} "
+        f"torrent_candidates={result.torrent_candidates} "
+        f"actions_planned={result.actions_planned} "
+        f"actions_applied={result.actions_applied} "
+        f"unresolved={result.unresolved_count}"
+    )
+    if result.reason_counts:
+        click.echo("reason_counts:")
+        for reason, count in result.reason_counts.items():
+            click.echo(f"  {reason}={count}")
+    if result.unresolved_samples:
+        click.echo("unresolved_samples:")
+        for item in result.unresolved_samples[:10]:
+            click.echo(
+                f"  table={item.get('table')} key={item.get('key')} "
+                f"device_id={item.get('device_id')} fs_uuid={item.get('fs_uuid')} "
+                f"path={item.get('path')}"
+            )
 
 # Payload command group
 @cli.group()
@@ -517,6 +634,7 @@ def payload_sync(
                     torrent_hash=torrent.hash,
                     payload_id=payload_id,
                     device_id=payload.device_id,
+                    fs_uuid=payload.fs_uuid,
                     save_path=torrent.save_path,
                     root_name=torrent.name,
                     category=torrent.category,
@@ -815,10 +933,12 @@ def _batch_count_active_payload_roots(conn, keys: list[tuple[int, str]]) -> dict
         by_device.setdefault(int(device_id), []).append(root_path)
 
     for device_id, root_paths in by_device.items():
-        table_name = f"files_{device_id}"
+        table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+        if not table_name:
+            continue
         table_ident = _quote_sql_identifier(table_name)
         if not conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            "SELECT name FROM sqlite_master WHERE name=?",
             (table_name,),
         ).fetchone():
             continue
@@ -1814,13 +1934,15 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
         total_deleted = 0
         for device in devices:
             device_id = device['device_id']
-            table_name = f"files_{device_id}"
+            table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+            if not table_name:
+                continue
             table_ident = _quote_sql_identifier(table_name)
 
             # Check if table exists
             table_exists = conn.execute("""
                 SELECT name FROM sqlite_master
-                WHERE type='table' AND name=?
+                WHERE name=?
             """, (table_name,)).fetchone()
 
             if table_exists:
@@ -1940,13 +2062,15 @@ def stats_cmd(db, hash_coverage, show_roots, roots_limit):
 
         for device in devices:
             device_id = device['device_id']
-            table_name = f"files_{device_id}"
+            table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+            if not table_name:
+                continue
             table_ident = _quote_sql_identifier(table_name)
 
             # Check if table exists
             table_exists = conn.execute("""
                 SELECT name FROM sqlite_master
-                WHERE type='table' AND name=?
+                WHERE name=?
             """, (table_name,)).fetchone()
 
             if table_exists:
@@ -3287,6 +3411,176 @@ def devices_repair_indexes(db, quiet):
     )
 
 
+@devices.command("migrate-files-tables")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--apply", is_flag=True, help="Execute changes. Default is dry-run.")
+@click.option(
+    "--device",
+    "device_filters",
+    multiple=True,
+    help="Limit to a device alias, device_id, or fs_uuid. Repeatable.",
+)
+@click.option("--limit", type=int, default=0, show_default=True, help="Maximum devices to process after filtering (0 = all).")
+@click.option("--report-json", type=click.Path(), help="Write JSON report to this path.")
+@click.option("--snapshot-db", type=click.Path(), help="Write a DB snapshot here before apply.")
+def devices_migrate_files_tables(db, apply, device_filters, limit, report_json, snapshot_db):
+    """Plan or apply fs_uuid-backed files-table bindings with compatibility views."""
+    import sqlite3
+    from collections import Counter
+    from datetime import datetime
+
+    from hashall.model import connect_db
+    from hashall.device import ensure_files_table, files_table_name_for_fs_uuid, resolve_device_id
+    from hashall.fs_utils import filesystem_uuid_is_stable
+
+    conn = connect_db(Path(db))
+    cursor = conn.cursor()
+    rows = list(cursor.execute(
+        """
+        SELECT device_id, device_alias, fs_uuid, files_table
+        FROM devices
+        WHERE fs_uuid IS NOT NULL AND trim(fs_uuid) <> ''
+        ORDER BY device_alias, fs_uuid
+        """
+    ).fetchall())
+
+    def _relation_type(name: str | None) -> str | None:
+        if not name:
+            return None
+        row = cursor.execute(
+            "SELECT type FROM sqlite_master WHERE name = ?",
+            (str(name),),
+        ).fetchone()
+        return str(row[0]) if row else None
+
+    if device_filters:
+        wanted_ids: set[int] = set()
+        for raw in device_filters:
+            try:
+                wanted_ids.add(resolve_device_id(conn, raw))
+                continue
+            except ValueError:
+                row = cursor.execute(
+                    "SELECT device_id FROM devices WHERE fs_uuid = ?",
+                    (str(raw),),
+                ).fetchone()
+                if row is None:
+                    conn.close()
+                    raise click.ClickException(
+                        f"No device found for filter {raw!r} (expected alias, device_id, or fs_uuid)"
+                    )
+                wanted_ids.add(int(row[0]))
+        rows = [row for row in rows if int(row[0]) in wanted_ids]
+
+    if limit > 0:
+        rows = rows[:limit]
+
+    report = {
+        "generated_at": datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "mode": "apply" if apply else "dry-run",
+        "db": str(Path(db)),
+        "device_filters": list(device_filters or ()),
+        "limit": int(limit),
+        "devices": [],
+    }
+
+    for row in rows:
+        device_id = int(row[0])
+        device_alias = str(row[1] or "")
+        fs_uuid = str(row[2] or "").strip()
+        current_binding = str(row[3] or "").strip() or None
+        target_table = files_table_name_for_fs_uuid(fs_uuid)
+        legacy_name = f"files_{device_id}"
+        target_relation = _relation_type(target_table)
+        legacy_relation = _relation_type(legacy_name)
+
+        if not filesystem_uuid_is_stable(fs_uuid):
+            action = "blocked_unstable_fs_uuid"
+        elif current_binding == target_table and target_relation == "table" and legacy_relation in {"table", "view"}:
+            action = "noop_already_bound"
+        elif target_relation == "table" and not current_binding:
+            action = "backfill_binding_only"
+        elif legacy_relation == "table" and target_relation != "table":
+            action = "rename_legacy_table"
+        elif target_relation != "table" and legacy_relation is None:
+            action = "create_target_table"
+        elif target_relation == "table" and legacy_relation is None:
+            action = "create_compat_view"
+        else:
+            action = "reconcile_binding"
+
+        report["devices"].append(
+            {
+                "device_id": device_id,
+                "device_alias": device_alias,
+                "fs_uuid": fs_uuid,
+                "current_binding": current_binding,
+                "target_table": target_table,
+                "target_relation": target_relation,
+                "legacy_relation": legacy_relation,
+                "planned_action": action,
+            }
+        )
+
+    snapshot_path = None
+    if apply:
+        blocked = [item for item in report["devices"] if item["planned_action"] == "blocked_unstable_fs_uuid"]
+        if blocked:
+            conn.close()
+            blocked_csv = ",".join(str(item["device_id"]) for item in blocked)
+            raise click.ClickException(
+                "refusing apply for devices with volatile dev-* fs_uuid fallback: "
+                f"{blocked_csv}"
+            )
+        snapshot_path = Path(snapshot_db) if snapshot_db else (
+            Path(db).with_name(
+                f"{Path(db).stem}-pre-files-table-migrate-{datetime.now().strftime('%Y%m%d-%H%M%S')}{Path(db).suffix}"
+            )
+        )
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_conn = sqlite3.connect(str(snapshot_path))
+        conn.backup(backup_conn)
+        backup_conn.close()
+        click.echo(f"snapshot_db={snapshot_path}")
+        report["snapshot_db"] = str(snapshot_path)
+
+        for item in report["devices"]:
+            table_name = ensure_files_table(cursor, item["device_id"], fs_uuid=item["fs_uuid"])
+            conn.commit()
+            item["applied_table"] = table_name
+            item["post_binding"] = cursor.execute(
+                "SELECT files_table FROM devices WHERE device_id = ?",
+                (item["device_id"],),
+            ).fetchone()[0]
+            item["post_target_relation"] = _relation_type(table_name)
+            item["post_legacy_relation"] = _relation_type(f"files_{item['device_id']}")
+
+    counter = Counter(item["planned_action"] for item in report["devices"])
+    report["summary"] = {
+        "devices": len(report["devices"]),
+        "actions": dict(counter),
+    }
+
+    click.echo(
+        f"mode={report['mode']} devices={report['summary']['devices']} "
+        f"actions={json.dumps(report['summary']['actions'], sort_keys=True)}"
+    )
+    for item in report["devices"]:
+        click.echo(
+            f"device_id={item['device_id']} alias={item['device_alias'] or '-'} "
+            f"fs_uuid={item['fs_uuid']} target={item['target_table']} "
+            f"planned={item['planned_action']}"
+        )
+
+    if report_json:
+        out_path = Path(report_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        click.echo(f"report_json={out_path}")
+
+    conn.close()
+
+
 @devices.command('alias')
 @click.argument('current_name')
 @click.argument('new_alias')
@@ -3419,7 +3713,9 @@ def devices_show(device, db):
      total_files, total_bytes, device_id_history_json) = device_row
 
     # Get deleted files count
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(cursor, device_id=device_id)
+    if not table_name:
+        table_name = f"files_{device_id}"
     table_ident = _quote_sql_identifier(table_name)
     deleted_count = 0
     try:
@@ -3597,6 +3893,15 @@ def devices_preferred_mount(device, mount_point, db):
 
     click.echo(f"Updated preferred mount point: {display_name} -> {mount_point}")
     conn.close()
+
+
+# Canonical CLI surface:
+# - `hashall rehome ...` exposes the full rehome command tree
+# - `hashall refresh` is a direct top-level alias for the rehome refresh flow
+from rehome.cli import cli as rehome_cli, refresh_cmd as rehome_refresh_cmd
+
+cli.add_command(rehome_cli, name="rehome")
+cli.add_command(rehome_refresh_cmd, name="refresh")
 
 
 if __name__ == "__main__":

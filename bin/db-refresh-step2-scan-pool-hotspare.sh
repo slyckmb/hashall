@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# STEP 2: Scan /pool/data and /mnt/hotspare6tb
-# Both should auto-correct from their temp/old device IDs to live IDs.
+# STEP 2: Scan /pool/data, /pool/media, and /mnt/hotspare6tb
+# All pool datasets and hotspare should be present in catalog devices/files tables.
 # Pause after this and paste tail of log to Claude before continuing.
 set -euo pipefail
 
@@ -13,12 +13,16 @@ mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/step2-scan-pool-hotspare-$(date +%Y%m%d-%H%M%S).log"
 
 echo "================================================================"
-echo "STEP 2: scan /pool/data + /mnt/hotspare6tb — $(date '+%F %T')"
+echo "STEP 2: scan /pool/data + /pool/media + /mnt/hotspare6tb — $(date '+%F %T')"
 echo "log: $LOGFILE"
 echo "================================================================"
 
 echo "--- scan /pool/data ---"
 "$PYTHON" -m hashall scan /pool/data --parallel --workers 8 2>&1 | tee "$LOGFILE"
+
+echo ""
+echo "--- scan /pool/media ---"
+"$PYTHON" -m hashall scan /pool/media --parallel --workers 8 2>&1 | tee -a "$LOGFILE"
 
 echo ""
 echo "--- scan /mnt/hotspare6tb ---"

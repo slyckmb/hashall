@@ -2,7 +2,7 @@
 # Repair a broken torrent (stoppedDL) using a good torrent (stoppedUP 100%)
 # from the same payload group.
 #
-# Usage: bin/qbit-repair-payload-group.sh --good HASH --broken HASH [--apply]
+# Usage: bin/qb-repair-payload-group.sh --good HASH --broken HASH [--apply]
 #
 # Phases:
 #   1. Validate (QB state)

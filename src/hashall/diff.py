@@ -4,6 +4,7 @@
 # ✅ Corrected import of DiffReport
 
 from hashall.model import DiffReport, DiffReportEntry
+from hashall.device import get_files_table_name
 from pathlib import Path
 
 
@@ -140,7 +141,9 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
             return {}
 
         rel_root_str = str(rel_root)
-        table_name = f"files_{device_id}"
+        table_name = get_files_table_name(cursor, device_id=device_id)
+        if not table_name:
+            return {}
         if not table_exists(table_name):
             return {}
 

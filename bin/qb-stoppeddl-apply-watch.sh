@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SEMVER="0.1.2"
+SEMVER="0.1.3"
 SCRIPT_NAME="$(basename "$0")"
 
 usage() {
@@ -28,6 +28,8 @@ Options:
   --state-file PATH         Last-applied report marker file
   --completion-file PATH    Apply completion marker file
   --stop-file PATH          If this file exists, loop exits cleanly
+  --lock-file PATH          Shared mutate lock path (default: <bucket>/MUTATE.lock)
+  --lock-wait N             Seconds to wait for lock (0 = no wait, default: 0)
   -h, --help                Show help
 
 Examples:
@@ -56,6 +58,8 @@ STATE_FILE=""
 STOP_FILE=""
 COMPLETION_FILE=""
 EXTRA_ARGS=()
+LOCK_FILE=""
+LOCK_WAIT="${LOCK_WAIT:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -70,6 +74,8 @@ while [[ $# -gt 0 ]]; do
     --state-file) STATE_FILE="${2:-}"; shift 2 ;;
     --completion-file) COMPLETION_FILE="${2:-}"; shift 2 ;;
     --stop-file) STOP_FILE="${2:-}"; shift 2 ;;
+    --lock-file) LOCK_FILE="${2:-}"; shift 2 ;;
+    --lock-wait) LOCK_WAIT="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --)
       shift
@@ -92,6 +98,10 @@ if ! [[ "$MIN_RATIO" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "Invalid --min-ratio: $MIN_RATIO" >&2
   exit 2
 fi
+if ! [[ "$LOCK_WAIT" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "Invalid --lock-wait: $LOCK_WAIT" >&2
+  exit 2
+fi
 
 BUCKET_DIR="$(python3 -c 'import os,sys; print(os.path.expanduser(sys.argv[1]))' "$BUCKET_DIR")"
 REPORTS_DIR="${BUCKET_DIR}/reports"
@@ -99,12 +109,46 @@ ACTIVE_HASHES_FILE="${BUCKET_DIR}/active-hashes.txt"
 STATE_FILE="${STATE_FILE:-${REPORTS_DIR}/apply-watch-last-report.txt}"
 COMPLETION_FILE="${COMPLETION_FILE:-${REPORTS_DIR}/apply-last-completion.json}"
 STOP_FILE="${STOP_FILE:-${BUCKET_DIR}/STOP_APPLY}"
+LOCK_FILE="${LOCK_FILE:-${BUCKET_DIR}/MUTATE.lock}"
 
 mkdir -p "$REPORTS_DIR"
 
 ts() {
   date '+%Y-%m-%dT%H:%M:%S'
 }
+
+acquire_mutate_lock() {
+  if [[ "$APPLY" != "true" ]]; then
+    echo "status ts=$(ts) action=lock_skip reason=no_apply lock_file=${LOCK_FILE}"
+    return 0
+  fi
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "ERROR: flock not found; cannot enforce mutate lock" >&2
+    return 2
+  fi
+  exec 200>"$LOCK_FILE"
+  if [[ "$LOCK_WAIT" == "0" ]]; then
+    if ! flock -n 200; then
+      echo "status ts=$(ts) action=stop reason=lock_busy lock_file=${LOCK_FILE}"
+      return 1
+    fi
+  else
+    if ! flock -w "$LOCK_WAIT" 200; then
+      echo "status ts=$(ts) action=stop reason=lock_timeout lock_file=${LOCK_FILE} wait=${LOCK_WAIT}s"
+      return 1
+    fi
+  fi
+  echo "status ts=$(ts) action=lock_acquired lock_file=${LOCK_FILE}"
+  return 0
+}
+
+if ! acquire_mutate_lock; then
+  rc=$?
+  if [[ "$rc" -eq 1 ]]; then
+    exit 0
+  fi
+  exit "$rc"
+fi
 
 is_report_complete() {
   local report="$1"
@@ -198,7 +242,7 @@ run_apply_once() {
 }
 
 echo "start ts=$(ts) script=${SCRIPT_NAME} semver=${SEMVER} bucket_dir=${BUCKET_DIR} poll=${POLL}s once=${ONCE} require_eligible=${REQUIRE_ELIGIBLE} apply=${APPLY}"
-echo "paths reports_dir=${REPORTS_DIR} active_hashes=${ACTIVE_HASHES_FILE} state_file=${STATE_FILE} completion_file=${COMPLETION_FILE} stop_file=${STOP_FILE}"
+echo "paths reports_dir=${REPORTS_DIR} active_hashes=${ACTIVE_HASHES_FILE} state_file=${STATE_FILE} completion_file=${COMPLETION_FILE} stop_file=${STOP_FILE} lock_file=${LOCK_FILE} lock_wait=${LOCK_WAIT}s"
 
 while true; do
   if [[ -e "$STOP_FILE" ]]; then

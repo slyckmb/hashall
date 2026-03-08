@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qbit-repair-batch.sh — batch repair of stoppedDL/pausedDL torrents.
+# qb-repair-batch.sh — batch repair of stoppedDL/pausedDL torrents.
 # Version: 1.6.1
 # Date:    2026-02-25
 #
@@ -28,7 +28,7 @@
 #   - Parallel recheck of all candidates
 #   - No 90s verification: recheck→stoppedUP = success
 #
-# Usage: bin/qbit-repair-batch.sh [--limit N] [--apply] [--no-ramp] [--same-save] [--clear-bl]
+# Usage: bin/qb-repair-batch.sh [--limit N] [--apply] [--no-ramp] [--same-save] [--clear-bl]
 #   --limit N    Process at most N stoppedDL candidates (default: 10)
 #   --apply      Execute changes (dry-run if omitted)
 #   --no-ramp    Drain mode: start ALL stoppedUP torrents immediately (no repair workflow)

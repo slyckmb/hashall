@@ -8,9 +8,9 @@
 #
 # Tiers:
 #   1 (score 90-100): EXACT QB match + progress ≥ 99%
-#                     → qbit-repair-batch.sh --limit N --apply
+#                     → qb-repair-batch.sh --limit N --apply
 #   2 (score 60-89):  EXACT or FUZZY QB match (any progress)
-#                     → qbit-repair-batch.sh --limit N --apply  (or --same-save)
+#                     → qb-repair-batch.sh --limit N --apply  (or --same-save)
 #   3 (score 10-59):  No QB match, progress ≥ 10%
 #                     → investigate: partial cross-seed with real data on disk
 #   4 (score  0-9):   No QB match, progress < 10%
@@ -263,8 +263,8 @@ for c in classified:
 
 # ── Determine recommended action per tier ────────────────────────────────────
 ACTIONS = {
-    1: "qbit-repair-batch.sh --limit N --apply",
-    2: "qbit-repair-batch.sh --limit N --apply  (same-save pairs: add --same-save)",
+    1: "qb-repair-batch.sh --limit N --apply",
+    2: "qb-repair-batch.sh --limit N --apply  (same-save pairs: add --same-save)",
     3: "inspect disk content; recheck manually if files present",
     4: "nohl-basics workflow (rehome-100/101/102) — not this script",
 }

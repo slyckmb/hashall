@@ -43,7 +43,7 @@ def test_nohl_restart_includes_qb_automation_audit_and_watchdog_steps() -> None:
     result = _run_wrapper(["--min-free-pct", "15"])
     assert result.returncode == 0, result.stderr
     assert "bin/rehome-89_nohl-basics-qb-automation-audit.sh" in result.stdout
-    assert "bin/rehome-99_qb-checking-watch.sh --interval" in result.stdout
+    assert "bin/qb-checking-watch.sh --interval" in result.stdout
 
 
 def test_nohl_restart_watchdog_allow_file_is_rendered_when_set() -> None:

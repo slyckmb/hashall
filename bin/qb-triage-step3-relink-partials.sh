@@ -9,7 +9,7 @@
 #   UNRESOLVED — content not found anywhere → manual investigation needed
 #
 # Default: dry-run (no changes). Pass --apply to execute.
-# Usage: bin/qbit-triage-step3-relink-partials.sh [--apply]
+# Usage: bin/qb-triage-step3-relink-partials.sh [--apply]
 set -euo pipefail
 
 set +x

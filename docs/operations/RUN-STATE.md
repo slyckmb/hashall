@@ -1,95 +1,52 @@
-# Run State (Canonical)
+# Operational Run State
 
-Last updated: 2026-03-01
-Status: canonical living state
+Last updated: 2026-03-07
 
-## Purpose
+## Pool Migration Status
 
-Single living document for current operational status, handoff context, and next-agent execution guidance.
+- Donor acquisition and offline attach are the shared backbone for both `REUSE` and `MOVE`.
+- The current rsync-based donor transfer is still the data mover; qB is metadata-only.
+- `REUSE` continues in small batches; each apply must finish with `stoppedup`/`stalledup`, no new downloads, and clean cleanup messages.
+- `pool-data -> pool-media` dry-runs show `0 MOVE groups available` when filtering by the strict safety criteria, but the catalog still contains many `/pool/data` payloads and the watcher reports >1.3 T of old-root usage.
+- Active gate: stash → pool-media `REUSE` pilot `rehome_runs.id=338` is running, and we do not scale `~noHL` until it finishes cleanly.
 
-## Current Mission
+## Current `MOVE` Risk
 
-1. Keep qB stoppedDL repair loop safe and convergent.
-2. Keep hashall catalog refresh + dedup pipeline robust across `stash`, `data`, and `spare`.
-3. Eliminate refresh/runtime failures caused by device alias drift and negative device IDs.
+- `MOVE` has been refactored to use the same offline fastresume attach constructor after donor acquisition.
+- The new path still needs a live pilot before it can be trusted at scale.
+- Operational guard: do not run `MOVE` apply at scale until a pilot shows no `MV`/`moving`, no download-like flip, and proper cleanup provenance.
+- If the planner returns `0 MOVE groups`, move to the next source domain instead of forcing a synthetic move.
+- The interim safe model for any copy is `copy-then-REUSE` (external transfer first, then shared attach).
 
-## Non-Negotiables
+## Refresh / Identity State
 
-- One mutating qB workflow at a time.
-- No unintended sustained downloading state flips.
-- Prefer deterministic, idempotent loops.
-- Any full refresh run must include all three main archives:
-  `/stash/media` (covers `/data/media` collection), `/pool/data`, `/mnt/hotspare6tb`.
+- `hashall refresh --verbose` is healthy again and validates `stash`, `pool-media`, `pool-data`, and `spare` roots.
+- Stable `fs_uuid` entries are enforced; `device_id` stays as runtime metadata.
+- The catalog now updates known movers immediately rather than waiting for a later refresh.
 
-## Active Toolchain
+## qB Guarding
 
-- qB stoppedDL pipeline:
-  - `bin/qb-stoppeddl-bucket.py`
-  - `bin/qb-stoppeddl-drain.py`
-  - `bin/qb-stoppeddl-apply.py`
-  - `bin/qb-stoppeddl-apply-watch.sh`
-  - `bin/qb-stoppeddl-roundloop.sh`
-  - `bin/qbit-start-seeding-gradual.sh`
-- Full DB refresh pipeline:
-  - `bin/codex-says-run-this-next.sh` (canonical)
-  - `bin/full-hashall-db-refresh.sh` (equivalent explicit wrapper)
-  - `bin/db-refresh-step1-scan-stash.sh`
-  - `bin/db-refresh-step2-scan-pool-hotspare.sh`
-  - `bin/db-refresh-step3-sha256-backfill.sh`
-  - `bin/db-refresh-step4_5-link-dedup.sh`
-  - `bin/db-refresh-step4-payload-sync.sh`
-  - `bin/qb-hash-root-report.sh`
+- `qb-start-seeding-gradual.sh` now halts only on newly flipped downloading-like torrents; preexisting download-like states no longer trigger safety gates.
+- StoppedDL drain/apply wraps and path watchers continue to use the shared cache agent for observability.
 
-## Recent Hardening (2026-03-01)
+## Known Gaps
 
-- Refresh scripts now derive repo root from script location instead of hardcoded paths.
-- Step 3 and step 3.5 now resolve device aliases safely:
-  - supports `spare` and legacy `hotspare6tb`
-  - fallback by mountpoint `/mnt/hotspare6tb`
-  - logs resolved devices and fails cleanly if none resolve
-- Step 3.5 default device set now uses `stash,data,spare`.
-- Step 3 / 3.5 aggregate per-device failures and exit non-zero on partial failure.
-- `hashall stats --hash-coverage` path for negative `device_id` tables is fixed in branch code
-  by quoting dynamic SQLite identifiers (e.g. `files_-905882091`).
+1. Cleanup-source path/provenance still sometimes references legacy `/pool/data/seeds/...` roots instead of the actual migrated source.
+2. `MOVE` has been refactored off qB relocation semantics but still awaits a pilot validation.
+3. Catalog updates for migration actions should be immediate, not wait for another refresh pass.
+4. The active stash → pool-media pilot (`rehome_runs.id=338`) is long-running; inspect the sequential rechecks once it finishes.
 
-## Current Long-Running Operation
+## Logs to Watch
 
-- Full pipeline launched via `bin/codex-says-run-this-next.sh`.
-- Step 3 and step 3.5 for `stash` and `data` completed and applied.
-- Step 3.5 for `spare` currently running large `hashall link execute` action set.
-- Monitoring signals:
-  - plan status from `link_plans`
-  - `link_actions` status counts
-  - process liveness (`jdupes` in I/O state on large files)
-  - `~/.logs/hashall/hashall.log` for error signatures
+- `~/.logs/hashall/hashall.log`
+- `~/.logs/hashall/rehome/refresh/`
+- `~/.logs/hashall/rehome/auto/`
+- `~/.logs/hashall/reports/qbit-triage/`
 
-## Primary Logs and Reports
+## Immediate Checklist
 
-- DB refresh logs: `~/.logs/hashall/reports/db-refresh/`
-- Hashall runtime log: `~/.logs/hashall/hashall.log`
-- qB triage logs: `~/.logs/hashall/reports/qbit-triage/`
-- stoppedDL reports: `/tmp/qb-stoppeddl-bucket-live/reports/`
-
-## Next-Agent Checklist
-
-1. Verify full refresh completion (all steps through payload sync + hash-root report).
-2. If any step failed:
-   - isolate failing device/step from logs,
-   - patch root cause,
-   - rerun only failed step(s),
-   - confirm no regression in successful steps.
-3. Re-run validations on this branch code path:
-   - `PYTHONPATH=$PWD/src python3 -m hashall stats --hash-coverage`
-   - syntax/compile checks for touched scripts.
-4. Only after clean run + validation, finalize commits and leave clean working tree.
-
-## Compatibility Notes
-
-Legacy docs remain stubs pointing here:
-
-- `docs/ops-log.md`
-- `docs/handoff.md`
-- `docs/next-agent.md`
-- `docs/NEXT-AGENT-PROMPT.md`
-- `docs/qbit-repair-handoff.md`
-- `docs/qbit-repair-ops-log.md`
+1. Fix cleanup-source path/provenance so operator messaging cites the actual migrated root.
+2. Confirm the stash → pool-media pilot completes cleanly.
+3. If clean, continue stash/pool-media `REUSE` batches incrementally.
+4. Only pilot `MOVE` once the planner surfaces a donor-acquisition candidate and the pilot passes without `MV`/download issues.
+5. After that, resume planning for `~noHL`.

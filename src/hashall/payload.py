@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
+from hashall.fs_utils import get_filesystem_uuid
+from hashall.device import get_files_table_name
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.scan import compute_full_hashes
 
@@ -42,6 +44,35 @@ def _get_mount_info(conn: sqlite3.Connection, device_id: int):
             mount_point = Path(dev_row[0])
             preferred_mount = Path(dev_row[1] or dev_row[0])
     return mount_point, preferred_mount
+
+
+def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    """Return True when *table_name* has *column_name*."""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except Exception:
+        return False
+    return any(str(row[1]) == str(column_name) for row in rows)
+
+
+def _resolve_fs_uuid_for_device(conn: sqlite3.Connection, device_id: Optional[int]) -> Optional[str]:
+    """Resolve fs_uuid for a device_id from devices table."""
+    if device_id is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT fs_uuid FROM devices WHERE device_id = ?",
+            (int(device_id),),
+        ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    value = row[0]
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _resolve_rel_root(
@@ -122,6 +153,7 @@ class Payload:
     total_bytes: int
     status: str  # 'complete' | 'incomplete'
     last_built_at: Optional[float]
+    fs_uuid: Optional[str] = None
 
 
 @dataclass
@@ -135,6 +167,7 @@ class TorrentInstance:
     category: Optional[str]
     tags: Optional[str]
     last_seen_at: Optional[float]
+    fs_uuid: Optional[str] = None
 
 
 def compute_payload_hash(files: List[PayloadFile]) -> Optional[str]:
@@ -218,7 +251,9 @@ def get_files_for_path(
     root_path = root_path.rstrip('/')
 
     # Use device-specific table
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return []
 
     # Check if table exists
     cursor = conn.cursor()
@@ -295,7 +330,9 @@ def get_fast_files_for_path(conn: sqlite3.Connection, device_id: int, root_path:
     Get all files under a given root path from the per-device table, using quick_hash.
     """
     root_path = root_path.rstrip("/")
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return []
 
     cursor = conn.cursor()
     cursor.execute(
@@ -365,7 +402,9 @@ def count_missing_sha256_for_path(conn: sqlite3.Connection, device_id: int, root
 
     Uses the same root resolution as get_files_for_path/build_payload.
     """
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return 0
     cursor = conn.cursor()
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -415,7 +454,9 @@ def summarize_missing_sha256_for_path(
         except (OSError, IOError):
             return {"files": 0, "bytes": 0}
 
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return {"files": 0, "bytes": 0}
     cursor = conn.cursor()
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -464,7 +505,9 @@ def count_active_files_for_path(conn: sqlite3.Connection, device_id: int, root_p
     if device_id is None:
         return 0
 
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return 0
     cursor = conn.cursor()
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -769,7 +812,9 @@ def get_payload_file_rows(
         except (OSError, IOError):
             return []
 
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return []
     cursor = conn.cursor()
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -863,8 +908,16 @@ def build_payload(
                 file_count=0,
                 total_bytes=0,
                 status='incomplete',
-                last_built_at=None
+                last_built_at=None,
+                fs_uuid=None,
             )
+
+    fs_uuid = _resolve_fs_uuid_for_device(conn, device_id)
+    if fs_uuid is None:
+        try:
+            fs_uuid = get_filesystem_uuid(str(root))
+        except Exception:
+            fs_uuid = None
 
     # Normalize to preferred mount point when the same filesystem is mounted at
     # multiple targets (ZFS alternate mount points, etc).
@@ -896,7 +949,8 @@ def build_payload(
             file_count=0,
             total_bytes=0,
             status='incomplete',
-            last_built_at=None
+            last_built_at=None,
+            fs_uuid=fs_uuid,
         )
 
     # Compute statistics
@@ -915,7 +969,8 @@ def build_payload(
         file_count=file_count,
         total_bytes=total_bytes,
         status=status,
-        last_built_at=time.time() if payload_hash else None
+        last_built_at=time.time() if payload_hash else None,
+        fs_uuid=fs_uuid,
     )
 
 
@@ -945,7 +1000,9 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
         except (OSError, IOError):
             return 0
 
-    table_name = f"files_{device_id}"
+    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
+    if not table_name:
+        return 0
     if not conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         (table_name,),
@@ -1144,44 +1201,109 @@ def upsert_payload(conn: sqlite3.Connection, payload: Payload, *, commit: bool =
     Returns:
         payload_id (int)
     """
-    # Check if payload with this root_path already exists (scoped to device_id)
-    if payload.device_id is None:
+    has_fs_uuid = _table_has_column(conn, "payloads", "fs_uuid")
+    payload_fs_uuid = str(payload.fs_uuid or "").strip() if payload.fs_uuid else None
+    if payload_fs_uuid is None:
+        payload_fs_uuid = _resolve_fs_uuid_for_device(conn, payload.device_id)
+
+    # Check if payload with this root_path already exists (scoped to fs_uuid when available)
+    if has_fs_uuid and payload_fs_uuid:
+        existing = conn.execute(
+            "SELECT payload_id FROM payloads WHERE root_path = ? AND fs_uuid = ?",
+            (payload.root_path, payload_fs_uuid),
+        ).fetchone()
+    elif payload.device_id is None:
         existing = conn.execute(
             "SELECT payload_id FROM payloads WHERE root_path = ? AND device_id IS NULL",
-            (payload.root_path,)
+            (payload.root_path,),
         ).fetchone()
     else:
         existing = conn.execute(
             "SELECT payload_id FROM payloads WHERE root_path = ? AND device_id = ?",
-            (payload.root_path, payload.device_id)
+            (payload.root_path, payload.device_id),
         ).fetchone()
 
     if existing:
         # Update existing
         payload_id = existing[0]
-        conn.execute("""
-            UPDATE payloads
-            SET payload_hash = ?, device_id = ?, file_count = ?,
-                total_bytes = ?, status = ?, last_built_at = ?,
-                updated_at = julianday('now')
-            WHERE payload_id = ?
-        """, (
-            payload.payload_hash, payload.device_id, payload.file_count,
-            payload.total_bytes, payload.status, payload.last_built_at,
-            payload_id
-        ))
+        if has_fs_uuid:
+            conn.execute(
+                """
+                UPDATE payloads
+                SET payload_hash = ?, device_id = ?, fs_uuid = ?, file_count = ?,
+                    total_bytes = ?, status = ?, last_built_at = ?,
+                    updated_at = julianday('now')
+                WHERE payload_id = ?
+                """,
+                (
+                    payload.payload_hash,
+                    payload.device_id,
+                    payload_fs_uuid,
+                    payload.file_count,
+                    payload.total_bytes,
+                    payload.status,
+                    payload.last_built_at,
+                    payload_id,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE payloads
+                SET payload_hash = ?, device_id = ?, file_count = ?,
+                    total_bytes = ?, status = ?, last_built_at = ?,
+                    updated_at = julianday('now')
+                WHERE payload_id = ?
+                """,
+                (
+                    payload.payload_hash,
+                    payload.device_id,
+                    payload.file_count,
+                    payload.total_bytes,
+                    payload.status,
+                    payload.last_built_at,
+                    payload_id,
+                ),
+            )
     else:
         # Insert new
-        cursor = conn.execute("""
-            INSERT INTO payloads (
-                payload_hash, device_id, root_path, file_count,
-                total_bytes, status, last_built_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            payload.payload_hash, payload.device_id, payload.root_path,
-            payload.file_count, payload.total_bytes, payload.status,
-            payload.last_built_at
-        ))
+        if has_fs_uuid:
+            cursor = conn.execute(
+                """
+                INSERT INTO payloads (
+                    payload_hash, device_id, fs_uuid, root_path, file_count,
+                    total_bytes, status, last_built_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.payload_hash,
+                    payload.device_id,
+                    payload_fs_uuid,
+                    payload.root_path,
+                    payload.file_count,
+                    payload.total_bytes,
+                    payload.status,
+                    payload.last_built_at,
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO payloads (
+                    payload_hash, device_id, root_path, file_count,
+                    total_bytes, status, last_built_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.payload_hash,
+                    payload.device_id,
+                    payload.root_path,
+                    payload.file_count,
+                    payload.total_bytes,
+                    payload.status,
+                    payload.last_built_at,
+                ),
+            )
         payload_id = cursor.lastrowid
 
     if commit:
@@ -1197,26 +1319,77 @@ def upsert_torrent_instance(conn: sqlite3.Connection, torrent: TorrentInstance, 
         conn: Database connection
         torrent: TorrentInstance object
     """
-    conn.execute("""
-        INSERT OR REPLACE INTO torrent_instances (
-            torrent_hash, payload_id, device_id, save_path, root_name,
-            category, tags, last_seen_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, julianday('now'))
-    """, (
-        torrent.torrent_hash, torrent.payload_id, torrent.device_id,
-        torrent.save_path, torrent.root_name, torrent.category,
-        torrent.tags, torrent.last_seen_at
-    ))
+    has_fs_uuid = _table_has_column(conn, "torrent_instances", "fs_uuid")
+    torrent_fs_uuid = str(torrent.fs_uuid or "").strip() if torrent.fs_uuid else None
+    if torrent_fs_uuid is None:
+        torrent_fs_uuid = _resolve_fs_uuid_for_device(conn, torrent.device_id)
+
+    if has_fs_uuid:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO torrent_instances (
+                torrent_hash, payload_id, device_id, fs_uuid, save_path, root_name,
+                category, tags, last_seen_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, julianday('now'))
+            """,
+            (
+                torrent.torrent_hash,
+                torrent.payload_id,
+                torrent.device_id,
+                torrent_fs_uuid,
+                torrent.save_path,
+                torrent.root_name,
+                torrent.category,
+                torrent.tags,
+                torrent.last_seen_at,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO torrent_instances (
+                torrent_hash, payload_id, device_id, save_path, root_name,
+                category, tags, last_seen_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, julianday('now'))
+            """,
+            (
+                torrent.torrent_hash,
+                torrent.payload_id,
+                torrent.device_id,
+                torrent.save_path,
+                torrent.root_name,
+                torrent.category,
+                torrent.tags,
+                torrent.last_seen_at,
+            ),
+        )
     if commit:
         conn.commit()
 
 
 def get_payload_by_id(conn: sqlite3.Connection, payload_id: int) -> Optional[Payload]:
     """Get payload by ID."""
-    row = conn.execute(
-        "SELECT * FROM payloads WHERE payload_id = ?",
-        (payload_id,)
-    ).fetchone()
+    has_fs_uuid = _table_has_column(conn, "payloads", "fs_uuid")
+    if has_fs_uuid:
+        row = conn.execute(
+            """
+            SELECT payload_id, payload_hash, device_id, root_path, file_count,
+                   total_bytes, status, last_built_at, fs_uuid
+            FROM payloads
+            WHERE payload_id = ?
+            """,
+            (payload_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT payload_id, payload_hash, device_id, root_path, file_count,
+                   total_bytes, status, last_built_at
+            FROM payloads
+            WHERE payload_id = ?
+            """,
+            (payload_id,),
+        ).fetchone()
 
     if not row:
         return None
@@ -1229,13 +1402,15 @@ def get_payload_by_id(conn: sqlite3.Connection, payload_id: int) -> Optional[Pay
         file_count=row[4],
         total_bytes=row[5],
         status=row[6],
-        last_built_at=row[7]
+        last_built_at=row[7],
+        fs_uuid=(row[8] if has_fs_uuid else None),
     )
 
 
 def get_payloads_by_hash(conn: sqlite3.Connection, payload_hash: str,
                          device_id: Optional[int] = None,
-                         status: Optional[str] = "complete") -> List[Payload]:
+                         status: Optional[str] = "complete",
+                         fs_uuid: Optional[str] = None) -> List[Payload]:
     """Get payloads by payload_hash, optionally filtering by device and status."""
     if not payload_hash:
         return []
@@ -1243,7 +1418,13 @@ def get_payloads_by_hash(conn: sqlite3.Connection, payload_hash: str,
     query = "SELECT * FROM payloads WHERE payload_hash = ?"
     params: List[object] = [payload_hash]
 
-    if device_id is not None:
+    has_fs_uuid = _table_has_column(conn, "payloads", "fs_uuid")
+    fs_uuid_text = str(fs_uuid or "").strip() if fs_uuid else ""
+
+    if has_fs_uuid and fs_uuid_text:
+        query += " AND fs_uuid = ?"
+        params.append(fs_uuid_text)
+    elif device_id is not None:
         query += " AND device_id = ?"
         params.append(device_id)
 
@@ -1252,6 +1433,11 @@ def get_payloads_by_hash(conn: sqlite3.Connection, payload_hash: str,
         params.append(status)
 
     query += " ORDER BY payload_id"
+    if has_fs_uuid:
+        query = query.replace("SELECT *", "SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at, fs_uuid")
+    else:
+        query = query.replace("SELECT *", "SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at")
+
     rows = conn.execute(query, params).fetchall()
     return [
         Payload(
@@ -1263,6 +1449,7 @@ def get_payloads_by_hash(conn: sqlite3.Connection, payload_hash: str,
             total_bytes=row[5],
             status=row[6],
             last_built_at=row[7],
+            fs_uuid=(row[8] if has_fs_uuid else None),
         )
         for row in rows
     ]
@@ -1321,12 +1508,27 @@ def get_torrent_siblings(conn: sqlite3.Connection, torrent_hash: str) -> List[st
 
 def get_torrent_instance(conn: sqlite3.Connection, torrent_hash: str) -> Optional[TorrentInstance]:
     """Get torrent instance by hash."""
-    row = conn.execute(
-        """SELECT torrent_hash, payload_id, device_id, save_path, root_name,
-                  category, tags, last_seen_at
-           FROM torrent_instances WHERE torrent_hash = ?""",
-        (torrent_hash,)
-    ).fetchone()
+    has_fs_uuid = _table_has_column(conn, "torrent_instances", "fs_uuid")
+    if has_fs_uuid:
+        row = conn.execute(
+            """
+            SELECT torrent_hash, payload_id, device_id, save_path, root_name,
+                   category, tags, last_seen_at, fs_uuid
+            FROM torrent_instances
+            WHERE torrent_hash = ?
+            """,
+            (torrent_hash,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT torrent_hash, payload_id, device_id, save_path, root_name,
+                   category, tags, last_seen_at
+            FROM torrent_instances
+            WHERE torrent_hash = ?
+            """,
+            (torrent_hash,),
+        ).fetchone()
 
     if not row:
         return None
@@ -1339,5 +1541,6 @@ def get_torrent_instance(conn: sqlite3.Connection, torrent_hash: str) -> Optiona
         root_name=row[4],
         category=row[5],
         tags=row[6],
-        last_seen_at=row[7]
+        last_seen_at=row[7],
+        fs_uuid=(row[8] if has_fs_uuid else None),
     )

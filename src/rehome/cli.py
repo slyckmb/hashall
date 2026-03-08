@@ -203,16 +203,17 @@ def cli():
 
     \b
     Everyday workflow:
-      rehome refresh                   scan all roots + dedup + sync qBit
-      rehome auto --limit 5            find top-5 MOVE candidates (dry-run)
-      rehome auto --limit 5 --apply    execute
+      hashall refresh                   scan all roots + dedup + sync qBit
+      hashall rehome auto --limit 5     find top-5 MOVE candidates (dry-run)
+      hashall rehome auto --limit 5 --apply
+                                        execute
 
     \b
     Config (persisted in ~/.hashall/rehome.toml):
-      rehome config show
-      rehome config set <key> <value>
-      rehome config add-root <path> <alias>
-      rehome config remove-root <path>
+      hashall rehome config show
+      hashall rehome config set <key> <value>
+      hashall rehome config add-root <path> <alias>
+      hashall rehome config remove-root <path>
     """
     _emit_banner()
 
@@ -436,7 +437,7 @@ def plan_cmd(demote, promote, torrent_hash, payload_hash, tag, catalog, seeding_
         click.echo(f"   Total torrents: {total_torrents}")
 
     click.echo()
-    click.echo(f"Next step: rehome apply {output_path} --dryrun")
+    click.echo(f"Next step: hashall rehome apply {output_path} --dryrun")
 
 
 @cli.command("plan-batch")
@@ -995,7 +996,7 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
     click.echo()
     if dryrun:
         click.echo("✅ Dry-run completed successfully")
-        click.echo(f"To execute: rehome apply {plan_file} --force")
+        click.echo(f"To execute: hashall rehome apply {plan_file} --force")
     else:
         click.echo("✅ Plan executed successfully")
         # Mandatory post-apply summary: query qBittorrent for final torrent states.
@@ -1211,7 +1212,7 @@ def normalize_plan_cmd(
             )
 
     click.echo()
-    click.echo(f"Next step: rehome apply {output_path} --dryrun")
+    click.echo(f"Next step: hashall rehome apply {output_path} --dryrun")
 
 
 @cli.command("auto")
@@ -1240,10 +1241,10 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 
     \b
     Examples:
-      rehome auto --limit 5                         # all sources → default dest
-      rehome auto --from spare --to pool            # spare→pool only
-      rehome auto --to active --from pool           # pool→stash (promotion)
-      rehome auto --limit 5 --apply                 # execute
+      hashall rehome auto --limit 5                 # all sources → default dest
+      hashall rehome auto --from spare --to pool    # spare→pool only
+      hashall rehome auto --to active --from pool   # pool→stash (promotion)
+      hashall rehome auto --limit 5 --apply         # execute
     """
     from rehome.config import load_config, parse_managed_roots
     from rehome.auto import run_auto, run_refresh
@@ -1294,6 +1295,15 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
     # Resolve managed roots to (device_id, alias, path) triples
     managed_pairs = parse_managed_roots(cfg.get("managed_roots") or [])
     extra_sources: list[tuple[int, str, str]] = []
+    explicit_source_tuple: Optional[tuple[int, str, str]] = None
+    if explicit_source_id is not None:
+        if explicit_source_id == active_id:
+            explicit_source_tuple = (explicit_source_id, active_alias, active_r)
+        else:
+            for xpath, xalias in managed_pairs:
+                if xalias == from_alias:
+                    explicit_source_tuple = (explicit_source_id, xalias, xpath)
+                    break
     if explicit_source_id is None:
         _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
         try:
@@ -1340,7 +1350,9 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
         plan_log_dir=plan_log_dir,
         run_log_dir=run_log_dir,
         source_device_id=explicit_source_id,
-        extra_sources=extra_sources if explicit_source_id is None else None,
+        extra_sources=extra_sources if explicit_source_id is None else (
+            [explicit_source_tuple] if explicit_source_tuple is not None else None
+        ),
         verbose=verbose,
         debug=debug,
     )
@@ -1422,9 +1434,53 @@ def _db_device_stats(conn: sqlite3.Connection, alias: str) -> Optional[tuple]:
     ).fetchone()
 
 
+def _publish_seed_root_state_if_possible() -> Optional[Path]:
+    """Refresh the published seed-root-state file after config mutations."""
+    try:
+        from rehome.seed_state import publish_seed_root_state
+
+        written_path, _state = publish_seed_root_state()
+        return written_path
+    except Exception as exc:
+        click.echo(f"  WARNING: failed to publish seed-root-state: {exc}", err=True)
+        return None
+
+
 @cli.group("config")
 def config_group():
     """Manage rehome defaults (~/.hashall/rehome.toml)."""
+
+
+@cli.group("seed-root-state")
+def seed_root_state_group():
+    """Inspect or publish the canonical seed-root coordination contract."""
+
+
+@seed_root_state_group.command("show")
+@click.option("--write", "do_write", is_flag=True, help="Write the published state file atomically")
+@click.option("--output", type=click.Path(path_type=Path), default=None,
+              help="Override output path (default: ~/.hashall/seed-root-state.json)")
+@click.option("--compact", is_flag=True, help="Print compact JSON instead of pretty JSON")
+def seed_root_state_show(do_write, output, compact):
+    """Print the seed-root-state contract, optionally writing it to disk."""
+    from rehome.seed_state import (
+        SEED_ROOT_STATE_PATH,
+        build_seed_root_state,
+        publish_seed_root_state,
+        _existing_generation,
+    )
+
+    output_path = output or SEED_ROOT_STATE_PATH
+    if do_write:
+        written_path, state = publish_seed_root_state(output_path)
+        click.echo(f"✅ wrote seed-root-state: {written_path}")
+    else:
+        state = build_seed_root_state(previous_generation=_existing_generation(output_path))
+
+    if compact:
+        click.echo(json.dumps(state, sort_keys=True))
+    else:
+        click.echo(json.dumps(state, indent=2, sort_keys=True))
 
 
 @config_group.command("show")
@@ -1448,7 +1504,7 @@ def config_show(catalog):
             f"  [DEPRECATION] Config file uses old key names: {', '.join(old_keys_present)}",
             err=True,
         )
-        click.echo("  Run: rehome config migrate  (rewrites file with new key names)\n", err=True)
+        click.echo("  Run: hashall rehome config migrate  (rewrites file with new key names)\n", err=True)
 
     scalar_keys = ("catalog", "active_device", "active_root", "content_root",
                    "default_dest_device", "default_dest_root")
@@ -1496,7 +1552,7 @@ def config_show(catalog):
                     stat = "(not found in DB)"
                 click.echo(f"  {alias:<20} {path}  {stat}")
         else:
-            click.echo("\nManaged storage roots: (none — use: rehome config add-root <path> <alias>)")
+            click.echo("\nManaged storage roots: (none — use: hashall rehome config add-root <path> <alias>)")
     finally:
         if conn:
             conn.close()
@@ -1517,7 +1573,7 @@ def config_set(key, value):
     if key not in all_valid:
         known = ", ".join(sorted(scalar_keys))
         click.echo(f"❌ Unknown key '{key}'. Known keys: {known}", err=True)
-        click.echo("  (For list keys use: rehome config add-root / remove-root)", err=True)
+        click.echo("  (For list keys use: hashall rehome config add-root / remove-root)", err=True)
         raise click.Abort()
     canonical = _KEY_RENAMES.get(key, key)
     save_config_key(key, value)
@@ -1525,6 +1581,9 @@ def config_set(key, value):
         click.echo(f"✅ {canonical} = {value!r}  (note: '{key}' is a deprecated alias for '{canonical}')")
     else:
         click.echo(f"✅ {canonical} = {value!r}")
+    written_path = _publish_seed_root_state_if_possible()
+    if written_path:
+        click.echo(f"↺ published seed-root-state: {written_path}")
 
 
 @config_group.command("add-root")
@@ -1536,7 +1595,7 @@ def config_add_root(path, alias, catalog):
 
     \b
     Example:
-      rehome config add-root /mnt/hotspare6tb spare
+      hashall rehome config add-root /mnt/hotspare6tb spare
     """
     from rehome.config import add_scan_root, load_config
 
@@ -1566,6 +1625,9 @@ def config_add_root(path, alias, catalog):
 
     add_scan_root(path, alias)
     click.echo(f"✅ added managed root: {path} → {alias}")
+    written_path = _publish_seed_root_state_if_possible()
+    if written_path:
+        click.echo(f"↺ published seed-root-state: {written_path}")
 
 
 @config_group.command("remove-root")
@@ -1575,12 +1637,15 @@ def config_remove_root(path):
 
     \b
     Example:
-      rehome config remove-root /mnt/hotspare6tb
+      hashall rehome config remove-root /mnt/hotspare6tb
     """
     from rehome.config import remove_scan_root
     removed = remove_scan_root(path)
     if removed:
         click.echo(f"✅ removed managed root: {path}")
+        written_path = _publish_seed_root_state_if_possible()
+        if written_path:
+            click.echo(f"↺ published seed-root-state: {written_path}")
     else:
         click.echo(f"⚠️  no entry found for path: {path}", err=True)
         raise click.exceptions.Exit(1)
@@ -1652,7 +1717,7 @@ def config_sync_roots(do_apply, min_files, catalog):
                 f"  {str(alias):<20} {mount:<30} "
                 f"files={int(tf or 0):>8,}  {_fmt_bytes(int(tb or 0)):<10}  last={str(last or '')[:10]}"
             )
-            click.echo(f"  → rehome config add-root {mount} {alias}")
+            click.echo(f"  → hashall rehome config add-root {mount} {alias}")
             if do_apply:
                 add_scan_root(mount, str(alias))
                 click.echo(f"  ✅ added")
@@ -1660,6 +1725,10 @@ def config_sync_roots(do_apply, min_files, catalog):
 
         if do_apply:
             click.echo(f"\nsync-roots complete: {added} added, {len(tracked_rows)} already tracked.")
+            if added > 0:
+                written_path = _publish_seed_root_state_if_possible()
+                if written_path:
+                    click.echo(f"↺ published seed-root-state: {written_path}")
         else:
             click.echo(f"\n(dry-run) Re-run with --apply to add automatically.")
     else:
@@ -1694,6 +1763,9 @@ def config_migrate():
     click.echo(f"✅ Migrated {len(old_keys)} old key(s): {', '.join(sorted(old_keys))}")
     from rehome.config import CONFIG_PATH
     click.echo(f"   Config written to: {CONFIG_PATH}")
+    written_path = _publish_seed_root_state_if_possible()
+    if written_path:
+        click.echo(f"↺ published seed-root-state: {written_path}")
 
 
 if __name__ == "__main__":

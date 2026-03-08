@@ -319,6 +319,71 @@ class TestExternalConsumerDetection:
         assert plan["decision"] == "BLOCK"
         assert any("outside" in r.lower() or "external" in r.lower() for r in plan["reasons"])
 
+    def test_external_consumer_detection_uses_fs_uuid_backed_files_relation(self, tmp_path):
+        """Planner should resolve devices.files_table and not require a physical files_<device_id> table."""
+        db_path = tmp_path / "catalog.db"
+        conn = sqlite3.connect(db_path)
+
+        payload_root = "/stash/torrents/seeding/Movie.2024"
+
+        conn.executescript(f"""
+            CREATE TABLE devices (
+                fs_uuid TEXT PRIMARY KEY,
+                device_id INTEGER UNIQUE,
+                device_alias TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT,
+                files_table TEXT
+            );
+
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload_hash TEXT,
+                device_id INTEGER,
+                fs_uuid TEXT,
+                root_path TEXT NOT NULL,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'incomplete'
+            );
+
+            CREATE TABLE files_fs_test_50 (
+                path TEXT PRIMARY KEY,
+                inode INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                sha1 TEXT,
+                status TEXT DEFAULT 'active'
+            );
+
+            INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, files_table)
+            VALUES ('fs-test-50', 50, 'stash', '/stash', '/stash', 'files_fs_test_50');
+
+            INSERT INTO files_fs_test_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('torrents/seeding/Movie.2024/video.mkv', 1001, 1000000, 1234567890, 'abc123', 'active'),
+                ('media/exports/Movie.2024.mkv', 1001, 1000000, 1234567890, 'abc123', 'active');
+
+            INSERT INTO payloads (payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status)
+            VALUES ('payload_hash_123', 50, 'fs-test-50', '{payload_root}', 1, 1000000, 'complete');
+        """)
+        conn.commit()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/torrents/seeding"],
+            library_roots=[],
+            stash_device=50,
+            pool_device=49,
+            pool_payload_root="/pool/torrents/content"
+        )
+
+        consumers = planner._detect_external_consumers(conn, payload_root)
+        conn.close()
+
+        assert len(consumers) == 1
+        assert consumers[0].file_path.endswith("video.mkv")
+        assert any("media/exports/Movie.2024.mkv" in ext for ext in consumers[0].external_link_paths)
+
     def test_block_when_library_roots_not_scanned(self, tmp_path):
         """Block demotion when library roots are missing from scan_roots."""
         db_path = TestDatabase.create_test_db(tmp_path)
@@ -443,9 +508,13 @@ class TestReusePlan:
         # Create test data:
         # - Payload on stash
         # - Same payload_hash exists on pool
-        stash_root = "/stash/torrents/seeding/Movie.2024"
-        pool_root = "/pool/torrents/content/Movie.2024"
+        stash_root = str((tmp_path / "stash" / "torrents" / "seeding" / "Movie.2024").resolve())
+        pool_root = str((tmp_path / "pool" / "torrents" / "content" / "Movie.2024").resolve())
+        stash_save = str((tmp_path / "stash" / "torrents" / "seeding").resolve())
         payload_hash = "shared_payload_hash_456"
+
+        Path(stash_root).mkdir(parents=True, exist_ok=True)
+        Path(pool_root).mkdir(parents=True, exist_ok=True)
 
         conn.executescript(f"""
             -- Files on stash (device 50)
@@ -468,7 +537,7 @@ class TestReusePlan:
 
             -- Torrent instance pointing to stash payload
             INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
-            VALUES ('torrent_reuse_123', 1, 50, '/stash/torrents/seeding', 'Movie.2024');
+            VALUES ('torrent_reuse_123', 1, 50, '{stash_save}', 'Movie.2024');
         """)
         conn.commit()
         conn.close()
@@ -476,11 +545,11 @@ class TestReusePlan:
         # Create planner
         planner = DemotionPlanner(
             catalog_path=db_path,
-            seeding_roots=["/stash/torrents/seeding"],
+            seeding_roots=[stash_save],
             library_roots=[],
             stash_device=50,
             pool_device=49,
-            pool_payload_root="/pool/torrents/content"
+            pool_payload_root=str((tmp_path / "pool" / "torrents" / "content").resolve())
         )
 
         # Plan demotion
@@ -498,9 +567,16 @@ class TestReusePlan:
         db_path = TestDatabase.create_test_db(tmp_path)
         conn = sqlite3.connect(db_path)
 
-        stash_root = "/stash/media/torrents/seeding/Movie.2024"
-        pool_root = "/pool/data/seeds/Movie.2024"
+        data_media_root = (tmp_path / "data" / "media").resolve()
+        stash_media_root = (tmp_path / "stash" / "media").resolve()
+        pool_data_root = (tmp_path / "pool" / "data").resolve()
+        stash_root = str((stash_media_root / "torrents" / "seeding" / "Movie.2024").resolve())
+        pool_root = str((pool_data_root / "seeds" / "Movie.2024").resolve())
+        alias_save = str((data_media_root / "torrents" / "seeding").resolve())
         payload_hash = "shared_alias_payload_hash"
+
+        Path(stash_root).mkdir(parents=True, exist_ok=True)
+        Path(pool_root).mkdir(parents=True, exist_ok=True)
 
         conn.executescript(f"""
             CREATE TABLE devices (
@@ -512,8 +588,8 @@ class TestReusePlan:
 
             INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
             VALUES
-                (50, 'fs-stash', '/data/media', '/stash/media'),
-                (49, 'fs-pool', '/pool/data', '/pool/data');
+                (50, 'fs-stash', '{data_media_root}', '{stash_media_root}'),
+                (49, 'fs-pool', '{pool_data_root}', '{pool_data_root}');
 
             CREATE TABLE scan_roots (
                 fs_uuid TEXT,
@@ -525,8 +601,8 @@ class TestReusePlan:
 
             INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count)
             VALUES
-                ('fs-stash', '/stash/media', '2026-02-18', 1),
-                ('fs-pool', '/pool/data', '2026-02-18', 1);
+                ('fs-stash', '{stash_media_root}', '2026-02-18', 1),
+                ('fs-pool', '{pool_data_root}', '2026-02-18', 1);
 
             INSERT INTO files_50 (path, inode, size, mtime, sha1, status) VALUES
                 ('torrents/seeding/Movie.2024/video.mkv', 8001, 1000000, 1234567890, 'abc123', 'active');
@@ -537,20 +613,20 @@ class TestReusePlan:
                 (2, '{payload_hash}', 49, '{pool_root}', 1, 1000000, 'complete');
 
             INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
-            VALUES ('torrent_alias_123', 1, 50, '/data/media/torrents/seeding', 'Movie.2024');
+            VALUES ('torrent_alias_123', 1, 50, '{alias_save}', 'Movie.2024');
         """)
         conn.commit()
         conn.close()
 
         planner = DemotionPlanner(
             catalog_path=db_path,
-            seeding_roots=["/data/media", "/stash/media", "/pool/data"],
-            library_roots=["/data/media", "/stash/media"],
+            seeding_roots=[str(data_media_root), str(stash_media_root), str(pool_data_root)],
+            library_roots=[str(data_media_root), str(stash_media_root)],
             stash_device=50,
             pool_device=49,
-            stash_seeding_root="/stash/media/torrents/seeding",
-            pool_seeding_root="/pool/data/seeds",
-            pool_payload_root="/pool/data/seeds",
+            stash_seeding_root=str((stash_media_root / "torrents" / "seeding").resolve()),
+            pool_seeding_root=str((pool_data_root / "seeds").resolve()),
+            pool_payload_root=str((pool_data_root / "seeds").resolve()),
         )
 
         plan = planner.plan_demotion("torrent_alias_123")
@@ -772,6 +848,100 @@ class TestDryRun:
         conn.close()
 
         assert final_count == initial_count
+
+
+class TestFsUuidIdentity:
+    """Tests for fs_uuid-first identity fields in generated plans."""
+
+    def test_demotion_move_plan_includes_fs_uuid_identity(self, tmp_path):
+        db_path = TestDatabase.create_test_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE devices (
+                device_id INTEGER PRIMARY KEY,
+                fs_uuid TEXT,
+                mount_point TEXT NOT NULL,
+                preferred_mount_point TEXT
+            );
+
+            INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point) VALUES
+                (49, 'fs-test-49', '/pool', '/pool'),
+                (50, 'fs-test-50', '/stash', '/stash');
+
+            CREATE TABLE scan_roots (
+                fs_uuid TEXT,
+                root_path TEXT,
+                last_scanned_at TEXT,
+                scan_count INTEGER,
+                PRIMARY KEY (fs_uuid, root_path)
+            );
+
+            INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count) VALUES
+                ('fs-test-50', '/stash/torrents/seeding', '2026-03-06', 1);
+
+            INSERT INTO files_50 (path, inode, size, mtime, sha1, status) VALUES
+                ('torrents/seeding/Show.S01/ep1.mkv', 101, 1000, 1.0, 'a', 'active');
+
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+            VALUES (1, 'payload_show_s01', 50, '/stash/torrents/seeding/Show.S01', 1, 1000, 'complete');
+
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+            VALUES ('showhash001', 1, 50, '/stash/torrents/seeding', 'Show.S01');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/torrents/seeding"],
+            library_roots=[],
+            stash_device=50,
+            pool_device=49,
+            stash_seeding_root="/stash/torrents/seeding",
+            pool_seeding_root="/pool/torrents/seeding",
+            pool_payload_root="/pool/torrents/content",
+        )
+
+        plan = planner.plan_demotion("showhash001")
+
+        assert plan["decision"] == "MOVE"
+        assert plan.get("source_fs_uuid") == "fs-test-50"
+        assert plan.get("target_fs_uuid") == "fs-test-49"
+
+
+def test_executor_resolves_fs_uuid_backed_files_relation(tmp_path):
+    """Executor helper should resolve devices.files_table without a physical files_<device_id> table."""
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            device_alias TEXT,
+            mount_point TEXT NOT NULL,
+            preferred_mount_point TEXT,
+            files_table TEXT
+        );
+
+        CREATE TABLE files_fs_test_50 (
+            path TEXT PRIMARY KEY,
+            sha256 TEXT,
+            status TEXT
+        );
+
+        INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, files_table)
+        VALUES ('fs-test-50', 50, 'stash', '/stash', '/stash', 'files_fs_test_50');
+        """
+    )
+    conn.commit()
+
+    executor = DemotionExecutor.__new__(DemotionExecutor)
+    assert executor._get_device_table_name(conn, 50) == "files_fs_test_50"
+
+    conn.close()
 
 
 if __name__ == "__main__":

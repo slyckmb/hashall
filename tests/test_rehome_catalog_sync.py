@@ -1,4 +1,4 @@
-"""Regression tests for rehome catalog synchronization on MOVE."""
+"""Regression tests for rehome catalog synchronization on MOVE/REUSE."""
 
 import sqlite3
 from pathlib import Path
@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from hashall.device import ensure_files_table
+from hashall.fastresume import bencode
 from hashall.qbittorrent import QBitFile
 from rehome.executor import DemotionExecutor
 
@@ -197,7 +198,12 @@ def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
     }
 
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "fastresume"
     executor.qbit_client = FakeQbitClient(default_path=str(source_file.parent))
+    executor._repoint_torrents_via_fastresume_batch = lambda relocations: [
+        executor.qbit_client.save_paths.__setitem__(row["torrent_hash"], row["target_save_path"])
+        for row in relocations
+    ]
 
     # Source file is already gone, target file already present.
     assert not source_file.exists()
@@ -378,6 +384,7 @@ def test_reuse_cleanup_reconciles_source_files_table_without_rescan(tmp_path):
     }
 
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClient(default_path=str(source_file.parent))
 
     executor.execute(plan, cleanup_duplicate_payload=True)
@@ -541,6 +548,7 @@ def test_reuse_same_device_prefers_target_root_path_row(tmp_path):
     }
 
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClient(default_path=str(target_file.parent))
     executor.execute(plan, cleanup_duplicate_payload=False)
 
@@ -632,6 +640,7 @@ def test_dry_run_cleanup_source_views_works_with_readonly_catalog(tmp_path):
     }
 
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClient(default_path=str(source_file.parent))
     executor.dry_run(plan, cleanup_source_views=True)
 
@@ -765,6 +774,7 @@ def test_reuse_same_device_without_target_payload_row_repoints_source_payload(tm
     }
 
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClient(default_path=str(target_file.parent))
     executor.execute(plan, cleanup_duplicate_payload=False)
 
@@ -830,6 +840,7 @@ def test_build_views_skips_duplicate_target_entries(tmp_path):
 
     files = [QBitFile(name=payload_file.name, size=payload_file.stat().st_size)]
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClientWithFiles(default_path=str(target_save), files=files)
 
     executor._build_views(payload_file, view_targets, plan)
@@ -847,6 +858,7 @@ def test_sanitize_plan_live_torrents_filters_stale_hashes(tmp_path):
     files = [QBitFile(name=payload_file.name, size=payload_file.stat().st_size)]
 
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClientSelective(
         default_path=str(tmp_path),
         files_by_hash={"hash_live": files},
@@ -898,6 +910,7 @@ def test_build_views_uses_preloaded_files_cache(tmp_path):
     files = [QBitFile(name=payload_file.name, size=payload_file.stat().st_size)]
 
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClientSelective(
         default_path=str(tmp_path),
         files_by_hash={"hash_live": files},
@@ -958,6 +971,8 @@ def test_execute_reuse_skips_stale_sibling_hash_with_missing_files(tmp_path, mon
 
     files = [QBitFile(name=payload_file.name, size=payload_size)]
     executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
+    executor.reuse_transport = "set_location"
     executor.qbit_client = FakeQbitClientSelective(
         default_path=str(view_save),
         files_by_hash={"hash_live": files},
@@ -1004,3 +1019,169 @@ def test_execute_reuse_skips_stale_sibling_hash_with_missing_files(tmp_path, mon
     assert built.stat().st_ino == payload_file.stat().st_ino
     assert plan["affected_torrents"] == ["hash_live"]
     assert [t["torrent_hash"] for t in plan["view_targets"]] == ["hash_live"]
+
+
+def test_execute_reuse_fastresume_transport_avoids_qb_set_location(tmp_path, monkeypatch):
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            mount_point TEXT,
+            preferred_mount_point TEXT
+        );
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT NOT NULL,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'incomplete'
+        );
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            device_id INTEGER,
+            save_path TEXT,
+            root_name TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-141", 141, str(tmp_path / "pool" / "media"), str(tmp_path / "pool" / "media")),
+    )
+    conn.commit()
+    conn.close()
+
+    target_parent = tmp_path / "pool" / "media" / "torrents" / "seeding" / "cross-seed" / "TrackerA"
+    target_parent.mkdir(parents=True, exist_ok=True)
+    target_file = target_parent / "Movie.2024.mkv"
+    target_file.write_bytes(b"payload")
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    torrent_hash = "abc123def456abc123def456abc123def456abcd"
+    old_save_path = str(tmp_path / "pool" / "data" / "media" / "torrents" / "seeding" / "cross-seed" / "TrackerA")
+    new_save_path = str(target_parent)
+    fastresume_path = fastresume_dir / f"{torrent_hash}.fastresume"
+    fastresume_path.write_bytes(
+        bencode(
+            {
+                b"save_path": old_save_path.encode("utf-8"),
+                b"qBt-savePath": old_save_path.encode("utf-8"),
+                b"qBt-downloadPath": old_save_path.encode("utf-8"),
+            }
+        )
+    )
+
+    class FastresumeClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__(default_path=old_save_path)
+            self.save_paths[torrent_hash] = old_save_path
+            self.set_location_calls = 0
+
+        def set_location(self, torrent_hash: str, new_location: str) -> bool:
+            self.set_location_calls += 1
+            raise AssertionError("REUSE fastresume transport must not call set_location")
+
+        def test_connection(self) -> bool:
+            return True
+
+        def login(self) -> bool:
+            return True
+
+        def recheck_torrent(self, torrent_hash: str) -> bool:
+            self.save_paths[torrent_hash] = new_save_path
+            return True
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
+    executor.reuse_transport = "fastresume"
+    executor.fastresume_dir = fastresume_dir
+    executor.qbit_client = FastresumeClient()
+
+    monkeypatch.setattr(executor, "_docker_qb_ctl", lambda action: None)
+    monkeypatch.setattr(executor, "_wait_qb_online_after_restart", lambda timeout_seconds=120.0: None)
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_save_path",
+        lambda torrent_hash, expected, **kwargs: (
+            SimpleNamespace(save_path=str(expected), auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0),
+            expected,
+        ),
+    )
+    monkeypatch.setattr(executor, "_validate_qb_content_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_sync_catalog_after_rehome", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_apply_rehome_provenance_tags", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_apply_cleanup", lambda *args, **kwargs: None)
+
+    plan = {
+        "version": "1.0",
+        "direction": "demote",
+        "decision": "REUSE",
+        "torrent_hash": torrent_hash,
+        "payload_hash": "payload_hash",
+        "payload_id": 1,
+        "source_path": str(tmp_path / "pool" / "data" / "media" / "torrents" / "seeding" / "cross-seed" / "TrackerA" / target_file.name),
+        "target_path": str(target_file),
+        "source_device_id": 231,
+        "target_device_id": 141,
+        "file_count": 1,
+        "total_bytes": target_file.stat().st_size,
+        "affected_torrents": [torrent_hash],
+        "view_targets": [],
+    }
+
+    monkeypatch.setattr(
+        executor,
+        "_build_relocations",
+        lambda conn, plan: [
+            {
+                "torrent_hash": torrent_hash,
+                "source_save_path": old_save_path,
+                "target_save_path": new_save_path,
+            }
+        ],
+    )
+
+    executor.execute(plan)
+
+    raw = fastresume_path.read_bytes()
+    assert new_save_path.encode("utf-8") in raw
+    assert b"qBt-downloadPath0:" in raw or b"qBt-downloadPath" in raw
+    assert executor.qbit_client.set_location_calls == 0
+
+
+def test_reuse_fallback_derives_save_path_for_single_entry_nested_file(tmp_path):
+    target_file = (
+        tmp_path
+        / "pool"
+        / "media"
+        / "torrents"
+        / "seeding"
+        / "cross-seed"
+        / "seedpool (API)"
+        / "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX"
+        / "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX.mkv"
+    )
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_bytes(b"payload")
+
+    class _File:
+        name = "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX/Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX.mkv"
+
+    derived = DemotionExecutor._derive_target_save_path_for_torrent(target_file, [_File()])
+
+    assert derived == (
+        tmp_path
+        / "pool"
+        / "media"
+        / "torrents"
+        / "seeding"
+        / "cross-seed"
+        / "seedpool (API)"
+    )

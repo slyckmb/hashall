@@ -6,7 +6,7 @@
 # and restarting qBittorrent to reload it.
 #
 # Usage:
-#   bin/qbit-fix-location.sh [OPTIONS] HASH [HASH2 ...]
+#   bin/qb-fix-location.sh [OPTIONS] HASH [HASH2 ...]
 #
 # Options:
 #   --save-path PATH    Update save_path via setLocation API (no restart needed)
@@ -17,13 +17,13 @@
 #
 # Examples:
 #   # Dry-run: show what would happen
-#   bin/qbit-fix-location.sh --save-path /pool/data/seeds/cross-seed/TL --clear-dl-path --recheck abc123
+#   bin/qb-fix-location.sh --save-path /pool/data/seeds/cross-seed/TL --clear-dl-path --recheck abc123
 #
 #   # Clear download_path + recheck + monitor 120s on one hash
-#   bin/qbit-fix-location.sh --clear-dl-path --recheck --monitor 120 --apply abc123
+#   bin/qb-fix-location.sh --clear-dl-path --recheck --monitor 120 --apply abc123
 #
 #   # Set new save path only (no restart needed)
-#   bin/qbit-fix-location.sh --save-path /new/path --apply abc123 def456
+#   bin/qb-fix-location.sh --save-path /new/path --apply abc123 def456
 
 set -euo pipefail
 
@@ -188,7 +188,7 @@ PYEOF
 
 # ── print plan ─────────────────────────────────────────────────────────────────
 echo "================================================================"
-echo "qbit-fix-location  [APPLY=$APPLY]  $(date '+%F %T')"
+echo "qb-fix-location  [APPLY=$APPLY]  $(date '+%F %T')"
 echo "================================================================"
 echo "Hashes:         ${#HASHES[@]}"
 [[ -n "$SAVE_PATH" ]]         && echo "save-path:      $SAVE_PATH"

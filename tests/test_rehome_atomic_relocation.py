@@ -244,6 +244,102 @@ def test_atomic_relocation_requests_recheck_before_resume(tmp_path, monkeypatch)
     assert executor.qbit_client.recheck_calls == ["t1"]
 
 
+def test_recheck_guard_waits_for_stable_ready_after_delayed_checking(tmp_path, monkeypatch):
+    class DelayedCheckingClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self._seq = [
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="checkingUP", progress=0.25, amount_left=768, size=1024, completed=256),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+            ]
+            self.info_calls = 0
+
+        def get_torrent_info(self, torrent_hash: str):
+            idx = min(self.info_calls, len(self._seq) - 1)
+            self.info_calls += 1
+            return self._seq[idx]
+
+    fake_clock = {"t": 0.0}
+
+    def _fake_monotonic():
+        return fake_clock["t"]
+
+    def _fake_sleep(seconds):
+        fake_clock["t"] += seconds
+
+    monkeypatch.setattr("time.monotonic", _fake_monotonic)
+    monkeypatch.setattr("time.sleep", _fake_sleep)
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = DelayedCheckingClient()
+    executor.recheck_ready_stable_seconds = 4.0
+    executor._get_torrent_info_with_retry = lambda *args, **kwargs: SimpleNamespace(
+        size=1024, completed=1024, state="stoppedUP", progress=1.0, amount_left=0
+    )
+
+    executor._ensure_qb_seed_ready_after_relocate(
+        "t1",
+        min_timeout_seconds=10.0,
+        interval_seconds=2.0,
+    )
+
+    assert executor.qbit_client.recheck_calls == ["t1"]
+    assert executor.qbit_client.info_calls >= 6
+
+
+def test_recheck_guard_tolerates_brief_stoppeddl_queue_before_checking(tmp_path, monkeypatch):
+    class QueuedRecheckClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self._seq = [
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedDL", progress=0.0, amount_left=1024, size=1024, completed=0),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedDL", progress=0.0, amount_left=1024, size=1024, completed=0),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="checkingUP", progress=0.25, amount_left=768, size=1024, completed=256),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="checkingUP", progress=0.75, amount_left=256, size=1024, completed=768),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+                SimpleNamespace(save_path="/pool/seeding", auto_tmm=False, state="stoppedUP", progress=1.0, amount_left=0, size=1024, completed=1024),
+            ]
+            self.info_calls = 0
+
+        def get_torrent_info(self, torrent_hash: str):
+            idx = min(self.info_calls, len(self._seq) - 1)
+            self.info_calls += 1
+            return self._seq[idx]
+
+    fake_clock = {"t": 0.0}
+
+    def _fake_monotonic():
+        return fake_clock["t"]
+
+    def _fake_sleep(seconds):
+        fake_clock["t"] += seconds
+
+    monkeypatch.setattr("time.monotonic", _fake_monotonic)
+    monkeypatch.setattr("time.sleep", _fake_sleep)
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = QueuedRecheckClient()
+    executor.recheck_ready_stable_seconds = 4.0
+    executor.recheck_queue_grace_seconds = 10.0
+    executor._get_torrent_info_with_retry = lambda *args, **kwargs: SimpleNamespace(
+        size=1024, completed=1024, state="stoppedUP", progress=1.0, amount_left=0
+    )
+
+    executor._ensure_qb_seed_ready_after_relocate(
+        "t1",
+        min_timeout_seconds=10.0,
+        interval_seconds=2.0,
+    )
+
+    assert executor.qbit_client.recheck_calls == ["t1"]
+    assert executor.qbit_client.info_calls >= 7
+
+
 def test_atomic_relocation_retries_torrent_info_before_failing(tmp_path, monkeypatch):
     class FlakyInfoQbitClient(FakeQbitClient):
         def __init__(self):
@@ -483,11 +579,15 @@ def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, m
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        executor,
+        "_relocate_torrents_atomic",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("MOVE must not call setLocation relocation")),
+    )
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -519,15 +619,13 @@ def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path,
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-
-    def fail_relocation(*_args, **_kwargs):
+    def fail_attach(*_args, **_kwargs):
         raise RuntimeError("relocation failed")
 
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", fail_relocation)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", fail_attach)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -554,24 +652,21 @@ def test_execute_move_relocation_failure_cleans_partial_views(tmp_path, monkeypa
     side_view_path = side_view_parent / "payload.mkv"
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: False)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
 
-    def fake_build_views(payload_root, view_targets, plan, **_kwargs):
-        for target in view_targets:
+    def fail_attach(exec_plan, donor, **_kwargs):
+        payload_root = donor.target_path
+        for target in exec_plan.get("view_targets") or []:
             dst = Path(target["target_save_path"]) / target["root_name"]
             if dst == payload_root:
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.link(payload_root, dst)
+        raise RuntimeError("relocation failed")
 
-    monkeypatch.setattr(executor, "_build_views", fake_build_views)
-    monkeypatch.setattr(
-        executor,
-        "_relocate_torrents_atomic",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("relocation failed")),
-    )
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", fail_attach)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -619,12 +714,11 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
     monkeypatch.setattr("rehome.executor.get_payload_file_rows", lambda *_args, **_kwargs: [])
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -647,18 +741,17 @@ def test_execute_move_filters_view_target_that_recreates_source(tmp_path, monkey
     target_path = tmp_path / "pool" / "data" / "seeds" / "thegeeks" / "book.epub"
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: False)
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
 
     captured = {}
 
-    def fake_build_relocations(_conn, exec_plan):
+    def fake_attach(exec_plan, donor, **_kwargs):
         captured["view_targets"] = list(exec_plan.get("view_targets") or [])
-        return []
+        return {}
 
-    monkeypatch.setattr(executor, "_build_relocations", fake_build_relocations)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", fake_attach)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -798,9 +891,7 @@ def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tm
         (target_path / "video.mkv").write_bytes(b"x")
 
     monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
 
     calls = {"delete": 0, "repair": 0}
 
@@ -818,6 +909,7 @@ def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tm
     monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", fake_repair)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,
@@ -847,9 +939,7 @@ def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_pa
         (target_path / "video.mkv").write_bytes(b"x")
 
     monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
-    monkeypatch.setattr(executor, "_build_relocations", lambda conn, plan: [])
-    monkeypatch.setattr(executor, "_build_views", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor, "_relocate_torrents_atomic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         executor,
         "_delete_path",
@@ -858,6 +948,7 @@ def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_pa
     monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", lambda _path: False)
 
     plan = {
+        "decision": "MOVE",
         "source_path": str(source_path),
         "target_path": str(target_path),
         "file_count": 1,

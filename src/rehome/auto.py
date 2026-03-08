@@ -7,10 +7,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import re
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -279,6 +281,68 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{h}h{m:02d}m{s:02d}s"
 
 
+def _run_catalog_preflight(catalog_path: Path) -> tuple[bool, dict[str, Any]]:
+    """
+    Run hashall catalog preflight checks directly against the DB.
+
+    Returns:
+      (ok, report_dict)
+    """
+    from hashall.model import connect_db
+    from hashall.preflight import run_catalog_preflight
+
+    conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+    try:
+        report = run_catalog_preflight(conn)
+    finally:
+        conn.close()
+    return bool(report.get("ok")), report
+
+
+_UPGRADE_SUMMARY_RE = re.compile(
+    r"(?:upgrade_summary|upgrade stage:)\s+queued=(\d+)\s+started=(\d+)\s+completed=(\d+)\s+failed=(\d+)"
+)
+
+_LINK_PLAN_ID_PATTERNS = (
+    re.compile(r"\bplan_id=(\d+)\b", re.IGNORECASE),
+    re.compile(r"\bPlan #(\d+)\b"),
+    re.compile(r"\blink show-plan (\d+)\b"),
+    re.compile(r"\blink execute (\d+)\b"),
+)
+
+
+def _parse_upgrade_summary(stdout: str) -> Optional[dict[str, int]]:
+    """Parse `upgrade_summary ...` counters from payload sync output."""
+    match = None
+    for m in _UPGRADE_SUMMARY_RE.finditer(str(stdout or "")):
+        match = m
+    if match is None:
+        return None
+    return {
+        "queued": int(match.group(1)),
+        "started": int(match.group(2)),
+        "completed": int(match.group(3)),
+        "failed": int(match.group(4)),
+    }
+
+
+def _parse_link_plan_id(stdout: str) -> Optional[str]:
+    """
+    Parse a link plan id from `hashall link plan` output.
+
+    Accept both older machine-readable output (``plan_id=12``) and the
+    current human summary/header form (``Plan #12``).
+    """
+    text = str(stdout or "")
+    for pattern in _LINK_PLAN_ID_PATTERNS:
+        match = None
+        for found in pattern.finditer(text):
+            match = found
+        if match is not None:
+            return match.group(1)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Inline verify
 # ---------------------------------------------------------------------------
@@ -296,6 +360,7 @@ def _inline_verify(
     """
     affected = plan.get("affected_torrents") or []
     source_path = plan.get("source_path")
+    decision = str(plan.get("decision") or "").strip().upper()
 
     state_counts: dict[str, int] = {}
     progress_vals: list[float] = []
@@ -338,8 +403,10 @@ def _inline_verify(
 
     # Source path gone
     source_gone = source_path is None or not Path(source_path).exists()
+    cleanup_pending = decision == "REUSE" and not source_gone
+    source_ok = True if decision == "REUSE" else source_gone
 
-    ok = (not alarm_hashes) and catalog_ok and source_gone
+    ok = (not alarm_hashes) and catalog_ok and source_ok
 
     # Build summary string
     state_str = " ".join(
@@ -347,7 +414,12 @@ def _inline_verify(
     ) or "?"
     pct_str = f"{max(progress_vals) * 100:.0f}%" if progress_vals else "?"
     catalog_str = "catalog OK" if catalog_ok else "catalog MISMATCH"
-    src_str = "source gone" if source_gone else "source STILL EXISTS"
+    if source_gone:
+        src_str = "source gone"
+    elif cleanup_pending:
+        src_str = "cleanup pending"
+    else:
+        src_str = "source STILL EXISTS"
     summary = f"{state_str} · {pct_str} · {catalog_str} · {src_str}"
     if alarm_hashes:
         summary += f" · ALARM({','.join(alarm_hashes)})"
@@ -399,6 +471,19 @@ def run_refresh(
     active_device = active_device or stash_device or ""
     dest_device = dest_device or pool_device or ""
     managed_roots = managed_roots or extra_roots or []
+    published_seed_state_path: Optional[Path] = None
+    try:
+        from rehome.seed_state import publish_seed_root_state
+        _cfg = {
+            "active_device": active_device,
+            "active_root": active_root,
+            "default_dest_device": dest_device,
+            "default_dest_root": dest_root,
+            "managed_roots": [f"{path}:{alias}" for path, alias in managed_roots],
+        }
+        published_seed_state_path, _seed_state = publish_seed_root_state(cfg=_cfg)
+    except Exception:
+        published_seed_state_path = None
 
     from rehome.runlog import RunLogger
 
@@ -429,7 +514,28 @@ def run_refresh(
                     logger.write_raw(result.stderr)
                 stdout = result.stdout or ""
             else:
-                result = subprocess.run(cmd)
+                try:
+                    heartbeat_s = max(5, int(os.environ.get("REHOME_REFRESH_HEARTBEAT_S", "30")))
+                except ValueError:
+                    heartbeat_s = 30
+                started_monotonic = time.monotonic()
+                next_heartbeat = started_monotonic + heartbeat_s
+                proc = subprocess.Popen(cmd)
+                while True:
+                    rc = proc.poll()
+                    if rc is not None:
+                        result = subprocess.CompletedProcess(cmd, rc)
+                        break
+                    now_monotonic = time.monotonic()
+                    if now_monotonic >= next_heartbeat:
+                        elapsed_hb = int(now_monotonic - started_monotonic)
+                        print(
+                            "  [refresh] still running "
+                            f"label={label} elapsed={elapsed_hb}s "
+                            "watch='tail -n0 -F ~/.logs/hashall/hashall.log'"
+                        )
+                        next_heartbeat = now_monotonic + heartbeat_s
+                    time.sleep(1.0)
                 stdout = ""
             elapsed = (datetime.now() - t0).total_seconds()
             ok = result.returncode == 0
@@ -457,116 +563,197 @@ def run_refresh(
             print(f"  dedup    {dedup_mode}")
             if logger.verbose:
                 print(f"  log      {log_path}")
+            if published_seed_state_path is not None:
+                print(f"  seed-state  {published_seed_state_path}")
             print(f"\n  Scan roots ({len(all_roots)}):")
             for i, (path, alias, role) in enumerate(all_roots, 1):
                 print(f"    [{i}] {alias:<20} {role:<7}  {path}")
 
             _validate_refresh_roots(catalog_path, all_roots)
 
-            # ── Step 1: scan active_root ──────────────────────────────────────────
-            ok, _ = _run_step(
-                f"scan active_root ({active_root})",
-                [python, "-m", "hashall.cli", "scan", active_root,
-                 "--parallel", "--workers", str(workers)] + db_args,
+            # ── Preflight: fail closed on catalog integrity issues ────────────────
+            preflight_label = "doctor preflight"
+            preflight_cmd = [python, "-m", "hashall.cli", "doctor", "preflight"] + db_args
+            preflight_t0 = datetime.now()
+            preflight_ok = False
+            preflight_report: dict[str, Any] = {}
+            preflight_error = ""
+            print(f"\n[refresh] {preflight_label}")
+            print(f"  $ {' '.join(preflight_cmd)}")
+            try:
+                preflight_ok, preflight_report = _run_catalog_preflight(catalog_path)
+            except Exception as exc:
+                preflight_ok = False
+                preflight_error = str(exc)
+                preflight_report = {
+                    "ok": False,
+                    "error": preflight_error,
+                    "checks": [],
+                    "summary": {"total_checks": 0, "failed_error": 1, "failed_warning": 0},
+                }
+            preflight_elapsed = (datetime.now() - preflight_t0).total_seconds()
+            print(f"  elapsed {_fmt_elapsed(preflight_elapsed)}  {'OK' if preflight_ok else 'FAILED'}")
+            logger.record_step(
+                preflight_label,
+                preflight_cmd,
+                preflight_ok,
+                preflight_elapsed,
+                stdout=json.dumps(preflight_report, indent=2),
             )
-            overall_ok = overall_ok and ok
+            summary = preflight_report.get("summary", {})
+            print(
+                "  preflight_summary "
+                f"failed_error={int(summary.get('failed_error', 0) or 0)} "
+                f"failed_warning={int(summary.get('failed_warning', 0) or 0)} "
+                f"total_checks={int(summary.get('total_checks', 0) or 0)}"
+            )
+            if preflight_error:
+                print(f"  preflight_error {preflight_error}")
+            if not preflight_ok:
+                for check in preflight_report.get("checks", []):
+                    if bool(check.get("ok")):
+                        continue
+                    print(
+                        "    fail "
+                        f"{str(check.get('severity') or 'error')} "
+                        f"{str(check.get('name') or 'unknown')} "
+                        f"{str(check.get('message') or '')}"
+                    )
+                print("  [refresh] catalog preflight failed — skipping refresh execution steps")
+            overall_ok = overall_ok and preflight_ok
 
-            # ── Step 2: scan dest_root ────────────────────────────────────────────
-            if dest_root != active_root:
+            if preflight_ok:
+                # ── Step 1: scan active_root ──────────────────────────────────────────
                 ok, _ = _run_step(
-                    f"scan dest_root ({dest_root})",
-                    [python, "-m", "hashall.cli", "scan", dest_root,
+                    f"scan active_root ({active_root})",
+                    [python, "-m", "hashall.cli", "scan", active_root,
                      "--parallel", "--workers", str(workers)] + db_args,
                 )
                 overall_ok = overall_ok and ok
 
-            # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
-            ok, _ = _run_step(
-                f"dupes auto-upgrade (active={active_device})",
-                [python, "-m", "hashall.cli", "dupes",
-                 "--device", active_device, "--auto-upgrade"] + db_args,
-            )
-            overall_ok = overall_ok and ok
+                # ── Step 2: scan dest_root ────────────────────────────────────────────
+                if dest_root != active_root:
+                    ok, _ = _run_step(
+                        f"scan dest_root ({dest_root})",
+                        [python, "-m", "hashall.cli", "scan", dest_root,
+                         "--parallel", "--workers", str(workers)] + db_args,
+                    )
+                    overall_ok = overall_ok and ok
 
-            # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
-            ok, _ = _run_step(
-                f"dupes auto-upgrade (dest={dest_device})",
-                [python, "-m", "hashall.cli", "dupes",
-                 "--device", dest_device, "--auto-upgrade"] + db_args,
-            )
-            overall_ok = overall_ok and ok
-
-            # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
-            for managed_path, managed_alias in (managed_roots or []):
+                # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
                 ok, _ = _run_step(
-                    f"scan managed root ({managed_path})",
-                    [python, "-m", "hashall.cli", "scan", managed_path,
-                     "--parallel", "--workers", str(workers)] + db_args,
-                )
-                overall_ok = overall_ok and ok
-
-                ok, _ = _run_step(
-                    f"dupes auto-upgrade (managed={managed_alias})",
+                    f"dupes auto-upgrade (active={active_device})",
                     [python, "-m", "hashall.cli", "dupes",
-                     "--device", managed_alias, "--auto-upgrade"] + db_args,
+                     "--device", active_device, "--auto-upgrade"] + db_args,
                 )
                 overall_ok = overall_ok and ok
 
-                if not skip_dedup:
-                    plan_name = f"refresh-{managed_alias}-{timestamp}"
-                    ok, stdout = _run_step(
-                        f"link plan ({managed_alias})",
-                        [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                         "--device", managed_alias, "--min-size", "1048576"] + db_args,
-                        capture=True,
+                # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
+                ok, _ = _run_step(
+                    f"dupes auto-upgrade (dest={dest_device})",
+                    [python, "-m", "hashall.cli", "dupes",
+                     "--device", dest_device, "--auto-upgrade"] + db_args,
+                )
+                overall_ok = overall_ok and ok
+
+                # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
+                for managed_path, managed_alias in (managed_roots or []):
+                    ok, _ = _run_step(
+                        f"scan managed root ({managed_path})",
+                        [python, "-m", "hashall.cli", "scan", managed_path,
+                         "--parallel", "--workers", str(workers)] + db_args,
+                    )
+                    overall_ok = overall_ok and ok
+
+                    ok, _ = _run_step(
+                        f"dupes auto-upgrade (managed={managed_alias})",
+                        [python, "-m", "hashall.cli", "dupes",
+                         "--device", managed_alias, "--auto-upgrade"] + db_args,
+                    )
+                    overall_ok = overall_ok and ok
+
+                    if not skip_dedup:
+                        plan_name = f"refresh-{managed_alias}-{timestamp}"
+                        ok, stdout = _run_step(
+                            f"link plan ({managed_alias})",
+                            [python, "-m", "hashall.cli", "link", "plan", plan_name,
+                             "--device", managed_alias, "--min-size", "1048576"] + db_args,
+                            capture=True,
                     )
                     overall_ok = overall_ok and ok
 
                     if ok:
-                        m = re.search(r"plan_id=(\d+)", stdout)
-                        if m:
-                            plan_id = m.group(1)
+                        plan_id = _parse_link_plan_id(stdout)
+                        if plan_id:
                             execute_cmd = [
                                 python, "-m", "hashall.cli", "link", "execute", plan_id,
+                                "--yes",
                             ] + db_args
                             label = f"link execute plan_id={plan_id} ({managed_alias})"
+                            print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
                             ok, _ = _run_step(label, execute_cmd)
                             overall_ok = overall_ok and ok
                         else:
-                            print(f"  [refresh] no plan_id in link plan output for {managed_alias} — skipping execute")
+                            print(f"  [refresh] no parsable plan_id in link plan output for {managed_alias} — skipping execute")
 
-            # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
-            if not skip_dedup:
-                for dev_alias in (active_device, dest_device):
-                    plan_name = f"refresh-{dev_alias}-{timestamp}"
-                    ok, stdout = _run_step(
-                        f"link plan ({dev_alias})",
-                        [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                         "--device", dev_alias, "--min-size", "1048576"] + db_args,
-                        capture=True,
-                    )
-                    overall_ok = overall_ok and ok
+                # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
+                if not skip_dedup:
+                    for dev_alias in (active_device, dest_device):
+                        plan_name = f"refresh-{dev_alias}-{timestamp}"
+                        ok, stdout = _run_step(
+                            f"link plan ({dev_alias})",
+                            [python, "-m", "hashall.cli", "link", "plan", plan_name,
+                             "--device", dev_alias, "--min-size", "1048576"] + db_args,
+                            capture=True,
+                        )
+                        overall_ok = overall_ok and ok
 
-                    if ok:
-                        m = re.search(r"plan_id=(\d+)", stdout)
-                        if m:
-                            plan_id = m.group(1)
-                            execute_cmd = [
-                                python, "-m", "hashall.cli", "link", "execute", plan_id,
-                            ] + db_args
-                            label = f"link execute plan_id={plan_id} ({dev_alias})"
-                            ok, _ = _run_step(label, execute_cmd)
-                            overall_ok = overall_ok and ok
-                        else:
-                            print(f"  [refresh] no plan_id in link plan output for {dev_alias} — skipping execute")
+                        if ok:
+                            plan_id = _parse_link_plan_id(stdout)
+                            if plan_id:
+                                execute_cmd = [
+                                    python, "-m", "hashall.cli", "link", "execute", plan_id,
+                                    "--yes",
+                                ] + db_args
+                                label = f"link execute plan_id={plan_id} ({dev_alias})"
+                                print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
+                                ok, _ = _run_step(label, execute_cmd)
+                                overall_ok = overall_ok and ok
+                            else:
+                                print(f"  [refresh] no parsable plan_id in link plan output for {dev_alias} — skipping execute")
 
-            # ── Step 5: payload sync --upgrade-missing ────────────────────────────
-            ok, _ = _run_step(
-                "payload sync --upgrade-missing",
-                [python, "-m", "hashall.cli", "payload", "sync",
-                 "--upgrade-missing"] + db_args,
-            )
-            overall_ok = overall_ok and ok
+                # ── Step 5: payload sync --upgrade-missing ────────────────────────────
+                ok, payload_stdout = _run_step(
+                    "payload sync --upgrade-missing",
+                    [python, "-m", "hashall.cli", "payload", "sync",
+                     "--upgrade-missing"] + db_args,
+                    capture=True,
+                )
+                overall_ok = overall_ok and ok
+                if ok:
+                    upgrade_summary = _parse_upgrade_summary(payload_stdout)
+                    min_ratio_env = os.environ.get("HASHALL_REFRESH_UPGRADE_MIN_COMPLETE_RATIO", "0.90")
+                    try:
+                        min_ratio = float(min_ratio_env)
+                    except ValueError:
+                        min_ratio = 0.90
+                    min_ratio = max(0.0, min(1.0, min_ratio))
+                    if upgrade_summary is None:
+                        overall_ok = False
+                        print("  [refresh] payload sync quality gate FAILED: missing upgrade_summary")
+                    else:
+                        queued = int(upgrade_summary.get("queued", 0))
+                        completed = int(upgrade_summary.get("completed", 0))
+                        failed = int(upgrade_summary.get("failed", 0))
+                        ratio = 1.0 if queued <= 0 else (float(completed) / float(queued))
+                        print(
+                            "  payload_sync_gate "
+                            f"min_complete_ratio={min_ratio:.3f} "
+                            f"queued={queued} completed={completed} failed={failed} ratio={ratio:.3f}"
+                        )
+                        if failed > 0 or ratio < min_ratio:
+                            overall_ok = False
+                            print("  [refresh] payload sync quality gate FAILED")
 
             # ── Summary ───────────────────────────────────────────────────────────
             sep = "─" * 57
@@ -820,6 +1007,7 @@ def run_auto(
         applied_count = 0
         verified_count = 0
         freed_bytes = 0
+        cleanup_pending_count = 0
         exit_code = 0
 
         try:
@@ -946,15 +1134,47 @@ def run_auto(
                     try:
                         executor.execute(plan)
                         apply_elapsed = (datetime.now() - t_apply).total_seconds()
-                        print(f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · source deleted"
-                              f"{'':>10}  OK")
-                        cand_rec["apply"] = {"ok": True, "elapsed_s": round(apply_elapsed, 3), "freed_bytes": src_bytes, "error": None}
+                        decision = str(plan.get("decision") or "").strip().upper()
+                        cleanup_pending = bool(plan.get("cleanup_source_deferred"))
+                        if decision == "REUSE":
+                            cleanup_label = "cleanup pending" if cleanup_pending else "source gone"
+                            print(
+                                f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · {cleanup_label}"
+                                f"{'':>9}  OK"
+                            )
+                            cand_rec["apply"] = {
+                                "ok": True,
+                                "elapsed_s": round(apply_elapsed, 3),
+                                "freed_bytes": 0,
+                                "source_cleanup": "pending_manual_cleanup" if cleanup_pending else "already_absent",
+                                "error": None,
+                            }
+                            if cleanup_pending:
+                                cleanup_pending_count += 1
+                        else:
+                            print(
+                                f"  apply   {_fmt_bytes(src_bytes)} · {_fmt_elapsed(apply_elapsed)} · source deleted"
+                                f"{'':>10}  OK"
+                            )
+                            cand_rec["apply"] = {
+                                "ok": True,
+                                "elapsed_s": round(apply_elapsed, 3),
+                                "freed_bytes": src_bytes,
+                                "source_cleanup": "source_deleted",
+                                "error": None,
+                            }
+                            freed_bytes += src_bytes
                         applied_count += 1
-                        freed_bytes += src_bytes
                     except Exception as e:
                         apply_elapsed = (datetime.now() - t_apply).total_seconds()
                         print(f"  apply   FAIL after {_fmt_elapsed(apply_elapsed)}: {e}")
-                        cand_rec["apply"] = {"ok": False, "elapsed_s": round(apply_elapsed, 3), "freed_bytes": 0, "error": str(e)}
+                        cand_rec["apply"] = {
+                            "ok": False,
+                            "elapsed_s": round(apply_elapsed, 3),
+                            "freed_bytes": 0,
+                            "source_cleanup": "unknown",
+                            "error": str(e),
+                        }
                         apply_ok = False
                         exit_code = 1
 
@@ -998,17 +1218,20 @@ def run_auto(
     sep = "─" * 57
     print(sep)
     if do_apply:
-        print(
+        summary_line = (
             f"applied  {applied_count}/{taking}   "
             f"verified  {verified_count}/{taking}   "
             f"freed  {_fmt_bytes(freed_bytes)} from sources"
         )
+        if cleanup_pending_count:
+            summary_line += f"   cleanup pending  {cleanup_pending_count}"
+        print(summary_line)
     else:
         print(
             f"dry-run  {planned_count}/{taking} planned  "
             f"{planned_count}/{taking} checked"
         )
-        print(f"To apply: rehome auto --limit {limit} --apply")
+        print(f"To apply: hashall rehome auto --limit {limit} --apply")
 
     run_record["summary"] = {
         "planned": planned_count,
@@ -1016,6 +1239,7 @@ def run_auto(
         "applied": applied_count,
         "verified": verified_count,
         "freed_bytes": freed_bytes,
+        "cleanup_pending": cleanup_pending_count,
         "exit_code": exit_code,
     }
 

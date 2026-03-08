@@ -106,12 +106,12 @@ rehome-30_nohl-discover-and-rank.sh
 rehome-40_nohl-build-group-plan.sh
 rehome-50_nohl-dryrun-group-batch.sh
 rehome-55_nohl-fix-target-hash.sh
-rehome-56_qb-missing-audit.sh
-rehome-57_qb-missing-remediate.sh
+qb-missing-audit.sh
+qb-missing-remediate.sh
 rehome-60_nohl-apply-group-batch.sh
 rehome-70_nohl-followup-and-reconcile.sh
 rehome-80_nohl-report-and-next-batch.sh
-rehome-99_qb-checking-watch.sh
+qb-checking-watch.sh
 rehome-stage0.sh
 rehome-05_pilot-batch_plan-and-dryrun.sh
 rehome-10_apply-batch-with-guards.sh
@@ -136,7 +136,7 @@ PYTHONPATH=src python3 -m hashall stats --hash-coverage
 make payload-sync
 
 # 3. No concurrent mutating qB workflow
-# Check ps/screen for qb-stoppeddl-apply.py, qb-repair-*, qbit-repair-batch.sh
+# Check ps/screen for qb-stoppeddl-apply.py, qb-repair-*, qb-repair-batch.sh
 
 # 4. qBittorrent accessible
 curl -s http://localhost:8080/api/v2/app/version
@@ -219,7 +219,7 @@ make rehome-followup REHOME_FOLLOWUP_CLEANUP=1
 5. **Commit:** `fix(rehome): <description>`
 6. **Re-run same phase from scratch** with fresh plan generation
 
-If a torrent is left in bad state: use qBittorrent UI or `qbit-repair-batch.sh` to restore before re-running.
+If a torrent is left in bad state: use qBittorrent UI or `qb-repair-batch.sh` to restore before re-running.
 
 ---
 

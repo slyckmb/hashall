@@ -2,7 +2,7 @@
 # Find stoppedDL torrents that have a stoppedUP 100% partner with the same root_name.
 # Outputs: good_hash broken_hash same_fs root_name
 #
-# Usage: bin/qbit-find-repair-candidates.sh [--limit N]
+# Usage: bin/qb-find-repair-candidates.sh [--limit N]
 set -euo pipefail
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null

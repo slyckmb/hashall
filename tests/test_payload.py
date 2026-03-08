@@ -9,7 +9,8 @@ import os
 from pathlib import Path
 from hashall.payload import (
     PayloadFile, PayloadFastFile, compute_payload_hash, compute_payload_fast_signature, build_payload,
-    upsert_payload, get_torrent_siblings, Payload, upgrade_payload_missing_sha256
+    upsert_payload, upsert_torrent_instance, get_payloads_by_hash, get_torrent_siblings,
+    Payload, TorrentInstance, upgrade_payload_missing_sha256
 )
 from hashall.model import connect_db
 from hashall.scan import scan_path
@@ -244,8 +245,102 @@ def test_upsert_payload_device_scoped(test_db):
     assert id_a != id_b
 
 
+def test_upsert_payload_prefers_fs_uuid_identity(test_db):
+    test_db.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+        VALUES ('zfs-test-49', 49, 'test49', '/test', '/test')
+        """
+    )
+    test_db.commit()
+
+    payload_a = Payload(
+        payload_id=None,
+        payload_hash="hash_uuid",
+        device_id=49,
+        root_path="/test/uuid-same",
+        file_count=1,
+        total_bytes=100,
+        status='complete',
+        last_built_at=1234567890.0,
+        fs_uuid="zfs-test-49",
+    )
+    first_id = upsert_payload(test_db, payload_a)
+
+    # Deliberately stale/incorrect device_id with matching fs_uuid should update
+    # existing row instead of inserting a duplicate.
+    payload_b = Payload(
+        payload_id=None,
+        payload_hash="hash_uuid_updated",
+        device_id=999,
+        root_path="/test/uuid-same",
+        file_count=1,
+        total_bytes=100,
+        status='complete',
+        last_built_at=1234567999.0,
+        fs_uuid="zfs-test-49",
+    )
+    second_id = upsert_payload(test_db, payload_b)
+
+    assert first_id == second_id
+    count = test_db.execute(
+        "SELECT COUNT(*) FROM payloads WHERE root_path = ?",
+        ("/test/uuid-same",),
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_get_payloads_by_hash_filters_by_fs_uuid(test_db):
+    test_db.execute(
+        """
+        INSERT INTO payloads (payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status, last_built_at)
+        VALUES
+          ('shared_hash', 49, 'zfs-a', '/test/a', 1, 10, 'complete', 1.0),
+          ('shared_hash', 50, 'zfs-b', '/test/b', 1, 10, 'complete', 1.0)
+        """
+    )
+    test_db.commit()
+
+    rows_a = get_payloads_by_hash(test_db, "shared_hash", fs_uuid="zfs-a", status="complete")
+    rows_b = get_payloads_by_hash(test_db, "shared_hash", fs_uuid="zfs-b", status="complete")
+
+    assert len(rows_a) == 1
+    assert len(rows_b) == 1
+    assert rows_a[0].root_path == "/test/a"
+    assert rows_b[0].root_path == "/test/b"
+
+
+def test_upsert_torrent_instance_writes_fs_uuid(test_db):
+    test_db.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status, last_built_at)
+        VALUES (101, 'thash', 49, 'zfs-49', '/test/payload', 1, 100, 'complete', 1.0)
+        """
+    )
+    test_db.commit()
+
+    t = TorrentInstance(
+        torrent_hash="abc123torrent",
+        payload_id=101,
+        device_id=49,
+        fs_uuid="zfs-49",
+        save_path="/test",
+        root_name="payload",
+        category="cat",
+        tags="tag",
+        last_seen_at=123.0,
+    )
+    upsert_torrent_instance(test_db, t)
+
+    row = test_db.execute(
+        "SELECT fs_uuid FROM torrent_instances WHERE torrent_hash = ?",
+        ("abc123torrent",),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "zfs-49"
+
+
 def test_upsert_torrent_instance_commit_false_defers_commit(test_db):
-    from hashall.payload import upsert_torrent_instance, TorrentInstance
     import time
 
     payload = Payload(

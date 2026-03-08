@@ -252,7 +252,7 @@ fi
 if [[ "$REFRESH_AUDIT" == "1" ]]; then
   refresh_prefix="${OUTPUT_PREFIX}-hardcase"
   audit_cmd=(
-    bin/rehome-56_qb-missing-audit.sh
+    bin/qb-missing-audit.sh
     --output-prefix "$refresh_prefix"
   )
   if [[ "$FAST_MODE" == "1" ]]; then
@@ -326,7 +326,7 @@ if [[ "$action_total" == "0" ]]; then
 fi
 
 remediate_cmd=(
-  bin/rehome-57_qb-missing-remediate.sh
+  bin/qb-missing-remediate.sh
   --plan "$filtered_plan_json"
   --mode "$MODE"
   --limit 0

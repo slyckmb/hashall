@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SEMVER="0.1.5"
+SEMVER="0.1.6"
 SCRIPT_NAME="$(basename "$0")"
 
 usage() {
@@ -43,7 +43,10 @@ Options:
   --apply-poll N              Apply poll interval (default: 5)
   --apply-timeout N           Apply per-hash timeout (default: 2400)
   --completion-file PATH      Apply completion marker path (default: <bucket>/reports/apply-last-completion.json)
-  --wait-recheck              Pass --wait-recheck to apply (default: no-wait)
+  --wait-recheck              Pass --wait-recheck to apply (default: enabled)
+  --no-wait-recheck           Pass --no-wait-recheck to apply
+  --lock-file PATH            Shared mutate lock path (default: <bucket>/MUTATE.lock)
+  --lock-wait N               Seconds to wait for lock (0 = no wait, default: 0)
   -h, --help                  Show help
 USAGE
 }
@@ -74,9 +77,11 @@ SHOW_VERIFY_PROGRESS="false"
 
 APPLY_POLL="${APPLY_POLL:-5}"
 APPLY_TIMEOUT="${APPLY_TIMEOUT:-2400}"
-WAIT_RECHECK="false"
+WAIT_RECHECK="true"
 COMPLETION_FILE=""
 CLEAR_STOP_FILE="true"
+LOCK_FILE=""
+LOCK_WAIT="${LOCK_WAIT:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -105,6 +110,9 @@ while [[ $# -gt 0 ]]; do
     --apply-timeout) APPLY_TIMEOUT="${2:-}"; shift 2 ;;
     --completion-file) COMPLETION_FILE="${2:-}"; shift 2 ;;
     --wait-recheck) WAIT_RECHECK="true"; shift ;;
+    --no-wait-recheck) WAIT_RECHECK="false"; shift ;;
+    --lock-file) LOCK_FILE="${2:-}"; shift 2 ;;
+    --lock-wait) LOCK_WAIT="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown arg: $1" >&2
@@ -118,7 +126,7 @@ for n in \
   "$MAX_ROUNDS" "$MAX_NO_PROGRESS" "$ROUND_SLEEP" \
   "$CHECKING_POLL" "$CHECKING_TIMEOUT" \
   "$DRAIN_LIMIT" "$MAX_CANDIDATES" "$VERIFY_TIMEOUT" "$VERIFY_POLL" \
-  "$APPLY_POLL" "$APPLY_TIMEOUT"; do
+  "$APPLY_POLL" "$APPLY_TIMEOUT" "$LOCK_WAIT"; do
   if ! [[ "$n" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     echo "Numeric option required; got: $n" >&2
     exit 2
@@ -138,11 +146,45 @@ REPORTS_DIR="${BUCKET_DIR}/reports"
 ACTIVE_HASHES_FILE="${BUCKET_DIR}/active-hashes.txt"
 STOP_FILE="${STOP_FILE:-${BUCKET_DIR}/STOP_ROUNDLOOP}"
 COMPLETION_FILE="${COMPLETION_FILE:-${REPORTS_DIR}/apply-last-completion.json}"
+LOCK_FILE="${LOCK_FILE:-${BUCKET_DIR}/MUTATE.lock}"
 mkdir -p "$REPORTS_DIR"
 
 if [[ "$CLEAR_STOP_FILE" == "true" && -e "$STOP_FILE" ]]; then
   rm -f "$STOP_FILE"
   echo "status ts=$(ts) action=startup_clear_stop_file stop_file=${STOP_FILE}"
+fi
+
+acquire_mutate_lock() {
+  if [[ "$APPLY_MODE" != "apply" ]]; then
+    echo "status ts=$(ts) action=lock_skip reason=dry_run lock_file=${LOCK_FILE}"
+    return 0
+  fi
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "ERROR: flock not found; cannot enforce mutate lock" >&2
+    return 2
+  fi
+  exec 200>"$LOCK_FILE"
+  if [[ "$LOCK_WAIT" == "0" ]]; then
+    if ! flock -n 200; then
+      echo "status ts=$(ts) action=stop reason=lock_busy lock_file=${LOCK_FILE}"
+      return 1
+    fi
+  else
+    if ! flock -w "$LOCK_WAIT" 200; then
+      echo "status ts=$(ts) action=stop reason=lock_timeout lock_file=${LOCK_FILE} wait=${LOCK_WAIT}s"
+      return 1
+    fi
+  fi
+  echo "status ts=$(ts) action=lock_acquired lock_file=${LOCK_FILE}"
+  return 0
+}
+
+if ! acquire_mutate_lock; then
+  rc=$?
+  if [[ "$rc" -eq 1 ]]; then
+    exit 0
+  fi
+  exit "$rc"
 fi
 
 get_bucket_count() {
@@ -320,6 +362,8 @@ run_apply_once() {
   fi
   if [[ "$WAIT_RECHECK" == "true" ]]; then
     cmd+=(--wait-recheck)
+  else
+    cmd+=(--no-wait-recheck)
   fi
   if [[ "$APPLY_MODE" == "apply" ]]; then
     cmd+=(--apply)
@@ -342,6 +386,7 @@ echo "start ts=$(ts) script=${SCRIPT_NAME} semver=${SEMVER} bucket_dir=${BUCKET_
 echo "config max_rounds=${MAX_ROUNDS} max_no_progress=${MAX_NO_PROGRESS} round_sleep=${ROUND_SLEEP}s checking_poll=${CHECKING_POLL}s checking_timeout=${CHECKING_TIMEOUT}s"
 echo "config drain_limit=${DRAIN_LIMIT} max_candidates=${MAX_CANDIDATES} verify_timeout=${VERIFY_TIMEOUT}s verify_poll=${VERIFY_POLL}s show_verify_progress=${SHOW_VERIFY_PROGRESS}"
 echo "config apply_mode=${APPLY_MODE} allow_class=${ALLOW_CLASS} min_ratio=${MIN_RATIO} ops_mode=${OPS_MODE} apply_poll=${APPLY_POLL}s apply_timeout=${APPLY_TIMEOUT}s wait_recheck=${WAIT_RECHECK}"
+echo "config lock_file=${LOCK_FILE} lock_wait=${LOCK_WAIT}s"
 echo "config ignore_hashes=${IGNORE_HASHES:-<none>} ignore_hashes_file=${IGNORE_HASHES_FILE:-<default_if_present>}"
 echo "paths reports_dir=${REPORTS_DIR} active_hashes=${ACTIVE_HASHES_FILE} completion_file=${COMPLETION_FILE} stop_file=${STOP_FILE} clear_stop_file=${CLEAR_STOP_FILE}"
 
