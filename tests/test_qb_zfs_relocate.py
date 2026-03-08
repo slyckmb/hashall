@@ -114,6 +114,65 @@ class FakeVerifier:
         return payload
 
 
+class FailingVerifier(FakeVerifier):
+    def verify(
+        self,
+        torrent_path,
+        candidate_path,
+        report_path,
+        *,
+        timeout_seconds,
+        quick_only,
+        show_progress,
+    ):
+        self.calls.append(
+            {
+                "torrent_path": str(torrent_path),
+                "candidate_path": str(candidate_path),
+                "report_path": str(report_path),
+                "timeout_seconds": float(timeout_seconds),
+                "quick_only": bool(quick_only),
+                "show_progress": bool(show_progress),
+            }
+        )
+        payload = {
+            "summary": {
+                "verified": 0,
+                "best_path": str(candidate_path),
+                "best_classification": "partial_match",
+            }
+        }
+        write_json(report_path, payload)
+        return payload
+
+
+class RecheckingFakeClient(FakeClient):
+    def __init__(self, torrents_by_hash):
+        super().__init__(torrents_by_hash)
+        self._recheck_polls = {}
+
+    def recheck_torrent(self, torrent_hash):
+        if super().recheck_torrent(torrent_hash):
+            info = self.torrents_by_hash[torrent_hash]
+            info.state = "checkingUP"
+            self._recheck_polls[torrent_hash] = 2
+            return True
+        return False
+
+    def get_torrent_info(self, torrent_hash):
+        info = self.torrents_by_hash.get(torrent_hash)
+        if info is None:
+            return None
+        if self._recheck_polls.get(torrent_hash, 0) > 0:
+            self._recheck_polls[torrent_hash] -= 1
+            if self._recheck_polls[torrent_hash] <= 0:
+                info.state = "missingFiles"
+                info.progress = 0.0
+            else:
+                info.state = "checkingUP"
+        return info
+
+
 def _torrent_info(torrent_hash, name, save_path, content_path, state="pausedUP", progress=1.0):
     return SimpleNamespace(
         hash=torrent_hash,
@@ -917,6 +976,51 @@ def test_verify_emits_progress_events_and_requests_show_progress(tmp_path, capsy
     assert "event=item_end phase=verify" in output
 
 
+def test_verify_failure_can_recheck_source_and_record_qb_result(tmp_path):
+    torrent_hash = "verifyrecheck"
+    row = _manifest_row(tmp_path, torrent_hash)
+    manifest_path = tmp_path / "verify-recheck.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = RecheckingFakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["old_save_path"],
+                row["content_path"],
+                state="stoppedUP",
+                progress=1.0,
+            )
+        }
+    )
+    tool = QBZFSRelocationTool(
+        qb_client=client,
+        runner=FakeRunner(),
+        verifier=FailingVerifier(),
+    )
+
+    rc = tool.verify(
+        manifest_path=manifest_path,
+        timeout_seconds=30.0,
+        quick_only=False,
+        recheck_source_on_fail=True,
+        recheck_timeout_seconds=30.0,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    assert rc == 1
+    assert client.recheck_calls == [torrent_hash]
+    assert row["verify_status"] == "verify_failed"
+    assert row["source_recheck_status"] == "completed"
+    assert row["source_recheck_before_state"] == "stoppedUP"
+    assert row["source_recheck_after_state"] == "missingFiles"
+    assert row["source_recheck_after_progress"] == 0.0
+
+
 def test_patch_and_rollback_round_trip_fastresume(tmp_path):
     torrent_hash = "patchhash"
     row = _manifest_row(tmp_path, torrent_hash)
@@ -1487,3 +1591,5 @@ def test_migrate_wrapper_passes_batch_size_and_migrate_phase(tmp_path):
     assert "--batch-size 3" in result.stdout
     assert "--resume-remaining" in result.stdout
     assert "--auto-stop-qb" in result.stdout
+    assert "--recheck-source-on-verify-fail" in result.stdout
+    assert "--recheck-timeout 1800" in result.stdout

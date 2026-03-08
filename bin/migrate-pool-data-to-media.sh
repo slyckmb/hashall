@@ -28,6 +28,9 @@ fi
 if [[ "${ALLOW_PARTIALS:-0}" == "1" ]]; then
   EXTRA_ARGS+=(--allow-partials)
 fi
+if [[ "${RECHECK_SOURCE_ON_VERIFY_FAIL:-1}" == "1" ]]; then
+  EXTRA_ARGS+=(--recheck-source-on-verify-fail --recheck-timeout "$RECHECK_TIMEOUT")
+fi
 
 exec "$PYTHON_BIN" "$TOOL" migrate \
   --manifest "$MANIFEST" \

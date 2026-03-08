@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.5"
+SCRIPT_VERSION = "0.1.6"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -688,6 +688,12 @@ class QBZFSRelocationTool:
         manifest.setdefault("global_issues", [])
         for row in manifest.get("rows", []):
             row.setdefault("verify_classification", "")
+            row.setdefault("source_recheck_status", "pending")
+            row.setdefault("source_recheck_before_state", "")
+            row.setdefault("source_recheck_before_progress", 0.0)
+            row.setdefault("source_recheck_after_state", "")
+            row.setdefault("source_recheck_after_progress", 0.0)
+            row.setdefault("source_recheck_elapsed_seconds", 0.0)
             row.setdefault("cleanup_status", "pending")
             row.setdefault("cleanup_ready", False)
             row.setdefault("cleanup_issues", [])
@@ -800,6 +806,90 @@ class QBZFSRelocationTool:
         if best_path != str(row.get("dest_content_path") or ""):
             return False, summary, "cleanup_verify_report_path_mismatch"
         return True, summary, ""
+
+    def _recheck_source_after_verify_failure(
+        self,
+        row: Dict[str, Any],
+        *,
+        timeout_seconds: float,
+    ) -> Dict[str, Any]:
+        info = self.qb_client.get_torrent_info(str(row.get("hash") or ""))
+        before_state = str(getattr(info, "state", "") or "")
+        before_progress = float(getattr(info, "progress", 0.0) or 0.0)
+        snapshot: Dict[str, Any] = {
+            "requested": False,
+            "completed": False,
+            "timed_out": False,
+            "before_state": before_state,
+            "before_progress": before_progress,
+            "after_state": before_state,
+            "after_progress": before_progress,
+            "elapsed_seconds": 0.0,
+        }
+        if info is None:
+            snapshot["status"] = "torrent_missing"
+            return snapshot
+        emit_log(
+            "source_recheck_start",
+            phase="verify",
+            hash=row["hash"],
+            state=before_state,
+            progress=before_progress,
+        )
+        if not self.qb_client.recheck_torrent(row["hash"]):
+            snapshot["status"] = "request_failed"
+            return snapshot
+        snapshot["requested"] = True
+        deadline = time.time() + max(1.0, float(timeout_seconds))
+        started_at = time.monotonic()
+        last_emit_at = 0.0
+        while True:
+            info = self.qb_client.get_torrent_info(str(row.get("hash") or ""))
+            state = str(getattr(info, "state", "") or "")
+            progress = float(getattr(info, "progress", 0.0) or 0.0)
+            snapshot["after_state"] = state
+            snapshot["after_progress"] = progress
+            elapsed = max(0.0, time.monotonic() - started_at)
+            snapshot["elapsed_seconds"] = elapsed
+            if info is not None and not state.lower().startswith("checking"):
+                snapshot["completed"] = True
+                snapshot["status"] = "completed"
+                emit_log(
+                    "source_recheck_end",
+                    phase="verify",
+                    hash=row["hash"],
+                    status="completed",
+                    elapsed=format_hms(elapsed),
+                    state=state,
+                    progress=progress,
+                )
+                return snapshot
+            if time.time() >= deadline:
+                snapshot["timed_out"] = True
+                snapshot["status"] = "timeout"
+                emit_log(
+                    "source_recheck_end",
+                    phase="verify",
+                    hash=row["hash"],
+                    status="timeout",
+                    elapsed=format_hms(elapsed),
+                    state=state,
+                    progress=progress,
+                )
+                return snapshot
+            now = time.monotonic()
+            if last_emit_at <= 0.0 or now - last_emit_at >= 5.0:
+                emit_log(
+                    "source_recheck_progress",
+                    phase="verify",
+                    hash=row["hash"],
+                    elapsed=format_hms(elapsed),
+                    eta=format_hms(max(0.0, deadline - time.time())),
+                    state=state,
+                    progress=progress,
+                )
+                last_emit_at = now
+            self.sleep_fn(1.0)
 
     def _cleanup_qb_snapshot(self, row: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -1100,6 +1190,12 @@ class QBZFSRelocationTool:
                 "verify_status": "pending",
                 "verify_report_path": "",
                 "verify_classification": "",
+                "source_recheck_status": "pending",
+                "source_recheck_before_state": "",
+                "source_recheck_before_progress": 0.0,
+                "source_recheck_after_state": "",
+                "source_recheck_after_progress": 0.0,
+                "source_recheck_elapsed_seconds": 0.0,
                 "patch_status": "pending",
                 "resume_status": "pending",
                 "cleanup_status": "pending",
@@ -1153,6 +1249,8 @@ class QBZFSRelocationTool:
         apply: bool,
         timeout_seconds: float,
         quick_only: bool,
+        recheck_source_on_verify_fail: bool = False,
+        recheck_timeout_seconds: float = 1800.0,
         allow_partials: bool,
         journal_path: Path,
         auto_stop_qb: bool,
@@ -1191,6 +1289,8 @@ class QBZFSRelocationTool:
                     manifest_path=manifest_path,
                     timeout_seconds=timeout_seconds,
                     quick_only=quick_only,
+                    recheck_source_on_fail=recheck_source_on_verify_fail,
+                    recheck_timeout_seconds=recheck_timeout_seconds,
                 ),
             ),
             (
@@ -1381,6 +1481,8 @@ class QBZFSRelocationTool:
         manifest_path: Path,
         timeout_seconds: float,
         quick_only: bool,
+        recheck_source_on_fail: bool = False,
+        recheck_timeout_seconds: float = 1800.0,
     ) -> int:
         manifest = self._load_manifest(manifest_path)
         rows = row_selection(manifest["rows"])
@@ -1431,14 +1533,29 @@ class QBZFSRelocationTool:
                 row["verify_classification"] = str(summary.get("best_classification") or "")
                 if verified:
                     remove_issue(row, "offline_verify_failed")
+                    row["source_recheck_status"] = "not_needed"
                 else:
                     add_issue(row, "offline_verify_failed")
+                    if recheck_source_on_fail:
+                        snapshot = self._recheck_source_after_verify_failure(
+                            row,
+                            timeout_seconds=recheck_timeout_seconds,
+                        )
+                        row["source_recheck_status"] = str(snapshot.get("status") or "pending")
+                        row["source_recheck_before_state"] = str(snapshot.get("before_state") or "")
+                        row["source_recheck_before_progress"] = float(snapshot.get("before_progress", 0.0) or 0.0)
+                        row["source_recheck_after_state"] = str(snapshot.get("after_state") or "")
+                        row["source_recheck_after_progress"] = float(snapshot.get("after_progress", 0.0) or 0.0)
+                        row["source_recheck_elapsed_seconds"] = float(snapshot.get("elapsed_seconds", 0.0) or 0.0)
                 results.append(
                     {
                         "hash": row["hash"],
                         "status": row["verify_status"],
                         "classification": row.get("verify_classification"),
                         "report_path": str(report_path),
+                        "source_recheck_status": row.get("source_recheck_status"),
+                        "source_recheck_after_state": row.get("source_recheck_after_state"),
+                        "source_recheck_after_progress": row.get("source_recheck_after_progress"),
                     }
                 )
             elapsed_seconds = max(0.0, time.monotonic() - started_at)
@@ -2433,6 +2550,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_manifest_argument(p_verify)
     p_verify.add_argument("--timeout", type=float, default=1800.0)
     p_verify.add_argument("--quick-only", action="store_true")
+    p_verify.add_argument("--recheck-source-on-fail", action="store_true")
+    p_verify.add_argument("--recheck-timeout", type=float, default=1800.0)
 
     p_validate = subparsers.add_parser("validate", help="Run validation-only safety checks")
     add_common_manifest_argument(p_validate)
@@ -2517,6 +2636,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_migrate.add_argument("--export-torrents-dir", default="")
     p_migrate.add_argument("--timeout", type=float, default=1800.0)
     p_migrate.add_argument("--quick-only", action="store_true")
+    p_migrate.add_argument("--recheck-source-on-verify-fail", action="store_true")
+    p_migrate.add_argument("--recheck-timeout", type=float, default=1800.0)
     p_migrate.add_argument("--allow-partials", action="store_true")
     p_migrate.add_argument("--journal", default="")
     p_migrate.add_argument("--auto-stop-qb", action="store_true")
@@ -2589,6 +2710,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 manifest_path=manifest_path,
                 timeout_seconds=float(args.timeout),
                 quick_only=bool(args.quick_only),
+                recheck_source_on_fail=bool(args.recheck_source_on_fail),
+                recheck_timeout_seconds=float(args.recheck_timeout),
             )
         elif args.phase == "validate":
             journal_path = Path(args.journal).expanduser() if args.journal else None
@@ -2676,6 +2799,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 apply=resolve_apply(args),
                 timeout_seconds=float(args.timeout),
                 quick_only=bool(args.quick_only),
+                recheck_source_on_verify_fail=bool(args.recheck_source_on_verify_fail),
+                recheck_timeout_seconds=float(args.recheck_timeout),
                 allow_partials=bool(args.allow_partials),
                 journal_path=journal_path,
                 auto_stop_qb=bool(args.auto_stop_qb),
