@@ -50,6 +50,7 @@ If context is compacted, recover with this sequence:
    - cleanup dry-runs for both successful migrate batches returned `blocked=0`
    - live cleanup has now completed for both successful batches and removed the four migrated source payloads
    - resume observe now respects its configured soak window; the wrapper default is `60s`
+   - latest `v0.1.4` live run completed cleanly with `resume_ok=2`, `cleaned=2`, and no cleanup blocks
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

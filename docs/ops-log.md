@@ -49,12 +49,13 @@ Latest tooling note (2026-03-08):
   - `python3 -m hashall` now resolves from repo root via local bootstrap packages.
 - Latest local validation for this tooling slice:
   - `pytest tests/test_qb_zfs_relocate.py -q`
-  - result: `28 passed`
+  - result: `29 passed`
 - Live relocation status:
   - successful migrate runs observed at `12:03` and `12:30` on 2026-03-08
   - both completed with `resume_ok=2` and `exit_code=0`
   - cleanup dry-runs against both successful manifests returned `blocked=0`, `dryrun=2`, `source_missing=0`
   - live cleanup has now completed for both successful manifests; four source payloads were removed from `/pool/data/media/torrents/seeding`
+  - latest `v0.1.4` run at `14:33` completed with `resume_ok=2`, `cleaned=2`, `blocked=0`, and a full `60s` resume observe window
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`

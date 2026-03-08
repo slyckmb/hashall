@@ -10,7 +10,7 @@ Prompt-critical context (2026-03-06):
   - `src/hashall/qb_zfs_relocate.py`
   - guarded phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
   - shared parser: `src/hashall/bencode.py`
-  - validation slice now passes locally: `28` targeted relocation tests.
+  - validation slice now passes locally: `29` targeted relocation tests.
   - wrapper flows now preserve timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - cleanup is now staged-safe and available both standalone and via `migrate --auto-cleanup=safe`
 - Use worktree/branch:
@@ -43,6 +43,7 @@ Prompt-critical context (2026-03-06):
   - cleanup dry-runs against both successful migrate manifests returned `blocked=0`, `dryrun=2`.
   - live cleanup has now completed for both successful batches; the four source payloads are gone from `/pool/data/media/torrents/seeding`.
   - resume observe now honors `PILOT_OBSERVE_SECONDS`; wrapper default is `60`.
+  - latest `v0.1.4` live run completed with `resume_ok=2`, `cleaned=2`, `blocked=0`, and a real `60s` resume soak.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

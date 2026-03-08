@@ -13,11 +13,12 @@ Critical qB repair continuity (2026-03-06):
   - wrappers now preserve per-run timestamped manifests and current-manifest pointers
   - cleanup now uses staged safe automation and can be invoked standalone from a manifest or from `migrate --auto-cleanup=safe`
 - Latest local validation for the relocation tooling slice:
-  - `28` targeted tests passed in `tests/test_qb_zfs_relocate.py`
+  - `29` targeted tests passed in `tests/test_qb_zfs_relocate.py`
   - live qB migrate pilots have now executed successfully twice on 2026-03-08
   - cleanup dry-runs for both successful migrate manifests returned `blocked=0`
   - live cleanup has now completed for both successful batches and removed the four source payloads
   - resume observe now honors the configured soak window; the pool-data wrapper default is `60s`
+  - latest `v0.1.4` live run completed with `resume_ok=2`, `cleaned=2`, and `blocked=0`
 - Drain empty-bucket blocker is fixed:
   - commit `657eccc`
   - `bin/qb-stoppeddl-drain.py` semver `0.1.23`

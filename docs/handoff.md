@@ -16,12 +16,13 @@
   - wrapper default pilot resume observe window is now `60s`
 - Guarded relocation coverage is in place:
   - targeted regression set now includes `tests/test_qb_zfs_relocate.py`
-  - last local verification for the relocation/tooling slice: `28 passed` in `tests/test_qb_zfs_relocate.py`
+  - last local verification for the relocation/tooling slice: `29 passed` in `tests/test_qb_zfs_relocate.py`
 - Live qB relocation has now succeeded for the `pool-data -> pool-media` workflow:
   - successful migrate runs are logged at `~/.logs/qb-zfs-relocate/20260308-120340-migrate-pid1497678.*` and `~/.logs/qb-zfs-relocate/20260308-123054-migrate-pid1658492.*`
   - both completed with `resume_ok=2` and `exit_code=0`
   - cleanup dry-runs against both successful batches returned `blocked=0`, `dryrun=2`, `source_missing=0`
   - live cleanup has now completed for both successful 2-item batches; the four source payloads were removed and manifests now record `cleanup_status=cleaned`
+  - latest `v0.1.4` live run `~/.logs/qb-zfs-relocate/20260308-143317-migrate-pid2363824.*` completed with a real `60s` resume soak, `resume_ok=2`, `cleaned=2`, and `exit_code=0`
 - Operate through `hashall` (script-level commands) rather than the removed `rehome` entrypoint.
 - Pool migration now relies on a shared donor-acquisition + offline fastresume attach constructor for both `REUSE` and `MOVE`.
 - `REUSE` applies already succeed via offline fastresume with no `MV`/`moving`, while cleanup notices still need refinement.
