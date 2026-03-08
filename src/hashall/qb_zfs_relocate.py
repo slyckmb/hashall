@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.4"
+SCRIPT_VERSION = "0.1.5"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -955,6 +955,7 @@ class QBZFSRelocationTool:
             torrent_hash
             for torrent_hash, info in info_by_hash.items()
             if self._torrent_matches_source_root(info, source_root)
+            and Path(str(getattr(info, "content_path", "") or "").strip()).exists()
         )
         selected_hashes = (
             all_hashes[:requested_batch_size]

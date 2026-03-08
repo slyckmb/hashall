@@ -266,6 +266,7 @@ def test_plan_auto_selects_torrents_under_source_root(tmp_path):
     bt_backup.mkdir()
     _write_fastresume(bt_backup / f"{torrent_hash}.fastresume", str(tmp_path / "old_ds" / "music"))
     _write_multi_file_torrent(bt_backup / f"{torrent_hash}.torrent", "Auto Set")
+    (tmp_path / "old_ds" / "music" / "Auto Set").mkdir(parents=True, exist_ok=True)
     matching = _torrent_info(
         torrent_hash,
         "Auto Set",
@@ -297,6 +298,39 @@ def test_plan_auto_selects_torrents_under_source_root(tmp_path):
     assert manifest["selection"]["mode"] == "auto_source_root"
     assert manifest["selection"]["hashes"] == [torrent_hash]
     assert [row["hash"] for row in manifest["rows"]] == [torrent_hash]
+
+
+def test_plan_auto_selection_skips_missing_source_content(tmp_path):
+    torrent_hash = "missingcontenthash"
+    bt_backup = tmp_path / "BT_backup"
+    bt_backup.mkdir()
+    _write_fastresume(bt_backup / f"{torrent_hash}.fastresume", str(tmp_path / "old_ds" / "music"))
+    _write_multi_file_torrent(bt_backup / f"{torrent_hash}.torrent", "Ghost Set")
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                "Ghost Set",
+                str(tmp_path / "old_ds" / "music"),
+                str(tmp_path / "old_ds" / "music" / "Ghost Set"),
+                state="missingFiles",
+                progress=0.0,
+            )
+        }
+    )
+    tool = QBZFSRelocationTool(qb_client=client, runner=FakeRunner(), verifier=FakeVerifier())
+    manifest_path = tmp_path / "relocation-missing-content.json"
+
+    with pytest.raises(RuntimeError):
+        tool.plan(
+            manifest_path=manifest_path,
+            hashes=[],
+            source_root=str(tmp_path / "old_ds"),
+            dest_root=str(tmp_path / "new_ds"),
+            fastresume_dir=bt_backup,
+            torrent_dir=bt_backup,
+            export_torrents_dir=None,
+        )
 
 
 def test_load_hashes_file_ignores_blank_and_comment_lines(tmp_path):
