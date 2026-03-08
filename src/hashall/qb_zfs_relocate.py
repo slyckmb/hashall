@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.1"
+SCRIPT_VERSION = "0.1.2"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -29,6 +29,10 @@ DEFAULT_FASTRESUME_DIR = Path(
 DEFAULT_VERIFIER = REPO_ROOT / "bin" / "qb-libtorrent-verify.py"
 DEFAULT_LOG_DIR = Path.home() / ".logs" / SCRIPT_NAME
 DEFAULT_PILOT_SIZE = 5
+DEFAULT_CLEANUP_PILOT_SIZE = 1
+DEFAULT_CLEANUP_OBSERVE_SECONDS = 60.0
+DEFAULT_CLEANUP_STAGE_DIRNAME = ".qb-zfs-relocate-staging"
+DEFAULT_AUTO_CLEANUP_MODE = "off"
 PAUSED_STATES = {
     "pausedup",
     "pauseddl",
@@ -58,6 +62,7 @@ GOOD_RESUME_STATES = {
     "queuedup",
     "stoppedup",
 }
+FINAL_CLEANUP_STATES = {"cleaned", "source_missing"}
 _RUN_TEXT_LOG_PATH: Optional[Path] = None
 _RUN_JSONL_LOG_PATH: Optional[Path] = None
 _RUN_TEXT_LOG_HANDLE: Any = None
@@ -126,6 +131,15 @@ def normalize_batch_size(value: int) -> int:
     return size
 
 
+def normalize_cleanup_mode(value: str) -> str:
+    mode = str(value or DEFAULT_AUTO_CLEANUP_MODE).strip().lower()
+    if mode in {"", "0", "false", "no", "off"}:
+        return "off"
+    if mode == "safe":
+        return mode
+    raise RelocationError(f"unsupported_auto_cleanup_mode mode={value}")
+
+
 def replace_root(path: str, source_root: str, dest_root: str) -> str:
     normalized_path = normalize_save_path(path)
     source = normalize_save_path(source_root)
@@ -159,6 +173,39 @@ def path_kind(path: Path) -> str:
     if path.is_file():
         return "file"
     return "other"
+
+
+def path_depth_under_root(path: str, root: str) -> int:
+    normalized_path = normalize_save_path(path)
+    normalized_root = normalize_save_path(root)
+    if normalized_path == normalized_root:
+        return 0
+    prefix = normalized_root + "/"
+    if not normalized_path.startswith(prefix):
+        return -1
+    rel = normalized_path[len(prefix) :]
+    return len([part for part in rel.split("/") if part])
+
+
+def paths_overlap(path_a: str, path_b: str) -> bool:
+    normalized_a = normalize_save_path(path_a)
+    normalized_b = normalize_save_path(path_b)
+    return (
+        normalized_a == normalized_b
+        or normalized_a.startswith(normalized_b + "/")
+        or normalized_b.startswith(normalized_a + "/")
+    )
+
+
+def is_cleanup_safe_state(state: str) -> bool:
+    value = str(state or "").strip().lower()
+    if not value:
+        return False
+    if value in BAD_RESUME_STATES:
+        return False
+    if value.startswith("checking") or value.startswith("downloading"):
+        return False
+    return True
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -629,12 +676,22 @@ class QBZFSRelocationTool:
         manifest["updated_at"] = ts_iso()
         write_json(manifest_path, manifest)
 
+    def _checkpoint_manifest(self, manifest_path: Path, manifest: Dict[str, Any]) -> None:
+        manifest["updated_at"] = ts_iso()
+        write_json(manifest_path, manifest)
+
     def _load_manifest(self, manifest_path: Path) -> Dict[str, Any]:
         manifest = load_json(manifest_path)
         if not isinstance(manifest, dict):
             raise RelocationError(f"invalid_manifest path={manifest_path}")
         manifest.setdefault("rows", [])
         manifest.setdefault("global_issues", [])
+        for row in manifest.get("rows", []):
+            row.setdefault("verify_classification", "")
+            row.setdefault("cleanup_status", "pending")
+            row.setdefault("cleanup_ready", False)
+            row.setdefault("cleanup_issues", [])
+            row.setdefault("cleanup_staged_path", "")
         return manifest
 
     def _selected_rows(self, manifest_path: Path) -> List[Dict[str, Any]]:
@@ -665,6 +722,20 @@ class QBZFSRelocationTool:
             raise RelocationError("qb_process_controller_required")
         return self.process_controller
 
+    def _ensure_qb_online_for_orchestration(self, *, timeout_seconds: float) -> None:
+        controller = self._ensure_controller()
+        if controller.is_stopped():
+            emit_log("qb_start", phase="plan", reason="prepare_for_orchestration")
+            controller.start()
+        if not self.qb_client.test_connection():
+            emit_log(
+                "qb_wait",
+                phase="plan",
+                reason="wait_for_qb_webui",
+                timeout_seconds=timeout_seconds,
+            )
+            self._wait_for_qb_online(timeout_seconds=timeout_seconds)
+
     def _pause_selected(self, rows: Sequence[Dict[str, Any]]) -> None:
         hashes = [row["hash"] for row in rows if row.get("selected")]
         if not hashes:
@@ -673,6 +744,162 @@ class QBZFSRelocationTool:
             raise RelocationError("pause_selected_failed")
         for torrent_hash in hashes:
             self._wait_for_stopped(torrent_hash)
+
+    def _refresh_rows_from_qb(self, rows: Sequence[Dict[str, Any]]) -> None:
+        for row in rows:
+            info = self.qb_client.get_torrent_info(str(row.get("hash") or ""))
+            if info is None:
+                continue
+            row["state"] = str(info.state or "")
+            row["progress"] = float(info.progress or 0.0)
+
+    def _cleanup_journal_path(self, manifest_path: Path, journal_path: Optional[Path]) -> Path:
+        return journal_path or manifest_report_path(manifest_path, "cleanup-journal", ".jsonl")
+
+    def _cleanup_stage_path(self, manifest_path: Path, row: Dict[str, Any]) -> Path:
+        existing = str(row.get("cleanup_staged_path") or "").strip()
+        if existing:
+            return Path(existing)
+        source_root = normalize_save_path(str(row.get("source_root") or ""))
+        source_path = Path(str(row.get("content_path") or ""))
+        stage_name = f"{row['hash']}-{source_path.name or row['hash']}"
+        return (
+            Path(source_root)
+            / DEFAULT_CLEANUP_STAGE_DIRNAME
+            / manifest_path.stem
+            / stage_name
+        )
+
+    def _load_cleanup_verify_summary(
+        self,
+        row: Dict[str, Any],
+    ) -> tuple[bool, Dict[str, Any], str]:
+        if not bool(row.get("verified")):
+            return False, {}, "cleanup_verify_not_marked_verified"
+        report_path_raw = str(row.get("verify_report_path") or "").strip()
+        if not report_path_raw:
+            return False, {}, "cleanup_verify_report_missing"
+        report_path = Path(report_path_raw)
+        if not report_path.exists():
+            return False, {}, "cleanup_verify_report_missing"
+        payload = load_json(report_path)
+        summary = dict(payload.get("summary") or {})
+        if int(summary.get("verified", 0) or 0) <= 0:
+            return False, summary, "cleanup_verify_report_not_verified"
+        best_path = str(summary.get("best_path") or "")
+        if best_path != str(row.get("dest_content_path") or ""):
+            return False, summary, "cleanup_verify_report_path_mismatch"
+        return True, summary, ""
+
+    def _cleanup_qb_snapshot(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            info = self.qb_client.get_torrent_info(str(row.get("hash") or ""))
+        except Exception as exc:
+            return {"found": False, "error": str(exc)}
+        if info is None:
+            return {"found": False}
+        return {
+            "found": True,
+            "state": str(getattr(info, "state", "") or ""),
+            "progress": float(getattr(info, "progress", 0.0) or 0.0),
+            "save_path": str(getattr(info, "save_path", "") or ""),
+        }
+
+    def _cleanup_snapshot_issues(
+        self,
+        row: Dict[str, Any],
+        snapshot: Dict[str, Any],
+    ) -> List[str]:
+        issues: List[str] = []
+        if not snapshot.get("found"):
+            issues.append(
+                "cleanup_qb_query_failed"
+                if snapshot.get("error")
+                else "cleanup_qb_torrent_missing"
+            )
+            return issues
+        save_path = str(snapshot.get("save_path") or "")
+        new_save_path = str(row.get("new_save_path") or "")
+        if not save_path or not new_save_path:
+            issues.append("cleanup_save_path_missing")
+        else:
+            if normalize_save_path(save_path) != normalize_save_path(new_save_path):
+                issues.append("cleanup_save_path_mismatch")
+        progress = float(snapshot.get("progress", 0.0) or 0.0)
+        if progress < 1.0:
+            issues.append("cleanup_torrent_not_complete")
+        state = str(snapshot.get("state") or "")
+        if not is_cleanup_safe_state(state):
+            issues.append("cleanup_state_not_safe")
+        return issues
+
+    def _append_cleanup_journal(
+        self,
+        journal_path: Path,
+        *,
+        row: Dict[str, Any],
+        action: str,
+        decision: str,
+        status: str,
+        source_path: Path,
+        staged_path: Path,
+        snapshot: Optional[Dict[str, Any]] = None,
+        details: str = "",
+    ) -> None:
+        append_jsonl(
+            journal_path,
+            {
+                "timestamp": ts_iso(),
+                "hash": row["hash"],
+                "name": row.get("name", ""),
+                "action": action,
+                "decision": decision,
+                "status": status,
+                "details": details,
+                "source_path": str(source_path),
+                "staged_path": str(staged_path),
+                "new_save_path": row.get("new_save_path", ""),
+                "verify_report_path": row.get("verify_report_path", ""),
+                "cleanup_status": row.get("cleanup_status", ""),
+                "qb_state": str((snapshot or {}).get("state") or ""),
+                "qb_progress": float((snapshot or {}).get("progress", 0.0) or 0.0),
+                "qb_save_path": str((snapshot or {}).get("save_path") or ""),
+            },
+        )
+
+    def _observe_cleanup_row(
+        self,
+        row: Dict[str, Any],
+        *,
+        observe_seconds: float,
+    ) -> Dict[str, Any]:
+        deadline = time.time() + max(0.0, float(observe_seconds))
+        first_pass = True
+        last_emit_at = 0.0
+        started_at = time.monotonic()
+        latest_snapshot: Dict[str, Any] = {}
+        while first_pass or time.time() < deadline:
+            first_pass = False
+            latest_snapshot = self._cleanup_qb_snapshot(row)
+            issues = self._cleanup_snapshot_issues(row, latest_snapshot)
+            if issues:
+                raise RelocationError(",".join(issues))
+            now = time.monotonic()
+            if observe_seconds > 0.0 and (
+                last_emit_at <= 0.0 or now - last_emit_at >= 5.0
+            ):
+                emit_log(
+                    "cleanup_observe_progress",
+                    phase="cleanup",
+                    hash=row["hash"],
+                    elapsed=format_hms(now - started_at),
+                    eta=format_hms(max(0.0, deadline - time.time())),
+                    state=str(latest_snapshot.get("state") or ""),
+                )
+                last_emit_at = now
+            if time.time() < deadline:
+                self.sleep_fn(1.0)
+        return latest_snapshot
 
     def _torrent_matches_source_root(self, info: Any, source_root: str) -> bool:
         candidates = [
@@ -861,10 +1088,13 @@ class QBZFSRelocationTool:
                 "copy_status": "pending",
                 "verify_status": "pending",
                 "verify_report_path": "",
+                "verify_classification": "",
                 "patch_status": "pending",
                 "resume_status": "pending",
                 "cleanup_status": "pending",
                 "cleanup_ready": False,
+                "cleanup_issues": [],
+                "cleanup_staged_path": "",
                 "plan_issues": sorted(dedupe_preserve(issues)),
                 "issues": sorted(dedupe_preserve(issues)),
             }
@@ -915,11 +1145,20 @@ class QBZFSRelocationTool:
         allow_partials: bool,
         journal_path: Path,
         auto_stop_qb: bool,
+        auto_cleanup_mode: str,
+        cleanup_journal_path: Optional[Path],
         pilot_size: int,
         observe_seconds: float,
         resume_remaining: bool,
         recheck_on_failure: bool,
+        cleanup_pilot_size: int,
+        cleanup_batch_size: int,
+        cleanup_observe_seconds: float,
+        cleanup_min_depth: int,
     ) -> int:
+        cleanup_mode = normalize_cleanup_mode(auto_cleanup_mode)
+        if apply and auto_stop_qb:
+            self._ensure_qb_online_for_orchestration(timeout_seconds=timeout_seconds)
         phases = [
             (
                 "plan",
@@ -1000,6 +1239,27 @@ class QBZFSRelocationTool:
                             missing=missing,
                         )
                     return 0
+        if cleanup_mode == "safe":
+            if not apply:
+                emit_log("phase_skip", phase="cleanup", reason="auto_cleanup_apply_only")
+                return 0
+            emit_log("phase_start", phase="cleanup", mode="apply")
+            code = int(
+                self.cleanup(
+                    manifest_path=manifest_path,
+                    apply=True,
+                    confirm_cleanup=True,
+                    journal_path=cleanup_journal_path,
+                    cleanup_pilot_size=cleanup_pilot_size,
+                    cleanup_batch_size=cleanup_batch_size,
+                    cleanup_observe_seconds=cleanup_observe_seconds,
+                    cleanup_min_depth=cleanup_min_depth,
+                )
+                or 0
+            )
+            emit_log("phase_end", phase="cleanup", code=code)
+            if code != 0:
+                return code
         return 0
 
     def copy(self, *, manifest_path: Path, apply: bool) -> int:
@@ -1007,6 +1267,7 @@ class QBZFSRelocationTool:
         rows = row_selection(manifest["rows"])
         if apply:
             self._pause_selected(rows)
+            self._refresh_rows_from_qb(rows)
         results: List[Dict[str, Any]] = []
         processed_seconds = 0.0
         total_rows = len(rows)
@@ -1223,6 +1484,7 @@ class QBZFSRelocationTool:
         hashes = [str(row.get("hash") or "") for row in rows]
         duplicates = len(hashes) != len(set(hashes))
         global_issues: List[str] = []
+        controller_stopped = False
         if duplicates:
             global_issues.append("duplicate_hashes_in_manifest")
         if for_patch:
@@ -1231,7 +1493,8 @@ class QBZFSRelocationTool:
                 global_issues.append("journal_parent_missing")
             if require_stopped_qb:
                 controller = self._ensure_controller()
-                if not controller.is_stopped():
+                controller_stopped = bool(controller.is_stopped())
+                if not controller_stopped:
                     global_issues.append("qbittorrent_must_be_stopped_before_patch")
         for row in rows:
             issues = list(row.get("plan_issues") or [])
@@ -1259,16 +1522,26 @@ class QBZFSRelocationTool:
                 issues.append("path_shape_mismatch")
             if not bool(row.get("verified")):
                 issues.append("offline_verify_failed")
-            info = self.qb_client.get_torrent_info(row["hash"])
-            if info is None:
-                issues.append("qb_torrent_not_found")
-            else:
+            info = None if controller_stopped else self.qb_client.get_torrent_info(row["hash"])
+            if info is not None:
                 row["state"] = str(info.state or "")
                 row["progress"] = float(info.progress or 0.0)
                 if require_torrents_stopped and not is_stopped_state(info.state):
                     issues.append("torrent_not_stopped")
                 if not allow_partials and float(info.progress or 0.0) < 1.0:
                     issues.append("torrent_not_complete")
+            elif controller_stopped:
+                cached_state = str(row.get("state") or "")
+                cached_progress = float(row.get("progress", 0.0) or 0.0)
+                if not cached_state:
+                    issues.append("qb_state_unavailable_while_stopped")
+                else:
+                    if require_torrents_stopped and not is_stopped_state(cached_state):
+                        issues.append("torrent_not_stopped")
+                    if not allow_partials and cached_progress < 1.0:
+                        issues.append("torrent_not_complete")
+            else:
+                issues.append("qb_torrent_not_found")
             set_row_issues(row, issues)
             row["actionable"] = not bool(global_issues) and not bool(row["issues"])
         manifest["global_issues"] = sorted(dedupe_preserve(global_issues))
@@ -1554,30 +1827,443 @@ class QBZFSRelocationTool:
         )
         return 0
 
-    def cleanup(self, *, manifest_path: Path, apply: bool, confirm_cleanup: bool) -> int:
+    def cleanup(
+        self,
+        *,
+        manifest_path: Path,
+        apply: bool,
+        confirm_cleanup: bool,
+        journal_path: Optional[Path] = None,
+        cleanup_pilot_size: int = DEFAULT_CLEANUP_PILOT_SIZE,
+        cleanup_batch_size: int = 0,
+        cleanup_observe_seconds: float = DEFAULT_CLEANUP_OBSERVE_SECONDS,
+        cleanup_min_depth: int = 1,
+    ) -> int:
         manifest = self._load_manifest(manifest_path)
-        rows = [row for row in row_selection(manifest["rows"]) if row.get("cleanup_ready")]
+        requested_batch_size = normalize_batch_size(cleanup_batch_size)
+        requested_pilot_size = max(1, int(cleanup_pilot_size or DEFAULT_CLEANUP_PILOT_SIZE))
+        requested_min_depth = max(1, int(cleanup_min_depth or 1))
+        rows = [
+            row
+            for row in row_selection(manifest["rows"])
+            if row.get("cleanup_ready") and row.get("cleanup_status") not in FINAL_CLEANUP_STATES
+        ]
+        if requested_batch_size:
+            rows = rows[:requested_batch_size]
+        if not rows:
+            report_path = manifest_report_path(manifest_path, "cleanup")
+            journal_target = self._cleanup_journal_path(manifest_path, journal_path)
+            write_json(
+                report_path,
+                {
+                    "phase": "cleanup",
+                    "apply": bool(apply),
+                    "journal_path": str(journal_target),
+                    "pilot": [],
+                    "remaining": [],
+                    "results": [],
+                    "generated_at": ts_iso(),
+                },
+            )
+            self._save_manifest(
+                manifest_path,
+                manifest,
+                phase="cleanup",
+                mode="apply" if apply else "dryrun",
+                report_path=report_path,
+            )
+            emit_summary(
+                {
+                    "blocked": 0,
+                    "cleaned": 0,
+                    "dryrun": 0,
+                    "pilot": 0,
+                    "remaining": 0,
+                    "restored": 0,
+                    "rows": 0,
+                    "source_missing": 0,
+                    "staged_dryrun": 0,
+                }
+            )
+            return 0
         if apply and not confirm_cleanup:
             raise RelocationError("cleanup_requires_confirm_cleanup")
-        results: List[Dict[str, Any]] = []
+        if not self.qb_client.test_connection():
+            raise RelocationError("qbittorrent_must_be_online_for_cleanup")
+        journal_target = self._cleanup_journal_path(manifest_path, journal_path)
+        prepared: List[Dict[str, Any]] = []
         for row in rows:
+            issues: List[str] = []
+            row["cleanup_issues"] = []
             source_path = Path(str(row.get("content_path") or ""))
-            if not source_path.exists():
-                row["cleanup_status"] = "source_missing"
-                results.append({"hash": row["hash"], "status": row["cleanup_status"]})
-                continue
-            if not apply:
-                row["cleanup_status"] = "dryrun"
-                results.append({"hash": row["hash"], "status": row["cleanup_status"]})
-                continue
-            if source_path.is_dir():
-                shutil.rmtree(source_path)
+            stage_path = self._cleanup_stage_path(manifest_path, row)
+            source_root = str(row.get("source_root") or "")
+            source_root_norm = ""
+            source_norm = ""
+            stage_norm = ""
+            try:
+                source_root_norm = normalize_save_path(source_root)
+            except Exception:
+                issues.append("cleanup_source_root_invalid")
+            if not source_path.is_absolute():
+                issues.append("cleanup_source_path_not_absolute")
             else:
-                source_path.unlink()
-            row["cleanup_status"] = "cleaned"
-            results.append({"hash": row["hash"], "status": row["cleanup_status"]})
+                try:
+                    source_norm = normalize_save_path(str(source_path))
+                except Exception:
+                    issues.append("cleanup_source_path_invalid")
+            try:
+                stage_norm = normalize_save_path(str(stage_path))
+            except Exception:
+                issues.append("cleanup_stage_path_invalid")
+            if source_norm and source_root_norm:
+                if not path_is_same_or_child(source_norm, source_root_norm):
+                    issues.append("cleanup_path_outside_source_root")
+                elif source_norm == source_root_norm:
+                    issues.append("cleanup_path_is_source_root")
+                elif path_depth_under_root(source_norm, source_root_norm) < requested_min_depth:
+                    issues.append("cleanup_path_depth_below_minimum")
+            if source_norm and stage_norm and paths_overlap(source_norm, stage_norm):
+                issues.append("cleanup_source_stage_overlap")
+            verified_ok, verify_summary, verify_issue = self._load_cleanup_verify_summary(row)
+            if not verified_ok:
+                issues.append(verify_issue)
+            source_exists = source_path.exists()
+            stage_exists = stage_path.exists()
+            if source_exists and stage_exists:
+                issues.append("cleanup_source_and_stage_both_exist")
+            set_row_issues(row, row.get("issues") or [])
+            row["cleanup_issues"] = sorted(dedupe_preserve(issues))
+            prepared.append(
+                {
+                    "row": row,
+                    "source_path": source_path,
+                    "stage_path": stage_path,
+                    "source_norm": source_norm,
+                    "stage_norm": stage_norm,
+                    "verify_summary": verify_summary,
+                }
+            )
+        for index, item in enumerate(prepared):
+            row = item["row"]
+            for other in prepared[index + 1 :]:
+                other_row = other["row"]
+                source_norm = str(item.get("source_norm") or "")
+                other_source_norm = str(other.get("source_norm") or "")
+                stage_norm = str(item.get("stage_norm") or "")
+                other_stage_norm = str(other.get("stage_norm") or "")
+                if source_norm and other_source_norm and paths_overlap(source_norm, other_source_norm):
+                    row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(row.get("cleanup_issues") or []) + ["cleanup_source_path_overlap"])
+                    )
+                    other_row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(other_row.get("cleanup_issues") or []) + ["cleanup_source_path_overlap"])
+                    )
+                if stage_norm and other_stage_norm and paths_overlap(stage_norm, other_stage_norm):
+                    row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(row.get("cleanup_issues") or []) + ["cleanup_stage_path_overlap"])
+                    )
+                    other_row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(other_row.get("cleanup_issues") or []) + ["cleanup_stage_path_overlap"])
+                    )
+                if source_norm and other_stage_norm and paths_overlap(source_norm, other_stage_norm):
+                    row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(row.get("cleanup_issues") or []) + ["cleanup_stage_source_overlap"])
+                    )
+                    other_row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(other_row.get("cleanup_issues") or []) + ["cleanup_stage_source_overlap"])
+                    )
+                if other_source_norm and stage_norm and paths_overlap(other_source_norm, stage_norm):
+                    row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(row.get("cleanup_issues") or []) + ["cleanup_stage_source_overlap"])
+                    )
+                    other_row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(other_row.get("cleanup_issues") or []) + ["cleanup_stage_source_overlap"])
+                    )
+        actionable = [item for item in prepared if not item["row"].get("cleanup_issues")]
+        pilot = actionable[:requested_pilot_size]
+        remaining = actionable[len(pilot) :]
+        results: List[Dict[str, Any]] = []
+        failed = False
+        processed_hashes = set()
+        total_rows = len(prepared)
+
+        def finish_item(
+            row: Dict[str, Any],
+            *,
+            index: int,
+            batch_name: str,
+            source_path: Path,
+            stage_path: Path,
+            details: str = "",
+        ) -> None:
+            processed_hashes.add(str(row.get("hash") or ""))
+            emit_log(
+                "item_end",
+                phase="cleanup",
+                batch=batch_name,
+                index=index,
+                total=total_rows,
+                hash=row["hash"],
+                status=row.get("cleanup_status", ""),
+                details=details,
+            )
+            results.append(
+                {
+                    "hash": row["hash"],
+                    "status": row.get("cleanup_status", ""),
+                    "details": details,
+                    "source_path": str(source_path),
+                    "staged_path": str(stage_path),
+                }
+            )
+
+        for batch_name, batch_items in (("pilot", pilot), ("remaining", remaining)):
+            for item in batch_items:
+                row = item["row"]
+                source_path = item["source_path"]
+                stage_path = item["stage_path"]
+                item_index = len(processed_hashes) + 1
+                emit_log(
+                    "item_start",
+                    phase="cleanup",
+                    batch=batch_name,
+                    index=item_index,
+                    total=total_rows,
+                    hash=row["hash"],
+                    name=row.get("name", ""),
+                    source=source_path,
+                    staged=stage_path,
+                    mode="apply" if apply else "dryrun",
+                )
+                source_exists = source_path.exists()
+                stage_exists = stage_path.exists()
+                if not source_exists and not stage_exists:
+                    row["cleanup_status"] = "source_missing"
+                    row["cleanup_ready"] = False
+                    finish_item(
+                        row,
+                        index=item_index,
+                        batch_name=batch_name,
+                        source_path=source_path,
+                        stage_path=stage_path,
+                    )
+                    continue
+                snapshot = self._cleanup_qb_snapshot(row)
+                live_issues = self._cleanup_snapshot_issues(row, snapshot)
+                if live_issues:
+                    row["cleanup_status"] = "blocked"
+                    row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(row.get("cleanup_issues") or []) + live_issues)
+                    )
+                    self._append_cleanup_journal(
+                        journal_target,
+                        row=row,
+                        action="validate",
+                        decision="block",
+                        status=row["cleanup_status"],
+                        source_path=source_path,
+                        staged_path=stage_path,
+                        snapshot=snapshot,
+                        details=",".join(live_issues),
+                    )
+                    failed = True
+                    finish_item(
+                        row,
+                        index=item_index,
+                        batch_name=batch_name,
+                        source_path=source_path,
+                        stage_path=stage_path,
+                        details=",".join(live_issues),
+                    )
+                    if apply:
+                        self._checkpoint_manifest(manifest_path, manifest)
+                        break
+                    continue
+                if not apply:
+                    row["cleanup_status"] = "staged_dryrun" if stage_exists and not source_exists else "dryrun"
+                    finish_item(
+                        row,
+                        index=item_index,
+                        batch_name=batch_name,
+                        source_path=source_path,
+                        stage_path=stage_path,
+                    )
+                    continue
+                if source_exists:
+                    stage_path.parent.mkdir(parents=True, exist_ok=True)
+                    if stage_path.exists():
+                        row["cleanup_status"] = "blocked"
+                        row["cleanup_issues"] = sorted(
+                            dedupe_preserve(list(row.get("cleanup_issues") or []) + ["cleanup_stage_path_exists"])
+                        )
+                        self._append_cleanup_journal(
+                            journal_target,
+                            row=row,
+                            action="stage",
+                            decision="block",
+                            status=row["cleanup_status"],
+                            source_path=source_path,
+                            staged_path=stage_path,
+                            snapshot=snapshot,
+                            details="cleanup_stage_path_exists",
+                        )
+                        failed = True
+                        finish_item(
+                            row,
+                            index=item_index,
+                            batch_name=batch_name,
+                            source_path=source_path,
+                            stage_path=stage_path,
+                            details="cleanup_stage_path_exists",
+                        )
+                        self._checkpoint_manifest(manifest_path, manifest)
+                        break
+                    emit_log(
+                        "cleanup_stage",
+                        phase="cleanup",
+                        hash=row["hash"],
+                        source=source_path,
+                        staged=stage_path,
+                    )
+                    source_path.rename(stage_path)
+                    row["cleanup_status"] = "staged"
+                    row["cleanup_staged_path"] = str(stage_path)
+                    self._append_cleanup_journal(
+                        journal_target,
+                        row=row,
+                        action="stage",
+                        decision="rename",
+                        status=row["cleanup_status"],
+                        source_path=source_path,
+                        staged_path=stage_path,
+                        snapshot=snapshot,
+                    )
+                    self._checkpoint_manifest(manifest_path, manifest)
+                try:
+                    observed_snapshot = self._observe_cleanup_row(
+                        row,
+                        observe_seconds=cleanup_observe_seconds,
+                    )
+                    emit_log(
+                        "cleanup_observe_end",
+                        phase="cleanup",
+                        hash=row["hash"],
+                        elapsed=format_hms(float(cleanup_observe_seconds)),
+                        status="ok",
+                    )
+                    self._append_cleanup_journal(
+                        journal_target,
+                        row=row,
+                        action="observe",
+                        decision="keep_staged",
+                        status="ok",
+                        source_path=source_path,
+                        staged_path=stage_path,
+                        snapshot=observed_snapshot,
+                    )
+                except RelocationError as exc:
+                    details = str(exc)
+                    restore_status = "restore_skipped"
+                    if stage_path.exists() and not source_path.exists():
+                        stage_path.rename(source_path)
+                        row["cleanup_staged_path"] = ""
+                        row["cleanup_status"] = "restored"
+                        restore_status = "restored"
+                    else:
+                        row["cleanup_status"] = "observe_failed"
+                    row["cleanup_issues"] = sorted(
+                        dedupe_preserve(list(row.get("cleanup_issues") or []) + [details])
+                    )
+                    self._append_cleanup_journal(
+                        journal_target,
+                        row=row,
+                        action="observe",
+                        decision="restore",
+                        status=row["cleanup_status"],
+                        source_path=source_path,
+                        staged_path=stage_path,
+                        snapshot=self._cleanup_qb_snapshot(row),
+                        details=details,
+                    )
+                    if restore_status == "restored":
+                        self._append_cleanup_journal(
+                            journal_target,
+                            row=row,
+                            action="restore",
+                            decision="rename_back",
+                            status=restore_status,
+                            source_path=source_path,
+                            staged_path=stage_path,
+                            snapshot=self._cleanup_qb_snapshot(row),
+                        )
+                    failed = True
+                    self._checkpoint_manifest(manifest_path, manifest)
+                    finish_item(
+                        row,
+                        index=item_index,
+                        batch_name=batch_name,
+                        source_path=source_path,
+                        stage_path=stage_path,
+                        details=details,
+                    )
+                    break
+                if stage_path.is_dir():
+                    shutil.rmtree(stage_path)
+                else:
+                    stage_path.unlink()
+                row["cleanup_status"] = "cleaned"
+                row["cleanup_ready"] = False
+                row["cleanup_staged_path"] = ""
+                self._append_cleanup_journal(
+                    journal_target,
+                    row=row,
+                    action="delete",
+                    decision="delete_staged",
+                    status=row["cleanup_status"],
+                    source_path=source_path,
+                    staged_path=stage_path,
+                    snapshot=self._cleanup_qb_snapshot(row),
+                )
+                self._checkpoint_manifest(manifest_path, manifest)
+                finish_item(
+                    row,
+                    index=item_index,
+                    batch_name=batch_name,
+                    source_path=source_path,
+                    stage_path=stage_path,
+                )
+            if failed:
+                break
+        for item in prepared:
+            row = item["row"]
+            if str(row.get("hash") or "") in processed_hashes:
+                continue
+            if row.get("cleanup_issues"):
+                row["cleanup_status"] = "blocked"
+                failed = True
+                results.append(
+                    {
+                        "hash": row["hash"],
+                        "status": row["cleanup_status"],
+                        "details": ",".join(row.get("cleanup_issues") or []),
+                        "source_path": str(item["source_path"]),
+                        "staged_path": str(item["stage_path"]),
+                    }
+                )
         report_path = manifest_report_path(manifest_path, "cleanup")
-        write_json(report_path, {"phase": "cleanup", "apply": bool(apply), "results": results, "generated_at": ts_iso()})
+        write_json(
+            report_path,
+            {
+                "phase": "cleanup",
+                "apply": bool(apply),
+                "journal_path": str(journal_target),
+                "pilot": [item["row"]["hash"] for item in pilot],
+                "remaining": [item["row"]["hash"] for item in remaining],
+                "results": results,
+                "generated_at": ts_iso(),
+            },
+        )
         self._save_manifest(
             manifest_path,
             manifest,
@@ -1589,10 +2275,16 @@ class QBZFSRelocationTool:
             {
                 "cleaned": sum(1 for row in rows if row.get("cleanup_status") == "cleaned"),
                 "dryrun": sum(1 for row in rows if row.get("cleanup_status") == "dryrun"),
+                "staged_dryrun": sum(1 for row in rows if row.get("cleanup_status") == "staged_dryrun"),
+                "blocked": sum(1 for row in rows if row.get("cleanup_status") == "blocked"),
+                "restored": sum(1 for row in rows if row.get("cleanup_status") == "restored"),
+                "source_missing": sum(1 for row in rows if row.get("cleanup_status") == "source_missing"),
+                "pilot": len(pilot),
+                "remaining": len(remaining),
                 "rows": len(rows),
             }
         )
-        return 0
+        return 0 if not failed and all(row.get("cleanup_status") != "blocked" for row in rows) else 1
 
     def rollback(
         self,
@@ -1749,10 +2441,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_resume.add_argument("--qb-stop-cmd", default="")
     p_resume.add_argument("--qb-start-cmd", default="")
 
-    p_cleanup = subparsers.add_parser("cleanup", help="Remove old source payloads after successful resume")
+    p_cleanup = subparsers.add_parser("cleanup", help="Safely stage, observe, and remove old source payloads after successful resume")
     add_common_manifest_argument(p_cleanup)
     add_mutation_flags(p_cleanup)
     p_cleanup.add_argument("-y", "--confirm-cleanup", action="store_true")
+    p_cleanup.add_argument("--cleanup-journal", default="")
+    p_cleanup.add_argument("--cleanup-pilot-size", type=int, default=DEFAULT_CLEANUP_PILOT_SIZE)
+    p_cleanup.add_argument("--cleanup-batch-size", type=int, default=0)
+    p_cleanup.add_argument("--cleanup-observe-seconds", type=float, default=DEFAULT_CLEANUP_OBSERVE_SECONDS)
+    p_cleanup.add_argument("--cleanup-min-depth", type=int, default=1)
 
     p_rollback = subparsers.add_parser("rollback", help="Restore fastresume backups from the patch journal")
     add_common_manifest_argument(p_rollback)
@@ -1766,7 +2463,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_migrate = subparsers.add_parser(
         "migrate",
-        help="Run plan, copy, verify, validate, patch, and resume as one guarded batch",
+        help="Run plan, copy, verify, validate, patch, resume, and optional safe cleanup as one guarded batch",
     )
     add_common_manifest_argument(p_migrate)
     add_mutation_flags(p_migrate)
@@ -1798,6 +2495,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_migrate.add_argument("--allow-partials", action="store_true")
     p_migrate.add_argument("--journal", default="")
     p_migrate.add_argument("--auto-stop-qb", action="store_true")
+    p_migrate.add_argument("--auto-cleanup", default=DEFAULT_AUTO_CLEANUP_MODE, choices=["off", "safe"])
+    p_migrate.add_argument("--cleanup-journal", default="")
+    p_migrate.add_argument("--cleanup-pilot-size", type=int, default=DEFAULT_CLEANUP_PILOT_SIZE)
+    p_migrate.add_argument("--cleanup-batch-size", type=int, default=0)
+    p_migrate.add_argument("--cleanup-observe-seconds", type=float, default=DEFAULT_CLEANUP_OBSERVE_SECONDS)
+    p_migrate.add_argument("--cleanup-min-depth", type=int, default=1)
     p_migrate.add_argument("--pilot-size", type=int, default=DEFAULT_PILOT_SIZE)
     p_migrate.add_argument("--pilot-observe-seconds", type=float, default=15.0)
     p_migrate.add_argument("--resume-remaining", action="store_true")
@@ -1892,10 +2595,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 recheck_on_failure=bool(args.recheck_on_failure),
             )
         elif args.phase == "cleanup":
+            cleanup_journal_path = (
+                Path(args.cleanup_journal).expanduser()
+                if args.cleanup_journal
+                else None
+            )
             code = tool.cleanup(
                 manifest_path=manifest_path,
                 apply=resolve_apply(args),
                 confirm_cleanup=bool(args.confirm_cleanup),
+                journal_path=cleanup_journal_path,
+                cleanup_pilot_size=int(args.cleanup_pilot_size),
+                cleanup_batch_size=int(args.cleanup_batch_size),
+                cleanup_observe_seconds=float(args.cleanup_observe_seconds),
+                cleanup_min_depth=int(args.cleanup_min_depth),
             )
         elif args.phase == "rollback":
             journal_path = (
@@ -1921,6 +2634,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if args.journal
                 else manifest_report_path(manifest_path, "patch-journal", ".jsonl")
             )
+            cleanup_journal_path = (
+                Path(args.cleanup_journal).expanduser()
+                if args.cleanup_journal
+                else None
+            )
             code = tool.migrate(
                 manifest_path=manifest_path,
                 hashes=hashes,
@@ -1936,10 +2654,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 allow_partials=bool(args.allow_partials),
                 journal_path=journal_path,
                 auto_stop_qb=bool(args.auto_stop_qb),
+                auto_cleanup_mode=str(args.auto_cleanup or DEFAULT_AUTO_CLEANUP_MODE),
+                cleanup_journal_path=cleanup_journal_path,
                 pilot_size=int(args.pilot_size),
                 observe_seconds=float(args.pilot_observe_seconds),
                 resume_remaining=bool(args.resume_remaining),
                 recheck_on_failure=bool(args.recheck_on_failure),
+                cleanup_pilot_size=int(args.cleanup_pilot_size),
+                cleanup_batch_size=int(args.cleanup_batch_size),
+                cleanup_observe_seconds=float(args.cleanup_observe_seconds),
+                cleanup_min_depth=int(args.cleanup_min_depth),
             )
         else:
             raise RelocationError(f"unsupported_phase {args.phase}")

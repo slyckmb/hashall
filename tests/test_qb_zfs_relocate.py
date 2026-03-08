@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -159,6 +160,19 @@ def _write_multi_file_torrent(path: Path, root_name: str) -> None:
     )
 
 
+def _write_verify_report(path: Path, candidate_path: Path, *, classification: str = "exact_tree", verified: int = 1) -> None:
+    write_json(
+        path,
+        {
+            "summary": {
+                "verified": int(verified),
+                "best_path": str(candidate_path),
+                "best_classification": classification,
+            }
+        },
+    )
+
+
 def _manifest_row(tmp_path: Path, torrent_hash: str) -> dict:
     old_save_path = str(tmp_path / "old_ds" / "category")
     new_save_path = str(tmp_path / "new_ds" / "category")
@@ -198,10 +212,13 @@ def _manifest_row(tmp_path: Path, torrent_hash: str) -> dict:
         "copy_status": "pending",
         "verify_status": "pending",
         "verify_report_path": "",
+        "verify_classification": "",
         "patch_status": "pending",
         "resume_status": "pending",
         "cleanup_status": "pending",
         "cleanup_ready": False,
+        "cleanup_issues": [],
+        "cleanup_staged_path": "",
         "plan_issues": [],
         "issues": [],
     }
@@ -336,6 +353,35 @@ def test_copy_apply_emits_progress_events_and_uses_rsync_progress_flag(tmp_path,
     assert "event=item_end phase=copy" in output
 
 
+def test_copy_apply_refreshes_cached_qb_state_after_pause(tmp_path):
+    torrent_hash = "copystate"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["state"] = "stalledUP"
+    manifest_path = tmp_path / "copy-refresh.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["old_save_path"],
+                row["content_path"],
+                state="stalledUP",
+            )
+        }
+    )
+    tool = QBZFSRelocationTool(qb_client=client, runner=FakeRunner(), verifier=FakeVerifier())
+
+    rc = tool.copy(manifest_path=manifest_path, apply=True)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert manifest["rows"][0]["state"] == "pausedUP"
+
+
 def test_migrate_limits_selection_with_batch_size(tmp_path):
     torrent_hash_a = "abc123def456abc123def456abc123def456abcd"
     torrent_hash_b = "bbb123def456abc123def456abc123def456abcd"
@@ -385,10 +431,16 @@ def test_migrate_limits_selection_with_batch_size(tmp_path):
         allow_partials=False,
         journal_path=tmp_path / "patch-journal.jsonl",
         auto_stop_qb=False,
+        auto_cleanup_mode="off",
+        cleanup_journal_path=None,
         pilot_size=1,
         observe_seconds=0.0,
         resume_remaining=True,
         recheck_on_failure=False,
+        cleanup_pilot_size=1,
+        cleanup_batch_size=0,
+        cleanup_observe_seconds=0.0,
+        cleanup_min_depth=1,
     )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -455,10 +507,16 @@ def test_migrate_apply_auto_stops_qb_before_validate(tmp_path):
         allow_partials=False,
         journal_path=tmp_path / "patch-journal.jsonl",
         auto_stop_qb=True,
+        auto_cleanup_mode="off",
+        cleanup_journal_path=None,
         pilot_size=1,
         observe_seconds=0.0,
         resume_remaining=False,
         recheck_on_failure=False,
+        cleanup_pilot_size=1,
+        cleanup_batch_size=0,
+        cleanup_observe_seconds=0.0,
+        cleanup_min_depth=1,
     )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -467,6 +525,165 @@ def test_migrate_apply_auto_stops_qb_before_validate(tmp_path):
     assert controller.start_calls == 1
     assert manifest["global_issues"] == []
     assert manifest["rows"][0]["patch_status"] in {"patched", "no_change"}
+
+
+def test_migrate_apply_auto_starts_qb_before_plan_when_initially_stopped(tmp_path):
+    torrent_hash = "applystart123def456abc123def456abc123def"
+    bt_backup = tmp_path / "BT_backup"
+    bt_backup.mkdir()
+    _write_fastresume(bt_backup / f"{torrent_hash}.fastresume", str(tmp_path / "old_ds" / "music"))
+    _write_multi_file_torrent(bt_backup / f"{torrent_hash}.torrent", "Apply Start")
+    source_content = tmp_path / "old_ds" / "music" / "Apply Start"
+    dest_content = tmp_path / "new_ds" / "music" / "Apply Start"
+    source_content.mkdir(parents=True, exist_ok=True)
+    dest_content.mkdir(parents=True, exist_ok=True)
+    (dest_content / "payload.bin").write_bytes(b"payload")
+    controller = FakeController(stopped=True)
+
+    class OfflineUntilStartedClient(FakeClient):
+        def test_connection(self):
+            return not controller.stopped
+
+        def get_torrents(self):
+            if controller.stopped:
+                raise RuntimeError("qB offline")
+            return super().get_torrents()
+
+    client = OfflineUntilStartedClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                "Apply Start",
+                str(tmp_path / "old_ds" / "music"),
+                str(source_content),
+                state="pausedUP",
+            )
+        }
+    )
+    original_start = controller.start
+
+    def _start_with_reloaded_path():
+        if controller.start_calls >= 1:
+            client.torrents_by_hash[torrent_hash].save_path = str(tmp_path / "new_ds" / "music")
+        original_start()
+
+    controller.start = _start_with_reloaded_path
+    tool = QBZFSRelocationTool(
+        qb_client=client,
+        runner=FakeRunner(),
+        verifier=FakeVerifier(),
+        process_controller=controller,
+    )
+    manifest_path = tmp_path / "migrate-start.json"
+
+    rc = tool.migrate(
+        manifest_path=manifest_path,
+        hashes=[],
+        source_root=str(tmp_path / "old_ds"),
+        dest_root=str(tmp_path / "new_ds"),
+        batch_size=0,
+        fastresume_dir=bt_backup,
+        torrent_dir=bt_backup,
+        export_torrents_dir=None,
+        apply=True,
+        timeout_seconds=30.0,
+        quick_only=False,
+        allow_partials=False,
+        journal_path=tmp_path / "patch-journal.jsonl",
+        auto_stop_qb=True,
+        auto_cleanup_mode="off",
+        cleanup_journal_path=None,
+        pilot_size=1,
+        observe_seconds=0.0,
+        resume_remaining=False,
+        recheck_on_failure=False,
+        cleanup_pilot_size=1,
+        cleanup_batch_size=0,
+        cleanup_observe_seconds=0.0,
+        cleanup_min_depth=1,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert controller.stop_calls == 1
+    assert controller.start_calls == 2
+    assert manifest["global_issues"] == []
+    assert manifest["rows"][0]["patch_status"] in {"patched", "no_change"}
+
+
+def test_migrate_apply_auto_cleanup_safe_cleans_source(tmp_path):
+    torrent_hash = "autocleanup123def456abc123def456abc123de"
+    bt_backup = tmp_path / "BT_backup"
+    bt_backup.mkdir()
+    _write_fastresume(bt_backup / f"{torrent_hash}.fastresume", str(tmp_path / "old_ds" / "music"))
+    _write_multi_file_torrent(bt_backup / f"{torrent_hash}.torrent", "Auto Cleanup")
+    source_content = tmp_path / "old_ds" / "music" / "Auto Cleanup"
+    dest_content = tmp_path / "new_ds" / "music" / "Auto Cleanup"
+    source_content.mkdir(parents=True, exist_ok=True)
+    dest_content.mkdir(parents=True, exist_ok=True)
+    (dest_content / "payload.bin").write_bytes(b"payload")
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                "Auto Cleanup",
+                str(tmp_path / "old_ds" / "music"),
+                str(source_content),
+                state="pausedUP",
+            )
+        }
+    )
+    controller = FakeController(stopped=False)
+    original_start = controller.start
+
+    def _start_with_reloaded_path():
+        client.torrents_by_hash[torrent_hash].save_path = str(tmp_path / "new_ds" / "music")
+        original_start()
+
+    controller.start = _start_with_reloaded_path
+    tool = QBZFSRelocationTool(
+        qb_client=client,
+        runner=FakeRunner(),
+        verifier=FakeVerifier(),
+        process_controller=controller,
+    )
+    manifest_path = tmp_path / "migrate-autocleanup.json"
+    cleanup_journal = tmp_path / "cleanup-journal.jsonl"
+
+    rc = tool.migrate(
+        manifest_path=manifest_path,
+        hashes=[],
+        source_root=str(tmp_path / "old_ds"),
+        dest_root=str(tmp_path / "new_ds"),
+        batch_size=0,
+        fastresume_dir=bt_backup,
+        torrent_dir=bt_backup,
+        export_torrents_dir=None,
+        apply=True,
+        timeout_seconds=30.0,
+        quick_only=False,
+        allow_partials=False,
+        journal_path=tmp_path / "patch-journal.jsonl",
+        auto_stop_qb=True,
+        auto_cleanup_mode="safe",
+        cleanup_journal_path=cleanup_journal,
+        pilot_size=1,
+        observe_seconds=0.0,
+        resume_remaining=False,
+        recheck_on_failure=False,
+        cleanup_pilot_size=1,
+        cleanup_batch_size=0,
+        cleanup_observe_seconds=0.0,
+        cleanup_min_depth=1,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    phases = [entry["phase"] for entry in manifest["phase_history"]]
+    assert rc == 0
+    assert not source_content.exists()
+    assert cleanup_journal.exists()
+    assert phases == ["plan", "copy", "verify", "validate", "patch", "resume", "cleanup"]
+    assert manifest["rows"][0]["cleanup_status"] == "cleaned"
 
 
 def test_migrate_dryrun_skips_downstream_phases_until_destination_exists(tmp_path):
@@ -506,10 +723,16 @@ def test_migrate_dryrun_skips_downstream_phases_until_destination_exists(tmp_pat
         allow_partials=False,
         journal_path=tmp_path / "patch-journal.jsonl",
         auto_stop_qb=False,
+        auto_cleanup_mode="off",
+        cleanup_journal_path=None,
         pilot_size=1,
         observe_seconds=0.0,
         resume_remaining=True,
         recheck_on_failure=False,
+        cleanup_pilot_size=1,
+        cleanup_batch_size=0,
+        cleanup_observe_seconds=0.0,
+        cleanup_min_depth=1,
     )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -558,6 +781,43 @@ def test_validate_can_skip_torrent_stopped_requirement(tmp_path):
     assert rc == 0
     assert row["actionable"] is True
     assert "torrent_not_stopped" not in row["issues"]
+
+
+def test_validate_uses_cached_qb_state_when_qb_is_stopped(tmp_path):
+    torrent_hash = "stoppedcache123def456abc123def456abc123"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["verified"] = True
+    row["state"] = "pausedUP"
+    manifest_path = tmp_path / "validate-stopped-cache.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+
+    class ExplodingClient(FakeClient):
+        def get_torrent_info(self, torrent_hash):
+            raise AssertionError("validate should not query qB after stop")
+
+    tool = QBZFSRelocationTool(
+        qb_client=ExplodingClient({}),
+        runner=FakeRunner(),
+        verifier=FakeVerifier(),
+        process_controller=FakeController(stopped=True),
+    )
+
+    rc = tool.validate(
+        manifest_path=manifest_path,
+        allow_partials=False,
+        for_patch=True,
+        journal_path=tmp_path / "patch-journal.jsonl",
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    assert rc == 0
+    assert row["actionable"] is True
+    assert "qb_torrent_not_found" not in row["issues"]
+    assert "qb_state_unavailable_while_stopped" not in row["issues"]
 
 
 def test_verify_and_validate_mark_verified_rows_actionable(tmp_path):
@@ -726,6 +986,184 @@ def test_cleanup_requires_confirm_cleanup(tmp_path):
         tool.cleanup(manifest_path=manifest_path, apply=True, confirm_cleanup=False)
 
 
+def test_cleanup_dryrun_validates_live_state_and_reports_ready_rows(tmp_path):
+    torrent_hash = "cleanupdryrun"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["cleanup_ready"] = True
+    report_path = tmp_path / "verify-report.json"
+    _write_verify_report(report_path, Path(row["dest_content_path"]))
+    row["verify_report_path"] = str(report_path)
+    row["verify_classification"] = "exact_tree"
+    manifest_path = tmp_path / "cleanup-dryrun.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["new_save_path"],
+                row["dest_content_path"],
+                state="stalledUP",
+            )
+        }
+    )
+    tool = QBZFSRelocationTool(qb_client=client, runner=FakeRunner(), verifier=FakeVerifier())
+
+    rc = tool.cleanup(
+        manifest_path=manifest_path,
+        apply=False,
+        confirm_cleanup=False,
+        cleanup_observe_seconds=0.0,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert manifest["rows"][0]["cleanup_status"] == "dryrun"
+
+
+def test_cleanup_apply_stages_observes_and_deletes_source(tmp_path):
+    torrent_hash = "cleanupapply"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["cleanup_ready"] = True
+    report_path = tmp_path / "verify-report.json"
+    _write_verify_report(report_path, Path(row["dest_content_path"]))
+    row["verify_report_path"] = str(report_path)
+    row["verify_classification"] = "exact_tree"
+    manifest_path = tmp_path / "cleanup-apply.json"
+    cleanup_journal = tmp_path / "cleanup-journal.jsonl"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["new_save_path"],
+                row["dest_content_path"],
+                state="stalledUP",
+            )
+        }
+    )
+    tool = QBZFSRelocationTool(qb_client=client, runner=FakeRunner(), verifier=FakeVerifier())
+
+    rc = tool.cleanup(
+        manifest_path=manifest_path,
+        apply=True,
+        confirm_cleanup=True,
+        journal_path=cleanup_journal,
+        cleanup_observe_seconds=0.0,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source_path = Path(row["content_path"])
+    actions = [json.loads(line)["action"] for line in cleanup_journal.read_text(encoding="utf-8").splitlines()]
+    assert rc == 0
+    assert not source_path.exists()
+    assert manifest["rows"][0]["cleanup_status"] == "cleaned"
+    assert actions == ["stage", "observe", "delete"]
+
+
+def test_cleanup_apply_can_resume_from_existing_staged_path(tmp_path):
+    torrent_hash = "cleanupresume"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["cleanup_ready"] = True
+    report_path = tmp_path / "verify-report.json"
+    _write_verify_report(report_path, Path(row["dest_content_path"]))
+    row["verify_report_path"] = str(report_path)
+    row["verify_classification"] = "exact_tree"
+    manifest_path = tmp_path / "cleanup-resume.json"
+    temp_tool = QBZFSRelocationTool(qb_client=FakeClient({}), runner=FakeRunner(), verifier=FakeVerifier())
+    source_path = Path(row["content_path"])
+    stage_path = temp_tool._cleanup_stage_path(manifest_path, row)
+    stage_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.rename(stage_path)
+    row["cleanup_staged_path"] = str(stage_path)
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["new_save_path"],
+                row["dest_content_path"],
+                state="stalledUP",
+            )
+        }
+    )
+    tool = QBZFSRelocationTool(qb_client=client, runner=FakeRunner(), verifier=FakeVerifier())
+
+    rc = tool.cleanup(
+        manifest_path=manifest_path,
+        apply=True,
+        confirm_cleanup=True,
+        cleanup_observe_seconds=0.0,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert not source_path.exists()
+    assert not stage_path.exists()
+    assert manifest["rows"][0]["cleanup_status"] == "cleaned"
+
+
+def test_cleanup_blocks_overlapping_source_targets(tmp_path):
+    torrent_hash_a = "cleanupoverlapa"
+    torrent_hash_b = "cleanupoverlapb"
+    row_a = _manifest_row(tmp_path, torrent_hash_a)
+    row_b = _manifest_row(tmp_path, torrent_hash_b)
+    parent_source = Path(row_a["content_path"]).parent / "Parent"
+    child_source = parent_source / "Child"
+    shutil.rmtree(Path(row_a["content_path"]))
+    child_source.mkdir(parents=True, exist_ok=True)
+    row_a["content_path"] = str(parent_source)
+    row_b["content_path"] = str(child_source)
+    row_a["cleanup_ready"] = True
+    row_b["cleanup_ready"] = True
+    for index, row in enumerate((row_a, row_b), start=1):
+        report_path = tmp_path / f"verify-report-{index}.json"
+        _write_verify_report(report_path, Path(row["dest_content_path"]))
+        row["verify_report_path"] = str(report_path)
+        row["verify_classification"] = "exact_tree"
+    manifest_path = tmp_path / "cleanup-overlap.json"
+    write_json(
+        manifest_path,
+        {
+            "rows": [row_a, row_b],
+            "global_issues": [],
+            "phase_history": [],
+            "selection": {"hashes": [torrent_hash_a, torrent_hash_b]},
+        },
+    )
+    client = FakeClient(
+        {
+            torrent_hash_a: _torrent_info(torrent_hash_a, row_a["name"], row_a["new_save_path"], row_a["dest_content_path"]),
+            torrent_hash_b: _torrent_info(torrent_hash_b, row_b["name"], row_b["new_save_path"], row_b["dest_content_path"]),
+        }
+    )
+    tool = QBZFSRelocationTool(qb_client=client, runner=FakeRunner(), verifier=FakeVerifier())
+
+    rc = tool.cleanup(
+        manifest_path=manifest_path,
+        apply=False,
+        confirm_cleanup=False,
+        cleanup_observe_seconds=0.0,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    statuses = {row["hash"]: row["cleanup_status"] for row in manifest["rows"]}
+    assert rc == 1
+    assert statuses[torrent_hash_a] == "blocked"
+    assert statuses[torrent_hash_b] == "blocked"
+
+
 def test_end_to_end_dryrun_flow_records_phase_history(tmp_path):
     torrent_hash = "e2edryrun"
     bt_backup = tmp_path / "BT_backup"
@@ -862,6 +1300,8 @@ def test_plan_wrapper_omits_hashes_file_when_missing(tmp_path):
         / "bin"
         / "migrate-pool-data-to-media_01_plan.sh"
     )
+    out_dir = tmp_path / "out"
+    run_stamp = "20260308-130000"
     result = subprocess.run(
         ["bash", str(script)],
         cwd=Path(__file__).resolve().parents[1],
@@ -869,15 +1309,20 @@ def test_plan_wrapper_omits_hashes_file_when_missing(tmp_path):
         text=True,
         env={
             "PATH": "/usr/bin:/bin",
-            "OUT_DIR": str(tmp_path / "out"),
+            "OUT_DIR": str(out_dir),
             "PYTHON_BIN": "/bin/echo",
+            "RUN_STAMP": run_stamp,
         },
         check=False,
     )
 
     assert result.returncode == 0
     assert "--hashes-file" not in result.stdout
-    assert not (tmp_path / "out" / "selected-hashes.txt").exists()
+    manifest_path = out_dir / "runs" / run_stamp / "manifest.json"
+    assert f"--manifest {manifest_path}" in result.stdout
+    assert (out_dir / "current-manifest.txt").read_text(encoding="utf-8").strip() == str(manifest_path)
+    assert os.readlink(out_dir / "latest-manifest.json") == str(manifest_path)
+    assert not (out_dir / "selected-hashes.txt").exists()
 
 
 def test_plan_wrapper_ignores_comment_only_hash_file(tmp_path):
@@ -886,7 +1331,9 @@ def test_plan_wrapper_ignores_comment_only_hash_file(tmp_path):
         / "bin"
         / "migrate-pool-data-to-media_01_plan.sh"
     )
-    hash_file = tmp_path / "out" / "selected-hashes.txt"
+    out_dir = tmp_path / "out"
+    run_stamp = "20260308-130100"
+    hash_file = out_dir / "selected-hashes.txt"
     hash_file.parent.mkdir(parents=True, exist_ok=True)
     hash_file.write_text("# template only\n", encoding="utf-8")
 
@@ -897,19 +1344,26 @@ def test_plan_wrapper_ignores_comment_only_hash_file(tmp_path):
         text=True,
         env={
             "PATH": "/usr/bin:/bin",
-            "OUT_DIR": str(tmp_path / "out"),
+            "OUT_DIR": str(out_dir),
             "PYTHON_BIN": "/bin/echo",
+            "RUN_STAMP": run_stamp,
         },
         check=False,
     )
 
     assert result.returncode == 0
     assert "--hashes-file" not in result.stdout
+    manifest_path = out_dir / "runs" / run_stamp / "manifest.json"
+    assert f"--manifest {manifest_path}" in result.stdout
+    assert (out_dir / "current-manifest.txt").read_text(encoding="utf-8").strip() == str(manifest_path)
+    assert os.readlink(out_dir / "latest-manifest.json") == str(manifest_path)
     assert "ignoring empty/comment-only hash override file" in result.stderr
 
 
 def test_migrate_wrapper_passes_batch_size_and_migrate_phase(tmp_path):
     script = Path(__file__).resolve().parents[1] / "bin" / "migrate-pool-data-to-media.sh"
+    out_dir = tmp_path / "out"
+    run_stamp = "20260308-130200"
     result = subprocess.run(
         ["bash", str(script)],
         cwd=Path(__file__).resolve().parents[1],
@@ -917,15 +1371,20 @@ def test_migrate_wrapper_passes_batch_size_and_migrate_phase(tmp_path):
         text=True,
         env={
             "PATH": "/usr/bin:/bin",
-            "OUT_DIR": str(tmp_path / "out"),
+            "OUT_DIR": str(out_dir),
             "PYTHON_BIN": "/bin/echo",
             "BATCH_SIZE": "3",
+            "RUN_STAMP": run_stamp,
         },
         check=False,
     )
 
     assert result.returncode == 0
     assert " migrate " in f" {result.stdout} "
+    manifest_path = out_dir / "runs" / run_stamp / "manifest.json"
+    assert f"--manifest {manifest_path}" in result.stdout
+    assert (out_dir / "current-manifest.txt").read_text(encoding="utf-8").strip() == str(manifest_path)
+    assert os.readlink(out_dir / "latest-manifest.json") == str(manifest_path)
     assert "--batch-size 3" in result.stdout
     assert "--resume-remaining" in result.stdout
     assert "--auto-stop-qb" in result.stdout

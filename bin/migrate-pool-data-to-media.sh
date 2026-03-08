@@ -5,13 +5,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/migrate-pool-data-to-media_common.sh"
 
 require_python
+set_write_manifest
+record_current_manifest "$MANIFEST"
 mapfile -t MODE_ARGS < <(phase_mode_args)
 mapfile -t HASH_ARGS < <(plan_hash_args)
 mapfile -t BATCH_ARGS < <(batch_size_args)
+mapfile -t CLEANUP_ARGS < <(cleanup_args)
 
 EXTRA_ARGS=()
 if [[ "${AUTO_STOP_QB:-1}" == "1" ]]; then
   EXTRA_ARGS+=(--auto-stop-qb)
+fi
+if [[ "${AUTO_CLEANUP:-off}" != "off" ]]; then
+  EXTRA_ARGS+=(--auto-cleanup "$AUTO_CLEANUP")
 fi
 if [[ "${RESUME_REMAINING:-1}" == "1" ]]; then
   EXTRA_ARGS+=(--resume-remaining)
@@ -37,6 +43,7 @@ exec "$PYTHON_BIN" "$TOOL" migrate \
   --pilot-observe-seconds "$PILOT_OBSERVE_SECONDS" \
   "${MODE_ARGS[@]}" \
   "${BATCH_ARGS[@]}" \
+  "${CLEANUP_ARGS[@]}" \
   "${HASH_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" \
   "$@"
