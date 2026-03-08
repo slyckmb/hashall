@@ -7,12 +7,19 @@
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
   - shared fastresume/bencode path now uses `src/hashall/bencode.py`
+  - script semver is now `v0.1.2`
+  - wrapper-driven runs now write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json` and keep `current-manifest.txt` + `latest-manifest.json` pointers
+  - `migrate` can now opt into staged safe cleanup via `--auto-cleanup=safe`
 - Source-layout CLI bootstrap is now present:
   - `python3 -m hashall` works from repo root via local `hashall/` + `rehome/` bootstrap packages.
+  - package semver is now `0.4.157`
 - Guarded relocation coverage is in place:
   - targeted regression set now includes `tests/test_qb_zfs_relocate.py`
-  - last local verification for the relocation/tooling slice: `34 passed`
-  - note: this was code/test validation only; no live qB relocation batch was executed here.
+  - last local verification for the relocation/tooling slice: `28 passed` in `tests/test_qb_zfs_relocate.py`
+- Live qB relocation has now succeeded for the `pool-data -> pool-media` workflow:
+  - successful migrate runs are logged at `~/.logs/qb-zfs-relocate/20260308-120340-migrate-pid1497678.*` and `~/.logs/qb-zfs-relocate/20260308-123054-migrate-pid1658492.*`
+  - both completed with `resume_ok=2` and `exit_code=0`
+  - cleanup dry-runs against both successful batches returned `blocked=0`, `dryrun=2`, `source_missing=0`
 - Operate through `hashall` (script-level commands) rather than the removed `rehome` entrypoint.
 - Pool migration now relies on a shared donor-acquisition + offline fastresume attach constructor for both `REUSE` and `MOVE`.
 - `REUSE` applies already succeed via offline fastresume with no `MV`/`moving`, while cleanup notices still need refinement.
@@ -23,10 +30,10 @@
 
 ## Immediate Next Work
 
-1. Run a real `qb-zfs-relocate plan` dry-run against the intended qB selection and confirm manifest path semantics on live metadata.
-2. Confirm the chosen verifier source (`BT_backup/*.torrent` vs export fallback) is complete in the live environment before any copy/patch attempt.
-3. Validate qB stop/start control wiring (`--qb-container` or command hooks) on the real host before patch mode.
-4. After that, continue the existing stash/pool-media `REUSE` and `MOVE` operator follow-up work as previously planned.
+1. Keep future relocation runs on the timestamped-manifest wrappers or pass explicit per-run `--manifest` paths when invoking the tool directly.
+2. If space pressure requires source cleanup, use `cleanup --dryrun` first, then `--apply --confirm-cleanup`, or opt into `migrate --auto-cleanup=safe` only after observing a clean pilot.
+3. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
+4. Continue the existing stash/pool-media `REUSE` and `MOVE` operator follow-up work as previously planned.
 
 ## Key Logs
 

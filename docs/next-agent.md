@@ -6,10 +6,11 @@ Primary run-state source:
 If context is compacted, recover with this sequence:
 
 0. Recover the new guarded qB relocation tooling state:
-   - `bin/qb-zfs-relocate.py` (`v0.1.0`)
+   - `bin/qb-zfs-relocate.py` (`v0.1.2`)
    - `src/hashall/qb_zfs_relocate.py`
    - `src/hashall/bencode.py`
    - repo-root `python3 -m hashall` bootstrap now works via local `hashall/` + `rehome/` packages.
+   - wrapper runs now keep timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
 1. Confirm branch/worktree:
    - `chatrap/codex-hashall-20260307-234425`
    - `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260307-234425`
@@ -24,7 +25,7 @@ If context is compacted, recover with this sequence:
    - new repair path now available:
      - `hashall doctor repair-identity`
      - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-     - `hashall` semver is `0.4.155`
+     - `hashall` semver is `0.4.157`
 4. Preserve and remediate known drift:
    - `payloads`/`torrent_instances` rows with missing or stale `device_id` values.
    - parked negative `device_id` row in `devices`.
@@ -43,8 +44,10 @@ If context is compacted, recover with this sequence:
 8. Current posture:
    - live migration is complete.
    - next work is follow-up cleanup, monitoring, and any future reduction of compatibility-view assumptions.
-9. New qB relocation-specific next step:
-   - run a real `qb-zfs-relocate` manifest + dry-run sequence on the target dataset pair before any live patch/resume action.
+9. qB relocation-specific current state:
+   - live `pool-data -> pool-media` migrate pilots have succeeded twice (`resume_ok=2`, `exit_code=0`)
+   - cleanup is now staged-safe and can run standalone from a manifest or via `migrate --auto-cleanup=safe`
+   - cleanup dry-runs for both successful migrate batches returned `blocked=0`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

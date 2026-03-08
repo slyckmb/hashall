@@ -34,18 +34,24 @@ Latest critical operations note (2026-03-06):
 Latest tooling note (2026-03-08):
 
 - Guarded qB dataset relocation workflow added:
-  - `bin/qb-zfs-relocate.py` (`v0.1.0`)
+  - `bin/qb-zfs-relocate.py` (`v0.1.2`)
   - `src/hashall/qb_zfs_relocate.py`
   - phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
+  - migrate now supports `--auto-cleanup=safe` with staged `rename -> observe -> delete`
+  - cleanup now live-validates qB state, verify evidence, path safety, and overlap rules before any delete path
+  - wrappers now write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
 - Shared bencode/fastresume groundwork added:
   - `src/hashall/bencode.py`
   - strict full-consumption decode now backs fastresume mutation.
 - Repo-local CLI bootstrap added:
   - `python3 -m hashall` now resolves from repo root via local bootstrap packages.
 - Latest local validation for this tooling slice:
-  - `pytest tests/test_bencode.py tests/test_fastresume.py tests/test_qbittorrent.py tests/test_rehome_catalog_sync.py tests/test_qb_zfs_relocate.py tests/test_cli_all.py -q`
-  - result: `34 passed`
-- No live relocation transaction was run in this session; next operational step is a manifest + dry-run on the target selection.
+  - `pytest tests/test_qb_zfs_relocate.py -q`
+  - result: `28 passed`
+- Live relocation status:
+  - successful migrate runs observed at `12:03` and `12:30` on 2026-03-08
+  - both completed with `resume_ok=2` and `exit_code=0`
+  - cleanup dry-runs against both successful manifests returned `blocked=0`, `dryrun=2`, `source_missing=0`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`

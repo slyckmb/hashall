@@ -6,11 +6,13 @@ Canonical state document:
 Prompt-critical context (2026-03-06):
 
 - New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
-  - `bin/qb-zfs-relocate.py` (`v0.1.0`)
+  - `bin/qb-zfs-relocate.py` (`v0.1.2`)
   - `src/hashall/qb_zfs_relocate.py`
   - guarded phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
   - shared parser: `src/hashall/bencode.py`
-  - validation slice passed locally: `34` targeted tests.
+  - validation slice now passes locally: `28` targeted relocation tests.
+  - wrapper flows now preserve timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
+  - cleanup is now staged-safe and available both standalone and via `migrate --auto-cleanup=safe`
 - Use worktree/branch:
   - `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260307-234425`
   - `chatrap/codex-hashall-20260307-234425`
@@ -22,7 +24,7 @@ Prompt-critical context (2026-03-06):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.155`.
+  - `hashall` version now `0.4.157`.
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -37,7 +39,8 @@ Prompt-critical context (2026-03-06):
   - read-only lookup bug is fixed and regression-tested.
   - live `hashall devices migrate-files-tables` execution completed successfully with snapshot + post-preflight verification.
   - next-agent work should treat fs_uuid-backed files tables as the current production model.
-  - qB relocation next step is a real manifest + dry-run on the intended dataset pair; no live patch/resume was executed in this session.
+  - qB relocation has already completed live 2-item migrate pilots successfully on 2026-03-08 (`resume_ok=2`, `exit_code=0` for both runs).
+  - cleanup dry-runs against both successful migrate manifests returned `blocked=0`, `dryrun=2`.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

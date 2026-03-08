@@ -6,13 +6,16 @@ Canonical operations state:
 Critical qB repair continuity (2026-03-06):
 
 - New guarded relocation tool now exists for dataset moves that must avoid `setLocation` as mover:
-  - `bin/qb-zfs-relocate.py` (`v0.1.0`)
+  - `bin/qb-zfs-relocate.py` (`v0.1.2`)
   - `src/hashall/qb_zfs_relocate.py`
   - phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
   - fastresume parsing/encoding now centralizes through `src/hashall/bencode.py`
+  - wrappers now preserve per-run timestamped manifests and current-manifest pointers
+  - cleanup now uses staged safe automation and can be invoked standalone from a manifest or from `migrate --auto-cleanup=safe`
 - Latest local validation for the relocation tooling slice:
-  - `34` targeted tests passed, including `tests/test_qb_zfs_relocate.py`
-  - no live qB transaction was executed yet; next step is a real manifest + dry-run.
+  - `28` targeted tests passed in `tests/test_qb_zfs_relocate.py`
+  - live qB migrate pilots have now executed successfully twice on 2026-03-08
+  - cleanup dry-runs for both successful migrate manifests returned `blocked=0`
 - Drain empty-bucket blocker is fixed:
   - commit `657eccc`
   - `bin/qb-stoppeddl-drain.py` semver `0.1.23`
