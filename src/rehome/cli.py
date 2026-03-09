@@ -24,6 +24,7 @@ from rehome.normalize import (
     build_pool_path_normalization_batch,
     build_root_relocation_batch,
 )
+from rehome.qb_missing import audit_missing_root_drift
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
@@ -1534,6 +1535,69 @@ def refresh_cmd(workers, skip_dedup, verbose, debug,
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
+
+
+@cli.command("qb-missing-audit")
+@click.option("--source-root", required=True, help="Old qB/root path prefix to audit")
+@click.option("--target-root", required=True, help="Mapped replacement root to test")
+@click.option(
+    "--fastresume-dir",
+    type=click.Path(exists=True),
+    default="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup",
+    show_default=True,
+    help="Directory containing qB .fastresume files",
+)
+@click.option(
+    "--catalog",
+    type=click.Path(exists=True),
+    default=DEFAULT_CATALOG_PATH,
+    show_default=True,
+    help="Path to hashall catalog database",
+)
+@click.option("--output", "-o", type=click.Path(), help="Optional JSON report output path")
+def qb_missing_audit_cmd(source_root, target_root, fastresume_dir, catalog, output):
+    """Audit qB missingFiles torrents for old-root drift after relocation."""
+    from hashall.qbittorrent import get_qbittorrent_client
+
+    report = audit_missing_root_drift(
+        qb_client=get_qbittorrent_client(),
+        source_root=source_root,
+        target_root=target_root,
+        fastresume_dir=Path(fastresume_dir),
+        catalog_path=Path(catalog),
+    )
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        click.echo(f"📝 wrote {output_path}")
+
+    summary = report.get("summary") or {}
+    causes = report.get("root_causes") or {}
+    click.echo("🔎 qB missingFiles root-drift audit")
+    click.echo(f"   source_root: {report.get('source_root')}")
+    click.echo(f"   target_root: {report.get('target_root')}")
+    click.echo(f"   rows: {summary.get('rows', 0)}")
+    click.echo(f"   mapped_target_exists: {summary.get('mapped_target_exists', 0)}")
+    click.echo(f"   fastresume_old_save_path: {summary.get('fastresume_old_save_path', 0)}")
+    click.echo(f"   fastresume_old_qbt_save_path: {summary.get('fastresume_old_qbt_save_path', 0)}")
+    click.echo(f"   latest_rehome_reuse_success: {summary.get('latest_rehome_reuse_success', 0)}")
+    if causes:
+        click.echo("   root_causes:")
+        for cause, count in sorted(causes.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            click.echo(f"     {count:>4}  {cause}")
+
+    sample_rows = report.get("rows") or []
+    if sample_rows:
+        click.echo("   samples:")
+        for row in sample_rows[:5]:
+            click.echo(
+                "     "
+                f"{str(row.get('hash') or '')[:16]} "
+                f"cause={row.get('root_cause')} "
+                f"save={row.get('save_path')} "
+                f"mapped={row.get('mapped_content_path')}"
+            )
 
 
 def _db_open_readonly(catalog_path: Path) -> Optional[sqlite3.Connection]:
