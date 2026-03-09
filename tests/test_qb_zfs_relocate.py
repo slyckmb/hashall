@@ -476,6 +476,33 @@ def test_copy_apply_refreshes_cached_qb_state_after_pause(tmp_path):
     assert manifest["rows"][0]["state"] == "pausedUP"
 
 
+def test_copy_reuses_existing_destination_when_source_is_missing(tmp_path):
+    torrent_hash = "copyreuse"
+    row = _manifest_row(tmp_path, torrent_hash)
+    shutil.rmtree(row["content_path"])
+    manifest_path = tmp_path / "copy-reuse.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = FakeClient(
+        {torrent_hash: _torrent_info(torrent_hash, row["name"], row["old_save_path"], row["content_path"])}
+    )
+    runner = FakeRunner()
+    tool = QBZFSRelocationTool(qb_client=client, runner=runner, verifier=FakeVerifier())
+
+    rc = tool.copy(manifest_path=manifest_path, apply=True)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    assert rc == 0
+    assert client.pause_calls == [[torrent_hash]]
+    assert runner.commands == []
+    assert row["copy_status"] == "reused_existing_dest"
+    assert row["dest_exists"] is True
+    assert "source_payload_missing" not in row["issues"]
+
+
 def test_migrate_limits_selection_with_batch_size(tmp_path):
     torrent_hash_a = "abc123def456abc123def456abc123def456abcd"
     torrent_hash_b = "bbb123def456abc123def456abc123def456abcd"
@@ -946,6 +973,46 @@ def test_verify_and_validate_mark_verified_rows_actionable(tmp_path):
     assert validate_rc == 0
     assert row["verified"] is True
     assert row["actionable"] is True
+
+
+def test_verify_and_validate_allow_reused_existing_destination_rows(tmp_path):
+    torrent_hash = "reuseverify123"
+    row = _manifest_row(tmp_path, torrent_hash)
+    shutil.rmtree(row["content_path"])
+    row["verified"] = False
+    row["copy_status"] = "reused_existing_dest"
+    manifest_path = tmp_path / "verify-reuse-manifest.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = FakeClient(
+        {torrent_hash: _torrent_info(torrent_hash, row["name"], row["old_save_path"], row["content_path"])}
+    )
+    controller = FakeController(stopped=True)
+    tool = QBZFSRelocationTool(
+        qb_client=client,
+        runner=FakeRunner(),
+        verifier=FakeVerifier(),
+        process_controller=controller,
+    )
+
+    verify_rc = tool.verify(manifest_path=manifest_path, timeout_seconds=30.0, quick_only=False)
+    validate_rc = tool.validate(
+        manifest_path=manifest_path,
+        allow_partials=False,
+        for_patch=True,
+        journal_path=tmp_path / "patch-journal.jsonl",
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    assert verify_rc == 0
+    assert validate_rc == 0
+    assert row["copy_status"] == "reused_existing_dest"
+    assert row["verified"] is True
+    assert row["actionable"] is True
+    assert "source_payload_missing" not in row["issues"]
 
 
 def test_verify_emits_progress_events_and_requests_show_progress(tmp_path, capsys):

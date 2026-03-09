@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.7"
+SCRIPT_VERSION = "0.1.8"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -1552,6 +1552,7 @@ class QBZFSRelocationTool:
             started_at = time.monotonic()
             source_path = Path(str(row.get("content_path") or ""))
             dest_parent = Path(str(row.get("new_save_path") or ""))
+            dest_content = Path(str(row.get("dest_content_path") or ""))
             emit_log(
                 "item_start",
                 phase="copy",
@@ -1565,8 +1566,12 @@ class QBZFSRelocationTool:
             )
             proc: Optional[subprocess.CompletedProcess[str]] = None
             if not source_path.exists():
-                row["copy_status"] = "source_missing"
-                add_issue(row, "source_payload_missing")
+                if dest_content.exists():
+                    # Idempotent/stale-root remediation path: reuse the verified destination.
+                    row["copy_status"] = "reused_existing_dest"
+                else:
+                    row["copy_status"] = "source_missing"
+                    add_issue(row, "source_payload_missing")
             elif not row.get("new_save_path"):
                 row["copy_status"] = "missing_target"
                 add_issue(row, "new_save_path_missing")
@@ -1597,7 +1602,6 @@ class QBZFSRelocationTool:
                         "cmd": cmd,
                     }
                 )
-            dest_content = Path(str(row.get("dest_content_path") or ""))
             row["dest_exists"] = bool(dest_content and dest_content.exists())
             row["dest_kind"] = path_kind(dest_content) if str(row.get("dest_content_path") or "") else "missing"
             if proc is None:
@@ -1635,6 +1639,9 @@ class QBZFSRelocationTool:
             {
                 "copied": sum(1 for row in rows if row.get("copy_status") == "copied"),
                 "dryrun": sum(1 for row in rows if row.get("copy_status") == "dryrun"),
+                "reused_existing_dest": sum(
+                    1 for row in rows if row.get("copy_status") == "reused_existing_dest"
+                ),
                 "copy_failed": sum(1 for row in rows if row.get("copy_status") == "copy_failed"),
                 "rows": len(rows),
             }
