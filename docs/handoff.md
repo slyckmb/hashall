@@ -6,10 +6,10 @@
   - entrypoint: `bin/qb-zfs-relocate.py`
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
-  - current script semver: `v0.1.7`
+  - current script semver: `v0.1.8`
   - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
-- `hashall` package semver is now `0.4.163`.
+- `hashall` package semver is now `0.4.164`.
 - New `rehome` planning capability landed in commit `e572bf8`:
   - new CLI: `hashall rehome relocate-plan`
   - core planner: `src/rehome/normalize.py`
@@ -25,8 +25,9 @@
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
   - audited live cohort: `49` `missingFiles` items
-  - classification: `root_drift_after_rehome_reuse`
-  - evidence: old `/pool/data/...` qB + fastresume paths, mapped payload present at `/pool/media/...`, latest rehome history showing earlier `REUSE success`
+  - current tool classification: `root_drift_fastresume_stale`
+  - evidence: old `/pool/data/...` qB + fastresume paths, mapped payload present at `/pool/media/...`
+  - note: catalog linkage for this cohort is incomplete, so the audit command does not currently prove `latest_rehome_reuse_success` for all 49 rows even though earlier manual investigation pointed at older rehome events
 - Guarded relocation coverage is current:
   - `tests/test_qb_zfs_relocate.py` previously passed locally for the guarded dataset relocation slice
   - `hashall rehome relocate-plan --help` works
@@ -38,11 +39,18 @@
 
 ## Immediate Next Work
 
-1. Resolve the currently hung `hashall refresh --verbose` session and confirm a clean fresh catalog before live remediation decisions.
+1. Refresh is not hung; the latest `hashall refresh --verbose` finished `PARTIAL`.
+   - root cause: payload-sync quality gate failed because `24` old `/pool/data/...` upgrade roots were queued and only `15` completed
+   - the incomplete roots were zero-file stale-root entries from the current `missingFiles` cohort
 2. Dry-run the new explicit planner:
    - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding -o out/rehome-plan-pool-data-to-media.json`
    - then `hashall rehome apply out/rehome-plan-pool-data-to-media.json --dryrun`
-3. Pilot one-item remediation for the 49-item stale-root cohort using the audit output and the hardened offline attach path.
+3. Active live remediation pilot:
+   - manifest: `out/qb-zfs-relocate/remediate-stranger-things-s02-20260309/manifest.json`
+   - hashes: `18843b7d...`, `1e48e188...`, `0f5f679b...`
+   - dry-run result: all `3` hashes reused existing destination payload and verified `exact_tree`
+   - current blocker: `validate` still trusts stale qB `progress=0.0` on `missingFiles` rows and adds `torrent_not_complete`
+   - uncommitted fix in worktree: `src/hashall/qb_zfs_relocate.py` + `tests/test_qb_zfs_relocate.py`
 4. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
 5. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 

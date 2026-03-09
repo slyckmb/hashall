@@ -59,7 +59,7 @@ Latest tooling note (2026-03-08):
 
 Latest rehome integration note (2026-03-08):
 
-- `hashall` is now `0.4.163`.
+- `hashall` is now `0.4.164`.
 - Commit `e572bf8` added explicit root-to-root relocation planning in `rehome`:
   - new CLI: `hashall rehome relocate-plan`
   - new core planner path in `src/rehome/normalize.py`
@@ -69,15 +69,25 @@ Latest rehome integration note (2026-03-08):
   - new CLI: `hashall rehome qb-missing-audit`
   - `rehome apply` now routes donor verification / offline fastresume mutation through the guarded `qb-zfs-relocate` backend
   - `MOVE` source cleanup is now deferred instead of deleting source payloads immediately
+- Commit `65eaa82` added a stale-root remediation step to `qb-zfs-relocate`:
+  - source missing + destination already present now becomes `copy_status=reused_existing_dest`
+  - this allows legacy root-drift items to reuse the already-good `/pool/media/...` payload instead of failing in copy
 - Live audit result for the current qB `missingFiles` cohort:
-  - `49` items classified as `root_drift_after_rehome_reuse`
-  - evidence: old `/pool/data/...` qB + fastresume paths, mapped `/pool/media/...` payload present, latest rehome history showing `REUSE success`
-  - interpretation: legacy rehome path drift, not new `qb-zfs-relocate` corruption
+  - `49` items currently classified by the tool as `root_drift_fastresume_stale`
+  - evidence: old `/pool/data/...` qB + fastresume paths, mapped `/pool/media/...` payload present
+  - interpretation: legacy stale-root path drift, not new `qb-zfs-relocate` corruption
+- Latest live stale-root remediation pilot status:
+  - refresh was not hung; it finished `PARTIAL` because payload sync hit `24` zero-file old-root upgrade entries from this same cohort
+  - `qb-start-seeding-gradual` halt set of `35` hashes is a subset of the audited `49`
+  - explicit dry-run pilot on `Stranger.Things.S02` (`3` hashes) reused existing destination payload and verified all `3` hashes as `exact_tree`
+  - current uncommitted blocker: `validate` still rejects these rows with `torrent_not_complete` because qB reports stale `progress=0.0`
 - Latest validation for this slice:
   - `pytest tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py -q`
   - result: `47 passed`
   - `hashall rehome relocate-plan --help`
   - `hashall rehome qb-missing-audit --help`
+  - `pytest tests/test_qb_zfs_relocate.py -q`
+  - result after commit `65eaa82`: `33 passed`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`

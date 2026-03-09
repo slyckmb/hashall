@@ -51,10 +51,11 @@ If context is compacted, recover with this sequence:
    - live cleanup has now completed for both successful batches and removed the four migrated source payloads
    - resume observe now respects its configured soak window; the wrapper default is `60s`
    - latest `v0.1.4` live run completed cleanly with `resume_ok=2`, `cleaned=2`, and no cleanup blocks
-   - a separate live qB audit now classifies the current `49` `missingFiles` items as `root_drift_after_rehome_reuse`
+   - a separate live qB audit now classifies the current `49` `missingFiles` items as `root_drift_fastresume_stale`
+   - `qb-start-seeding-gradual` halted on `35` hashes that are a direct subset of that cohort
 10. New planner continuity to preserve:
    - `hashall rehome relocate-plan` now exists in commit `e572bf8`
-   - `hashall` semver is `0.4.163`
+   - `hashall` semver is `0.4.164`
    - planner lives in `src/rehome/normalize.py`
    - it can plan explicit root-to-root relocations and synthesize unique target views for shared-root sibling collisions
    - `rehome apply` execution is now wired to the guarded `qb-zfs-relocate` backend
@@ -62,9 +63,11 @@ If context is compacted, recover with this sequence:
    - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding`
    - use it before any mass remediation of qB `missingFiles` items
 12. First thing to do after compact if the task continues:
-   - resolve the hung `hashall refresh --verbose` if still present
+   - note: refresh is not hung; the latest run finished `PARTIAL` because payload sync hit `24` zero-file stale-root upgrade entries
    - run `hashall rehome qb-missing-audit --help`
-   - pilot one explicit `rehome apply` root-to-root move and one 49-item stale-root remediation batch
+   - inspect `out/qb-zfs-relocate/remediate-stranger-things-s02-20260309/manifest.json`
+   - finish the uncommitted `qb-zfs-relocate validate` fix so `reused_existing_dest` rows do not fail on stale qB `progress=0.0`
+   - rerun the `Stranger.Things.S02` 3-hash stale-root remediation pilot
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

@@ -26,7 +26,13 @@ Last updated: 2026-03-08
 
 ## Refresh / Identity State
 
-- `hashall refresh --verbose` is healthy again and validates `stash`, `pool-media`, `pool-data`, and `spare` roots.
+- The latest `hashall refresh --verbose` did not hang; it finished `PARTIAL`.
+- The scan stages succeeded, but payload sync failed its quality gate:
+  - `queued=24`
+  - `completed=15`
+  - `failed=0`
+  - ratio `0.625 < 0.900`
+- The incomplete roots were zero-file old `/pool/data/...` entries from the stale-root qB cohort.
 - Stable `fs_uuid` entries are enforced; `device_id` stays as runtime metadata.
 - The catalog now updates known movers immediately rather than waiting for a later refresh.
 
@@ -37,8 +43,11 @@ Last updated: 2026-03-08
 - `hashall rehome qb-missing-audit` now classifies stale-root `missingFiles` cohorts against qB, fastresume, and rehome history.
 - Live audit result on 2026-03-08:
   - `49` `missingFiles` items map cleanly from old `/pool/data/...` roots to existing `/pool/media/...` payloads
-  - classification: `root_drift_after_rehome_reuse`
-  - this points at legacy REUSE path drift, not current `qb-zfs-relocate` pilot mutations
+  - current tool classification: `root_drift_fastresume_stale`
+  - this points at legacy stale-root drift, not current `qb-zfs-relocate` pilot mutations
+- `qb-start-seeding-gradual` halt at `2026-03-08 14:34` is explained:
+  - `35` halted hashes are a direct subset of the audited `49`
+  - the daemon tripped on preexisting `missingFiles` rows in protected scope, not on a newly started torrent
 
 ## Known Gaps
 
@@ -46,6 +55,9 @@ Last updated: 2026-03-08
 2. `rehome auto` still favors donor-backed MOVE discovery and does not replace `rehome relocate-plan` for explicit root-to-root cases.
 3. Cleanup/canonical-root accounting should continue to dedupe by payload root, not by torrent hash.
 4. The 49-item legacy stale-root cohort still needs controlled live remediation.
+5. Current uncommitted worktree fix:
+   - `qb-zfs-relocate validate` should trust successful offline verify over stale qB `progress=0.0` for `reused_existing_dest` rows
+   - this is required to finish the live `Stranger.Things.S02` remediation pilot
 
 ## Logs to Watch
 
@@ -56,7 +68,7 @@ Last updated: 2026-03-08
 
 ## Immediate Checklist
 
-1. Resolve and rerun the hung `hashall refresh --verbose` task if needed before using catalog state for live decisions.
-2. Pilot one explicit `MOVE` apply for `/pool/data -> /pool/media`, with a shared-root sibling case included.
+1. Finish and validate the uncommitted `torrent_not_complete` override for `reused_existing_dest` rows in `qb-zfs-relocate`.
+2. Re-run the `Stranger.Things.S02` 3-hash remediation dry-run/apply pilot from `out/qb-zfs-relocate/remediate-stranger-things-s02-20260309/manifest.json`.
 3. Export the `49` stale-root `missingFiles` hashes with `hashall rehome qb-missing-audit` and remediate them in small batches.
-4. Keep direct `qb-zfs-relocate` wrapper runs only for ad hoc troubleshooting or manifest-specific replay.
+4. Pilot one explicit `MOVE` apply for `/pool/data -> /pool/media`, with a shared-root sibling case included.
