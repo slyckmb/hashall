@@ -6,7 +6,7 @@ Canonical operations state:
 Critical qB repair continuity (2026-03-06):
 
 - New guarded relocation tool now exists for dataset moves that must avoid `setLocation` as mover:
-  - `bin/qb-zfs-relocate.py` (`v0.1.4`)
+  - `bin/qb-zfs-relocate.py` (`v0.1.6`)
   - `src/hashall/qb_zfs_relocate.py`
   - phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
   - fastresume parsing/encoding now centralizes through `src/hashall/bencode.py`
@@ -19,6 +19,12 @@ Critical qB repair continuity (2026-03-06):
   - live cleanup has now completed for both successful batches and removed the four source payloads
   - resume observe now honors the configured soak window; the pool-data wrapper default is `60s`
   - latest `v0.1.4` live run completed with `resume_ok=2`, `cleaned=2`, and `blocked=0`
+- New adjacent `rehome` planner work now exists for eventual convergence:
+  - commit `e572bf8`
+  - `hashall rehome relocate-plan`
+  - supports explicit root-to-root relocation planning and shared-root sibling groups
+  - synthesizes unique destination views when sibling torrents would otherwise collide
+  - this is planning only so far; live guarded MOVE still belongs to `qb-zfs-relocate` until transport merge work lands
 - Drain empty-bucket blocker is fixed:
   - commit `657eccc`
   - `bin/qb-stoppeddl-drain.py` semver `0.1.23`

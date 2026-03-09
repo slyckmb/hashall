@@ -2,41 +2,43 @@
 
 ## Key Facts
 
-- `qb-zfs-relocate` is now implemented for guarded qB dataset relocation:
+- `qb-zfs-relocate` remains the hardened live migration backend for guarded qB dataset relocation:
   - entrypoint: `bin/qb-zfs-relocate.py`
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
-  - shared fastresume/bencode path now uses `src/hashall/bencode.py`
-  - script semver is now `v0.1.4`
-  - wrapper-driven runs now write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json` and keep `current-manifest.txt` + `latest-manifest.json` pointers
-  - `migrate` can now opt into staged safe cleanup via `--auto-cleanup=safe`
-- Source-layout CLI bootstrap is now present:
-  - `python3 -m hashall` works from repo root via local `hashall/` + `rehome/` bootstrap packages.
-  - package semver is now `0.4.159`
-  - wrapper default pilot resume observe window is now `60s`
-- Guarded relocation coverage is in place:
-  - targeted regression set now includes `tests/test_qb_zfs_relocate.py`
-  - last local verification for the relocation/tooling slice: `29 passed` in `tests/test_qb_zfs_relocate.py`
-- Live qB relocation has now succeeded for the `pool-data -> pool-media` workflow:
-  - successful migrate runs are logged at `~/.logs/qb-zfs-relocate/20260308-120340-migrate-pid1497678.*` and `~/.logs/qb-zfs-relocate/20260308-123054-migrate-pid1658492.*`
-  - both completed with `resume_ok=2` and `exit_code=0`
-  - cleanup dry-runs against both successful batches returned `blocked=0`, `dryrun=2`, `source_missing=0`
-  - live cleanup has now completed for both successful 2-item batches; the four source payloads were removed and manifests now record `cleanup_status=cleaned`
-  - latest `v0.1.4` live run `~/.logs/qb-zfs-relocate/20260308-143317-migrate-pid2363824.*` completed with a real `60s` resume soak, `resume_ok=2`, `cleaned=2`, and `exit_code=0`
-- Operate through `hashall` (script-level commands) rather than the removed `rehome` entrypoint.
-- Pool migration now relies on a shared donor-acquisition + offline fastresume attach constructor for both `REUSE` and `MOVE`.
-- `REUSE` applies already succeed via offline fastresume with no `MV`/`moving`, while cleanup notices still need refinement.
-- `MOVE` uses the same offline attach path but remains unproven live; the next gate is one live `MOVE` pilot.
-- `pool-data -> pool-media` dry-runs report `0 MOVE groups available`, yet numerous `/pool/data` payloads still exist; watch the inventory carefully.
-- qB gradual-seeding daemon and path watchers are tuned to avoid halting on preexisting download-like states.
-- Active gate: stash → pool-media `REUSE` pilot `rehome_runs.id=338` is running; do not scale `~noHL` until it finishes cleanly.
+  - current script semver: `v0.1.6`
+  - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
+  - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
+- `hashall` package semver is now `0.4.162`.
+- New `rehome` planning capability landed in commit `e572bf8`:
+  - new CLI: `hashall rehome relocate-plan`
+  - core planner: `src/rehome/normalize.py`
+  - this can now generate `rehome apply` batch plans for explicit root-to-root relocations such as `/pool/data/media/torrents/seeding -> /pool/media/torrents/seeding`
+  - shared-root sibling groups are now surfaced as one payload move plus synthesized unique destination views when sibling torrents would collide on the same target save path
+  - this is the first planner step toward handling `2-to-1 -> 2-to-2` payload/view relocation inside `rehome`
+- Important boundary:
+  - `rehome relocate-plan` now solves explicit planning for these root-to-root moves
+  - the hardened `qb-zfs-relocate` MOVE transport has not yet been merged into `rehome apply`
+  - do not overstate this as a fully unified live execution path yet
+- Guarded relocation coverage is current:
+  - `tests/test_qb_zfs_relocate.py` previously passed locally for the guarded dataset relocation slice
+  - latest local validation for the new `rehome` planner slice:
+    - `pytest tests/test_rehome_normalize.py tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py -q`
+    - result: `45 passed`
+  - `hashall rehome relocate-plan --help` works
+- Live qB relocation already succeeded for `pool-data -> pool-media` via `qb-zfs-relocate`:
+  - successful migrate runs are logged under `~/.logs/qb-zfs-relocate/`
+  - cleanup completed successfully for prior successful pilot batches
+- Operate through `hashall` for planning and `qb-zfs-relocate` for the hardened live mover until the transport merge is complete.
 
 ## Immediate Next Work
 
-1. Keep future relocation runs on the timestamped-manifest wrappers or pass explicit per-run `--manifest` paths when invoking the tool directly.
-2. If space pressure requires source cleanup, use `cleanup --dryrun` first, then `--apply --confirm-cleanup`, or opt into `migrate --auto-cleanup=safe` only after observing a clean pilot.
+1. Dry-run the new explicit planner:
+   - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding -o out/rehome-plan-pool-data-to-media.json`
+   - then `hashall rehome apply out/rehome-plan-pool-data-to-media.json --dryrun`
+2. Merge the hardened MOVE transport from `qb-zfs-relocate` into `rehome` execution so `relocate-plan` plans can be applied with the same rsync/verify/fastresume safety contract.
 3. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
-4. Continue the existing stash/pool-media `REUSE` and `MOVE` operator follow-up work as previously planned.
+4. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 
 ## Key Logs
 
@@ -49,5 +51,6 @@
 
 - `hashall refresh --verbose` keeps catalog scans updated; run it after any donor copy.
 - `hashall rehome auto --from <src> --to <dst> --limit <n> [--apply]` remains the canonical mover.
+- `hashall rehome relocate-plan` is now the explicit planner for root-to-root relocation cases that `auto` does not surface cleanly.
 - Do not let qB run `setLocation` as part of normal migration; we rely on offline fastresume repointing.
 - Keep the guard log tailing commands handy for monitoring long runs.

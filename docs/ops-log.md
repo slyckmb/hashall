@@ -57,5 +57,21 @@ Latest tooling note (2026-03-08):
   - live cleanup has now completed for both successful manifests; four source payloads were removed from `/pool/data/media/torrents/seeding`
   - latest `v0.1.4` run at `14:33` completed with `resume_ok=2`, `cleaned=2`, `blocked=0`, and a full `60s` resume observe window
 
+Latest rehome planning note (2026-03-08):
+
+- `hashall` is now `0.4.162`.
+- Commit `e572bf8` added explicit root-to-root relocation planning in `rehome`:
+  - new CLI: `hashall rehome relocate-plan`
+  - new core planner path in `src/rehome/normalize.py`
+  - supports batch plans for explicit moves like `/pool/data/media/torrents/seeding -> /pool/media/torrents/seeding`
+  - synthesizes unique destination sibling views under `_rehome-unique/<hash>` when a shared-root group would otherwise collide on the same target view
+- This closes the planning gap for shared-root `2-to-1` payload groups, but it is still a planner-only integration step:
+  - live move execution still relies on `qb-zfs-relocate`
+  - next integration step is to merge the hardened rsync/verify/fastresume MOVE backend into `rehome apply`
+- Latest validation for this slice:
+  - `pytest tests/test_rehome_normalize.py tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py -q`
+  - result: `45 passed`
+  - `hashall rehome relocate-plan --help`
+
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`

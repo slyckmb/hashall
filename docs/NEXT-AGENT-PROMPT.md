@@ -6,11 +6,11 @@ Canonical state document:
 Prompt-critical context (2026-03-06):
 
 - New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
-  - `bin/qb-zfs-relocate.py` (`v0.1.4`)
+  - `bin/qb-zfs-relocate.py` (`v0.1.6`)
   - `src/hashall/qb_zfs_relocate.py`
   - guarded phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
   - shared parser: `src/hashall/bencode.py`
-  - validation slice now passes locally: `29` targeted relocation tests.
+  - validation slice now passes locally for its targeted relocation tests.
   - wrapper flows now preserve timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - cleanup is now staged-safe and available both standalone and via `migrate --auto-cleanup=safe`
 - Use worktree/branch:
@@ -24,7 +24,7 @@ Prompt-critical context (2026-03-06):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.159`.
+  - `hashall` version now `0.4.162`.
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -44,6 +44,9 @@ Prompt-critical context (2026-03-06):
   - live cleanup has now completed for both successful batches; the four source payloads are gone from `/pool/data/media/torrents/seeding`.
   - resume observe now honors `PILOT_OBSERVE_SECONDS`; wrapper default is `60`.
   - latest `v0.1.4` live run completed with `resume_ok=2`, `cleaned=2`, `blocked=0`, and a real `60s` resume soak.
+  - new planner commit `e572bf8` added `hashall rehome relocate-plan` for explicit root-to-root relocation planning.
+  - that planner can now surface shared-root sibling payload groups and synthesize unique destination views for `2-to-1 -> 2-to-2` planning.
+  - this is not yet a full execution-path merge: the hardened `qb-zfs-relocate` MOVE backend still needs to be integrated into `rehome apply`.
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`
