@@ -559,7 +559,7 @@ def test_atomic_relocation_reverify_path_after_mismatch(tmp_path, monkeypatch):
     assert reapply["count"] >= 1
 
 
-def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, monkeypatch):
+def test_execute_move_cross_filesystem_uses_rsync_and_defers_source_cleanup(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()
 
@@ -599,7 +599,9 @@ def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, m
 
     assert "rsync" in rsync_calls["cmd"]
     assert target_path.exists()
-    assert not source_path.exists()
+    assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
+    assert plan["cleanup_source_deferred_path"] == str(source_path)
 
 
 def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path, monkeypatch):
@@ -728,7 +730,8 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
 
     executor._execute_move(plan, spot_check=1)
     assert target_path.exists()
-    assert not source_path.exists()
+    assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
 
 
 def test_execute_move_filters_view_target_that_recreates_source(tmp_path, monkeypatch):
@@ -770,7 +773,8 @@ def test_execute_move_filters_view_target_that_recreates_source(tmp_path, monkey
     executor._execute_move(plan, spot_check=0)
     assert captured["view_targets"] == []
     assert target_path.exists()
-    assert not source_path.exists()
+    assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
 
 
 def test_atomic_relocation_fails_when_qb_content_path_stays_missing(tmp_path, monkeypatch):
@@ -875,7 +879,7 @@ def test_spot_check_persists_sha256_and_inode_peers(tmp_path, monkeypatch):
     assert as_map[str(peer_path)] == "inode:777"
 
 
-def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tmp_path, monkeypatch):
+def test_execute_move_cross_filesystem_marks_cleanup_pending(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()
 
@@ -893,21 +897,6 @@ def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tm
     monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
     monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
 
-    calls = {"delete": 0, "repair": 0}
-
-    def fake_delete(path):
-        calls["delete"] += 1
-        if calls["delete"] == 1:
-            raise PermissionError(13, "Permission denied", str(path))
-        shutil.rmtree(path)
-
-    def fake_repair(_path):
-        calls["repair"] += 1
-        return True
-
-    monkeypatch.setattr(executor, "_delete_path", fake_delete)
-    monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", fake_repair)
-
     plan = {
         "decision": "MOVE",
         "source_path": str(source_path),
@@ -918,12 +907,13 @@ def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tm
     }
 
     executor._execute_move(plan, spot_check=0)
-    assert calls["repair"] == 1
     assert target_path.exists()
-    assert not source_path.exists()
+    assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
+    assert plan["cleanup_source_deferred_path"] == str(source_path)
 
 
-def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_path, monkeypatch):
+def test_execute_move_cross_filesystem_cleanup_stays_deferred(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()
 
@@ -940,12 +930,6 @@ def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_pa
 
     monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
     monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        executor,
-        "_delete_path",
-        lambda _path: (_ for _ in ()).throw(PermissionError(13, "Permission denied")),
-    )
-    monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", lambda _path: False)
 
     plan = {
         "decision": "MOVE",
@@ -959,3 +943,4 @@ def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_pa
     executor._execute_move(plan, spot_check=0)
     assert target_path.exists()
     assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True

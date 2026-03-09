@@ -25,6 +25,13 @@ from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.qbittorrent import get_qbittorrent_client
 from hashall.payload import get_payload_file_rows
 from hashall.scan import compute_sha256
+from hashall.qb_zfs_relocate import (
+    DockerQbController,
+    QBZFSRelocationTool,
+    build_manifest_for_relocations,
+    row_selection,
+    write_json,
+)
 from rehome.view_builder import build_torrent_view
 
 
@@ -36,6 +43,7 @@ class TargetDonor:
     acquisition_mode: str
     move_strategy: str = "existing"
     moved_payload: bool = False
+    target_preexisting: bool = False
 
 
 class DemotionExecutor:
@@ -124,6 +132,30 @@ class DemotionExecutor:
             )
         ).expanduser()
         self.qb_container = os.getenv("HASHALL_REHOME_QB_CONTAINER", "qbittorrent_vpn").strip()
+        self.relocation_artifact_root = Path(
+            os.getenv(
+                "HASHALL_REHOME_RELOCATE_ARTIFACT_ROOT",
+                str(Path.home() / ".logs" / "hashall" / "reports" / "rehome-relocate"),
+            )
+        ).expanduser()
+        try:
+            self.relocation_verify_timeout_seconds = max(
+                60.0, float(os.getenv("HASHALL_REHOME_VERIFY_TIMEOUT_SECONDS", "1800"))
+            )
+        except ValueError:
+            self.relocation_verify_timeout_seconds = 1800.0
+        try:
+            self.resume_pilot_size = max(
+                1, int(os.getenv("HASHALL_REHOME_QB_PILOT_SIZE", "1"))
+            )
+        except ValueError:
+            self.resume_pilot_size = 1
+        try:
+            self.resume_observe_seconds = max(
+                0.0, float(os.getenv("HASHALL_REHOME_QB_OBSERVE_SECONDS", "60"))
+            )
+        except ValueError:
+            self.resume_observe_seconds = 60.0
 
     def _get_db_connection(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Get database connection."""
@@ -338,6 +370,165 @@ class DemotionExecutor:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"Failed to copy payload with rsync: {exc}") from exc
+
+    def _relocation_artifact_dir(self, plan: Dict) -> Path:
+        payload_hash = str(plan.get("payload_hash") or "unknown")[:16]
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        root = self.relocation_artifact_root
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            root = Path(self.catalog_path).expanduser().resolve().parent / ".rehome-relocate"
+            root.mkdir(parents=True, exist_ok=True)
+        artifact_dir = root / f"{stamp}-{payload_hash}"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        return artifact_dir
+
+    def _build_qb_zfs_relocation_tool(self) -> QBZFSRelocationTool:
+        return QBZFSRelocationTool(
+            qb_client=self.qbit_client,
+            process_controller=DockerQbController(self.qb_container),
+        )
+
+    def _build_hardened_relocation_manifest(
+        self,
+        plan: Dict,
+        relocations: List[Dict],
+        *,
+        artifact_dir: Path,
+    ) -> Path:
+        torrent_dir = artifact_dir / "torrents"
+        torrent_dir.mkdir(parents=True, exist_ok=True)
+        normalization = plan.get("normalization") or {}
+        source_root = str(
+            normalization.get("source_root")
+            or plan.get("source_path")
+            or (relocations[0].get("source_save_path") if relocations else "")
+            or ""
+        )
+        dest_root = str(
+            normalization.get("target_root")
+            or plan.get("target_path")
+            or (relocations[0].get("target_save_path") if relocations else "")
+            or ""
+        )
+        manifest = build_manifest_for_relocations(
+            qb_client=self.qbit_client,
+            relocations=relocations,
+            fastresume_dir=self.fastresume_dir,
+            torrent_dir=torrent_dir,
+            source_root=source_root,
+            dest_root=dest_root,
+            mode=str(normalization.get("mode") or "rehome_apply"),
+            apply_context={
+                "payload_hash": str(plan.get("payload_hash") or ""),
+                "decision": str(plan.get("decision") or ""),
+                "direction": str(plan.get("direction") or ""),
+                "source_path": str(plan.get("source_path") or ""),
+                "target_path": str(plan.get("target_path") or ""),
+            },
+        )
+        manifest_path = artifact_dir / "manifest.json"
+        write_json(manifest_path, manifest)
+        self._log(f"hardened_manifest path={manifest_path}")
+        return manifest_path
+
+    def _attach_torrents_via_hardened_fastresume(
+        self,
+        plan: Dict,
+        donor: TargetDonor,
+        *,
+        relocations: List[Dict],
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> Dict[str, float]:
+        import time
+
+        phase_times: Dict[str, float] = {}
+
+        t0 = time.monotonic()
+        artifact_dir = self._relocation_artifact_dir(plan)
+        manifest_path = self._build_hardened_relocation_manifest(
+            plan,
+            relocations,
+            artifact_dir=artifact_dir,
+        )
+        patch_journal_path = artifact_dir / "patch-journal.jsonl"
+        tool = self._build_qb_zfs_relocation_tool()
+        manifest = tool._load_manifest(manifest_path)
+        rows = row_selection(manifest["rows"])
+        tool._pause_selected(rows)
+        tool._refresh_rows_from_qb(rows)
+        tool._checkpoint_manifest(manifest_path, manifest)
+        phase_times["prepare_manifest"] = time.monotonic() - t0
+
+        t0 = time.monotonic()
+        verify_code = tool.verify(
+            manifest_path=manifest_path,
+            timeout_seconds=self.relocation_verify_timeout_seconds,
+            quick_only=False,
+            recheck_source_on_fail=False,
+        )
+        if verify_code != 0:
+            raise RuntimeError(f"offline verify failed manifest={manifest_path}")
+        phase_times["offline_verify"] = time.monotonic() - t0
+
+        t0 = time.monotonic()
+        validate_code = tool.validate(
+            manifest_path=manifest_path,
+            allow_partials=False,
+            for_patch=True,
+            journal_path=patch_journal_path,
+            require_stopped_qb=False,
+            require_torrents_stopped=True,
+        )
+        if validate_code != 0:
+            raise RuntimeError(f"rehome relocation validate failed manifest={manifest_path}")
+        phase_times["validate"] = time.monotonic() - t0
+
+        t0 = time.monotonic()
+        patch_code = tool.patch(
+            manifest_path=manifest_path,
+            journal_path=patch_journal_path,
+            apply=True,
+            auto_stop_qb=True,
+        )
+        if patch_code != 0:
+            raise RuntimeError(f"rehome relocation patch failed manifest={manifest_path}")
+        phase_times["patch"] = time.monotonic() - t0
+
+        t0 = time.monotonic()
+        if self.resume_after_relocate:
+            resume_code = tool.resume(
+                manifest_path=manifest_path,
+                apply=True,
+                pilot_size=self.resume_pilot_size,
+                observe_seconds=self.resume_observe_seconds,
+                resume_remaining=True,
+                recheck_on_failure=self.force_recheck_after_relocate,
+            )
+            if resume_code != 0:
+                raise RuntimeError(f"rehome relocation resume failed manifest={manifest_path}")
+        else:
+            controller = tool._ensure_controller()
+            if controller.is_stopped():
+                controller.start()
+            tool._wait_for_qb_online()
+            manifest = tool._load_manifest(manifest_path)
+            for row in row_selection(manifest["rows"]):
+                info = self.qbit_client.get_torrent_info(str(row.get("hash") or ""))
+                if info is None:
+                    raise RuntimeError(f"qB info unavailable after patch for torrent {row['hash'][:16]}")
+                if canonicalize_path(Path(info.save_path).resolve()) != canonicalize_path(
+                    Path(str(row.get("new_save_path") or "")).resolve()
+                ):
+                    raise RuntimeError(
+                        f"save_path verification failed after patch hash={row['hash'][:16]} "
+                        f"expected={row.get('new_save_path')} actual={getattr(info, 'save_path', '')}"
+                    )
+                row["resume_status"] = "kept_paused"
+            tool._checkpoint_manifest(manifest_path, manifest)
+        phase_times["post_patch"] = time.monotonic() - t0
+        return phase_times
 
     def _is_under_roots(self, path: Path, roots: List[Path]) -> bool:
         """Check if a path is under any of the given roots."""
@@ -2858,7 +3049,8 @@ class DemotionExecutor:
 
         self._log(f"step=verify_source path={source_path}")
         moved_payload = False
-        move_strategy = "rename"
+        move_strategy = "rsync_copy_first"
+        target_preexisting = target_path.exists()
 
         if source_path.exists():
             if not self._verify_file_count(source_path, plan["file_count"]):
@@ -2866,20 +3058,22 @@ class DemotionExecutor:
             if not self._verify_total_bytes(source_path, plan["total_bytes"]):
                 raise RuntimeError("Source total bytes mismatch")
 
-            is_cross_fs = self._is_cross_filesystem(source_path, target_path.parent)
-            if target_path.exists() and not is_cross_fs:
-                raise RuntimeError(f"Target path already exists before move: {target_path}")
-
             target_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                if is_cross_fs:
-                    move_strategy = "rsync_copy"
-                    self._copy_with_rsync_progress(source_path, target_path)
-                else:
-                    self._log(f"step=move_payload method=rename source={source_path} target={target_path}")
-                    shutil.move(str(source_path), str(target_path))
-                moved_payload = True
+                self._copy_with_rsync_progress(source_path, target_path)
+                moved_payload = not target_preexisting
             except Exception as e:
+                if not target_preexisting and target_path.exists():
+                    try:
+                        if target_path.is_dir():
+                            shutil.rmtree(target_path)
+                        else:
+                            target_path.unlink()
+                    except Exception as cleanup_error:
+                        self._log(
+                            f"cleanup_partial_target_failed path={target_path} error={cleanup_error}",
+                            "warning",
+                        )
                 raise RuntimeError(f"Failed to move payload: {e}")
         else:
             if not target_path.exists():
@@ -2901,6 +3095,7 @@ class DemotionExecutor:
             acquisition_mode="copied" if move_strategy != "idempotent_reconcile" else "existing",
             move_strategy=move_strategy,
             moved_payload=moved_payload,
+            target_preexisting=target_preexisting,
         )
 
     def _build_execute_plan_for_donor(self, plan: Dict, donor: TargetDonor) -> Dict:
@@ -2946,7 +3141,15 @@ class DemotionExecutor:
         self._log("step=relocate_siblings")
         if self.reuse_transport == "fastresume":
             self._log("  reuse_transport=fastresume")
-            self._repoint_torrents_via_fastresume_batch(relocations)
+            phase_times.update(
+                self._attach_torrents_via_hardened_fastresume(
+                    plan,
+                    donor,
+                    relocations=relocations,
+                    preloaded_files=preloaded_files,
+                )
+            )
+            return phase_times
         elif allow_set_location_fallback and self.reuse_transport == "set_location":
             self._log("  reuse_transport=set_location", "warning")
             self._relocate_torrents_atomic(relocations)
@@ -2988,49 +3191,8 @@ class DemotionExecutor:
         self._rollback_partial_target_views(execute_plan)
 
     def _cleanup_move_source_after_success(self, plan: Dict, donor: TargetDonor) -> str:
-        cleanup_source_status = "deleted"
-        source_path = donor.source_path
-        plan["cleanup_source_deferred"] = False
-        plan.pop("cleanup_source_deferred_path", None)
-
-        if donor.move_strategy == "rsync_copy" and source_path.exists():
-            self._log(f"step=cleanup_source_after_rsync path={source_path}")
-            try:
-                self._delete_path(source_path)
-            except Exception as e:
-                if self._is_permission_error(e):
-                    self._log(
-                        f"cleanup_source_permission_denied path={source_path} error={e}",
-                        "warning",
-                    )
-                    repaired = self._repair_permissions_for_cleanup(source_path)
-                    if repaired:
-                        try:
-                            self._delete_path(source_path)
-                            self._log(
-                                f"cleanup_source_after_rsync recovered=true path={source_path}",
-                                "success",
-                            )
-                        except Exception as retry_exc:
-                            cleanup_source_status = "deferred"
-                            plan["cleanup_source_deferred"] = True
-                            plan["cleanup_source_deferred_path"] = str(source_path)
-                            self._log(
-                                f"cleanup_source_deferred path={source_path} error={retry_exc}",
-                                "warning",
-                            )
-                    else:
-                        cleanup_source_status = "deferred"
-                        plan["cleanup_source_deferred"] = True
-                        plan["cleanup_source_deferred_path"] = str(source_path)
-                        self._log(
-                            f"cleanup_source_deferred path={source_path} "
-                            "reason=permission_repair_failed",
-                            "warning",
-                        )
-                else:
-                    raise RuntimeError(f"Failed to remove source after rsync move: {e}") from e
-        return cleanup_source_status
+        self._mark_cleanup_pending(plan, donor.source_path, donor.target_path)
+        return "deferred" if bool(plan.get("cleanup_source_deferred")) else "not_required"
 
     def _execute_reuse(
         self,

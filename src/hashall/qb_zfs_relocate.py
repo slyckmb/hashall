@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.6"
+SCRIPT_VERSION = "0.1.7"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -434,6 +434,172 @@ def load_torrent_metadata(path: Path) -> Dict[str, Any]:
 
 def expected_content_path(save_path: str, metadata: Dict[str, Any]) -> str:
     return str(Path(normalize_save_path(save_path)) / str(metadata["root_name"]))
+
+
+def build_manifest_row_for_relocation(
+    *,
+    torrent_hash: str,
+    qb_client: QBittorrentClient,
+    fastresume_dir: Path,
+    torrent_dir: Path,
+    target_save_path: str,
+    source_root: str,
+    dest_root: str,
+    source_save_path: Optional[str] = None,
+    info: Optional[Any] = None,
+) -> Dict[str, Any]:
+    issues: List[str] = []
+    info = info or qb_client.get_torrent_info(torrent_hash)
+    fastresume_path = fastresume_dir / f"{torrent_hash}.fastresume"
+    torrent_path = torrent_dir / f"{torrent_hash}.torrent"
+    if not torrent_path.exists():
+        backup_torrent = fastresume_dir / f"{torrent_hash}.torrent"
+        if backup_torrent.exists():
+            torrent_path = backup_torrent
+        elif hasattr(qb_client, "export_torrent_file"):
+            blob = qb_client.export_torrent_file(torrent_hash, torrent_path)
+            if not blob:
+                issues.append("torrent_metadata_missing")
+    if info is None:
+        issues.append("qb_torrent_not_found")
+    if not fastresume_path.exists():
+        issues.append("fastresume_missing")
+    if not torrent_path.exists():
+        issues.append("torrent_metadata_missing")
+
+    old_save_path = ""
+    old_qbt_save_path = ""
+    old_qbt_download_path = ""
+    if fastresume_path.exists():
+        try:
+            fastresume = read_fastresume(fastresume_path)
+            old_save_path = as_text(fastresume.get(b"save_path", b"")).strip()
+            old_qbt_save_path = as_text(
+                fastresume.get(b"qBt-savePath", b"")
+            ).strip()
+            old_qbt_download_path = as_text(
+                fastresume.get(b"qBt-downloadPath", b"")
+            ).strip()
+        except Exception as exc:
+            issues.append(f"fastresume_read_error:{exc}")
+
+    metadata: Optional[Dict[str, Any]] = None
+    if torrent_path.exists():
+        try:
+            metadata = load_torrent_metadata(torrent_path)
+        except Exception as exc:
+            issues.append(f"torrent_metadata_error:{exc}")
+
+    if info is not None and old_save_path and normalize_save_path(old_save_path) != normalize_save_path(info.save_path):
+        issues.append("save_path_mismatch_api_fastresume")
+    if not old_save_path:
+        old_save_path = str(source_save_path or getattr(info, "save_path", "") or "").strip()
+    if not old_qbt_save_path:
+        old_qbt_save_path = old_save_path
+
+    content_path = str(getattr(info, "content_path", "") or "").strip() if info else ""
+    expected_root_name = ""
+    is_multi_file = False
+    path_shape_match = False
+    dest_content_path = ""
+    target_save_path_n = normalize_save_path(target_save_path)
+    if metadata is not None:
+        expected_root_name = str(metadata["root_name"])
+        is_multi_file = bool(metadata["is_multi_file"])
+        if old_save_path:
+            expected_old_content = expected_content_path(old_save_path, metadata)
+            if not content_path:
+                content_path = expected_old_content
+            path_shape_match = normalize_save_path(content_path) == normalize_save_path(
+                expected_old_content
+            )
+            dest_content_path = expected_content_path(target_save_path_n, metadata)
+        else:
+            issues.append("missing_old_save_path")
+
+    dest_path_obj = Path(dest_content_path) if dest_content_path else Path("/")
+    row = {
+        "hash": torrent_hash,
+        "name": getattr(info, "name", "") if info else "",
+        "state": getattr(info, "state", "") if info else "",
+        "progress": float(getattr(info, "progress", 0.0) or 0.0) if info else 0.0,
+        "selected": True,
+        "fastresume_path": str(fastresume_path),
+        "torrent_path": str(torrent_path),
+        "old_save_path": old_save_path,
+        "old_qbt_save_path": old_qbt_save_path,
+        "old_qbt_download_path": old_qbt_download_path,
+        "content_path": content_path,
+        "source_root": normalize_save_path(source_root),
+        "dest_root": normalize_save_path(dest_root),
+        "new_save_path": target_save_path_n,
+        "dest_content_path": dest_content_path,
+        "dest_exists": bool(dest_content_path and dest_path_obj.exists()),
+        "dest_kind": path_kind(dest_path_obj) if dest_content_path else "missing",
+        "is_multi_file": is_multi_file,
+        "expected_root_name": expected_root_name,
+        "path_shape_match": bool(path_shape_match),
+        "verified": False,
+        "actionable": False,
+        "copy_status": "pending",
+        "verify_status": "pending",
+        "verify_report_path": "",
+        "verify_classification": "",
+        "source_recheck_status": "pending",
+        "source_recheck_before_state": "",
+        "source_recheck_before_progress": 0.0,
+        "source_recheck_after_state": "",
+        "source_recheck_after_progress": 0.0,
+        "source_recheck_elapsed_seconds": 0.0,
+        "cleanup_status": "pending",
+        "cleanup_ready": False,
+        "cleanup_issues": [],
+        "cleanup_staged_path": "",
+        "plan_issues": sorted(dedupe_preserve(issues)),
+        "issues": sorted(dedupe_preserve(issues)),
+    }
+    return row
+
+
+def build_manifest_for_relocations(
+    *,
+    qb_client: QBittorrentClient,
+    relocations: Sequence[Dict[str, Any]],
+    fastresume_dir: Path,
+    torrent_dir: Path,
+    source_root: str,
+    dest_root: str,
+    mode: str,
+    apply_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    info_by_hash = qb_client.get_torrents_by_hashes(
+        [str(relocation.get("torrent_hash") or "") for relocation in relocations]
+    )
+    rows = [
+        build_manifest_row_for_relocation(
+            torrent_hash=str(relocation.get("torrent_hash") or ""),
+            qb_client=qb_client,
+            fastresume_dir=fastresume_dir,
+            torrent_dir=torrent_dir,
+            target_save_path=str(relocation.get("target_save_path") or ""),
+            source_root=source_root,
+            dest_root=dest_root,
+            source_save_path=str(relocation.get("source_save_path") or ""),
+            info=info_by_hash.get(str(relocation.get("torrent_hash") or "").lower()),
+        )
+        for relocation in relocations
+        if str(relocation.get("torrent_hash") or "").strip()
+    ]
+    return {
+        "version": "1.0",
+        "generated_at": ts_iso(),
+        "mode": mode,
+        "selection_mode": "rehome_relocations",
+        "global_issues": [],
+        "phase_history": [],
+        "apply_context": dict(apply_context or {}),
+        "rows": rows,
+    }
 
 
 class SubprocessRunner:

@@ -200,10 +200,12 @@ def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
     executor = DemotionExecutor(catalog_path=db_path)
     executor.reuse_transport = "fastresume"
     executor.qbit_client = FakeQbitClient(default_path=str(source_file.parent))
-    executor._repoint_torrents_via_fastresume_batch = lambda relocations: [
-        executor.qbit_client.save_paths.__setitem__(row["torrent_hash"], row["target_save_path"])
-        for row in relocations
-    ]
+    def fake_hardened_attach(plan, donor, relocations, preloaded_files=None):
+        for row in relocations:
+            executor.qbit_client.save_paths[row["torrent_hash"]] = row["target_save_path"]
+        return {}
+
+    executor._attach_torrents_via_hardened_fastresume = fake_hardened_attach
 
     # Source file is already gone, target file already present.
     assert not source_file.exists()
@@ -1118,6 +1120,16 @@ def test_execute_reuse_fastresume_transport_avoids_qb_set_location(tmp_path, mon
     monkeypatch.setattr(executor, "_sync_catalog_after_rehome", lambda *args, **kwargs: None)
     monkeypatch.setattr(executor, "_apply_rehome_provenance_tags", lambda *args, **kwargs: None)
     monkeypatch.setattr(executor, "_apply_cleanup", lambda *args, **kwargs: None)
+    def fake_hardened_attach(plan, donor, relocations, preloaded_files=None):
+        for row in relocations:
+            executor.qbit_client.save_paths[row["torrent_hash"]] = row["target_save_path"]
+        return {}
+
+    monkeypatch.setattr(
+        executor,
+        "_attach_torrents_via_hardened_fastresume",
+        fake_hardened_attach,
+    )
 
     plan = {
         "version": "1.0",
@@ -1149,11 +1161,8 @@ def test_execute_reuse_fastresume_transport_avoids_qb_set_location(tmp_path, mon
     )
 
     executor.execute(plan)
-
-    raw = fastresume_path.read_bytes()
-    assert new_save_path.encode("utf-8") in raw
-    assert b"qBt-downloadPath0:" in raw or b"qBt-downloadPath" in raw
     assert executor.qbit_client.set_location_calls == 0
+    assert executor.qbit_client.save_paths[torrent_hash] == new_save_path
 
 
 def test_reuse_fallback_derives_save_path_for_single_entry_nested_file(tmp_path):
