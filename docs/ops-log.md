@@ -57,21 +57,27 @@ Latest tooling note (2026-03-08):
   - live cleanup has now completed for both successful manifests; four source payloads were removed from `/pool/data/media/torrents/seeding`
   - latest `v0.1.4` run at `14:33` completed with `resume_ok=2`, `cleaned=2`, `blocked=0`, and a full `60s` resume observe window
 
-Latest rehome planning note (2026-03-08):
+Latest rehome integration note (2026-03-08):
 
-- `hashall` is now `0.4.162`.
+- `hashall` is now `0.4.163`.
 - Commit `e572bf8` added explicit root-to-root relocation planning in `rehome`:
   - new CLI: `hashall rehome relocate-plan`
   - new core planner path in `src/rehome/normalize.py`
   - supports batch plans for explicit moves like `/pool/data/media/torrents/seeding -> /pool/media/torrents/seeding`
   - synthesizes unique destination sibling views under `_rehome-unique/<hash>` when a shared-root group would otherwise collide on the same target view
-- This closes the planning gap for shared-root `2-to-1` payload groups, but it is still a planner-only integration step:
-  - live move execution still relies on `qb-zfs-relocate`
-  - next integration step is to merge the hardened rsync/verify/fastresume MOVE backend into `rehome apply`
+- Commits `d553f20` and `264ec25` closed the next execution gap:
+  - new CLI: `hashall rehome qb-missing-audit`
+  - `rehome apply` now routes donor verification / offline fastresume mutation through the guarded `qb-zfs-relocate` backend
+  - `MOVE` source cleanup is now deferred instead of deleting source payloads immediately
+- Live audit result for the current qB `missingFiles` cohort:
+  - `49` items classified as `root_drift_after_rehome_reuse`
+  - evidence: old `/pool/data/...` qB + fastresume paths, mapped `/pool/media/...` payload present, latest rehome history showing `REUSE success`
+  - interpretation: legacy rehome path drift, not new `qb-zfs-relocate` corruption
 - Latest validation for this slice:
-  - `pytest tests/test_rehome_normalize.py tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py -q`
-  - result: `45 passed`
+  - `pytest tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py -q`
+  - result: `47 passed`
   - `hashall rehome relocate-plan --help`
+  - `hashall rehome qb-missing-audit --help`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`
