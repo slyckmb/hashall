@@ -1,4 +1,4 @@
-"""Path normalization helpers for pool-side payload roots."""
+"""Path normalization and root-relocation helpers for rehome batch planning."""
 
 from __future__ import annotations
 
@@ -18,6 +18,9 @@ class NormalizationSkip:
     payload_hash: str
     source_path: str
     reason: str
+
+
+DEFAULT_UNIQUE_VIEW_SUBDIR = "_rehome-unique"
 
 
 def _canonical(path: str | Path) -> Path:
@@ -58,10 +61,10 @@ def _resolve_rel(
     return to_relpath(remapped, base_root)
 
 
-def _fetch_pool_torrents(
+def _fetch_device_torrents(
     conn: sqlite3.Connection,
     payload_hash: str,
-    pool_device: int,
+    device_id: int,
 ) -> List[sqlite3.Row]:
     return conn.execute(
         """
@@ -71,16 +74,17 @@ def _fetch_pool_torrents(
         WHERE p.payload_hash = ? AND p.device_id = ?
         ORDER BY ti.torrent_hash
         """,
-        (payload_hash, pool_device),
+        (payload_hash, device_id),
     ).fetchall()
 
 
 def _preferred_expected_target(
     conn: sqlite3.Connection,
     payload_hash: str,
-    pool_root: Path,
-    stash_root: Optional[Path],
-    pool_torrents: Sequence[sqlite3.Row],
+    source_root: Path,
+    target_root: Path,
+    reference_root: Optional[Path],
+    device_torrents: Sequence[sqlite3.Row],
     source_path: Path,
     expected_file_count: int,
     expected_total_bytes: int,
@@ -132,11 +136,11 @@ def _preferred_expected_target(
             if not source_raw:
                 continue
             run_source_path = _canonical(source_raw)
-            rel = _resolve_rel(run_source_path, stash_root)
+            rel = _resolve_rel(run_source_path, reference_root)
             if rel is None or str(rel) == ".":
                 continue
-            candidate = _canonical(pool_root / rel)
-            if not is_under(candidate, pool_root):
+            candidate = _canonical(target_root / rel)
+            if not is_under(candidate, target_root):
                 continue
             if expected_file_count != 1:
                 return candidate, "rehome_runs"
@@ -144,7 +148,7 @@ def _preferred_expected_target(
                 return candidate, "rehome_runs"
             if source_name:
                 alt = _canonical(candidate.parent / source_name)
-                if is_under(alt, pool_root) and _single_file_matches(alt):
+                if is_under(alt, target_root) and _single_file_matches(alt):
                     return alt, "rehome_runs_single_file_name"
             if run_fallback is None:
                 run_fallback = candidate
@@ -153,19 +157,26 @@ def _preferred_expected_target(
 
     # Fallback: infer from torrent save_path + root_name.
     save_fallback: Optional[Path] = None
-    for row in pool_torrents:
+    for row in device_torrents:
         save_path_raw = str(row["save_path"] or "").strip()
         root_name = str(row["root_name"] or "").strip()
         if not save_path_raw or not root_name:
             continue
         save_path = _canonical(save_path_raw)
-        candidates: List[Tuple[Path, str]] = [(_canonical(save_path / root_name), "torrent_save_path")]
+        target_save_path = _map_target_save_path(
+            source_save_path=save_path,
+            source_root=source_root,
+            target_root=target_root,
+        )
+        if target_save_path is None:
+            continue
+        candidates: List[Tuple[Path, str]] = [(_canonical(target_save_path / root_name), "torrent_save_path")]
         if expected_file_count == 1 and source_name:
-            single_file_candidate = _canonical(save_path / source_name)
+            single_file_candidate = _canonical(target_save_path / source_name)
             if single_file_candidate != candidates[0][0]:
                 candidates.append((single_file_candidate, "torrent_save_path_single_file_name"))
         for candidate, hint in candidates:
-            if not is_under(candidate, pool_root):
+            if not is_under(candidate, target_root):
                 continue
             if expected_file_count != 1:
                 return candidate, "torrent_save_path"
@@ -190,14 +201,14 @@ def _sanitize_path_component(value: str) -> str:
     return text or "_uncategorized"
 
 
-def _select_tracker_group(pool_torrents: Sequence[sqlite3.Row], pool_root: Path) -> Optional[str]:
+def _select_tracker_group(device_torrents: Sequence[sqlite3.Row], source_root: Path) -> Optional[str]:
     # Prefer existing cross-seed folder already seen in torrent save_path.
-    for row in pool_torrents:
+    for row in device_torrents:
         save_path_raw = str(row["save_path"] or "").strip()
         if not save_path_raw:
             continue
         save_path = _canonical(save_path_raw)
-        rel = to_relpath(save_path, pool_root)
+        rel = _resolve_rel(save_path, source_root)
         if rel is None or len(rel.parts) < 2:
             continue
         if rel.parts[0] == "cross-seed":
@@ -213,7 +224,7 @@ def _select_tracker_group(pool_torrents: Sequence[sqlite3.Row], pool_root: Path)
         "rehome_verify_ok",
         "rehome_verify_failed",
     }
-    for row in pool_torrents:
+    for row in device_torrents:
         for tag in _split_tags(str(row["tags"] or "")):
             lowered = tag.lower()
             if lowered in ignored:
@@ -226,12 +237,13 @@ def _select_tracker_group(pool_torrents: Sequence[sqlite3.Row], pool_root: Path)
 def _fallback_expected_target(
     *,
     source_path: Path,
-    pool_root: Path,
-    pool_torrents: Sequence[sqlite3.Row],
+    source_root: Path,
+    target_root: Path,
+    device_torrents: Sequence[sqlite3.Row],
 ) -> Tuple[Path, str, str, bool]:
     categories = [
         str(row["category"] or "").strip()
-        for row in pool_torrents
+        for row in device_torrents
         if str(row["category"] or "").strip()
     ]
     category = categories[0] if categories else ""
@@ -240,22 +252,22 @@ def _fallback_expected_target(
     if not is_cross_seed:
         is_cross_seed = any(
             "cross-seed" in tag.lower()
-            for row in pool_torrents
+            for row in device_torrents
             for tag in _split_tags(str(row["tags"] or ""))
         )
 
     leaf = source_path.name
     if is_cross_seed:
-        tracker_group = _select_tracker_group(pool_torrents, pool_root)
+        tracker_group = _select_tracker_group(device_torrents, source_root)
         if tracker_group:
             return (
-                _canonical(pool_root / "cross-seed" / _sanitize_path_component(tracker_group) / leaf),
+                _canonical(target_root / "cross-seed" / _sanitize_path_component(tracker_group) / leaf),
                 "qb_fallback_cross_seed",
                 "medium",
                 False,
             )
         return (
-            _canonical(pool_root / "cross-seed" / "_unknown_tracker" / leaf),
+            _canonical(target_root / "cross-seed" / "_unknown_tracker" / leaf),
             "qb_fallback_cross_seed_unknown_tracker",
             "low",
             True,
@@ -263,44 +275,133 @@ def _fallback_expected_target(
 
     if category:
         return (
-            _canonical(pool_root / _sanitize_path_component(category) / leaf),
+            _canonical(target_root / _sanitize_path_component(category) / leaf),
             "qb_fallback_category",
             "medium",
             False,
         )
 
     return (
-        _canonical(pool_root / "_uncategorized" / leaf),
+        _canonical(target_root / "_uncategorized" / leaf),
         "qb_fallback_uncategorized",
         "low",
         True,
     )
 
 
-def build_pool_path_normalization_batch(
+def _map_target_save_path(
+    *,
+    source_save_path: Path,
+    source_root: Path,
+    target_root: Path,
+) -> Optional[Path]:
+    rel = _resolve_rel(source_save_path, source_root)
+    if rel is None:
+        return None
+    if str(rel) == ".":
+        return _canonical(target_root)
+    return _canonical(target_root / rel)
+
+
+def _choose_unique_target_save(
+    *,
+    target_root: Path,
+    torrent_hash: str,
+    unique_view_subdir: str,
+) -> Path:
+    subdir = _sanitize_path_component(unique_view_subdir or DEFAULT_UNIQUE_VIEW_SUBDIR)
+    return _canonical(target_root / subdir / torrent_hash)
+
+
+def _build_target_view_targets(
+    *,
+    device_torrents: Sequence[sqlite3.Row],
+    source_root: Path,
+    target_root: Path,
+    unique_on_collision: bool,
+    unique_view_subdir: str,
+) -> Tuple[List[str], List[Dict[str, str]], int, int]:
+    affected_torrents: List[str] = []
+    view_targets: List[Dict[str, str]] = []
+    seen_view_keys: Set[Tuple[str, str]] = set()
+    collisions = 0
+    unique_views = 0
+
+    for torrent_row in device_torrents:
+        torrent_hash = str(torrent_row["torrent_hash"] or "").strip()
+        save_path_raw = str(torrent_row["save_path"] or "").strip()
+        root_name = str(torrent_row["root_name"] or "").strip()
+        if not torrent_hash or not save_path_raw:
+            continue
+
+        save_path = _canonical(save_path_raw)
+        target_save_path = _map_target_save_path(
+            source_save_path=save_path,
+            source_root=source_root,
+            target_root=target_root,
+        )
+        if target_save_path is None:
+            continue
+
+        affected_torrents.append(torrent_hash)
+        if not root_name:
+            continue
+
+        view_key = (str(target_save_path), root_name)
+        if view_key in seen_view_keys:
+            collisions += 1
+            if unique_on_collision:
+                target_save_path = _choose_unique_target_save(
+                    target_root=target_root,
+                    torrent_hash=torrent_hash,
+                    unique_view_subdir=unique_view_subdir,
+                )
+                unique_views += 1
+                view_key = (str(target_save_path), root_name)
+
+        seen_view_keys.add(view_key)
+        view_targets.append(
+            {
+                "torrent_hash": torrent_hash,
+                "source_save_path": str(save_path),
+                "target_save_path": str(target_save_path),
+                "root_name": root_name,
+            }
+        )
+
+    return affected_torrents, view_targets, collisions, unique_views
+
+
+def build_root_relocation_batch(
     *,
     catalog_path: Path,
-    pool_device: int,
-    pool_seeding_root: str,
-    stash_seeding_root: Optional[str] = None,
+    source_device: int,
+    target_device: int,
+    source_root: str,
+    target_root: str,
+    reference_root: Optional[str] = None,
     payload_hashes: Optional[Set[str]] = None,
     limit: int = 0,
     flat_only: bool = True,
+    unique_on_collision: bool = True,
+    unique_view_subdir: str = DEFAULT_UNIQUE_VIEW_SUBDIR,
+    mode: str = "root_relocation",
 ) -> Dict:
     """
-    Build batch plans to normalize pool payload root paths.
+    Build batch plans to relocate payload roots from one managed root to another.
 
-    The generated plans are REUSE (when target already exists) or MOVE
-    (when target is absent). They are safe to execute with existing
-    `rehome apply` workflow.
+    Plans are `REUSE` when the expected target root already exists and `MOVE`
+    otherwise. The output is compatible with existing `hashall rehome apply`
+    workflow.
     """
     catalog_uri = (
         f"file:{quote(str(Path(catalog_path).expanduser().resolve()))}?mode=ro&immutable=1"
     )
     conn = sqlite3.connect(catalog_uri, uri=True)
     conn.row_factory = sqlite3.Row
-    pool_root = _canonical(pool_seeding_root)
-    stash_root = _canonical(stash_seeding_root) if stash_seeding_root else None
+    source_root_path = _canonical(source_root)
+    target_root_path = _canonical(target_root)
+    reference_root_path = _canonical(reference_root) if reference_root else None
 
     plans: List[Dict] = []
     skipped: List[NormalizationSkip] = []
@@ -309,10 +410,10 @@ def build_pool_path_normalization_batch(
     def _source_row_score(row: sqlite3.Row) -> int:
         score = 0
         source = _canonical(str(row["root_path"]))
-        if not is_under(source, pool_root):
+        if not is_under(source, source_root_path):
             return -10_000
         score += 100
-        if not flat_only or source.parent == pool_root:
+        if not flat_only or source.parent == source_root_path:
             score += 30
         file_count = int(row["file_count"] or 0)
         total_bytes = int(row["total_bytes"] or 0)
@@ -333,12 +434,12 @@ def build_pool_path_normalization_batch(
     try:
         payload_rows = conn.execute(
             """
-            SELECT payload_id, payload_hash, root_path, file_count, total_bytes
+            SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
             FROM payloads
             WHERE device_id = ? AND status = 'complete'
             ORDER BY payload_id
             """,
-            (pool_device,),
+            (source_device,),
         ).fetchall()
 
         payload_rows_by_hash: Dict[str, List[sqlite3.Row]] = {}
@@ -359,9 +460,9 @@ def build_pool_path_normalization_batch(
             in_scope_rows: List[sqlite3.Row] = []
             for row in rows_for_hash:
                 source = _canonical(str(row["root_path"]))
-                if not is_under(source, pool_root):
+                if not is_under(source, source_root_path):
                     continue
-                if flat_only and source.parent != pool_root:
+                if flat_only and source.parent != source_root_path:
                     continue
                 in_scope_rows.append(row)
             if not in_scope_rows:
@@ -369,19 +470,18 @@ def build_pool_path_normalization_batch(
 
             row = max(in_scope_rows, key=_source_row_score)
             payload_id = int(row["payload_id"])
-
             source_path = _canonical(str(row["root_path"]))
             file_count = int(row["file_count"] or 0)
             total_bytes = int(row["total_bytes"] or 0)
 
-            pool_torrents = _fetch_pool_torrents(conn, payload_hash, pool_device)
-            if not pool_torrents:
+            device_torrents = _fetch_device_torrents(conn, payload_hash, source_device)
+            if not device_torrents:
                 skipped.append(
                     NormalizationSkip(
                         payload_id=payload_id,
                         payload_hash=payload_hash,
                         source_path=str(source_path),
-                        reason="no_pool_torrents",
+                        reason="no_source_torrents",
                     )
                 )
                 continue
@@ -389,9 +489,10 @@ def build_pool_path_normalization_batch(
             target_path, source_hint = _preferred_expected_target(
                 conn,
                 payload_hash,
-                pool_root,
-                stash_root,
-                pool_torrents,
+                source_root_path,
+                target_root_path,
+                reference_root_path,
+                device_torrents,
                 source_path,
                 file_count,
                 total_bytes,
@@ -402,17 +503,17 @@ def build_pool_path_normalization_batch(
             if target_path is None:
                 target_path, source_hint, confidence, review_required = _fallback_expected_target(
                     source_path=source_path,
-                    pool_root=pool_root,
-                    pool_torrents=pool_torrents,
+                    source_root=source_root_path,
+                    target_root=target_root_path,
+                    device_torrents=device_torrents,
                 )
                 fallback_used = True
             elif target_path == source_path and source_hint.startswith("torrent_save_path"):
-                # qB save_path/root_name can mirror the current flat payload root.
-                # In that case, apply category/tag fallback to produce a normalized layout.
                 fb_target, fb_hint, fb_confidence, fb_review = _fallback_expected_target(
                     source_path=source_path,
-                    pool_root=pool_root,
-                    pool_torrents=pool_torrents,
+                    source_root=source_root_path,
+                    target_root=target_root_path,
+                    device_torrents=device_torrents,
                 )
                 if fb_target != source_path:
                     target_path = fb_target
@@ -495,7 +596,7 @@ def build_pool_path_normalization_batch(
 
             if source_path == target_path:
                 continue
-            if not is_under(target_path, pool_root):
+            if not is_under(target_path, target_root_path):
                 skipped.append(
                     NormalizationSkip(
                         payload_id=payload_id,
@@ -506,27 +607,13 @@ def build_pool_path_normalization_batch(
                 )
                 continue
 
-            affected_torrents: List[str] = []
-            view_targets: List[Dict[str, str]] = []
-            for torrent_row in pool_torrents:
-                torrent_hash = str(torrent_row["torrent_hash"] or "").strip()
-                save_path_raw = str(torrent_row["save_path"] or "").strip()
-                root_name = str(torrent_row["root_name"] or "").strip()
-                if not torrent_hash or not save_path_raw:
-                    continue
-                save_path = _canonical(save_path_raw)
-                if not is_under(save_path, pool_root):
-                    continue
-                affected_torrents.append(torrent_hash)
-                if root_name:
-                    view_targets.append(
-                        {
-                            "torrent_hash": torrent_hash,
-                            "source_save_path": str(save_path),
-                            "target_save_path": str(save_path),
-                            "root_name": root_name,
-                        }
-                    )
+            affected_torrents, view_targets, view_collisions, unique_view_targets = _build_target_view_targets(
+                device_torrents=device_torrents,
+                source_root=source_root_path,
+                target_root=target_root_path,
+                unique_on_collision=unique_on_collision,
+                unique_view_subdir=unique_view_subdir,
+            )
 
             if not affected_torrents:
                 skipped.append(
@@ -540,6 +627,13 @@ def build_pool_path_normalization_batch(
                 continue
 
             if payload_hash not in payload_group_cache:
+                device_filter: Tuple[int, ...]
+                if int(source_device) == int(target_device):
+                    device_filter = (int(source_device),)
+                    device_placeholders = "?"
+                else:
+                    device_filter = (int(source_device), int(target_device))
+                    device_placeholders = "?, ?"
                 payload_group_cache[payload_hash] = [
                     {
                         "payload_id": int(p["payload_id"]),
@@ -550,13 +644,13 @@ def build_pool_path_normalization_batch(
                         "status": str(p["status"] or ""),
                     }
                     for p in conn.execute(
-                        """
+                        f"""
                         SELECT payload_id, device_id, root_path, file_count, total_bytes, status
                         FROM payloads
-                        WHERE payload_hash = ? AND device_id = ?
-                        ORDER BY payload_id
+                        WHERE payload_hash = ? AND device_id IN ({device_placeholders})
+                        ORDER BY device_id, payload_id
                         """,
-                        (payload_hash, int(pool_device)),
+                        (payload_hash, *device_filter),
                     ).fetchall()
                 ]
 
@@ -569,26 +663,33 @@ def build_pool_path_normalization_batch(
                 "payload_id": payload_id,
                 "payload_hash": payload_hash,
                 "reasons": [
-                    f"Normalize pool payload path from {source_path} to {target_path} ({source_hint})"
+                    f"Relocate payload root from {source_path} to {target_path} ({source_hint})"
                 ],
                 "affected_torrents": affected_torrents,
                 "source_path": str(source_path),
                 "target_path": str(target_path),
-                "source_device_id": int(pool_device),
-                "target_device_id": int(pool_device),
-                "seeding_roots": [str(pool_root)],
+                "source_device_id": int(source_device),
+                "target_device_id": int(target_device),
+                "seeding_roots": [str(source_root_path), str(target_root_path)],
                 "library_roots": [],
                 "view_targets": view_targets,
                 "payload_group": payload_group_cache[payload_hash],
                 "file_count": file_count,
                 "total_bytes": total_bytes,
                 "normalization": {
-                    "mode": "pool_path",
+                    "mode": mode,
                     "source_hint": source_hint,
                     "confidence": confidence,
                     "fallback_used": bool(fallback_used),
                     "review_required": bool(review_required),
                     "flat_only": bool(flat_only),
+                    "source_root": str(source_root_path),
+                    "target_root": str(target_root_path),
+                    "source_device_id": int(source_device),
+                    "target_device_id": int(target_device),
+                    "view_collisions": int(view_collisions),
+                    "unique_view_targets": int(unique_view_targets),
+                    "unique_view_subdir": _sanitize_path_component(unique_view_subdir),
                 },
             }
             plans.append(plan)
@@ -600,11 +701,13 @@ def build_pool_path_normalization_batch(
     return {
         "version": "1.0",
         "batch": True,
-        "mode": "normalize_pool_paths",
+        "mode": mode,
         "generated_at": datetime.now().astimezone().isoformat(),
-        "pool_device": int(pool_device),
-        "pool_seeding_root": str(pool_root),
-        "stash_seeding_root": str(stash_root) if stash_root else None,
+        "source_device": int(source_device),
+        "target_device": int(target_device),
+        "source_root": str(source_root_path),
+        "target_root": str(target_root_path),
+        "reference_root": str(reference_root_path) if reference_root_path else None,
         "flat_only": bool(flat_only),
         "plans": plans,
         "skipped": [
@@ -627,5 +730,50 @@ def build_pool_path_normalization_batch(
             "review_required": sum(
                 1 for p in plans if bool((p.get("normalization") or {}).get("review_required"))
             ),
+            "view_collisions": sum(
+                int((p.get("normalization") or {}).get("view_collisions") or 0)
+                for p in plans
+            ),
+            "unique_view_targets": sum(
+                int((p.get("normalization") or {}).get("unique_view_targets") or 0)
+                for p in plans
+            ),
         },
     }
+
+
+def build_pool_path_normalization_batch(
+    *,
+    catalog_path: Path,
+    pool_device: int,
+    pool_seeding_root: str,
+    stash_seeding_root: Optional[str] = None,
+    payload_hashes: Optional[Set[str]] = None,
+    limit: int = 0,
+    flat_only: bool = True,
+) -> Dict:
+    """
+    Build batch plans to normalize pool payload root paths.
+
+    The generated plans are REUSE (when target already exists) or MOVE
+    (when target is absent). They are safe to execute with existing
+    `rehome apply` workflow.
+    """
+    report = build_root_relocation_batch(
+        catalog_path=catalog_path,
+        source_device=pool_device,
+        target_device=pool_device,
+        source_root=pool_seeding_root,
+        target_root=pool_seeding_root,
+        reference_root=stash_seeding_root,
+        payload_hashes=payload_hashes,
+        limit=limit,
+        flat_only=flat_only,
+        mode="normalize_pool_paths",
+    )
+    report["pool_device"] = int(pool_device)
+    report["pool_seeding_root"] = str(_canonical(pool_seeding_root))
+    report["stash_seeding_root"] = (
+        str(_canonical(stash_seeding_root)) if stash_seeding_root else None
+    )
+    return report

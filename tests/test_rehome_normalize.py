@@ -6,7 +6,11 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from rehome.normalize import build_pool_path_normalization_batch
+from rehome.normalize import (
+    DEFAULT_UNIQUE_VIEW_SUBDIR,
+    build_pool_path_normalization_batch,
+    build_root_relocation_batch,
+)
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -355,3 +359,113 @@ def test_normalize_plan_skips_single_file_target_dir_conflict(tmp_path):
     assert report["summary"]["candidates"] == 0
     assert report["summary"]["skipped"] == 1
     assert report["skipped"][0]["reason"] == "single_file_target_dir_conflict"
+
+
+def test_root_relocation_plan_maps_source_root_to_target_root_across_devices(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding"
+    source_path = source_root / "tv" / "Snowfall.S05.1080p.AMZN.WEB-DL.DDP5.1.H.264-NTb"
+
+    source_path.mkdir(parents=True, exist_ok=True)
+    (source_path / "episode.mkv").write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (20, 'hash20', 231, ?, 1, 3, 'complete')
+        """,
+        (str(source_path),),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category)
+        VALUES ('thash20', 20, 231, ?, ?, 'tv')
+        """,
+        (str(source_root / "tv"), source_path.name),
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_root_relocation_batch(
+        catalog_path=db_path,
+        source_device=231,
+        target_device=141,
+        source_root=str(source_root),
+        target_root=str(target_root),
+        flat_only=False,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "MOVE"
+    assert plan["source_device_id"] == 231
+    assert plan["target_device_id"] == 141
+    assert plan["source_path"] == str(source_path)
+    assert plan["target_path"] == str(target_root / "tv" / source_path.name)
+    assert plan["view_targets"] == [
+        {
+            "torrent_hash": "thash20",
+            "source_save_path": str(source_root / "tv"),
+            "target_save_path": str(target_root / "tv"),
+            "root_name": source_path.name,
+        }
+    ]
+
+
+def test_root_relocation_plan_synthesizes_unique_view_targets_for_colliding_siblings(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool-media" / "media" / "torrents" / "seeding"
+    source_path = source_root / "tv" / "Snowfall.S05.1080p.AMZN.WEB-DL.DDP5.1.H.264-NTb"
+
+    source_path.mkdir(parents=True, exist_ok=True)
+    (source_path / "episode.mkv").write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (21, 'hash21', 231, ?, 1, 3, 'complete')
+        """,
+        (str(source_path),),
+    )
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category)
+        VALUES (?, 21, 231, ?, ?, 'tv')
+        """,
+        [
+            ("thash21a", str(source_root / "tv"), source_path.name),
+            ("thash21b", str(source_root / "tv"), source_path.name),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_root_relocation_batch(
+        catalog_path=db_path,
+        source_device=231,
+        target_device=141,
+        source_root=str(source_root),
+        target_root=str(target_root),
+        flat_only=False,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    assert report["summary"]["view_collisions"] == 1
+    assert report["summary"]["unique_view_targets"] == 1
+
+    plan = report["plans"][0]
+    assert plan["affected_torrents"] == ["thash21a", "thash21b"]
+    assert plan["normalization"]["view_collisions"] == 1
+    assert plan["normalization"]["unique_view_targets"] == 1
+
+    by_hash = {row["torrent_hash"]: row for row in plan["view_targets"]}
+    assert by_hash["thash21a"]["target_save_path"] == str(target_root / "tv")
+    assert by_hash["thash21b"]["target_save_path"] == str(
+        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21b"
+    )

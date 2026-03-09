@@ -19,7 +19,11 @@ from rehome import executor as rehome_executor
 from rehome import view_builder as rehome_view_builder
 from rehome import __version__
 from rehome.followup import run_followup
-from rehome.normalize import build_pool_path_normalization_batch
+from rehome.normalize import (
+    DEFAULT_UNIQUE_VIEW_SUBDIR,
+    build_pool_path_normalization_batch,
+    build_root_relocation_batch,
+)
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
@@ -1192,6 +1196,121 @@ def normalize_plan_cmd(
         f"skipped:{summary.get('skipped', 0)} "
         f"fallback:{summary.get('fallback_used', 0)} "
         f"review:{summary.get('review_required', 0)}"
+    )
+    if plans:
+        for plan in plans[:5]:
+            click.echo(
+                f"  {str(plan.get('decision', '')):5s} "
+                f"payload={str(plan.get('payload_hash', ''))[:16]} "
+                f"source={plan.get('source_path')} "
+                f"target={plan.get('target_path')}"
+            )
+        if len(plans) > 5:
+            click.echo(f"  ... ({len(plans) - 5} more)")
+
+    if print_skipped:
+        for item in report.get("skipped", []):
+            click.echo(
+                f"  skipped payload={str(item.get('payload_hash', ''))[:16]} "
+                f"reason={item.get('reason')} source={item.get('source_path')}"
+            )
+
+    click.echo()
+    click.echo(f"Next step: hashall rehome apply {output_path} --dryrun")
+
+
+@cli.command("relocate-plan")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--source-device", type=str, required=True,
+              help="Source device alias or integer device_id")
+@click.option("--source-root", type=click.Path(), required=True,
+              help="Source seeding root to relocate from")
+@click.option("--target-device", type=str, required=True,
+              help="Target device alias or integer device_id")
+@click.option("--target-root", type=click.Path(), required=True,
+              help="Target seeding root to relocate into")
+@click.option("--reference-root", type=click.Path(),
+              help="Optional historical/source reference root for relative-path inference")
+@click.option("--payload-hash", "payload_hashes", multiple=True,
+              help="Restrict relocation planning to specific payload hash(es)")
+@click.option("--limit", type=int, default=0,
+              help="Max relocation candidates to include (0 = all)")
+@click.option("--flat-only/--all-mismatches", default=True,
+              help="Plan only payloads directly under source root (default) or all mismatches")
+@click.option("--unique-view-subdir", default=DEFAULT_UNIQUE_VIEW_SUBDIR, show_default=True,
+              help="Subdirectory under target root used for synthesized unique sibling views")
+@click.option("--output", "-o", type=click.Path(),
+              help="Output batch plan JSON (default: rehome-plan-relocate-<timestamp>.json)")
+@click.option("--print-skipped", is_flag=True,
+              help="Print skipped payload reasons")
+def relocate_plan_cmd(
+    catalog,
+    source_device,
+    source_root,
+    target_device,
+    target_root,
+    reference_root,
+    payload_hashes,
+    limit,
+    flat_only,
+    unique_view_subdir,
+    output,
+    print_skipped,
+):
+    """Create batch plan(s) to relocate payload roots between managed seeding roots."""
+    catalog_path = Path(catalog)
+
+    try:
+        from hashall.model import connect_db
+        from hashall.device import resolve_device_id
+        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
+        try:
+            source_device = resolve_device_id(_resolve_conn, source_device)
+            target_device = resolve_device_id(_resolve_conn, target_device)
+        finally:
+            _resolve_conn.close()
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+
+    try:
+        report = build_root_relocation_batch(
+            catalog_path=catalog_path,
+            source_device=int(source_device),
+            target_device=int(target_device),
+            source_root=source_root,
+            target_root=target_root,
+            reference_root=reference_root,
+            payload_hashes=set(payload_hashes) if payload_hashes else None,
+            limit=limit,
+            flat_only=flat_only,
+            unique_view_subdir=unique_view_subdir,
+            mode="root_relocation",
+        )
+    except Exception as e:
+        click.echo(f"❌ relocate-plan failed: {e}", err=True)
+        raise click.Abort()
+
+    if not output:
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        output = f"rehome-plan-relocate-{stamp}.json"
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    summary = report.get("summary", {})
+    plans = report.get("plans", [])
+    click.echo(f"✅ Relocation plan written to: {output_path}")
+    click.echo(
+        "summary="
+        f"candidates:{summary.get('candidates', 0)} "
+        f"reuse:{summary.get('decision_reuse', 0)} "
+        f"move:{summary.get('decision_move', 0)} "
+        f"skipped:{summary.get('skipped', 0)} "
+        f"collisions:{summary.get('view_collisions', 0)} "
+        f"unique_views:{summary.get('unique_view_targets', 0)}"
     )
     if plans:
         for plan in plans[:5]:
