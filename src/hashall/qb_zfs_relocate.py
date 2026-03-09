@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.8"
+SCRIPT_VERSION = "0.1.9"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -387,6 +387,10 @@ def row_selection(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def is_stopped_state(state: str) -> bool:
     value = str(state or "").strip().lower()
     return value in PAUSED_STATES or value.startswith("paused") or value.startswith("stopped")
+
+
+def should_trust_offline_verify_over_qb_progress(row: Dict[str, Any]) -> bool:
+    return bool(row.get("verified")) and str(row.get("copy_status") or "") == "reused_existing_dest"
 
 
 def load_torrent_metadata(path: Path) -> Dict[str, Any]:
@@ -1829,7 +1833,11 @@ class QBZFSRelocationTool:
                 row["progress"] = float(info.progress or 0.0)
                 if require_torrents_stopped and not is_stopped_state(info.state):
                     issues.append("torrent_not_stopped")
-                if not allow_partials and float(info.progress or 0.0) < 1.0:
+                if (
+                    not allow_partials
+                    and float(info.progress or 0.0) < 1.0
+                    and not should_trust_offline_verify_over_qb_progress(row)
+                ):
                     issues.append("torrent_not_complete")
             elif controller_stopped:
                 cached_state = str(row.get("state") or "")
@@ -1839,7 +1847,11 @@ class QBZFSRelocationTool:
                 else:
                     if require_torrents_stopped and not is_stopped_state(cached_state):
                         issues.append("torrent_not_stopped")
-                    if not allow_partials and cached_progress < 1.0:
+                    if (
+                        not allow_partials
+                        and cached_progress < 1.0
+                        and not should_trust_offline_verify_over_qb_progress(row)
+                    ):
                         issues.append("torrent_not_complete")
             else:
                 issues.append("qb_torrent_not_found")

@@ -987,7 +987,16 @@ def test_verify_and_validate_allow_reused_existing_destination_rows(tmp_path):
         {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
     )
     client = FakeClient(
-        {torrent_hash: _torrent_info(torrent_hash, row["name"], row["old_save_path"], row["content_path"])}
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["old_save_path"],
+                row["content_path"],
+                state="missingFiles",
+                progress=0.0,
+            )
+        }
     )
     controller = FakeController(stopped=True)
     tool = QBZFSRelocationTool(
@@ -1013,6 +1022,7 @@ def test_verify_and_validate_allow_reused_existing_destination_rows(tmp_path):
     assert row["verified"] is True
     assert row["actionable"] is True
     assert "source_payload_missing" not in row["issues"]
+    assert "torrent_not_complete" not in row["issues"]
 
 
 def test_verify_emits_progress_events_and_requests_show_progress(tmp_path, capsys):
