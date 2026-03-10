@@ -6,10 +6,19 @@
   - entrypoint: `bin/qb-zfs-relocate.py`
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
-  - current script semver: `v0.1.8`
+  - current script semver: `v0.1.9`
   - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
-- `hashall` package semver is now `0.4.164`.
+- `hashall` package semver is now `0.4.166`.
+- `qb-repair-payload-group.sh` was hardened in commit `5d83419`:
+  - wrapper: `bin/qb-repair-payload-group.sh`
+  - core module: `src/hashall/qb_repair_payload_group.py`
+  - script semver: `v0.2.0`
+  - validates that `--good` and `--broken` share the same `payload_hash` before any apply step
+  - uses dynamic catalog device/file-table resolution, full relative-path file matching, shared fastresume backup/journal logic, and per-run artifacts under `out/qb-repair-payload-group/<stamp>-<hash>/`
+  - targeted validation now passes locally:
+    - `pytest tests/test_fastresume.py tests/test_qb_repair_payload_group.py -q`
+    - result: `8 passed`
 - New `rehome` planning capability landed in commit `e572bf8`:
   - new CLI: `hashall rehome relocate-plan`
   - core planner: `src/rehome/normalize.py`
@@ -24,10 +33,13 @@
     - result: `47 passed`
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
-  - audited live cohort: `49` `missingFiles` items
-  - current tool classification: `root_drift_fastresume_stale`
-  - evidence: old `/pool/data/...` qB + fastresume paths, mapped payload present at `/pool/media/...`
-  - note: catalog linkage for this cohort is incomplete, so the audit command does not currently prove `latest_rehome_reuse_success` for all 49 rows even though earlier manual investigation pointed at older rehome events
+  - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`
+  - that stale-root `missingFiles` lane has now been remediated live in waves using `qb-zfs-relocate`
+  - current qB non-healthy set is no longer `missingFiles`; it is `7` `stoppedDL` torrents that need repair rather than path-drift remediation
+  - current qB state snapshot:
+    - `stalledUP=5138`
+    - `uploading=5`
+    - `stoppedDL=7`
 - Guarded relocation coverage is current:
   - `tests/test_qb_zfs_relocate.py` previously passed locally for the guarded dataset relocation slice
   - `hashall rehome relocate-plan --help` works
@@ -39,20 +51,23 @@
 
 ## Immediate Next Work
 
-1. Refresh is not hung; the latest `hashall refresh --verbose` finished `PARTIAL`.
-   - root cause: payload-sync quality gate failed because `24` old `/pool/data/...` upgrade roots were queued and only `15` completed
-   - the incomplete roots were zero-file stale-root entries from the current `missingFiles` cohort
-2. Dry-run the new explicit planner:
+1. Repair the remaining `7` `stoppedDL` torrents instead of running more stale-root remediation.
+   - all `7` have at least one complete qB sibling candidate
+   - the worst remaining item is `0fff0ce260a58b789f857f6ad085a5d03622b952` (`Shining.Girls...`) at `15.7%`
+   - a live dry-run of the hardened repair script against donor `4511c5f4149223175792ca180eea5a41655abea4` completed cleanly and produced:
+     - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
+2. Fix the read-only catalog bug in `hashall payload siblings`.
+   - current root cause: `payload_siblings()` still calls `connect_db(Path(db))` without `read_only=True`
+   - code pointers:
+     - `src/hashall/cli.py:1431`
+     - `src/hashall/model.py:9`
+3. Re-run `hashall refresh --verbose` only after the `stoppedDL` repair lane is reduced.
+   - the last `PARTIAL` refresh was explained by the old stale-root `/pool/data/...` cohort, which has since been remediated
+4. Dry-run the new explicit planner:
    - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding -o out/rehome-plan-pool-data-to-media.json`
    - then `hashall rehome apply out/rehome-plan-pool-data-to-media.json --dryrun`
-3. Active live remediation pilot:
-   - manifest: `out/qb-zfs-relocate/remediate-stranger-things-s02-20260309/manifest.json`
-   - hashes: `18843b7d...`, `1e48e188...`, `0f5f679b...`
-   - dry-run result: all `3` hashes reused existing destination payload and verified `exact_tree`
-   - current blocker: `validate` still trusts stale qB `progress=0.0` on `missingFiles` rows and adds `torrent_not_complete`
-   - uncommitted fix in worktree: `src/hashall/qb_zfs_relocate.py` + `tests/test_qb_zfs_relocate.py`
-4. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
-5. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
+5. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
+6. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 
 ## Key Logs
 
@@ -66,6 +81,6 @@
 - `hashall refresh --verbose` keeps catalog scans updated; run it after any donor copy.
 - `hashall rehome auto --from <src> --to <dst> --limit <n> [--apply]` remains the canonical mover.
 - `hashall rehome relocate-plan` is now the explicit planner for root-to-root relocation cases that `auto` does not surface cleanly.
-- `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` is the canonical proof path for the current legacy stale-root `missingFiles` cohort.
+- `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` is the canonical proof path for the legacy stale-root cohort; that lane is no longer the active blocker now that the `missingFiles` set has been cleared.
 - Do not let qB run `setLocation` as part of normal migration; we rely on offline fastresume repointing.
 - Keep the guard log tailing commands handy for monitoring long runs.

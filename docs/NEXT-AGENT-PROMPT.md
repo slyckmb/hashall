@@ -3,7 +3,7 @@
 Canonical state document:
 `docs/operations/RUN-STATE.md`
 
-Prompt-critical context (2026-03-06):
+Prompt-critical context (2026-03-10):
 
 - New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
   - `bin/qb-zfs-relocate.py` (`v0.1.8`)
@@ -50,8 +50,16 @@ Prompt-critical context (2026-03-06):
   - commit `65eaa82` lets `qb-zfs-relocate` reuse an already-present destination payload when the old source path is gone.
   - a new `hashall rehome qb-missing-audit` command classifies stale-root `missingFiles` cohorts; the current live cohort is `49` items, currently reported as `root_drift_fastresume_stale`.
   - `qb-start-seeding-gradual` halt set (`35` hashes) is a subset of that `49` cohort.
-  - active uncommitted WIP: `qb-zfs-relocate validate` must trust successful offline verify over stale qB `progress=0.0` for `reused_existing_dest` rows.
-  - proof artifact to resume from after compact: `out/qb-zfs-relocate/remediate-stranger-things-s02-20260309/manifest.json` where all `3` `Stranger.Things.S02` hashes already verified `exact_tree` but were blocked only by `torrent_not_complete`.
+  - the stale-root `missingFiles` lane has since been remediated live; current non-healthy qB lane is `7` `stoppedDL` torrents.
+  - commit `5d83419` hardened `bin/qb-repair-payload-group.sh` into a backed-up, journaled Python path:
+    - `src/hashall/qb_repair_payload_group.py`
+    - script semver `0.2.0`
+    - validation: `pytest tests/test_fastresume.py tests/test_qb_repair_payload_group.py -q` -> `8 passed`
+  - current repair proof artifact:
+    - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
+  - separate repo issue still open:
+    - `hashall payload siblings` opens the catalog without `read_only=True` and hits a WAL-mode write attempt on the live read-only DB path
+    - fix target: `src/hashall/cli.py` `payload_siblings()`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

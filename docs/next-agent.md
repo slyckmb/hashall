@@ -63,11 +63,13 @@ If context is compacted, recover with this sequence:
    - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding`
    - use it before any mass remediation of qB `missingFiles` items
 12. First thing to do after compact if the task continues:
-   - note: refresh is not hung; the latest run finished `PARTIAL` because payload sync hit `24` zero-file stale-root upgrade entries
-   - run `hashall rehome qb-missing-audit --help`
-   - inspect `out/qb-zfs-relocate/remediate-stranger-things-s02-20260309/manifest.json`
-   - finish the uncommitted `qb-zfs-relocate validate` fix so `reused_existing_dest` rows do not fail on stale qB `progress=0.0`
-   - rerun the `Stranger.Things.S02` 3-hash stale-root remediation pilot
+   - the stale-root `missingFiles` lane has already been cleared live; do not resume that remediation path by default
+   - current qB non-healthy set is `7` `stoppedDL` torrents that need repair, not path-drift repointing
+   - start from the hardened repair artifacts at:
+     - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
+   - fix the separate CLI bug in `hashall payload siblings`:
+     - `src/hashall/cli.py` should open the DB with `connect_db(Path(db), read_only=True, apply_migrations=False)`
+   - after the `stoppedDL` lane is reduced, rerun `hashall refresh --verbose`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

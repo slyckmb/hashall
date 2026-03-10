@@ -91,3 +91,34 @@ Latest rehome integration note (2026-03-08):
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/ops-log.md`
+
+Latest repair/handoff note (2026-03-10):
+
+- `hashall` is now `0.4.166`.
+- Commit `5d83419` hardened payload-group repair:
+  - `bin/qb-repair-payload-group.sh` is now a thin launcher over `src/hashall/qb_repair_payload_group.py`
+  - validates `payload_hash` equality before apply
+  - matches files by relative path, not basename
+  - uses shared fastresume backup/journal logic instead of ad hoc in-place mutation
+  - writes per-run artifacts under `out/qb-repair-payload-group/<stamp>-<hash>/`
+  - targeted validation passed locally:
+    - `pytest tests/test_fastresume.py tests/test_qb_repair_payload_group.py -q`
+    - result: `8 passed`
+- Live qB state has shifted:
+  - the prior stale-root `missingFiles` cohort has been remediated
+  - current non-healthy qB lane is `7` `stoppedDL` torrents, not `missingFiles`
+  - current qB state snapshot:
+    - `stalledUP=5138`
+    - `uploading=5`
+    - `stoppedDL=7`
+- Hardened repair dry-run evidence:
+  - donor `4511c5f4149223175792ca180eea5a41655abea4`
+  - broken `0fff0ce260a58b789f857f6ad085a5d03622b952`
+  - per-run artifact:
+    - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
+- Separate repo issue remains:
+  - `hashall payload siblings` still opens the catalog without `read_only=True`
+  - on the live read-only catalog path this trips a WAL-mode write attempt and raises `sqlite3.OperationalError: attempt to write a readonly database`
+  - root code path:
+    - `src/hashall/cli.py` `payload_siblings()`
+    - `src/hashall/model.py` already supports `connect_db(..., read_only=True, apply_migrations=False)`
