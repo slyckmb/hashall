@@ -48,19 +48,15 @@ Last updated: 2026-03-10
   - interpretation: legacy stale-root drift, not current `qb-zfs-relocate` pilot mutations
 - That stale-root `missingFiles` lane has now been remediated live.
 - Current qB health snapshot:
-  - `stalledUP=5138`
+  - `stalledUP=5145`
   - `uploading=5`
-  - `stoppedDL=6`
-  - `stoppedUP=1`
+  - no active `stoppedDL`
+  - no active `stoppedUP`
 - The active qB problem lane is now repair-oriented:
-  - one hardened live repair already succeeded: `0fff0ce260a58b789f857f6ad085a5d03622b952` now rechecks to `stoppedUP 100%`
-  - the remaining `6` `stoppedDL` torrents are blocked on missing sidecar files, not missing media payload bytes
-  - blocker pattern:
-    - `1feb6eda...`, `4bfee343...`, `57c38fa8...`, `aa0a5bbb...` each miss one `.nfo`
-    - `e2d30cbf...` misses `23` `.srt` files
-    - `f51bd14b...` misses `7` `.srt` files
-  - current sibling donors already contain the media payloads and often hardlink them, but they do not contain those extra sidecars
-  - catalog lookup found no local copies of the exact missing sidecar filenames
+  - this stoppedDL lane has now been cleared
+  - one hardened live repair fixed `0fff0ce260a58b789f857f6ad085a5d03622b952`
+  - the other six initially failed only because qB lacked write access to create missing sidecar files
+  - after changing just those six payload directories from `root:root 755` to owner `1026:101`, qB fetched the missing sidecars and all six returned to `stalledUP 100%`
 - `qb-start-seeding-gradual` halt at `2026-03-08 14:34` is explained historically:
   - `35` halted hashes were a direct subset of the old audited `49`
   - the daemon tripped on preexisting `missingFiles` rows in protected scope, not on a newly started torrent
@@ -70,7 +66,7 @@ Last updated: 2026-03-10
 1. Shared-root payload groups can now be planned and executed in theory, but the new execution path still needs a live end-to-end pilot.
 2. `rehome auto` still favors donor-backed MOVE discovery and does not replace `rehome relocate-plan` for explicit root-to-root cases.
 3. Cleanup/canonical-root accounting should continue to dedupe by payload root, not by torrent hash.
-4. The active live gap is no longer stale-root remediation; it is the remaining `6`-item `stoppedDL` sidecar-repair lane.
+4. The stoppedDL sidecar-repair lane is clear; the next live gap is returning to normal refresh/rehome pilot cadence.
 5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
 
 ## Logs to Watch
@@ -82,6 +78,6 @@ Last updated: 2026-03-10
 
 ## Immediate Checklist
 
-1. Source exact donor sidecar files (`.nfo` / `.srt`) for the remaining `6` `stoppedDL` items or deliberately let qB fetch them from peers.
-2. Re-run `hashall refresh --verbose` after the `stoppedDL` lane is reduced again.
-3. Continue with explicit `rehome relocate-plan` / `rehome apply` pilots for root-to-root `MOVE` after the repair lane is under control.
+1. Re-run `hashall refresh --verbose` now that the stoppedDL lane is clear.
+2. Continue with explicit `rehome relocate-plan` / `rehome apply` pilots for root-to-root `MOVE`.
+3. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.

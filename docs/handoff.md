@@ -35,12 +35,11 @@
   - CLI: `hashall rehome qb-missing-audit`
   - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`
   - that stale-root `missingFiles` lane has now been remediated live in waves using `qb-zfs-relocate`
-  - current qB non-healthy set is no longer `missingFiles`; the live repair lane reduced it from `7` to `6` `stoppedDL` torrents
+  - current qB non-healthy set is no longer `missingFiles`; the live stoppedDL repair lane is now clear
   - current qB state snapshot:
-    - `stalledUP=5138`
+    - `stalledUP=5145`
     - `uploading=5`
-    - `stoppedDL=6`
-    - `stoppedUP=1`
+  - there are no remaining `stoppedDL`, `stoppedUP`, or `missingFiles` rows in the active lane
 - Guarded relocation coverage is current:
   - `tests/test_qb_zfs_relocate.py` previously passed locally for the guarded dataset relocation slice
   - `hashall rehome relocate-plan --help` works
@@ -52,18 +51,17 @@
 
 ## Immediate Next Work
 
-1. The first hardened live repair succeeded.
+1. Hardened live repair succeeded and the sidecar-fetch lane is now clear.
    - commit `fe6b0fb` fixed qB API readiness checks after container restart
-   - `0fff0ce260a58b789f857f6ad085a5d03622b952` now rechecks to `stoppedUP 100%`
+   - `0fff0ce260a58b789f857f6ad085a5d03622b952` repaired from sibling donor and now seeds normally again
    - live artifact: `out/qb-repair-payload-group/20260310-164254-0fff0ce260a5/repair-plan.json`
-2. The remaining `6` `stoppedDL` items are blocked on missing sidecar files, not missing media bytes.
-   - `1feb6eda...`, `4bfee343...`, `57c38fa8...`, and `aa0a5bbb...` are each missing one `.nfo`
-   - `e2d30cbf...` is missing `23` `.srt` files
-   - `f51bd14b...` is missing `7` `.srt` files
-   - current common sibling donors already hardlink the media payloads but do not contain these extra sidecars
-   - catalog lookup found no local copies of those exact `.nfo` / `.srt` names
+2. The remaining sidecar blockers were resolved operationally.
+   - qB resume attempts initially failed with `Permission denied` creating missing `.nfo` / `.srt` files
+   - root cause: the six payload directories were `root:root 755` while qB runs as uid `1026` gid `101`
+   - minimal live fix: change ownership of just those six directories to `1026:101`, then resume the six torrents
+   - result: qB fetched the missing sidecars and all six returned to `stalledUP 100%`
 3. `hashall payload siblings` read-only bug is fixed in commit `74ea2b5`.
-4. Re-run `hashall refresh --verbose` only after the `stoppedDL` repair lane is reduced further or exact sidecar donors are sourced.
+4. Re-run `hashall refresh --verbose` now that the stoppedDL lane is clear.
    - the last `PARTIAL` refresh was explained by the old stale-root `/pool/data/...` cohort, which has since been remediated
 5. Dry-run the new explicit planner:
    - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding -o out/rehome-plan-pool-data-to-media.json`

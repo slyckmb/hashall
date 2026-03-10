@@ -107,22 +107,24 @@ Latest repair/handoff note (2026-03-10):
 - Live qB repair progress:
   - commit `fe6b0fb` fixed qB API readiness checks used by the repair restart path
   - `0fff0ce260a58b789f857f6ad085a5d03622b952` repaired successfully from donor `4511c5f4149223175792ca180eea5a41655abea4`
-  - qB now reports that hash as `stoppedUP 100%`
-  - current non-healthy qB lane is down to `6` `stoppedDL`
+  - qB now reports that hash as healthy again
+  - the former `6`-item sidecar blocker lane was resolved by a narrow ownership fix on the affected payload directories
+  - qB then fetched the missing `.nfo` / `.srt` files from peers
+  - current non-healthy qB lane is clear
   - current qB state snapshot:
-    - `stalledUP=5138`
+    - `stalledUP=5145`
     - `uploading=5`
-    - `stoppedDL=6`
-    - `stoppedUP=1`
+    - no active `stoppedDL`
+    - no active `stoppedUP`
 - Hardened repair artifacts:
   - initial dry-run artifact:
     - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
   - successful live apply artifact:
     - `out/qb-repair-payload-group/20260310-164254-0fff0ce260a5/repair-plan.json`
-- Remaining blocker classification:
-  - `1feb6eda...`, `4bfee343...`, `57c38fa8...`, `aa0a5bbb...` each miss one `.nfo`
-  - `e2d30cbf...` misses `23` `.srt` files
-  - `f51bd14b...` misses `7` `.srt` files
-  - exact local copies of those missing sidecar filenames were not found in the current catalog
+- Sidecar-fetch root cause and fix:
+  - qB log showed `Permission denied` when creating the missing sidecars
+  - affected payload directories were owned by `root:root` with mode `755`
+  - qB runs as uid `1026` gid `101`
+  - changing only those six directories to owner `1026:101` was sufficient for qB to fetch the sidecars and recover all six torrents
 - Separate repo issue is no longer open:
   - commit `74ea2b5` fixed `hashall payload siblings` to open catalogs read-only
