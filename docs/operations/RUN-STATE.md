@@ -50,9 +50,17 @@ Last updated: 2026-03-10
 - Current qB health snapshot:
   - `stalledUP=5138`
   - `uploading=5`
-  - `stoppedDL=7`
+  - `stoppedDL=6`
+  - `stoppedUP=1`
 - The active qB problem lane is now repair-oriented:
-  - `7` `stoppedDL` torrents remain and need donor/sibling repair rather than path-drift relocation
+  - one hardened live repair already succeeded: `0fff0ce260a58b789f857f6ad085a5d03622b952` now rechecks to `stoppedUP 100%`
+  - the remaining `6` `stoppedDL` torrents are blocked on missing sidecar files, not missing media payload bytes
+  - blocker pattern:
+    - `1feb6eda...`, `4bfee343...`, `57c38fa8...`, `aa0a5bbb...` each miss one `.nfo`
+    - `e2d30cbf...` misses `23` `.srt` files
+    - `f51bd14b...` misses `7` `.srt` files
+  - current sibling donors already contain the media payloads and often hardlink them, but they do not contain those extra sidecars
+  - catalog lookup found no local copies of the exact missing sidecar filenames
 - `qb-start-seeding-gradual` halt at `2026-03-08 14:34` is explained historically:
   - `35` halted hashes were a direct subset of the old audited `49`
   - the daemon tripped on preexisting `missingFiles` rows in protected scope, not on a newly started torrent
@@ -62,10 +70,8 @@ Last updated: 2026-03-10
 1. Shared-root payload groups can now be planned and executed in theory, but the new execution path still needs a live end-to-end pilot.
 2. `rehome auto` still favors donor-backed MOVE discovery and does not replace `rehome relocate-plan` for explicit root-to-root cases.
 3. Cleanup/canonical-root accounting should continue to dedupe by payload root, not by torrent hash.
-4. The active live gap is no longer stale-root remediation; it is the remaining `7`-item `stoppedDL` repair lane.
-5. `hashall payload siblings` still has a separate read-only catalog bug:
-   - `src/hashall/cli.py` `payload_siblings()` opens the DB without `read_only=True`
-   - this triggers a WAL-mode write attempt on the live read-only DB path even though `src/hashall/model.py` already supports safe read-only connections
+4. The active live gap is no longer stale-root remediation; it is the remaining `6`-item `stoppedDL` sidecar-repair lane.
+5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
 
 ## Logs to Watch
 
@@ -76,8 +82,6 @@ Last updated: 2026-03-10
 
 ## Immediate Checklist
 
-1. Use the hardened repair path for the remaining `7` `stoppedDL` items, starting from:
-   - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
-2. Fix and regression-test the `hashall payload siblings` read-only DB/WAL bug in `src/hashall/cli.py`.
-3. Re-run `hashall refresh --verbose` after the `stoppedDL` lane is reduced.
-4. Continue with explicit `rehome relocate-plan` / `rehome apply` pilots for root-to-root `MOVE` after the repair lane is under control.
+1. Source exact donor sidecar files (`.nfo` / `.srt`) for the remaining `6` `stoppedDL` items or deliberately let qB fetch them from peers.
+2. Re-run `hashall refresh --verbose` after the `stoppedDL` lane is reduced again.
+3. Continue with explicit `rehome relocate-plan` / `rehome apply` pilots for root-to-root `MOVE` after the repair lane is under control.
