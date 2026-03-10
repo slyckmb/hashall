@@ -1378,7 +1378,7 @@ def payload_show(torrent_hash, db):
     from hashall.model import connect_db
     from hashall.payload import get_torrent_instance, get_payload_by_id
 
-    conn = connect_db(Path(db))
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
 
     # Get torrent instance
     torrent = get_torrent_instance(conn, torrent_hash)
