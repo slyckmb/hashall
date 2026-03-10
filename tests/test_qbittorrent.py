@@ -144,3 +144,46 @@ def test_set_location_retries_transient_connection_with_exponential_backoff(monk
     assert ok is True
     assert calls["count"] == 3
     assert sleeps == [0.25, 0.5]
+
+
+def test_is_reachable_uses_login_when_not_authenticated(monkeypatch):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    calls = {"count": 0}
+
+    def fake_login():
+        calls["count"] += 1
+        client._authenticated = True
+        return True
+
+    monkeypatch.setattr(client, "login", fake_login)
+
+    assert client.is_reachable() is True
+    assert calls["count"] == 1
+
+
+def test_is_reachable_reauthenticates_on_forbidden(monkeypatch):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client._authenticated = True
+
+    class FakeForbidden:
+        status_code = 403
+        text = "Forbidden"
+
+        def raise_for_status(self):
+            raise requests.HTTPError("forbidden", response=self)
+
+    def fake_get(_url, timeout=None):
+        return FakeForbidden()
+
+    calls = {"count": 0}
+
+    def fake_login():
+        calls["count"] += 1
+        client._authenticated = True
+        return True
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+    monkeypatch.setattr(client, "login", fake_login)
+
+    assert client.is_reachable() is True
+    assert calls["count"] == 1

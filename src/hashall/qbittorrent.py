@@ -141,6 +141,35 @@ class QBittorrentClient:
             print(f"⚠️ qBittorrent login failed: {e}")
             return False
 
+    def is_reachable(self) -> bool:
+        """
+        Check whether the qB API is reachable and authenticated.
+
+        Returns:
+            True if the API answers successfully, False otherwise.
+        """
+        response: Optional[requests.Response] = None
+        try:
+            if not self._authenticated:
+                return self.login()
+            response = self.session.get(
+                f"{self.base_url}/api/v2/app/version",
+                timeout=self.request_timeout,
+            )
+            response.raise_for_status()
+            self.last_error = None
+            return True
+        except requests.HTTPError as e:
+            status = self._status_from_error(e, response)
+            if status in {401, 403}:
+                self._authenticated = False
+                return self.login()
+            self.last_error = f"HTTP {status}" if status is not None else str(e)
+            return False
+        except requests.RequestException as e:
+            self.last_error = str(e)
+            return False
+
     def _ensure_authenticated(self):
         """Ensure we're authenticated before making requests."""
         if not self._authenticated:
