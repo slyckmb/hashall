@@ -3,7 +3,7 @@
 Canonical state document:
 `docs/operations/RUN-STATE.md`
 
-Prompt-critical context (2026-03-10):
+Prompt-critical context (2026-03-11):
 
 - New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
   - `bin/qb-zfs-relocate.py` (`v0.1.8`)
@@ -24,7 +24,7 @@ Prompt-critical context (2026-03-10):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.164`.
+  - `hashall` version now `0.4.171`.
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -55,11 +55,21 @@ Prompt-critical context (2026-03-10):
     - `src/hashall/qb_repair_payload_group.py`
     - script semver `0.2.0`
     - validation: `pytest tests/test_fastresume.py tests/test_qb_repair_payload_group.py -q` -> `8 passed`
-  - current repair proof artifact:
+  - current repair proof artifacts:
     - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
-  - separate repo issue still open:
-    - `hashall payload siblings` opens the catalog without `read_only=True` and hits a WAL-mode write attempt on the live read-only DB path
-    - fix target: `src/hashall/cli.py` `payload_siblings()`
+    - `out/qb-repair-payload-group/20260310-164254-0fff0ce260a5/repair-plan.json`
+  - read-only `hashall payload siblings` bug is fixed in commit `74ea2b5`
+  - latest refresh returned `OK`
+  - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` now returns `0`
+  - `rehome apply` is now proven live on both:
+    - `REUSE`: `The.West.Wing.S07...`
+      - rerun path uses `rehome_reconcile_only` to catalog-sync already-repointed rows
+    - `MOVE`: `Megalopolis.2024.REPACK...`
+      - executor now explicitly stops qB before patch-mode validate
+  - next prepared live scale-up:
+    - `out/rehome-plan-pool-data-to-media-mixed4.json`
+    - includes `Shining.Girls`, `Longlegs`, `Brave.New.World.US.S01`, and `Greenland.2020.Repack`
+    - dry-run already passed
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

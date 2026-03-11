@@ -39,12 +39,15 @@
   - non-reconcile `MOVE` runs now explicitly stop qB before patch-mode validate:
     - this removes the false `torrent_not_stopped` blocker that appeared after successful copy + offline verify
     - the live `Megalopolis.2024.REPACK...` pilot proved the corrected path
+  - small live `rehome` pilots are now green on both major paths:
+    - `REUSE`: `The.West.Wing.S07...` cross-device reuse group completed and catalog-synced on rerun via `rehome_reconcile_only`
+    - `MOVE`: `Megalopolis.2024.REPACK...` moved from `/pool/data/...` to `/pool/media/...`, verified `exact_tree`, patched, resumed, and left source cleanup deferred
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
   - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`
   - that stale-root `missingFiles` lane has now been remediated live in waves using `qb-zfs-relocate`
   - current qB non-healthy set is no longer `missingFiles`; the live stoppedDL repair lane is now clear
-  - current qB state snapshot:
+- current qB state snapshot after the repair lane clear:
     - `stalledUP=5145`
     - `uploading=5`
   - there are no remaining `stoppedDL`, `stoppedUP`, or `missingFiles` rows in the active lane
@@ -69,8 +72,8 @@
    - minimal live fix: change ownership of just those six directories to `1026:101`, then resume the six torrents
    - result: qB fetched the missing sidecars and all six returned to `stalledUP 100%`
 3. `hashall payload siblings` read-only bug is fixed in commit `74ea2b5`.
-4. Re-run `hashall refresh --verbose` now that the stoppedDL lane is clear.
-   - the last `PARTIAL` refresh was explained by the old stale-root `/pool/data/...` cohort, which has since been remediated
+4. `hashall refresh --verbose` has now returned `OK` after the stale-root / stoppedDL cleanup work.
+   - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` now returns `0`
 5. The `West Wing S07` cross-device `REUSE` pilot is now green:
    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-155600-8277eae774b3591b/`
    - all three siblings ended `stalledUP 100%` on `/pool/media/...`
@@ -87,9 +90,17 @@
      - `4da8ec78... -> payload_id 9704, device_id 141, save_path /pool/media/.../PrivateHD`
      - `6befda30... -> payload_id 13557, device_id 141, save_path /pool/media/.../_rehome-unique/...`
    - source removal stayed deferred and manual
-7. The next live scale-up can now be either:
-   - another small clean `MOVE` batch, or
-   - a mixed batch of known-good `REUSE` plus `MOVE` groups
+7. The next prepared live scale-up is:
+   - plan file: `out/rehome-plan-pool-data-to-media-mixed4.json`
+   - contents:
+     - `REUSE`: `Shining.Girls...` (`3` torrents)
+     - `REUSE`: `Longlegs...` (`9` torrents)
+     - `MOVE`: `Brave.New.World.US.S01...` (`4` torrents, `22.62 GiB`)
+     - `MOVE`: `Greenland.2020.Repack...` (`8` torrents, `34.18 GiB`)
+   - dry-run already completed cleanly:
+     - `hashall rehome apply out/rehome-plan-pool-data-to-media-mixed4.json --dryrun`
+   - next live command:
+     - `hashall rehome apply out/rehome-plan-pool-data-to-media-mixed4.json --force`
 8. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
 9. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 

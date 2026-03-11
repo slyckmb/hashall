@@ -17,15 +17,11 @@ If context is compacted, recover with this sequence:
 2. Confirm stoppedDL pipeline baseline:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
-3. Continue architecture task in progress:
-   - replace identity dependence on `device_id` with `fs_uuid` in payload/torrent/rehome core flows.
-   - current implementation-in-progress already includes:
-     - migration `0012_fs_uuid_identity.sql`
-     - fs_uuid-aware payload/torrent writes and planner/executor propagation.
-   - new repair path now available:
-     - `hashall doctor repair-identity`
-     - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-     - `hashall` semver is `0.4.159`
+3. Current active rehome state:
+   - `hashall` semver is `0.4.171`
+   - single-plan live pilots are now green on both major paths:
+     - `REUSE`: `The.West.Wing.S07...`
+     - `MOVE`: `Megalopolis.2024.REPACK...`
 4. Preserve and remediate known drift:
    - `payloads`/`torrent_instances` rows with missing or stale `device_id` values.
    - parked negative `device_id` row in `devices`.
@@ -42,17 +38,14 @@ If context is compacted, recover with this sequence:
      - `Copied-DB Validation`
      - `Live Files-Table Migration Execution`
 8. Current posture:
-   - live migration is complete.
+   - live migration is active again.
    - `rehome apply` now uses the hardened `qb-zfs-relocate` transport for guarded relocation attachment.
 9. qB relocation-specific current state:
-   - live `pool-data -> pool-media` migrate pilots have succeeded via `qb-zfs-relocate`
-   - cleanup is now staged-safe and can run standalone from a manifest or via `migrate --auto-cleanup=safe`
-   - cleanup dry-runs for both successful migrate batches returned `blocked=0`
-   - live cleanup has now completed for both successful batches and removed the four migrated source payloads
-   - resume observe now respects its configured soak window; the wrapper default is `60s`
-   - latest `v0.1.4` live run completed cleanly with `resume_ok=2`, `cleaned=2`, and no cleanup blocks
-   - a separate live qB audit now classifies the current `49` `missingFiles` items as `root_drift_fastresume_stale`
-   - `qb-start-seeding-gradual` halted on `35` hashes that are a direct subset of that cohort
+   - direct `qb-zfs-relocate` pilots already proved the guarded backend earlier
+   - stale-root `missingFiles` and stoppedDL repair lanes are now clear
+   - latest refresh returned `OK`
+   - `hashall rehome qb-missing-audit ...` now returns `0`
+   - current scale-up target is `rehome apply`, not direct `qb-zfs-relocate`
 10. New planner continuity to preserve:
    - `hashall rehome relocate-plan` now exists in commit `e572bf8`
    - `hashall` semver is `0.4.164`
@@ -63,13 +56,13 @@ If context is compacted, recover with this sequence:
    - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding`
    - use it before any mass remediation of qB `missingFiles` items
 12. First thing to do after compact if the task continues:
-   - the stale-root `missingFiles` lane has already been cleared live; do not resume that remediation path by default
-   - current qB non-healthy set is `7` `stoppedDL` torrents that need repair, not path-drift repointing
-   - start from the hardened repair artifacts at:
-     - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
-   - fix the separate CLI bug in `hashall payload siblings`:
-     - `src/hashall/cli.py` should open the DB with `connect_db(Path(db), read_only=True, apply_migrations=False)`
-   - after the `stoppedDL` lane is reduced, rerun `hashall refresh --verbose`
+   - do not resume the old stale-root remediation or stoppedDL repair lanes; they are already clear
+   - start from the successful single-plan rehome pilots:
+     - `REUSE`: `~/.logs/hashall/reports/rehome-relocate/20260311-155600-8277eae774b3591b/`
+     - `MOVE`: `~/.logs/hashall/reports/rehome-relocate/20260311-173250-692ffa9407a574f4/`
+   - then continue with the prepared mixed batch:
+     - `out/rehome-plan-pool-data-to-media-mixed4.json`
+     - `hashall rehome apply out/rehome-plan-pool-data-to-media-mixed4.json --force`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

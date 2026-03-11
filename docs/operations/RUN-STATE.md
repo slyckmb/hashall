@@ -23,8 +23,13 @@ Last updated: 2026-03-11
 ## Current `MOVE` Risk
 
 - `MOVE` has been refactored to use the same offline fastresume attach constructor after donor acquisition.
-- The new path still needs a live pilot before it can be trusted at scale.
-- Operational guard: do not run `MOVE` apply at scale until a pilot shows no `MV`/`moving`, no download-like flip, and proper cleanup provenance.
+- The new path now has a successful live pilot:
+  - `Megalopolis.2024.REPACK...`
+  - report dir `~/.logs/hashall/reports/rehome-relocate/20260311-173250-692ffa9407a574f4/`
+  - all three sibling views verified `exact_tree`
+  - qB ended `stalledUP 100%` on `/pool/media/...`
+  - source cleanup remained deferred/manual
+- Operational guard remains: scale `MOVE` in small batches even after the pilot; keep cleanup deferred until post-run observation is established.
 - Do not treat `rehome auto` returning `0 MOVE groups` as the final answer for explicit root-to-root relocation anymore; use `rehome relocate-plan` for that case.
 - The current safe model is unified:
   - use `rehome relocate-plan` or `rehome auto` for planning
@@ -33,13 +38,9 @@ Last updated: 2026-03-11
 
 ## Refresh / Identity State
 
-- The latest `hashall refresh --verbose` did not hang; it finished `PARTIAL`.
-- The scan stages succeeded, but payload sync failed its quality gate:
-  - `queued=24`
-  - `completed=15`
-  - `failed=0`
-  - ratio `0.625 < 0.900`
-- The incomplete roots were zero-file old `/pool/data/...` entries from the stale-root qB cohort.
+- The stale-root cleanup and stoppedDL repair lane are now reflected in refresh:
+  - latest `hashall refresh --verbose` finished `OK`
+  - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` returns `0`
 - Stable `fs_uuid` entries are enforced; `device_id` stays as runtime metadata.
 - The catalog now updates known movers immediately rather than waiting for a later refresh.
 - Do not treat the prior `PARTIAL` refresh as the current truth forever; the stale-root qB cohort has since been remediated and refresh should be rerun after the remaining repair lane is reduced.
@@ -70,10 +71,10 @@ Last updated: 2026-03-11
 
 ## Known Gaps
 
-1. Shared-root payload groups can now be planned and executed in theory, but the new execution path still needs a live end-to-end pilot.
+1. Shared-root payload groups can now be planned; the new execution path has proven single-plan REUSE and MOVE, but not yet a larger mixed batch or a live `2-to-1 -> 2-to-2` case.
 2. `rehome auto` still favors donor-backed MOVE discovery and does not replace `rehome relocate-plan` for explicit root-to-root cases.
 3. Cleanup/canonical-root accounting should continue to dedupe by payload root, not by torrent hash.
-4. The stoppedDL sidecar-repair lane is clear; the next live gap is returning to normal refresh/rehome pilot cadence.
+4. The next live gap is scaling from single-plan pilots to a mixed-batch live run.
 5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
 
 ## Logs to Watch
@@ -85,14 +86,12 @@ Last updated: 2026-03-11
 
 ## Immediate Checklist
 
-1. Re-run `hashall refresh --verbose` now that the stoppedDL lane is clear.
-2. The `West Wing S07` cross-device `REUSE` pilot is now proven end-to-end:
+1. The `West Wing S07` cross-device `REUSE` pilot is now proven end-to-end:
    - offline verify passed for all three siblings
    - `rehome_reconcile_only` fired on rerun
    - qB stayed `stalledUP 100%` on `/pool/media/...`
    - catalog now points all three torrents at device `141` / target save paths
-3. Continue with the next explicit `rehome relocate-plan` / `rehome apply` pilot for a clean `MOVE` candidate that is not the known-bad ebook mismatch.
-4. The `Megalopolis.2024.REPACK...` live `MOVE` pilot is now green:
+2. The `Megalopolis.2024.REPACK...` live `MOVE` pilot is now green:
    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-173250-692ffa9407a574f4/`
    - copy to `/pool/media/...` completed
    - all three sibling views offline-verified `exact_tree`
@@ -102,4 +101,8 @@ Last updated: 2026-03-11
      - `/pool/media/torrents/seeding/cross-seed/PrivateHD`
      - `/pool/media/torrents/seeding/_rehome-unique/6befda30838dbbee444769501bece3fdc5848a3e`
    - source cleanup remained deferred, manual, and explicit
-5. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.
+3. The next prepared scale-up is a clean mixed batch:
+   - plan file: `out/rehome-plan-pool-data-to-media-mixed4.json`
+   - dry-run already passed
+   - live command: `hashall rehome apply out/rehome-plan-pool-data-to-media-mixed4.json --force`
+4. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.

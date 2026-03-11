@@ -128,3 +128,38 @@ Latest repair/handoff note (2026-03-10):
   - changing only those six directories to owner `1026:101` was sufficient for qB to fetch the sidecars and recover all six torrents
 - Separate repo issue is no longer open:
   - commit `74ea2b5` fixed `hashall payload siblings` to open catalogs read-only
+
+Latest rehome pilot note (2026-03-11):
+
+- `hashall` is now `0.4.171`.
+- Commit `4fd8781` fixed catalog catch-up for already-repointed cross-device `REUSE` reruns:
+  - executor now detects `rehome_reconcile_only` after offline verify when qB is already on the target save paths
+  - relocation validate/patch are skipped
+  - catalog sync still runs and updates target `payloads` rows plus `torrent_instances`
+- Commit `310b136` fixed patch-mode orchestration for non-reconcile `MOVE`:
+  - `rehome apply` now explicitly stops qB before patch-mode validate
+  - this removes the false `torrent_not_stopped` blocker after successful copy + offline verify
+- Live `REUSE` pilot success:
+  - `The.West.Wing.S07...`
+  - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-155600-8277eae774b3591b/`
+  - all `3` siblings offline-verified `exact_tree`
+  - qB ended `stalledUP 100%` on `/pool/media/...`
+  - catalog now points all `3` torrents at device `141` / target save paths
+- Live `MOVE` pilot success:
+  - `Megalopolis.2024.REPACK...`
+  - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-173250-692ffa9407a574f4/`
+  - copy completed from `/pool/data/...` to `/pool/media/...`
+  - all `3` sibling views offline-verified `exact_tree`
+  - qB ended `stalledUP 100%` on the target save paths
+  - source cleanup remained deferred/manual
+- Refresh / qB baseline after the repair lane clear:
+  - `hashall refresh --verbose` returned `OK`
+  - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` returned `0`
+- Next prepared scale-up:
+  - plan file: `out/rehome-plan-pool-data-to-media-mixed4.json`
+  - dry-run already completed cleanly
+  - contents:
+    - `REUSE`: `Shining.Girls...` (`3` torrents)
+    - `REUSE`: `Longlegs...` (`9` torrents)
+    - `MOVE`: `Brave.New.World.US.S01...` (`4` torrents)
+    - `MOVE`: `Greenland.2020.Repack...` (`8` torrents)
