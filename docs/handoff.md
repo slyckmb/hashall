@@ -42,6 +42,10 @@
   - small live `rehome` pilots are now green on both major paths:
     - `REUSE`: `The.West.Wing.S07...` cross-device reuse group completed and catalog-synced on rerun via `rehome_reconcile_only`
     - `MOVE`: `Megalopolis.2024.REPACK...` moved from `/pool/data/...` to `/pool/media/...`, verified `exact_tree`, patched, resumed, and left source cleanup deferred
+  - mixed-state reruns are now handled safely:
+    - commit `85b91af` added partial reconcile support for batches where some rows are already repointed and verified while others were skipped
+    - post-patch save-path verification now ignores rows that were not actually patched
+    - this unblocked the live `Longlegs` mixed-batch rerun
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
   - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`
@@ -90,19 +94,27 @@
      - `4da8ec78... -> payload_id 9704, device_id 141, save_path /pool/media/.../PrivateHD`
      - `6befda30... -> payload_id 13557, device_id 141, save_path /pool/media/.../_rehome-unique/...`
    - source removal stayed deferred and manual
-7. The next prepared live scale-up is:
-   - plan file: `out/rehome-plan-pool-data-to-media-mixed4.json`
-   - contents:
-     - `REUSE`: `Shining.Girls...` (`3` torrents)
-     - `REUSE`: `Longlegs...` (`9` torrents)
-     - `MOVE`: `Brave.New.World.US.S01...` (`4` torrents, `22.62 GiB`)
-     - `MOVE`: `Greenland.2020.Repack...` (`8` torrents, `34.18 GiB`)
-   - dry-run already completed cleanly:
-     - `hashall rehome apply out/rehome-plan-pool-data-to-media-mixed4.json --dryrun`
-   - next live command:
-     - `hashall rehome apply out/rehome-plan-pool-data-to-media-mixed4.json --force`
-8. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
-9. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
+7. The first mixed live scale-up is now green in curated form:
+   - bad candidate excluded:
+     - `Shining.Girls...` REUSE group from `mixed4`
+     - reason: all `3` rows failed destination offline verify as `partial_match`, so this is a real bad reuse candidate, not a planner-only false positive
+   - successful batch plan:
+     - `out/rehome-plan-pool-data-to-media-mixed3-no-shining.json`
+   - successful live results:
+     - `Longlegs...` REUSE completed via `rehome_reconcile_subset`
+       - `8` rows reconciled cleanly on `/pool/media/...`
+       - `1` `dest_missing` row was left untouched on `/pool/data/...`
+       - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-180840-a1041c6049c66abe/`
+     - `Brave.New.World.US.S01...` MOVE completed successfully
+       - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-182010-66eebb2df636b12a/`
+       - all `4` torrents ended `stalledUP 100%` on `/pool/media/...`
+     - `Greenland.2020.Repack...` MOVE completed successfully
+       - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-183147-adf55dffe6443f6a/`
+       - all `8` torrents ended `stalledUP 100%` on `/pool/media/...`
+   - source cleanup remained deferred/manual for all three payload groups
+8. The next live scale-up should start from a new curated batch built from the remaining clean candidates, explicitly excluding the bad `Shining.Girls` reuse group and the known skipped `Longlegs` row.
+9. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
+10. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 
 ## Key Logs
 

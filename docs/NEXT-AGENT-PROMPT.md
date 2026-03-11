@@ -66,10 +66,17 @@ Prompt-critical context (2026-03-11):
       - rerun path uses `rehome_reconcile_only` to catalog-sync already-repointed rows
     - `MOVE`: `Megalopolis.2024.REPACK...`
       - executor now explicitly stops qB before patch-mode validate
-  - next prepared live scale-up:
-    - `out/rehome-plan-pool-data-to-media-mixed4.json`
-    - includes `Shining.Girls`, `Longlegs`, `Brave.New.World.US.S01`, and `Greenland.2020.Repack`
-    - dry-run already passed
+  - mixed-state reruns are now supported by commit `85b91af`:
+    - post-patch verification ignores unpatched rows
+    - `rehome_reconcile_subset` can catalog-sync the already-good subset of a mixed batch
+  - first curated mixed batch is now green:
+    - `Longlegs...` REUSE completed via `rehome_reconcile_subset`
+    - `Brave.New.World.US.S01...` MOVE completed successfully
+    - `Greenland.2020.Repack...` MOVE completed successfully
+  - one real bad reuse candidate is now known and should be excluded:
+    - `Shining.Girls...` REUSE group from `mixed4`
+    - all three rows failed destination offline verify as `partial_match`
+  - do not rerun `mixed4`; build the next curated batch from the remaining clean candidates
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

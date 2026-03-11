@@ -19,9 +19,13 @@ If context is compacted, recover with this sequence:
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
    - `hashall` semver is `0.4.171`
-   - single-plan live pilots are now green on both major paths:
+   - single-plan live pilots are green on both major paths:
      - `REUSE`: `The.West.Wing.S07...`
      - `MOVE`: `Megalopolis.2024.REPACK...`
+   - first curated mixed batch is also green:
+     - `Longlegs...` REUSE via `rehome_reconcile_subset`
+     - `Brave.New.World.US.S01...` MOVE
+     - `Greenland.2020.Repack...` MOVE
 4. Preserve and remediate known drift:
    - `payloads`/`torrent_instances` rows with missing or stale `device_id` values.
    - parked negative `device_id` row in `devices`.
@@ -57,12 +61,12 @@ If context is compacted, recover with this sequence:
    - use it before any mass remediation of qB `missingFiles` items
 12. First thing to do after compact if the task continues:
    - do not resume the old stale-root remediation or stoppedDL repair lanes; they are already clear
-   - start from the successful single-plan rehome pilots:
-     - `REUSE`: `~/.logs/hashall/reports/rehome-relocate/20260311-155600-8277eae774b3591b/`
-     - `MOVE`: `~/.logs/hashall/reports/rehome-relocate/20260311-173250-692ffa9407a574f4/`
-   - then continue with the prepared mixed batch:
-     - `out/rehome-plan-pool-data-to-media-mixed4.json`
-     - `hashall rehome apply out/rehome-plan-pool-data-to-media-mixed4.json --force`
+   - start from the latest successful mixed-batch artifacts:
+     - `REUSE subset`: `~/.logs/hashall/reports/rehome-relocate/20260311-180840-a1041c6049c66abe/`
+     - `MOVE`: `~/.logs/hashall/reports/rehome-relocate/20260311-182010-66eebb2df636b12a/`
+     - `MOVE`: `~/.logs/hashall/reports/rehome-relocate/20260311-183147-adf55dffe6443f6a/`
+   - exclude the bad `Shining.Girls` reuse group from future batches
+   - generate the next curated batch from the remaining clean candidates rather than rerunning `mixed4`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

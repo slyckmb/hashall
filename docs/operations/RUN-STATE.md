@@ -16,6 +16,10 @@ Last updated: 2026-03-11
   - if qB is already on the target save paths and offline verify passes, `rehome apply` logs `rehome_reconcile_only`
   - relocation validate/patch are skipped
   - catalog sync still runs and updates `torrent_instances` / target payload rows
+- Mixed-state REUSE reruns now have a partial-reconcile path:
+  - if a batch contains a subset of rows already repointed and verified, `rehome apply` logs `rehome_reconcile_subset`
+  - the good subset is reconciled into the catalog
+  - skipped/bad rows are left untouched instead of aborting the whole batch
 - Non-reconcile `MOVE` runs now stop qB before patch-mode validate:
   - this avoids false `torrent_not_stopped` blocks after a successful copy + offline verify
   - the `Megalopolis.2024.REPACK...` live `MOVE` pilot proved this path on 2026-03-11
@@ -71,10 +75,10 @@ Last updated: 2026-03-11
 
 ## Known Gaps
 
-1. Shared-root payload groups can now be planned; the new execution path has proven single-plan REUSE and MOVE, but not yet a larger mixed batch or a live `2-to-1 -> 2-to-2` case.
+1. Shared-root payload groups can now be planned; the new execution path has now proven both single-plan pilots and a curated mixed batch, but not yet a live `2-to-1 -> 2-to-2` case.
 2. `rehome auto` still favors donor-backed MOVE discovery and does not replace `rehome relocate-plan` for explicit root-to-root cases.
 3. Cleanup/canonical-root accounting should continue to dedupe by payload root, not by torrent hash.
-4. The next live gap is scaling from single-plan pilots to a mixed-batch live run.
+4. The next live gap is scaling from the first successful curated mixed batch to another curated batch from the remaining clean candidates.
 5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
 
 ## Logs to Watch
@@ -101,8 +105,15 @@ Last updated: 2026-03-11
      - `/pool/media/torrents/seeding/cross-seed/PrivateHD`
      - `/pool/media/torrents/seeding/_rehome-unique/6befda30838dbbee444769501bece3fdc5848a3e`
    - source cleanup remained deferred, manual, and explicit
-3. The next prepared scale-up is a clean mixed batch:
-   - plan file: `out/rehome-plan-pool-data-to-media-mixed4.json`
-   - dry-run already passed
-   - live command: `hashall rehome apply out/rehome-plan-pool-data-to-media-mixed4.json --force`
+3. First mixed-batch scale-up is now proven:
+   - `mixed4` exposed a real bad REUSE candidate:
+     - `Shining.Girls...` (`3` torrents) failed destination offline verify as `partial_match`
+     - it is now an explicit exclusion, not a planner bug
+   - curated replacement batch:
+     - `out/rehome-plan-pool-data-to-media-mixed3-no-shining.json`
+   - successful results:
+     - `Longlegs...` REUSE completed via `rehome_reconcile_subset` with `8` good rows reconciled and `1` skipped `dest_missing` row left alone
+     - `Brave.New.World.US.S01...` MOVE completed successfully
+     - `Greenland.2020.Repack...` MOVE completed successfully
+   - qB now shows all affected `Brave New World` and `Greenland` torrents as `stalledUP 100%` on `/pool/media/...`
 4. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.

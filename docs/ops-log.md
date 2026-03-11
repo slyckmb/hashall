@@ -163,3 +163,27 @@ Latest rehome pilot note (2026-03-11):
     - `REUSE`: `Longlegs...` (`9` torrents)
     - `MOVE`: `Brave.New.World.US.S01...` (`4` torrents)
     - `MOVE`: `Greenland.2020.Repack...` (`8` torrents)
+
+Latest mixed-batch note (2026-03-11):
+
+- Commit `85b91af` fixed mixed-state rehome reruns:
+  - post-patch save-path verification now ignores rows that were not actually patched
+  - executor now supports `rehome_reconcile_subset` for batches where some rows are already repointed and verified while others were skipped
+- `mixed4` surfaced one real bad candidate:
+  - `Shining.Girls...` REUSE group (`0fff0ce2...`, `4511c5f4...`, `57316294...`)
+  - all `3` rows failed destination offline verify as `partial_match`
+  - this group should be excluded from future reuse batches until separately investigated/repaired
+- Curated replacement batch:
+  - `out/rehome-plan-pool-data-to-media-mixed3-no-shining.json`
+- Live `mixed3` results:
+  - `Longlegs...` REUSE:
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-180840-a1041c6049c66abe/`
+    - `8` rows were already repointed/verified and reconciled via `rehome_reconcile_subset`
+    - `1` row (`3a9b02d88bbecd94...`) remained `dest_missing` and was intentionally left on `/pool/data/...`
+  - `Brave.New.World.US.S01...` MOVE:
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-182010-66eebb2df636b12a/`
+    - all `4` torrents ended `stalledUP 100%` on `/pool/media/...`
+  - `Greenland.2020.Repack...` MOVE:
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-183147-adf55dffe6443f6a/`
+    - all `8` torrents ended `stalledUP 100%` on `/pool/media/...`
+- Cleanup remained deferred/manual for all three successful payload groups.
