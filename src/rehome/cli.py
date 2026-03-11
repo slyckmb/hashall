@@ -13,6 +13,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import rehome
 from rehome import executor as rehome_executor
@@ -34,6 +35,31 @@ DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
 def _debug_enabled() -> bool:
     return os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_device_alias_read_only(catalog_path: Path, value: str) -> int:
+    """Resolve a device alias using a dedicated immutable read-only catalog handle."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+
+    catalog_uri = f"file:{quote(str(catalog_path.expanduser().resolve()), safe='/')}?mode=ro&immutable=1"
+    conn = sqlite3.connect(catalog_uri, uri=True)
+    try:
+        row = conn.execute(
+            "SELECT device_id FROM devices WHERE device_alias = ?",
+            (str(value),),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row:
+        return int(row[0])
+    raise ValueError(
+        f"No device found with alias {value!r}. "
+        "Run 'make devices' to list registered devices and their aliases."
+    )
 
 
 def _print_post_apply_summary(executor: "DemotionExecutor", plans: list) -> bool:
@@ -1263,14 +1289,8 @@ def relocate_plan_cmd(
     catalog_path = Path(catalog)
 
     try:
-        from hashall.model import connect_db
-        from hashall.device import resolve_device_id
-        _resolve_conn = connect_db(catalog_path, read_only=True, apply_migrations=False)
-        try:
-            source_device = resolve_device_id(_resolve_conn, source_device)
-            target_device = resolve_device_id(_resolve_conn, target_device)
-        finally:
-            _resolve_conn.close()
+        source_device = _resolve_device_alias_read_only(catalog_path, source_device)
+        target_device = _resolve_device_alias_read_only(catalog_path, target_device)
     except ValueError as e:
         click.echo(f"❌ {e}", err=True)
         raise click.Abort()
