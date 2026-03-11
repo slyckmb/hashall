@@ -1025,6 +1025,50 @@ def test_verify_and_validate_allow_reused_existing_destination_rows(tmp_path):
     assert "torrent_not_complete" not in row["issues"]
 
 
+def test_validate_allows_already_repointed_rows_when_source_content_differs(tmp_path):
+    torrent_hash = "repointed123def456abc123def456abc123def"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["verified"] = True
+    row["verify_status"] = "verified"
+    row["old_save_path"] = row["new_save_path"]
+    row["old_qbt_save_path"] = row["new_save_path"]
+    row["state"] = "stoppedUP"
+    row["progress"] = 1.0
+    manifest_path = tmp_path / "validate-repointed.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["new_save_path"],
+                row["dest_content_path"],
+                state="stoppedUP",
+                progress=1.0,
+            )
+        }
+    )
+    tool = QBZFSRelocationTool(qb_client=client, runner=FakeRunner(), verifier=FakeVerifier())
+
+    validate_rc = tool.validate(
+        manifest_path=manifest_path,
+        allow_partials=False,
+        for_patch=False,
+        journal_path=None,
+        require_stopped_qb=False,
+        require_torrents_stopped=False,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    assert validate_rc == 0
+    assert "source_and_destination_paths_identical" not in row["issues"]
+    assert row["actionable"] is True
+
+
 def test_verify_emits_progress_events_and_requests_show_progress(tmp_path, capsys):
     torrent_hash = "verifyprogress"
     row = _manifest_row(tmp_path, torrent_hash)

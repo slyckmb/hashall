@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.9"
+SCRIPT_VERSION = "0.1.10"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -1806,6 +1806,7 @@ class QBZFSRelocationTool:
             torrent_path = Path(str(row.get("torrent_path") or ""))
             fastresume_path = Path(str(row.get("fastresume_path") or ""))
             dest_content = Path(str(row.get("dest_content_path") or ""))
+            source_content = Path(str(row.get("content_path") or ""))
             new_save_path = str(row.get("new_save_path") or "")
             old_save_path = str(row.get("old_save_path") or "")
             if not torrent_path.exists():
@@ -1822,7 +1823,13 @@ class QBZFSRelocationTool:
                 except Exception:
                     issues.append("destination_path_not_absolute")
             if old_save_path and new_save_path and normalize_save_path(old_save_path) == normalize_save_path(new_save_path):
-                issues.append("source_and_destination_paths_identical")
+                same_content_path = False
+                try:
+                    same_content_path = source_content == dest_content
+                except Exception:
+                    same_content_path = False
+                if same_content_path:
+                    issues.append("source_and_destination_paths_identical")
             if not bool(row.get("path_shape_match")):
                 issues.append("path_shape_mismatch")
             if not bool(row.get("verified")):

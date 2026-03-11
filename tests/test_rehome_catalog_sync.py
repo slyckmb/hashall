@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from hashall.device import ensure_files_table
 from hashall.fastresume import bencode
 from hashall.qbittorrent import QBitFile
-from rehome.executor import DemotionExecutor
+from rehome.executor import DemotionExecutor, TargetDonor
 
 
 class FakeQbitClient:
@@ -81,6 +81,112 @@ class FakeQbitClientSelective(FakeQbitClient):
     def get_torrent_files(self, torrent_hash: str):
         self.files_calls.append(torrent_hash)
         return list(self._files_by_hash.get(torrent_hash, []))
+
+
+def test_hardened_fastresume_reconcile_only_skips_validate_and_patch(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "rows": [
+            {
+                "hash": "hash-a",
+                "selected": True,
+                "state": "stalledUP",
+                "verified": False,
+                "old_save_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+                "new_save_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+                "content_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)/The.West.Wing.S07",
+                "dest_content_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)/The.West.Wing.S07",
+            },
+            {
+                "hash": "hash-b",
+                "selected": True,
+                "state": "stoppedUP",
+                "verified": False,
+                "old_save_path": "/pool/media/torrents/seeding/cross-seed/TorrentLeech",
+                "new_save_path": "/pool/media/torrents/seeding/cross-seed/TorrentLeech",
+                "content_path": "/pool/media/torrents/seeding/cross-seed/TorrentLeech/The.West.Wing.S07",
+                "dest_content_path": "/pool/media/torrents/seeding/cross-seed/TorrentLeech/The.West.Wing.S07",
+            },
+        ]
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest))
+
+    class FakeRelocationTool:
+        def __init__(self, path: Path):
+            self.path = path
+            self.validate_calls = 0
+            self.patch_calls = 0
+
+        def _load_manifest(self, path: Path):
+            return __import__("json").loads(Path(path).read_text())
+
+        def _checkpoint_manifest(self, path: Path, manifest):
+            Path(path).write_text(__import__("json").dumps(manifest))
+
+        def _pause_selected(self, rows):
+            for row in rows:
+                row["state"] = "stoppedUP"
+
+        def _refresh_rows_from_qb(self, rows):
+            return None
+
+        def verify(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["verified"] = True
+                row["verify_status"] = "verified"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def validate(self, **kwargs):
+            self.validate_calls += 1
+            return 1
+
+        def patch(self, **kwargs):
+            self.patch_calls += 1
+            return 1
+
+    class ResumeTrackingClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__(default_path="/pool/media/torrents/seeding/cross-seed/Aither (API)")
+            self.resumed_hashes = []
+
+        def resume_torrent(self, torrent_hash: str) -> bool:
+            self.resumed_hashes.append(torrent_hash)
+            return True
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = ResumeTrackingClient()
+    relocation_tool = FakeRelocationTool(manifest_path)
+
+    monkeypatch.setattr(executor, "_relocation_artifact_dir", lambda plan: tmp_path)
+    monkeypatch.setattr(executor, "_build_hardened_relocation_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr(executor, "_build_qb_zfs_relocation_tool", lambda: relocation_tool)
+
+    plan = {"payload_hash": "payload-hash", "catalog_reconcile_only": False}
+    phase_times = executor._attach_torrents_via_hardened_fastresume(
+        plan,
+        TargetDonor(
+            source_path=tmp_path / "src",
+            target_path=tmp_path / "dst",
+            target_device_id=141,
+            acquisition_mode="reuse",
+        ),
+        relocations=[],
+    )
+
+    assert plan["catalog_reconcile_only"] is True
+    assert relocation_tool.validate_calls == 0
+    assert relocation_tool.patch_calls == 0
+    assert executor.qbit_client.resumed_hashes == ["hash-a"]
+    assert phase_times["validate"] == 0.0
+    assert phase_times["patch"] == 0.0
+    assert phase_times["post_patch"] == 0.0
+
+    updated = __import__("json").loads(manifest_path.read_text())
+    rows = {row["hash"]: row for row in updated["rows"]}
+    assert rows["hash-a"]["resume_status"] == "already_repointed"
+    assert rows["hash-b"]["resume_status"] == "already_repointed_kept_paused"
 
 
 def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
@@ -793,6 +899,176 @@ def test_reuse_same_device_without_target_payload_row_repoints_source_payload(tm
 
     assert payload10 == (str(target_file),)
     assert torrent_row == (10, 44, str(target_file.parent))
+
+
+def test_reuse_cross_device_without_target_payload_row_creates_target_payload(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_mount = tmp_path / "pool" / "data"
+    target_mount = tmp_path / "pool" / "media"
+    source_file = source_mount / "cross-seed" / "TorrentLeech" / "Show.S01.mkv"
+    target_file = target_mount / "cross-seed" / "Aither (API)" / "Show.S01.mkv"
+
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    payload_bytes = b"show-bytes"
+    source_file.write_bytes(payload_bytes)
+    target_file.write_bytes(payload_bytes)
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            mount_point TEXT,
+            preferred_mount_point TEXT
+        );
+
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT NOT NULL,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'incomplete',
+            last_built_at REAL,
+            updated_at REAL
+        );
+
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            device_id INTEGER,
+            save_path TEXT,
+            root_name TEXT,
+            category TEXT,
+            tags TEXT,
+            last_seen_at REAL,
+            FOREIGN KEY (payload_id) REFERENCES payloads(payload_id)
+        );
+        """
+    )
+
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-231", 231, str(source_mount), str(source_mount)),
+    )
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-141", 141, str(target_mount), str(target_mount)),
+    )
+
+    cur = conn.cursor()
+    ensure_files_table(cur, 231)
+    ensure_files_table(cur, 141)
+
+    source_rel = str(source_file.relative_to(source_mount))
+    target_rel = str(target_file.relative_to(target_mount))
+    conn.execute(
+        """
+        INSERT INTO files_231
+            (path, size, mtime, quick_hash, sha1, sha256, hash_source, inode, status, discovered_under)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        """,
+        (
+            source_rel,
+            len(payload_bytes),
+            111.0,
+            "qh-src",
+            "sha1-src",
+            "sha256-same",
+            "calculated",
+            1001,
+            str(source_file.parent),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO files_141
+            (path, size, mtime, quick_hash, sha1, sha256, hash_source, inode, status, discovered_under)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        """,
+        (
+            target_rel,
+            len(payload_bytes),
+            222.0,
+            "qh-dst",
+            "sha1-dst",
+            "sha256-same",
+            "calculated",
+            2002,
+            str(target_file.parent),
+        ),
+    )
+
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at)
+        VALUES (10, 'payload_hash_cross_missing_target', 231, ?, 1, ?, 'complete', 123.0)
+        """,
+        (str(source_file), len(payload_bytes)),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+        VALUES ('tor_cross_missing_target', 10, 231, ?, ?)
+        """,
+        (str(source_file.parent), source_file.name),
+    )
+    conn.commit()
+    conn.close()
+
+    plan = {
+        "version": "1.0",
+        "direction": "demote",
+        "decision": "REUSE",
+        "torrent_hash": "tor_cross_missing_target",
+        "payload_id": 10,
+        "payload_hash": "payload_hash_cross_missing_target",
+        "affected_torrents": ["tor_cross_missing_target"],
+        "source_path": str(source_file),
+        "target_path": str(target_file),
+        "source_device_id": 231,
+        "target_device_id": 141,
+        "file_count": 1,
+        "total_bytes": len(payload_bytes),
+        "seeding_roots": [str(source_mount), str(target_mount)],
+        "payload_group": [
+            {"root_path": str(source_file), "file_count": 1, "total_bytes": len(payload_bytes)},
+            {"root_path": str(target_file), "file_count": 1, "total_bytes": len(payload_bytes)},
+        ],
+    }
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
+    executor.qbit_client = FakeQbitClient(default_path=str(source_file.parent))
+    executor.execute(plan, cleanup_duplicate_payload=False)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        payload_rows = conn.execute(
+            """
+            SELECT payload_id, device_id, root_path, file_count, total_bytes, status, last_built_at
+            FROM payloads
+            WHERE payload_hash = 'payload_hash_cross_missing_target'
+            ORDER BY payload_id
+            """
+        ).fetchall()
+        torrent_row = conn.execute(
+            """
+            SELECT payload_id, device_id, save_path
+            FROM torrent_instances
+            WHERE torrent_hash = 'tor_cross_missing_target'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert len(payload_rows) == 2
+    assert payload_rows[0] == (10, 231, str(source_file), 1, len(payload_bytes), "complete", 123.0)
+    assert payload_rows[1][1:] == (141, str(target_file), 1, len(payload_bytes), "complete", 123.0)
+    assert torrent_row == (payload_rows[1][0], 141, str(target_file.parent))
 
 
 def test_build_views_skips_duplicate_target_entries(tmp_path):

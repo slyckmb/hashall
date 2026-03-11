@@ -6,10 +6,10 @@
   - entrypoint: `bin/qb-zfs-relocate.py`
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
-  - current script semver: `v0.1.9`
+  - current script semver: `v0.1.10`
   - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
-- `hashall` package semver is now `0.4.168`.
+- `hashall` package semver is now `0.4.170`.
 - `qb-repair-payload-group.sh` was hardened in commit `5d83419`:
   - wrapper: `bin/qb-repair-payload-group.sh`
   - core module: `src/hashall/qb_repair_payload_group.py`
@@ -31,6 +31,11 @@
   - tests covering the merged path now pass locally:
     - `pytest tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py -q`
     - result: `47 passed`
+  - cross-device `REUSE` reruns now support catalog-only catch-up after successful live repoint:
+    - executor logs `rehome_reconcile_only`
+    - offline verify still runs
+    - validate/patch are skipped when qB is already on the target save paths
+    - catalog sync then updates the target `payloads` row and `torrent_instances`
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
   - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`
@@ -63,11 +68,16 @@
 3. `hashall payload siblings` read-only bug is fixed in commit `74ea2b5`.
 4. Re-run `hashall refresh --verbose` now that the stoppedDL lane is clear.
    - the last `PARTIAL` refresh was explained by the old stale-root `/pool/data/...` cohort, which has since been remediated
-5. Dry-run the new explicit planner:
-   - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding -o out/rehome-plan-pool-data-to-media.json`
-   - then `hashall rehome apply out/rehome-plan-pool-data-to-media.json --dryrun`
-6. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
-7. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
+5. The `West Wing S07` cross-device `REUSE` pilot is now green:
+   - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-155600-8277eae774b3591b/`
+   - all three siblings ended `stalledUP 100%` on `/pool/media/...`
+   - catalog now shows:
+     - `2d9004e9... -> payload_id 13703, device_id 141, save_path /pool/media/.../Aither (API)`
+     - `8bf2aec2... -> payload_id 13703, device_id 141, save_path /pool/media/.../TorrentLeech`
+     - `f18b8cd0... -> payload_id 13703, device_id 141, save_path /pool/media/.../_rehome-unique/...`
+6. Next live target should be a clean `MOVE` candidate that is not `The Immortality Seekers.epub`, which already proved a real source/torrent mismatch.
+7. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
+8. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 
 ## Key Logs
 

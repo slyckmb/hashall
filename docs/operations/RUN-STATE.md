@@ -1,6 +1,6 @@
 # Operational Run State
 
-Last updated: 2026-03-10
+Last updated: 2026-03-11
 
 ## Pool Migration Status
 
@@ -12,6 +12,10 @@ Last updated: 2026-03-10
   - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding`
   - shared-root sibling collisions are now surfaced and get synthesized unique destination views.
 - `rehome apply` now uses the hardened `qb-zfs-relocate` backend for donor verification, offline fastresume patching, restart checks, and deferred cleanup.
+- Cross-device `REUSE` reruns now have a catalog-reconcile path:
+  - if qB is already on the target save paths and offline verify passes, `rehome apply` logs `rehome_reconcile_only`
+  - relocation validate/patch are skipped
+  - catalog sync still runs and updates `torrent_instances` / target payload rows
 
 ## Current `MOVE` Risk
 
@@ -79,5 +83,10 @@ Last updated: 2026-03-10
 ## Immediate Checklist
 
 1. Re-run `hashall refresh --verbose` now that the stoppedDL lane is clear.
-2. Continue with explicit `rehome relocate-plan` / `rehome apply` pilots for root-to-root `MOVE`.
-3. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.
+2. The `West Wing S07` cross-device `REUSE` pilot is now proven end-to-end:
+   - offline verify passed for all three siblings
+   - `rehome_reconcile_only` fired on rerun
+   - qB stayed `stalledUP 100%` on `/pool/media/...`
+   - catalog now points all three torrents at device `141` / target save paths
+3. Continue with the next explicit `rehome relocate-plan` / `rehome apply` pilot for a clean `MOVE` candidate that is not the known-bad ebook mismatch.
+4. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.

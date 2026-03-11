@@ -10,7 +10,7 @@ import os
 import errno
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import json
 from datetime import datetime
 from urllib.parse import quote
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from hashall.device import ensure_files_table, get_files_table_name
-from hashall.fastresume import patch_fastresume_file
+from hashall.fastresume import normalize_save_path, patch_fastresume_file
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.qbittorrent import get_qbittorrent_client
 from hashall.payload import get_payload_file_rows
@@ -456,6 +456,8 @@ class DemotionExecutor:
         tool = self._build_qb_zfs_relocation_tool()
         manifest = tool._load_manifest(manifest_path)
         rows = row_selection(manifest["rows"])
+        for row in rows:
+            row["_pre_pause_state"] = str(row.get("state") or "")
         tool._pause_selected(rows)
         tool._refresh_rows_from_qb(rows)
         tool._checkpoint_manifest(manifest_path, manifest)
@@ -471,6 +473,20 @@ class DemotionExecutor:
         if verify_code != 0:
             raise RuntimeError(f"offline verify failed manifest={manifest_path}")
         phase_times["offline_verify"] = time.monotonic() - t0
+
+        manifest = tool._load_manifest(manifest_path)
+        rows = row_selection(manifest["rows"])
+        if self._hardened_manifest_is_reconcile_only(rows):
+            self._log(
+                f"rehome_reconcile_only manifest={manifest_path} rows={len(rows)}"
+            )
+            self._restore_reconcile_rows(rows)
+            tool._checkpoint_manifest(manifest_path, manifest)
+            plan["catalog_reconcile_only"] = True
+            phase_times["validate"] = 0.0
+            phase_times["patch"] = 0.0
+            phase_times["post_patch"] = 0.0
+            return phase_times
 
         t0 = time.monotonic()
         validate_code = tool.validate(
@@ -529,6 +545,42 @@ class DemotionExecutor:
             tool._checkpoint_manifest(manifest_path, manifest)
         phase_times["post_patch"] = time.monotonic() - t0
         return phase_times
+
+    @staticmethod
+    def _hardened_manifest_is_reconcile_only(rows: Sequence[Dict[str, object]]) -> bool:
+        if not rows:
+            return False
+        for row in rows:
+            if not bool(row.get("verified")):
+                return False
+            old_save_path = str(row.get("old_save_path") or "")
+            new_save_path = str(row.get("new_save_path") or "")
+            content_path = str(row.get("content_path") or "")
+            dest_content_path = str(row.get("dest_content_path") or "")
+            if not old_save_path or not new_save_path or not content_path or not dest_content_path:
+                return False
+            if normalize_save_path(old_save_path) != normalize_save_path(new_save_path):
+                return False
+            if canonicalize_path(Path(content_path).resolve()) != canonicalize_path(
+                Path(dest_content_path).resolve()
+            ):
+                return False
+        return True
+
+    def _restore_reconcile_rows(self, rows: Sequence[Dict[str, object]]) -> None:
+        for row in rows:
+            torrent_hash = str(row.get("hash") or "")
+            if not torrent_hash:
+                continue
+            previous_state = str(row.get("_pre_pause_state") or "").strip().lower()
+            if previous_state.startswith("stopped") or previous_state.startswith("paused"):
+                row["resume_status"] = "already_repointed_kept_paused"
+                continue
+            if not self.qbit_client.resume_torrent(torrent_hash):
+                raise RuntimeError(
+                    f"Failed to restore already-repointed torrent {torrent_hash[:16]} after verify"
+                )
+            row["resume_status"] = "already_repointed"
 
     def _is_under_roots(self, path: Path, roots: List[Path]) -> bool:
         """Check if a path is under any of the given roots."""
@@ -2586,7 +2638,75 @@ class DemotionExecutor:
                         target_payload_id = int(source_payload_row[0])
 
                 if target_payload_id is None:
-                    raise RuntimeError("Target payload not found for catalog sync")
+                    if plan.get("payload_id") is None:
+                        raise RuntimeError("Target payload not found for catalog sync")
+
+                    if payload_has_fs_uuid:
+                        source_payload_row = conn.execute(
+                            """
+                            SELECT payload_hash, file_count, total_bytes, status, last_built_at
+                            FROM payloads
+                            WHERE payload_id = ?
+                            LIMIT 1
+                            """,
+                            (int(plan.get("payload_id")),),
+                        ).fetchone()
+                    else:
+                        source_payload_row = conn.execute(
+                            """
+                            SELECT payload_hash, file_count, total_bytes, status, last_built_at
+                            FROM payloads
+                            WHERE payload_id = ?
+                            LIMIT 1
+                            """,
+                            (int(plan.get("payload_id")),),
+                        ).fetchone()
+
+                    if source_payload_row is None:
+                        raise RuntimeError("Target payload not found for catalog sync")
+
+                    source_payload_hash = str(source_payload_row[0] or plan.get("payload_hash") or "")
+                    source_file_count = int(source_payload_row[1] or plan.get("file_count") or 0)
+                    source_total_bytes = int(source_payload_row[2] or plan.get("total_bytes") or 0)
+                    source_status = str(source_payload_row[3] or "complete")
+                    source_last_built_at = source_payload_row[4]
+
+                    if payload_has_fs_uuid:
+                        cursor = conn.execute(
+                            """
+                            INSERT INTO payloads
+                                (payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status, last_built_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, julianday('now'))
+                            """,
+                            (
+                                source_payload_hash,
+                                target_device_id,
+                                target_fs_uuid,
+                                target_path,
+                                source_file_count,
+                                source_total_bytes,
+                                source_status,
+                                source_last_built_at,
+                            ),
+                        )
+                    else:
+                        cursor = conn.execute(
+                            """
+                            INSERT INTO payloads
+                                (payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, julianday('now'))
+                            """,
+                            (
+                                source_payload_hash,
+                                target_device_id,
+                                target_path,
+                                source_file_count,
+                                source_total_bytes,
+                                source_status,
+                                source_last_built_at,
+                            ),
+                        )
+                    target_payload_id = int(cursor.lastrowid)
 
                 plan["target_payload_id"] = target_payload_id
 
