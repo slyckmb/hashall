@@ -477,11 +477,31 @@ class DemotionExecutor:
 
         manifest = tool._load_manifest(manifest_path)
         rows = row_selection(manifest["rows"])
-        if self._hardened_manifest_is_reconcile_only(rows):
+        reconcile_hashes = self._hardened_manifest_reconcile_hashes(rows)
+        if reconcile_hashes and len(reconcile_hashes) == len(rows):
             self._log(
                 f"rehome_reconcile_only manifest={manifest_path} rows={len(rows)}"
             )
             self._restore_reconcile_rows(rows)
+            tool._checkpoint_manifest(manifest_path, manifest)
+            plan["catalog_reconcile_only"] = True
+            phase_times["validate"] = 0.0
+            phase_times["patch"] = 0.0
+            phase_times["post_patch"] = 0.0
+            return phase_times
+        if reconcile_hashes and all(
+            str(row.get("hash") or "") in reconcile_hashes or not bool(row.get("verified"))
+            for row in rows
+        ):
+            self._log(
+                "rehome_reconcile_subset "
+                f"manifest={manifest_path} rows={len(rows)} reconcile_rows={len(reconcile_hashes)}"
+            )
+            reconcile_rows = [
+                row for row in rows if str(row.get("hash") or "") in reconcile_hashes
+            ]
+            self._restore_reconcile_rows(reconcile_rows)
+            self._filter_plan_to_hashes(plan, reconcile_hashes)
             tool._checkpoint_manifest(manifest_path, manifest)
             plan["catalog_reconcile_only"] = True
             phase_times["validate"] = 0.0
@@ -536,6 +556,8 @@ class DemotionExecutor:
             tool._wait_for_qb_online()
             manifest = tool._load_manifest(manifest_path)
             for row in row_selection(manifest["rows"]):
+                if str(row.get("patch_status") or "") != "patched":
+                    continue
                 info = self.qbit_client.get_torrent_info(str(row.get("hash") or ""))
                 if info is None:
                     raise RuntimeError(f"qB info unavailable after patch for torrent {row['hash'][:16]}")
@@ -552,25 +574,39 @@ class DemotionExecutor:
         return phase_times
 
     @staticmethod
-    def _hardened_manifest_is_reconcile_only(rows: Sequence[Dict[str, object]]) -> bool:
-        if not rows:
-            return False
+    def _hardened_manifest_reconcile_hashes(rows: Sequence[Dict[str, object]]) -> set[str]:
+        reconcile_hashes: set[str] = set()
         for row in rows:
             if not bool(row.get("verified")):
-                return False
+                continue
             old_save_path = str(row.get("old_save_path") or "")
             new_save_path = str(row.get("new_save_path") or "")
             content_path = str(row.get("content_path") or "")
             dest_content_path = str(row.get("dest_content_path") or "")
             if not old_save_path or not new_save_path or not content_path or not dest_content_path:
-                return False
+                continue
             if normalize_save_path(old_save_path) != normalize_save_path(new_save_path):
-                return False
+                continue
             if canonicalize_path(Path(content_path).resolve()) != canonicalize_path(
                 Path(dest_content_path).resolve()
             ):
-                return False
-        return True
+                continue
+            reconcile_hashes.add(str(row.get("hash") or ""))
+        return reconcile_hashes
+
+    @staticmethod
+    def _filter_plan_to_hashes(plan: Dict[str, object], allowed_hashes: set[str]) -> None:
+        allowed = {str(h) for h in allowed_hashes}
+        affected = [h for h in plan.get("affected_torrents", []) if str(h) in allowed]
+        plan["affected_torrents"] = affected
+        if plan.get("torrent_hash") not in allowed and affected:
+            plan["torrent_hash"] = affected[0]
+        if plan.get("view_targets"):
+            plan["view_targets"] = [
+                target
+                for target in plan.get("view_targets", [])
+                if str(target.get("torrent_hash", "")) in allowed
+            ]
 
     def _restore_reconcile_rows(self, rows: Sequence[Dict[str, object]]) -> None:
         for row in rows:
