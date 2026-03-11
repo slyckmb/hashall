@@ -1428,7 +1428,7 @@ def payload_siblings(torrent_hash, db):
     from hashall.model import connect_db
     from hashall.payload import get_torrent_siblings, get_torrent_instance
 
-    conn = connect_db(Path(db))
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
 
     # Get siblings
     siblings = get_torrent_siblings(conn, torrent_hash)
