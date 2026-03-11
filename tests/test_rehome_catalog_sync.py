@@ -189,6 +189,114 @@ def test_hardened_fastresume_reconcile_only_skips_validate_and_patch(tmp_path, m
     assert rows["hash-b"]["resume_status"] == "already_repointed_kept_paused"
 
 
+def test_hardened_fastresume_stops_qb_before_validate_for_patch_mode(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "rows": [
+            {
+                "hash": "hash-a",
+                "selected": True,
+                "state": "stalledUP",
+                "verified": False,
+                "old_save_path": "/pool/data/media/torrents/seeding/cross-seed/Aither (API)",
+                "new_save_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+                "content_path": "/pool/data/media/torrents/seeding/cross-seed/Aither (API)/Megalopolis.mkv",
+                "dest_content_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)/Megalopolis.mkv",
+            }
+        ]
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest))
+
+    class FakeController:
+        def __init__(self):
+            self.running = True
+            self.stop_calls = 0
+
+        def is_stopped(self):
+            return not self.running
+
+        def stop(self):
+            self.stop_calls += 1
+            self.running = False
+
+        def start(self):
+            self.running = True
+
+    class FakeRelocationTool:
+        def __init__(self, path: Path):
+            self.path = path
+            self.controller = FakeController()
+            self.validate_kwargs = None
+            self.patch_calls = 0
+            self.resume_calls = 0
+
+        def _ensure_controller(self):
+            return self.controller
+
+        def _wait_for_qb_online(self):
+            return None
+
+        def _load_manifest(self, path: Path):
+            return __import__("json").loads(Path(path).read_text())
+
+        def _checkpoint_manifest(self, path: Path, manifest):
+            Path(path).write_text(__import__("json").dumps(manifest))
+
+        def _pause_selected(self, rows):
+            for row in rows:
+                row["state"] = "stoppedUP"
+
+        def _refresh_rows_from_qb(self, rows):
+            return None
+
+        def verify(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["verified"] = True
+                row["verify_status"] = "verified"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def validate(self, **kwargs):
+            self.validate_kwargs = kwargs
+            return 0
+
+        def patch(self, **kwargs):
+            self.patch_calls += 1
+            return 0
+
+        def resume(self, **kwargs):
+            self.resume_calls += 1
+            return 0
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClient(default_path="/pool/data/media/torrents/seeding/cross-seed/Aither (API)")
+    executor.resume_after_relocate = True
+    relocation_tool = FakeRelocationTool(manifest_path)
+
+    monkeypatch.setattr(executor, "_relocation_artifact_dir", lambda plan: tmp_path)
+    monkeypatch.setattr(executor, "_build_hardened_relocation_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr(executor, "_build_qb_zfs_relocation_tool", lambda: relocation_tool)
+
+    phase_times = executor._attach_torrents_via_hardened_fastresume(
+        {"payload_hash": "payload-hash"},
+        TargetDonor(
+            source_path=tmp_path / "src",
+            target_path=tmp_path / "dst",
+            target_device_id=141,
+            acquisition_mode="move",
+        ),
+        relocations=[],
+    )
+
+    assert relocation_tool.controller.stop_calls == 1
+    assert relocation_tool.validate_kwargs["require_stopped_qb"] is True
+    assert relocation_tool.validate_kwargs["require_torrents_stopped"] is False
+    assert relocation_tool.patch_calls == 1
+    assert relocation_tool.resume_calls == 1
+    assert phase_times["validate"] >= 0.0
+
+
 def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
     db_path = tmp_path / "catalog.db"
     stash_mount = tmp_path / "stash" / "media"

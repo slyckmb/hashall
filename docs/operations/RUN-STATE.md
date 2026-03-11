@@ -16,6 +16,9 @@ Last updated: 2026-03-11
   - if qB is already on the target save paths and offline verify passes, `rehome apply` logs `rehome_reconcile_only`
   - relocation validate/patch are skipped
   - catalog sync still runs and updates `torrent_instances` / target payload rows
+- Non-reconcile `MOVE` runs now stop qB before patch-mode validate:
+  - this avoids false `torrent_not_stopped` blocks after a successful copy + offline verify
+  - the `Megalopolis.2024.REPACK...` live `MOVE` pilot proved this path on 2026-03-11
 
 ## Current `MOVE` Risk
 
@@ -89,4 +92,14 @@ Last updated: 2026-03-11
    - qB stayed `stalledUP 100%` on `/pool/media/...`
    - catalog now points all three torrents at device `141` / target save paths
 3. Continue with the next explicit `rehome relocate-plan` / `rehome apply` pilot for a clean `MOVE` candidate that is not the known-bad ebook mismatch.
-4. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.
+4. The `Megalopolis.2024.REPACK...` live `MOVE` pilot is now green:
+   - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-173250-692ffa9407a574f4/`
+   - copy to `/pool/media/...` completed
+   - all three sibling views offline-verified `exact_tree`
+   - validate passed after explicit `qb_stop phase=validate reason=prepare_for_patch`
+   - qB ended `stalledUP 100%` on:
+     - `/pool/media/torrents/seeding/cross-seed/Aither (API)`
+     - `/pool/media/torrents/seeding/cross-seed/PrivateHD`
+     - `/pool/media/torrents/seeding/_rehome-unique/6befda30838dbbee444769501bece3fdc5848a3e`
+   - source cleanup remained deferred, manual, and explicit
+5. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.

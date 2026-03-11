@@ -29,6 +29,7 @@ from hashall.qb_zfs_relocate import (
     DockerQbController,
     QBZFSRelocationTool,
     build_manifest_for_relocations,
+    emit_log,
     row_selection,
     write_json,
 )
@@ -489,13 +490,17 @@ class DemotionExecutor:
             return phase_times
 
         t0 = time.monotonic()
+        controller = tool._ensure_controller()
+        if not controller.is_stopped():
+            emit_log("qb_stop", phase="validate", reason="prepare_for_patch")
+            controller.stop()
         validate_code = tool.validate(
             manifest_path=manifest_path,
             allow_partials=False,
             for_patch=True,
             journal_path=patch_journal_path,
-            require_stopped_qb=False,
-            require_torrents_stopped=True,
+            require_stopped_qb=True,
+            require_torrents_stopped=False,
         )
         if validate_code != 0:
             raise RuntimeError(f"rehome relocation validate failed manifest={manifest_path}")

@@ -6,10 +6,10 @@
   - entrypoint: `bin/qb-zfs-relocate.py`
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
-  - current script semver: `v0.1.10`
+  - current script semver: `v0.1.11`
   - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
-- `hashall` package semver is now `0.4.170`.
+- `hashall` package semver is now `0.4.171`.
 - `qb-repair-payload-group.sh` was hardened in commit `5d83419`:
   - wrapper: `bin/qb-repair-payload-group.sh`
   - core module: `src/hashall/qb_repair_payload_group.py`
@@ -36,6 +36,9 @@
     - offline verify still runs
     - validate/patch are skipped when qB is already on the target save paths
     - catalog sync then updates the target `payloads` row and `torrent_instances`
+  - non-reconcile `MOVE` runs now explicitly stop qB before patch-mode validate:
+    - this removes the false `torrent_not_stopped` blocker that appeared after successful copy + offline verify
+    - the live `Megalopolis.2024.REPACK...` pilot proved the corrected path
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
   - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`
@@ -75,9 +78,20 @@
      - `2d9004e9... -> payload_id 13703, device_id 141, save_path /pool/media/.../Aither (API)`
      - `8bf2aec2... -> payload_id 13703, device_id 141, save_path /pool/media/.../TorrentLeech`
      - `f18b8cd0... -> payload_id 13703, device_id 141, save_path /pool/media/.../_rehome-unique/...`
-6. Next live target should be a clean `MOVE` candidate that is not `The Immortality Seekers.epub`, which already proved a real source/torrent mismatch.
-7. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
-8. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
+6. The `Megalopolis.2024.REPACK...` `MOVE` pilot is now green:
+   - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-173250-692ffa9407a574f4/`
+   - all three sibling views verified `exact_tree`
+   - qB ended `stalledUP 100%` on the target roots
+   - catalog now shows:
+     - `14e3deab... -> payload_id 13557, device_id 141, save_path /pool/media/.../Aither (API)`
+     - `4da8ec78... -> payload_id 9704, device_id 141, save_path /pool/media/.../PrivateHD`
+     - `6befda30... -> payload_id 13557, device_id 141, save_path /pool/media/.../_rehome-unique/...`
+   - source removal stayed deferred and manual
+7. The next live scale-up can now be either:
+   - another small clean `MOVE` batch, or
+   - a mixed batch of known-good `REUSE` plus `MOVE` groups
+8. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
+9. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 
 ## Key Logs
 
