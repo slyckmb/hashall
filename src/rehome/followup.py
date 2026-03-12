@@ -205,6 +205,54 @@ def _load_cleanup_sources(rows: Iterable[sqlite3.Row], payload_hash: str) -> lis
     ]
 
 
+def _derive_target_root(row: sqlite3.Row, expected_save: str) -> str:
+    root_path = str(row["root_path"] or "").strip()
+    if not root_path or not expected_save:
+        return ""
+    root_name = Path(root_path).name
+    if not root_name:
+        return ""
+    return _normalize_path(str(Path(expected_save) / root_name))
+
+
+def _find_target_payload_row(
+    conn: sqlite3.Connection,
+    *,
+    payload_hash: str,
+    target_device: int,
+    target_root: str,
+) -> Optional[sqlite3.Row]:
+    if not payload_hash or not target_device or not target_root:
+        target_root = ""
+    exact = conn.execute(
+        """
+        SELECT payload_id, device_id, root_path, status
+        FROM payloads
+        WHERE payload_hash = ?
+          AND device_id = ?
+          AND root_path = ?
+          AND status = 'complete'
+        ORDER BY payload_id
+        LIMIT 1
+        """,
+        (payload_hash, target_device, target_root),
+    ).fetchone()
+    if exact:
+        return exact
+    return conn.execute(
+        """
+        SELECT payload_id, device_id, root_path, status
+        FROM payloads
+        WHERE payload_hash = ?
+          AND device_id = ?
+          AND status = 'complete'
+        ORDER BY payload_id
+        LIMIT 1
+        """,
+        (payload_hash, target_device),
+    ).fetchone()
+
+
 def _observe_cleanup_gate(
     *,
     qbit_client,
@@ -435,9 +483,10 @@ def run_followup(
                 (payload_hash,),
             ).fetchall()
             row_by_hash = {str(r["torrent_hash"]): r for r in db_rows}
+            candidate_rows = [row_by_hash[h] for h in candidate_hashes if h in row_by_hash]
 
             device_counts: dict[int, int] = {}
-            for row in db_rows:
+            for row in candidate_rows:
                 device_id = int(row["ti_device_id"] or 0)
                 device_counts[device_id] = device_counts.get(device_id, 0) + 1
             target_device = 0
@@ -501,10 +550,6 @@ def run_followup(
 
                 if str(row["status"] or "") != "complete":
                     db_reasons.append(f"payload_not_complete:{torrent_hash[:12]}")
-                if target_device and int(row["ti_device_id"] or 0) != target_device:
-                    db_reasons.append(f"torrent_device_not_target:{torrent_hash[:12]}")
-                if target_device and int(row["payload_device_id"] or 0) != target_device:
-                    db_reasons.append(f"payload_device_not_target:{torrent_hash[:12]}")
 
                 expected_save = _normalize_path(str(row["ti_save_path"] or ""))
                 expected_saves[torrent_hash] = expected_save
@@ -536,6 +581,58 @@ def run_followup(
                     info=info,
                     expected_save=expected_save,
                 )
+
+                reconciled_row = row
+                if target_device and gate.ok and (
+                    int(row["ti_device_id"] or 0) != target_device
+                    or int(row["payload_device_id"] or 0) != target_device
+                ):
+                    target_root = _derive_target_root(row, expected_save)
+                    target_payload = _find_target_payload_row(
+                        conn,
+                        payload_hash=payload_hash,
+                        target_device=target_device,
+                        target_root=target_root,
+                    )
+                    if target_payload:
+                        conn.execute(
+                            """
+                            UPDATE torrent_instances
+                            SET payload_id = ?,
+                                device_id = ?,
+                                save_path = ?,
+                                last_seen_at = CURRENT_TIMESTAMP
+                            WHERE torrent_hash = ?
+                            """,
+                            (
+                                int(target_payload["payload_id"] or 0),
+                                target_device,
+                                expected_save,
+                                torrent_hash,
+                            ),
+                        )
+                        reconciled_row = conn.execute(
+                            """
+                            SELECT ti.torrent_hash,
+                                   ti.device_id AS ti_device_id,
+                                   ti.save_path AS ti_save_path,
+                                   ti.tags AS ti_tags,
+                                   p.payload_id,
+                                   p.device_id AS payload_device_id,
+                                   p.root_path,
+                                   p.status
+                            FROM torrent_instances ti
+                            JOIN payloads p ON p.payload_id = ti.payload_id
+                            WHERE ti.torrent_hash = ?
+                            """,
+                            (torrent_hash,),
+                        ).fetchone() or row
+                        row_by_hash[torrent_hash] = reconciled_row
+
+                if target_device and int(reconciled_row["ti_device_id"] or 0) != target_device:
+                    db_reasons.append(f"torrent_device_not_target:{torrent_hash[:12]}")
+                if target_device and int(reconciled_row["payload_device_id"] or 0) != target_device:
+                    db_reasons.append(f"payload_device_not_target:{torrent_hash[:12]}")
                 qb_reasons.extend(gate.reasons)
                 qb_checks.append(gate.__dict__)
 
