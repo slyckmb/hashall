@@ -24,7 +24,7 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.179`.
+  - `hashall` version now `0.4.180`.
   - `rehome` now has a shared stale-assumption / reality layer:
     - module: `src/rehome/reality.py`
     - CLI: `hashall rehome drift-audit --plan <plan.json>`
@@ -36,6 +36,7 @@ Prompt-critical context (2026-03-12):
   - latest follow-up fix for that reality layer:
     - source-only `MOVE` rows are no longer mislabeled as `target_view_missing`
     - `qb-libtorrent-verify.py` now treats `exact_tree + verify_ratio=1.0 + no_recheck_transition + healthy upload state` as success
+    - post-apply target-side qB checking is now reported as `post_apply_settling` / `settling_after_apply`, not as a false blocked drift state
     - live proof: `David Khune - Wakanda - Native American Magic.epub` rerun succeeded at `~/.logs/hashall/reports/rehome-relocate/20260312-145812-6bb9bb5432f39cbb/`
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).

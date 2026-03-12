@@ -5,18 +5,19 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-12):
 
-- `hashall` is now `0.4.179`.
+- `hashall` is now `0.4.180`.
 - New 2026-03-12 verifier/reality note:
   - the `Wakanda` ebook false-negative was code, not bad content
   - direct source verify proved `exact_tree` with `verify_ratio=1.0`
   - the bug was that instant-complete rechecks could skip `checking_files`, leaving `verify_reason=no_recheck_transition`
   - `qb-libtorrent-verify.py` now promotes those healthy instant-complete results
   - `rehome` reality snapshots also now classify a normal source-only `MOVE` row as `source_only` instead of `target_view_missing`
+  - post-apply snapshots now classify healthy target-side qB checking as `post_apply_settling` / `settling_after_apply` instead of `blocked_qbit_transient`
   - successful live rerun:
     - `~/.logs/hashall/reports/rehome-relocate/20260312-145812-6bb9bb5432f39cbb/`
   - targeted validation:
     - `pytest tests/test_qb_libtorrent_verify.py tests/test_rehome_reality.py tests/test_rehome_qb_missing.py tests/test_rehome_followup.py tests/test_rehome_catalog_sync.py -q`
-    - result: `41 passed`
+    - result: `43 passed`
 - New shared reality/drift module:
   - `src/rehome/reality.py`
 - New proactive audit command:

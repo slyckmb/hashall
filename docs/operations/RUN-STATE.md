@@ -4,7 +4,7 @@ Last updated: 2026-03-12
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.4.179`.
+- `hashall` is now `0.4.180`.
 - `rehome` now has a shared live-reality snapshot layer in `src/rehome/reality.py`.
 - New proactive audit command:
   - `hashall rehome drift-audit --plan <plan.json> [--output <file>]`
@@ -19,6 +19,10 @@ Last updated: 2026-03-12
   - `qb-libtorrent-verify.py` now treats instant-complete `exact_tree` results as healthy when libtorrent jumps directly to `seeding`/`stalledUP` without a visible `checking_files` transition
   - this closed the false-negative exposed by `David Khune - Wakanda - Native American Magic.epub`
   - `rehome` reality snapshots now classify plain source-only `MOVE` rows as `source_only` rather than `target_view_missing`
+  - post-apply reality snapshots now downgrade short-lived target-side qB checking to:
+    - row classification: `post_apply_settling`
+    - group state: `settling_after_apply`
+  - that means a clean apply no longer writes a misleading `blocked_qbit_transient` post snapshot just because qB is briefly checking the newly patched target
   - the `Wakanda` rerun completed successfully at `~/.logs/hashall/reports/rehome-relocate/20260312-145812-6bb9bb5432f39cbb/`
 - Current group-state outputs include:
   - `ready_catalog_reconcile`
