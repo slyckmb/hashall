@@ -567,6 +567,7 @@ class DemotionExecutor:
                 qb_client=self.qbit_client,
                 catalog_path=self.catalog_path,
                 fastresume_dir=self.fastresume_dir,
+                phase=phase,
             )
         except Exception as exc:
             self._log(
@@ -575,7 +576,6 @@ class DemotionExecutor:
             )
             return None
 
-        snapshot["phase"] = phase
         if error:
             snapshot["error"] = str(error)
         snapshot_path = artifact_dir / f"reality-{phase}.json"

@@ -279,3 +279,91 @@ def test_build_plan_reality_snapshot_classifies_move_source_only(tmp_path):
 
     assert snapshot["group_state"] == "ready_repoint_or_reconcile"
     assert snapshot["rows"][0]["classification"] == "source_only"
+
+
+def test_build_plan_reality_snapshot_treats_post_apply_transient_as_settling(tmp_path):
+    source_root = tmp_path / "pool-data" / "cross-seed" / "Tracker" / "Movie.mkv"
+    target_root = tmp_path / "pool-media" / "cross-seed" / "Tracker" / "Movie.mkv"
+    source_root.parent.mkdir(parents=True, exist_ok=True)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    source_root.write_bytes(b"old")
+    target_root.write_bytes(b"new")
+
+    catalog = tmp_path / "catalog.db"
+    _make_catalog(catalog, payload_root=str(source_root), save_path=str(source_root.parent))
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(target_root.parent),
+        qbt_save_path=str(target_root.parent),
+    )
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="Movie.mkv",
+                state="checkingResumeData",
+                progress=0.0,
+                save_path=str(target_root.parent),
+                content_path=str(target_root),
+            )
+        ]
+    )
+
+    snapshot = build_plan_reality_snapshot(
+        plan=_make_plan(source_root, target_root),
+        qb_client=qb,
+        catalog_path=catalog,
+        fastresume_dir=fastresume_dir,
+        phase="post",
+    )
+
+    assert snapshot["group_state"] == "settling_after_apply"
+    assert snapshot["rows"][0]["classification"] == "post_apply_settling"
+
+
+def test_build_plan_reality_snapshot_keeps_preflight_transient_blocking(tmp_path):
+    source_root = tmp_path / "pool-data" / "cross-seed" / "Tracker" / "Movie.mkv"
+    target_root = tmp_path / "pool-media" / "cross-seed" / "Tracker" / "Movie.mkv"
+    source_root.parent.mkdir(parents=True, exist_ok=True)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    source_root.write_bytes(b"old")
+    target_root.write_bytes(b"new")
+
+    catalog = tmp_path / "catalog.db"
+    _make_catalog(catalog, payload_root=str(source_root), save_path=str(source_root.parent))
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(target_root.parent),
+        qbt_save_path=str(target_root.parent),
+    )
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="Movie.mkv",
+                state="checkingResumeData",
+                progress=0.0,
+                save_path=str(target_root.parent),
+                content_path=str(target_root),
+            )
+        ]
+    )
+
+    snapshot = build_plan_reality_snapshot(
+        plan=_make_plan(source_root, target_root),
+        qb_client=qb,
+        catalog_path=catalog,
+        fastresume_dir=fastresume_dir,
+        phase="pre",
+    )
+
+    assert snapshot["group_state"] == "blocked_qbit_transient"
+    assert snapshot["rows"][0]["classification"] == "qbit_transient"

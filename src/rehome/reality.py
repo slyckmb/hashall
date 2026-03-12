@@ -158,7 +158,7 @@ def _catalog_rows_by_hash(
         conn.close()
 
 
-def _classify_row(row: Dict[str, Any]) -> tuple[str, str, str]:
+def _classify_row(row: Dict[str, Any], *, phase: str = "pre") -> tuple[str, str, str]:
     qbit_state = str(row.get("qbit_state") or "").strip().lower()
     qbit_progress = float(row.get("qbit_progress") or 0.0)
     qbit_save = _normalize_path(row.get("qbit_save_path"))
@@ -185,6 +185,12 @@ def _classify_row(row: Dict[str, Any]) -> tuple[str, str, str]:
         )
 
     if any(marker in qbit_state for marker in TRANSIENT_STATE_MARKERS):
+        if phase == "post" and qbit_on_target and fr_on_target and target_exists:
+            return (
+                "post_apply_settling",
+                "qB is still settling on the already-repointed target view immediately after apply.",
+                "Wait for qB to finish its post-apply checks before treating this row as drift.",
+            )
         return (
             "qbit_transient",
             "qB is actively checking or moving this torrent right now, so its current state is still in flux.",
@@ -253,10 +259,17 @@ def _classify_row(row: Dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
-def _summarize_group(rows: List[Dict[str, Any]]) -> tuple[str, str]:
+def _summarize_group(rows: List[Dict[str, Any]], *, phase: str = "pre") -> tuple[str, str]:
     states = Counter(str(row.get("classification") or "") for row in rows)
     if not rows:
         return ("empty", "No rows were present in the reality snapshot.")
+    if phase == "post" and set(states).issubset(
+        {"aligned_target", "catalog_drift_already_targeted", "post_apply_settling"}
+    ):
+        return (
+            "settling_after_apply",
+            "The group is already on the target and qB is only doing short post-apply checks.",
+        )
     if states.get("qbit_transient"):
         return (
             "blocked_qbit_transient",
@@ -308,6 +321,7 @@ def build_plan_reality_snapshot(
     qb_client: Any,
     catalog_path: Optional[Path] = None,
     fastresume_dir: Optional[Path] = None,
+    phase: str = "pre",
 ) -> Dict[str, Any]:
     affected = [
         str(torrent_hash or "").strip().lower()
@@ -373,16 +387,17 @@ def build_plan_reality_snapshot(
         }
         row.update(catalog_rows.get(torrent_hash, {}))
         row.update(_read_fastresume_fields(fastresume_dir, torrent_hash))
-        classification, operator_reason, operator_action = _classify_row(row)
+        classification, operator_reason, operator_action = _classify_row(row, phase=phase)
         row["classification"] = classification
         row["operator_reason"] = operator_reason
         row["operator_action"] = operator_action
         rows.append(row)
 
     summary_counts = Counter(str(row.get("classification") or "") for row in rows)
-    group_state, group_reason = _summarize_group(rows)
+    group_state, group_reason = _summarize_group(rows, phase=phase)
     return {
         "generated_at": _ts_iso(),
+        "phase": phase,
         "payload_hash": str(plan.get("payload_hash") or ""),
         "decision": str(plan.get("decision") or ""),
         "direction": str(plan.get("direction") or ""),
