@@ -8,7 +8,7 @@ Last updated: 2026-03-12
 - The current rsync-based donor transfer is still the data mover; qB is metadata-only.
 - `REUSE` continues in small batches; each apply must finish with `stoppedup`/`stalledup`, no new downloads, and clean cleanup messages.
 - `qb-zfs-relocate` has already proven the guarded live `pool-data -> pool-media` mover for pilot batches.
-- `qb-zfs-relocate` `v0.1.12` / `hashall 0.4.176` now include a live-proven fix for the `Mickey.17...` false-partial case:
+- `qb-zfs-relocate` `v0.1.13` / `hashall 0.4.177` now include a live-proven fix for the `Mickey.17...` false-partial case:
   - qB source recheck completion now requires a real transition into/out of `checking*`
   - verify retries one time when quick/exact evidence is clean but libtorrent transiently reports `partial_match` in `downloading*`
 - `rehome` now has an explicit root-to-root planner for this domain:
@@ -71,20 +71,21 @@ Last updated: 2026-03-12
   - interpretation: legacy stale-root drift, not current `qb-zfs-relocate` pilot mutations
 - That stale-root `missingFiles` lane has now been remediated live.
 - Current qB health snapshot:
-  - `stalledUP=5138`
-  - `uploading=7`
-  - `missingFiles=6`
+  - `stalledUP=5144`
+  - `uploading=1`
+  - `stoppedUP=6`
+  - `missingFiles=0`
   - no active `stoppedDL`
-  - no active `stoppedUP`
-- The current active qB problem lane is a new stale sibling-root drift cohort:
-  - the `6` `missingFiles` rows are now classified as `root_drift_to_surviving_sibling_target`
-  - affected payload groups:
-    - `Megalopolis...` (`4` hashes)
-    - `Cleverman.S02...` (`2` hashes)
-  - the healthy payload bytes still exist under newer `/pool/media/...` sibling target views
-  - the broken rows still point at dead old `/data == /stash` roots in both qB and `.fastresume`
-  - this is a historical sibling coverage / cleanup drift class, not a current fastresume corruption signal
-  - use `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/media/torrents/seeding` to confirm the live set
+- The 2026-03-12 stale sibling-root drift cohort is now remediated:
+  - original scope:
+    - `Megalopolis...` (`4`)
+    - `Cleverman.S02...` (`2`)
+  - new reconnect CLI:
+    - `hashall rehome qb-missing-remediate`
+  - live result:
+    - both payload groups were reattached successfully via guarded `REUSE`
+    - `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/media/torrents/seeding` now returns `0`
+  - the `6` current `stoppedUP` rows are the freshly reattached hashes intentionally kept paused after reconnect
 - `qb-start-seeding-gradual` halt at `2026-03-08 14:34` is explained historically:
   - `35` halted hashes were a direct subset of the old audited `49`
   - the daemon tripped on preexisting `missingFiles` rows in protected scope, not on a newly started torrent

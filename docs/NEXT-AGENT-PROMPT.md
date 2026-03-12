@@ -24,7 +24,7 @@ Prompt-critical context (2026-03-11):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.176`.
+  - `hashall` version now `0.4.177`.
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -51,10 +51,14 @@ Prompt-critical context (2026-03-11):
   - a new `hashall rehome qb-missing-audit` command classifies stale-root `missingFiles` cohorts; the current live cohort is `49` items, currently reported as `root_drift_fastresume_stale`.
   - `qb-start-seeding-gradual` halt set (`35` hashes) is a subset of that `49` cohort.
   - the old `/pool/data` stale-root lane has since been remediated live.
-  - current live qB non-healthy lane is now `6` `missingFiles` torrents on old `/data == /stash` roots:
-    - `Megalopolis...` (`4`)
-    - `Cleverman.S02...` (`2`)
-  - the updated audit classifies all `6` as `root_drift_to_surviving_sibling_target`.
+  - the former `/data == /stash` `missingFiles` lane is now fixed:
+    - new CLI: `hashall rehome qb-missing-remediate`
+    - live proofs:
+      - `Cleverman.S02...` (`2`)
+      - `Megalopolis...` (`4`)
+    - current qB state:
+      - `missingFiles=0`
+      - `stoppedUP=6` because the remediated hashes were intentionally kept paused
   - commit `5d83419` hardened `bin/qb-repair-payload-group.sh` into a backed-up, journaled Python path:
     - `src/hashall/qb_repair_payload_group.py`
     - script semver `0.2.0`

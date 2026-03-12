@@ -18,8 +18,8 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.176`
-   - `qb-zfs-relocate` semver is `0.1.12`
+   - `hashall` semver is `0.4.177`
+   - `qb-zfs-relocate` semver is `0.1.13`
    - single-plan live pilots are green on both major paths:
      - `REUSE`: `The.West.Wing.S07...`
      - `MOVE`: `Megalopolis.2024.REPACK...`
@@ -48,12 +48,13 @@ If context is compacted, recover with this sequence:
 9. qB relocation-specific current state:
    - direct `qb-zfs-relocate` pilots already proved the guarded backend earlier
    - the old `/pool/data -> /pool/media` stale-root and stoppedDL repair lanes are clear
-   - the current live qB problem lane is different:
-     - `6` `missingFiles` rows on old `/data == /stash` roots
-     - all classified as `root_drift_to_surviving_sibling_target`
-     - payload groups:
+   - the old `/data == /stash` sibling-root drift lane is now remediated live:
+     - `hashall rehome qb-missing-remediate` succeeded for:
        - `Megalopolis...` (`4`)
        - `Cleverman.S02...` (`2`)
+     - current qB state after that run:
+       - `missingFiles=0`
+       - `stoppedUP=6` (intentionally paused remediated hashes)
    - latest refresh returned `OK`
    - `hashall rehome qb-missing-audit ...` now returns `0`
    - current scale-up target is `rehome apply`, not direct `qb-zfs-relocate`
@@ -68,7 +69,7 @@ If context is compacted, recover with this sequence:
    - use it before any mass remediation of qB `missingFiles` items
 12. First thing to do after compact if the task continues:
    - do not resume the old `/pool/data` stale-root remediation or stoppedDL repair lanes; they are already clear
-   - do investigate/remediate the current `6` old `/data == /stash` sibling-root drift rows instead
+   - do not reopen the old `6` `/data == /stash` sibling-root drift lane; it is fixed
    - start from the latest successful mixed-batch artifacts:
      - `REUSE subset`: `~/.logs/hashall/reports/rehome-relocate/20260311-180840-a1041c6049c66abe/`
      - `MOVE`: `~/.logs/hashall/reports/rehome-relocate/20260311-182010-66eebb2df636b12a/`

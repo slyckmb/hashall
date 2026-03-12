@@ -122,6 +122,20 @@ Latest repair/handoff note (2026-03-10):
 Latest sibling-root drift note (2026-03-12):
 
 - `hashall` is now `0.4.176`.
+- `hashall` is now `0.4.177`.
+- New 2026-03-12 remediation/reconnect note:
+  - `hashall rehome qb-missing-remediate` now exists for stale sibling-root `missingFiles` rows
+  - it builds synthetic guarded `REUSE` plans against surviving `/pool/media/...` donor payloads
+  - it now handles:
+    - `root_drift_to_surviving_sibling_target`
+    - `root_drift_fastresume_stale` rows that still have healthy sibling donors
+  - live proof:
+    - `Cleverman.S02...` (`2` hashes) succeeded
+    - `Megalopolis...` (`4` hashes) succeeded
+  - post-run live state:
+    - `/data == /stash` stale-root audit returns `0`
+    - qB now shows `missingFiles=0`
+    - the six remediated hashes are `stoppedUP` by design
 - Current qB snapshot is:
   - `stalledUP=5138`
   - `uploading=7`

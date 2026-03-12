@@ -6,10 +6,22 @@
   - entrypoint: `bin/qb-zfs-relocate.py`
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
-  - current script semver: `v0.1.12`
+  - current script semver: `v0.1.13`
   - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
-- `hashall` package semver is now `0.4.176`.
+- `hashall` package semver is now `0.4.177`.
+- New direct stale-root reconnect command landed on 2026-03-12:
+  - CLI: `hashall rehome qb-missing-remediate`
+  - purpose: reconnect `missingFiles` torrents that still point at dead `/data == /stash` roots to already-healthy surviving sibling payloads under `/pool/media/...`
+  - live proof:
+    - `Cleverman.S02...` (`2` hashes) remediated successfully
+    - `Megalopolis...` (`4` hashes) remediated successfully
+  - current post-run qB snapshot:
+    - `stalledUP=5144`
+    - `uploading=1`
+    - `stoppedUP=6`
+    - `missingFiles=0`
+  - the `6` stoppedUP rows are the freshly reattached hashes left paused on purpose after reconnect
 - `qb-repair-payload-group.sh` was hardened in commit `5d83419`:
   - wrapper: `bin/qb-repair-payload-group.sh`
   - core module: `src/hashall/qb_repair_payload_group.py`
@@ -60,17 +72,16 @@
   - live proof on 2026-03-12:
     - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-111522-36390ecee324f1af/`
     - `Mickey.17.2025.1080p.iT.WEB-DL.DDP5.1.Atmos.H.264-BYNDR.mkv` completed `MOVE` successfully and ended `stoppedUP 100%` on `/pool/media/...`
-- A second stale-root drift class is now confirmed live on 2026-03-12:
-  - current qB snapshot is `stalledUP=5138`, `uploading=7`, `missingFiles=6`
-  - all `6` `missingFiles` rows are now classified by the updated audit as `root_drift_to_surviving_sibling_target`
-  - they are only two payload groups:
+- The 2026-03-12 stale sibling-root drift lane is now remediated live:
+  - original scope:
     - `Megalopolis...` (`4` hashes)
     - `Cleverman.S02...` (`2` hashes)
-  - common-English root cause:
-    - healthy sibling torrents for these payloads already exist on newer `/pool/media/...` target views
-    - these `6` hashes were left behind still pointing at old `/data == /stash` views
-    - the old stash/data files are now gone, so qB and `.fastresume` are looking in the wrong place
-  - this is not evidence of current fastresume scribbling; it is another older sibling-coverage / cleanup drift class
+  - root cause in plain English:
+    - healthy sibling torrents for those payloads already existed under newer `/pool/media/...` target views
+    - the stale hashes were left behind still pointing at dead old `/data == /stash` views in both qB and `.fastresume`
+  - live result:
+    - `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/media/torrents/seeding` now returns `0`
+    - qB no longer has an active `missingFiles` lane for this class
 - Follow-up cleanup is now hardened against creating more of this class:
   - cleanup now checks for any surviving same-`payload_hash` torrent refs that still point at non-target devices or old `/data`/`/stash` aliases
   - staged cleanup will stay blocked until those stale sibling refs are reconciled
