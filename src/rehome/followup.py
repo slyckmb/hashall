@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 import shutil
 import sqlite3
+import time
 from typing import Any, Dict, Iterable, Optional
 
 from hashall.qbittorrent import get_qbittorrent_client
@@ -16,6 +17,9 @@ VERIFY_PENDING_TAG = "rehome_verify_pending"
 VERIFY_OK_TAG = "rehome_verify_ok"
 VERIFY_FAILED_TAG = "rehome_verify_failed"
 CLEANUP_REQUIRED_TAG = "rehome_cleanup_source_required"
+DEFAULT_CLEANUP_OBSERVE_SECONDS = 60.0
+DEFAULT_CLEANUP_POLL_SECONDS = 5.0
+DEFAULT_CLEANUP_STAGE_DIRNAME = ".rehome-cleanup-stage"
 
 GOOD_STATES = {"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}
 TRANSIENT_REASONS = {
@@ -36,6 +40,16 @@ class TorrentGate:
     auto_tmm: Optional[bool]
     save_path: Optional[str]
     tags: Optional[str]
+
+
+@dataclass
+class CleanupSource:
+    payload_id: int
+    device_id: int
+    root_path: Path
+    file_count: int
+    total_bytes: int
+    stage_path: Path
 
 
 def _split_tags(raw: Optional[str]) -> set[str]:
@@ -104,6 +118,202 @@ def _delete_path(path: Path) -> None:
         path.unlink()
 
 
+def _path_stats(path: Path) -> dict[str, int | bool]:
+    target = Path(path)
+    if not target.exists():
+        return {"exists": False, "is_file": False, "file_count": 0, "total_bytes": 0}
+    if target.is_file():
+        return {
+            "exists": True,
+            "is_file": True,
+            "file_count": 1,
+            "total_bytes": int(target.stat().st_size),
+        }
+    file_count = 0
+    total_bytes = 0
+    for candidate in target.rglob("*"):
+        if not candidate.is_file():
+            continue
+        file_count += 1
+        total_bytes += int(candidate.stat().st_size)
+    return {
+        "exists": True,
+        "is_file": False,
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+    }
+
+
+def _format_stats(path: Path, stats: dict[str, int | bool], *, expected_count: int, expected_bytes: int) -> str:
+    return (
+        f"path={path} exists={str(bool(stats['exists'])).lower()} "
+        f"actual_files={int(stats['file_count'])} expected_files={int(expected_count)} "
+        f"actual_bytes={int(stats['total_bytes'])} expected_bytes={int(expected_bytes)}"
+    )
+
+
+def _build_torrent_gate(
+    *,
+    torrent_hash: str,
+    info: Any,
+    expected_save: str,
+) -> TorrentGate:
+    progress = float(getattr(info, "progress", 0.0))
+    state = str(getattr(info, "state", ""))
+    auto_tmm = bool(getattr(info, "auto_tmm", False))
+    save_path = _normalize_path(str(getattr(info, "save_path", "") or ""))
+    info_tags = str(getattr(info, "tags", "") or "")
+
+    reasons: list[str] = []
+    if progress < 0.9999:
+        reasons.append("progress_below_100")
+    state_reason = _state_reason(state)
+    if state_reason:
+        reasons.append(state_reason)
+    if auto_tmm:
+        reasons.append("auto_tmm_enabled")
+    if expected_save and save_path and expected_save != save_path:
+        reasons.append("save_path_mismatch")
+
+    return TorrentGate(
+        torrent_hash=torrent_hash,
+        ok=(len(reasons) == 0),
+        reasons=reasons,
+        progress=progress,
+        state=state,
+        auto_tmm=auto_tmm,
+        save_path=save_path,
+        tags=info_tags,
+    )
+
+
+def _make_stage_path(source_path: Path, payload_hash: str) -> Path:
+    return source_path.parent / DEFAULT_CLEANUP_STAGE_DIRNAME / payload_hash / source_path.name
+
+
+def _load_cleanup_sources(rows: Iterable[sqlite3.Row], payload_hash: str) -> list[CleanupSource]:
+    return [
+        CleanupSource(
+            payload_id=int(row["payload_id"] or 0),
+            device_id=int(row["device_id"] or 0),
+            root_path=Path(str(row["root_path"] or "")),
+            file_count=int(row["file_count"] or 0),
+            total_bytes=int(row["total_bytes"] or 0),
+            stage_path=_make_stage_path(Path(str(row["root_path"] or "")), payload_hash),
+        )
+        for row in rows
+    ]
+
+
+def _observe_cleanup_gate(
+    *,
+    qbit_client,
+    candidate_hashes: list[str],
+    expected_saves: dict[str, str],
+    observe_seconds: float,
+    poll_seconds: float,
+) -> tuple[bool, list[dict[str, Any]], list[str]]:
+    deadline = time.monotonic() + max(0.0, float(observe_seconds))
+    while True:
+        snapshot = _collect_torrent_snapshot(qbit_client)
+        qb_checks: list[dict[str, Any]] = []
+        reasons: list[str] = []
+        for torrent_hash in candidate_hashes:
+            info = snapshot.get(str(torrent_hash).lower()) or qbit_client.get_torrent_info(torrent_hash)
+            if not info:
+                gate = TorrentGate(
+                    torrent_hash=torrent_hash,
+                    ok=False,
+                    reasons=["missing_in_qbit"],
+                    progress=None,
+                    state=None,
+                    auto_tmm=None,
+                    save_path=None,
+                    tags=None,
+                )
+            else:
+                gate = _build_torrent_gate(
+                    torrent_hash=torrent_hash,
+                    info=info,
+                    expected_save=expected_saves.get(torrent_hash, ""),
+                )
+            qb_checks.append(gate.__dict__)
+            reasons.extend(gate.reasons)
+        if not reasons:
+            return True, qb_checks, []
+        if time.monotonic() >= deadline:
+            return False, qb_checks, sorted(set(reasons))
+        time.sleep(max(0.1, float(poll_seconds)))
+
+
+def _cleanup_sources_with_staging(
+    *,
+    qbit_client,
+    payload_hash: str,
+    candidate_hashes: list[str],
+    expected_saves: dict[str, str],
+    source_rows: list[CleanupSource],
+    observe_seconds: float,
+    poll_seconds: float,
+) -> tuple[str, list[str], list[str], list[str], list[dict[str, Any]]]:
+    cleanup_errors: list[str] = []
+    deleted_paths: list[str] = []
+    staged_paths: list[str] = []
+    cleanup_checks: list[dict[str, Any]] = []
+
+    for source in source_rows:
+        stats = _path_stats(source.root_path)
+        if not bool(stats["exists"]):
+            continue
+        if int(stats["file_count"]) != source.file_count or int(stats["total_bytes"]) != source.total_bytes:
+            cleanup_errors.append(
+                "source_stats_mismatch "
+                + _format_stats(
+                    source.root_path,
+                    stats,
+                    expected_count=source.file_count,
+                    expected_bytes=source.total_bytes,
+                )
+            )
+        if source.stage_path.exists():
+            cleanup_errors.append(f"cleanup_stage_path_exists path={source.stage_path}")
+    if cleanup_errors:
+        return "failed", deleted_paths, cleanup_errors, staged_paths, cleanup_checks
+
+    renamed: list[CleanupSource] = []
+    try:
+        for source in source_rows:
+            if not source.root_path.exists():
+                continue
+            source.stage_path.parent.mkdir(parents=True, exist_ok=True)
+            source.root_path.rename(source.stage_path)
+            renamed.append(source)
+            staged_paths.append(str(source.stage_path))
+
+        observed_ok, cleanup_checks, observe_reasons = _observe_cleanup_gate(
+            qbit_client=qbit_client,
+            candidate_hashes=candidate_hashes,
+            expected_saves=expected_saves,
+            observe_seconds=observe_seconds,
+            poll_seconds=poll_seconds,
+        )
+        if not observed_ok:
+            raise RuntimeError(",".join(observe_reasons or ["cleanup_observe_failed"]))
+
+        for source in renamed:
+            if not source.stage_path.exists():
+                continue
+            _delete_path(source.stage_path)
+            deleted_paths.append(str(source.root_path))
+        return "done", deleted_paths, cleanup_errors, staged_paths, cleanup_checks
+    except Exception as exc:
+        cleanup_errors.append(str(exc))
+        for source in reversed(renamed):
+            if source.stage_path.exists() and not source.root_path.exists():
+                source.stage_path.rename(source.root_path)
+        return "restored", deleted_paths, cleanup_errors, staged_paths, cleanup_checks
+
+
 def _update_verify_tags(qbit_client, torrent_hash: str, outcome: str, cleanup_done: bool) -> None:
     remove_tags = [VERIFY_PENDING_TAG, VERIFY_OK_TAG, VERIFY_FAILED_TAG]
     if cleanup_done:
@@ -125,6 +335,7 @@ def run_followup(
     payload_hashes: Optional[set[str]] = None,
     limit: int = 0,
     retry_failed: bool = False,
+    cleanup_observe_seconds: float = DEFAULT_CLEANUP_OBSERVE_SECONDS,
 ) -> dict[str, Any]:
     """Run a follow-up pass for rehome tag state and optional source cleanup."""
     qbit = get_qbittorrent_client()
@@ -236,7 +447,7 @@ def run_followup(
             source_rows = [
                 row for row in conn.execute(
                     """
-                    SELECT payload_id, device_id, root_path, status
+                    SELECT payload_id, device_id, root_path, file_count, total_bytes, status
                     FROM payloads
                     WHERE payload_hash = ? AND status = 'complete'
                     ORDER BY payload_id
@@ -268,6 +479,7 @@ def run_followup(
             qb_reasons: list[str] = []
             db_reasons: list[str] = []
             source_reasons: list[str] = []
+            expected_saves: dict[str, str] = {}
 
             for torrent_hash in candidate_hashes:
                 row = row_by_hash.get(torrent_hash)
@@ -295,6 +507,7 @@ def run_followup(
                     db_reasons.append(f"payload_device_not_target:{torrent_hash[:12]}")
 
                 expected_save = _normalize_path(str(row["ti_save_path"] or ""))
+                expected_saves[torrent_hash] = expected_save
                 info = torrent_snapshot.get(str(torrent_hash).lower())
                 if not info:
                     info = qbit.get_torrent_info(torrent_hash)
@@ -318,36 +531,13 @@ def run_followup(
                 # Keep DB tags reasonably fresh after follow-up reads.
                 tag_updates.append((str(getattr(info, "tags", "") or ""), torrent_hash))
 
-                progress = float(getattr(info, "progress", 0.0))
-                state = str(getattr(info, "state", ""))
-                auto_tmm = bool(getattr(info, "auto_tmm", False))
-                save_path = _normalize_path(str(getattr(info, "save_path", "") or ""))
-                info_tags = str(getattr(info, "tags", "") or "")
-
-                reasons: list[str] = []
-                if progress < 0.9999:
-                    reasons.append("progress_below_100")
-                state_reason = _state_reason(state)
-                if state_reason:
-                    reasons.append(state_reason)
-                if auto_tmm:
-                    reasons.append("auto_tmm_enabled")
-                if expected_save and save_path and expected_save != save_path:
-                    reasons.append("save_path_mismatch")
-
-                qb_reasons.extend(reasons)
-                qb_checks.append(
-                    TorrentGate(
-                        torrent_hash=torrent_hash,
-                        ok=(len(reasons) == 0),
-                        reasons=reasons,
-                        progress=progress,
-                        state=state,
-                        auto_tmm=auto_tmm,
-                        save_path=save_path,
-                        tags=info_tags,
-                    ).__dict__
+                gate = _build_torrent_gate(
+                    torrent_hash=torrent_hash,
+                    info=info,
+                    expected_save=expected_save,
                 )
+                qb_reasons.extend(gate.reasons)
+                qb_checks.append(gate.__dict__)
 
             if stale_refs > 0:
                 db_reasons.append("stale_refs_on_source_payload")
@@ -365,24 +555,25 @@ def run_followup(
             cleanup_result = "skipped"
             cleanup_errors: list[str] = []
             deleted_paths: list[str] = []
+            staged_paths: list[str] = []
+            cleanup_checks: list[dict[str, Any]] = []
             if cleanup and cleanup_required and outcome == "ok":
                 cleanup_attempted += 1
-                for row in source_rows:
-                    source_path = Path(str(row["root_path"] or ""))
-                    if not source_path.exists():
-                        continue
-                    try:
-                        _delete_path(source_path)
-                        deleted_paths.append(str(source_path))
-                    except Exception as exc:
-                        cleanup_errors.append(f"{source_path}: {exc}")
+                cleanup_sources = _load_cleanup_sources(source_rows, payload_hash)
+                cleanup_result, deleted_paths, cleanup_errors, staged_paths, cleanup_checks = _cleanup_sources_with_staging(
+                    qbit_client=qbit,
+                    payload_hash=payload_hash,
+                    candidate_hashes=candidate_hashes,
+                    expected_saves=expected_saves,
+                    source_rows=cleanup_sources,
+                    observe_seconds=cleanup_observe_seconds,
+                    poll_seconds=DEFAULT_CLEANUP_POLL_SECONDS,
+                )
 
-                if cleanup_errors:
-                    cleanup_result = "failed"
-                    cleanup_failed += 1
-                else:
-                    cleanup_result = "done"
+                if cleanup_result == "done":
                     cleanup_done += 1
+                else:
+                    cleanup_failed += 1
 
             for torrent_hash in candidate_hashes:
                 _update_verify_tags(
@@ -409,7 +600,10 @@ def run_followup(
                     "cleanup_required": cleanup_required,
                     "cleanup_result": cleanup_result,
                     "cleanup_deleted_paths": deleted_paths,
+                    "cleanup_staged_paths": staged_paths,
                     "cleanup_errors": cleanup_errors,
+                    "cleanup_checks": cleanup_checks,
+                    "cleanup_observe_seconds": float(cleanup_observe_seconds),
                     "qb_checks": qb_checks,
                     "db_reasons": sorted(set(db_reasons)),
                     "source_reasons": sorted(set(source_reasons)),
@@ -430,6 +624,7 @@ def run_followup(
             "checked_at": datetime.now().astimezone().isoformat(),
             "catalog": str(catalog_path),
             "cleanup_requested": bool(cleanup),
+            "cleanup_mode": "staged_safe" if cleanup else "skipped",
             "retry_failed": bool(retry_failed),
             "missing_payload_rows": missing_payload,
             "summary": {

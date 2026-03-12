@@ -1069,13 +1069,15 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
               help="Max payload groups to process (0 = all)")
 @click.option("--retry-failed", is_flag=True,
               help="Include rehome_verify_failed groups in this pass")
+@click.option("--cleanup-observe-seconds", type=float, default=60.0,
+              help="Observe qB for this many seconds after staging source cleanup before delete")
 @click.option("--strict", is_flag=True,
               help="Exit non-zero if any group remains pending or failed")
 @click.option("--output", type=click.Path(),
               help="Write JSON report to file")
 @click.option("--print-torrents", is_flag=True,
               help="Print per-torrent follow-up gate details")
-def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, output, print_torrents):
+def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, cleanup_observe_seconds, strict, output, print_torrents):
     """Run rehome verification follow-up and optional deferred cleanup retry."""
     catalog_path = Path(catalog)
     try:
@@ -1085,6 +1087,7 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, 
             payload_hashes=set(payload_hashes) if payload_hashes else None,
             limit=limit,
             retry_failed=retry_failed,
+            cleanup_observe_seconds=float(cleanup_observe_seconds),
         )
     except Exception as e:
         click.echo(f"❌ FOLLOWUP failed: {e}", err=True)

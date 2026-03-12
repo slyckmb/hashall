@@ -184,6 +184,76 @@ def test_followup_cleanup_retries_and_clears_cleanup_required(monkeypatch, tmp_p
     assert any("rehome_cleanup_source_required" in call[1] for call in removed_tags)
 
 
+def test_followup_cleanup_restores_source_when_observe_fails(monkeypatch, tmp_path: Path):
+    db_path = _make_db(tmp_path)
+    source_dir = tmp_path / "pool-data-source"
+    source_dir.mkdir()
+    (source_dir / "file.mkv").write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        f"""
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES
+          (1, 'hash-restore', 141, '/pool/media/seeds/Movie', 1, 3, 'complete'),
+          (2, 'hash-restore', 231, '{source_dir}', 1, 3, 'complete');
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, tags)
+        VALUES ('torrent-restore', 1, 141, '/pool/media/seeds/cross-seed/seedpool (API)',
+                'rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_verify_pending,rehome_cleanup_source_required');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    class ObservedFailureQbitClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__()
+            self.snapshot_calls = 0
+
+        def get_torrents(self, category=None, tag=None):
+            if tag is not None:
+                return super().get_torrents(category=category, tag=tag)
+            self.snapshot_calls += 1
+            state = "uploading" if self.snapshot_calls == 1 else "stoppedDL"
+            progress = 1.0 if self.snapshot_calls == 1 else 0.5
+            return [
+                SimpleNamespace(
+                    hash="torrent-restore",
+                    tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_verify_pending,rehome_cleanup_source_required",
+                    progress=progress,
+                    state=state,
+                    auto_tmm=False,
+                    save_path="/pool/media/seeds/cross-seed/seedpool (API)",
+                )
+            ]
+
+    fake = ObservedFailureQbitClient()
+    fake.torrents_by_tag["rehome_verify_pending"] = [
+        SimpleNamespace(
+            hash="torrent-restore",
+            tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrents_by_tag["rehome_cleanup_source_required"] = [
+        SimpleNamespace(
+            hash="torrent-restore",
+            tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+
+    monkeypatch.setattr("rehome.followup.get_qbittorrent_client", lambda: fake)
+
+    report = run_followup(catalog_path=db_path, cleanup=True, cleanup_observe_seconds=0.0)
+
+    assert report["summary"]["cleanup_attempted"] == 1
+    assert report["summary"]["cleanup_failed"] == 1
+    assert report["entries"][0]["cleanup_result"] == "restored"
+    assert source_dir.exists() is True
+    removed_tags = [call for call in fake.remove_calls if call[0] == "torrent-restore"]
+    assert removed_tags
+    assert not any("rehome_cleanup_source_required" in call[1] for call in removed_tags)
+
+
 def test_followup_marks_hard_failures_verify_failed(monkeypatch, tmp_path: Path):
     db_path = _make_db(tmp_path)
     conn = sqlite3.connect(db_path)
