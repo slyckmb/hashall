@@ -37,6 +37,7 @@ from hashall.qb_zfs_relocate import (
     write_json,
 )
 from rehome.view_builder import build_torrent_view
+from rehome.reality import build_plan_reality_snapshot
 
 
 @dataclass(frozen=True)
@@ -533,17 +534,62 @@ class DemotionExecutor:
         )
 
     def _relocation_artifact_dir(self, plan: Dict) -> Path:
+        existing = str(plan.get("_artifact_dir") or "").strip()
+        if existing:
+            return Path(existing)
         payload_hash = str(plan.get("payload_hash") or "unknown")[:16]
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         root = self.relocation_artifact_root
+        artifact_name = f"{stamp}-{payload_hash}"
         try:
             root.mkdir(parents=True, exist_ok=True)
+            artifact_dir = root / artifact_name
+            artifact_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             root = Path(self.catalog_path).expanduser().resolve().parent / ".rehome-relocate"
             root.mkdir(parents=True, exist_ok=True)
-        artifact_dir = root / f"{stamp}-{payload_hash}"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+            artifact_dir = root / artifact_name
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+        plan["_artifact_dir"] = str(artifact_dir)
         return artifact_dir
+
+    def _write_plan_reality_snapshot(
+        self,
+        plan: Dict,
+        *,
+        artifact_dir: Path,
+        phase: str,
+        error: str = "",
+    ) -> Optional[Dict[str, object]]:
+        try:
+            snapshot = build_plan_reality_snapshot(
+                plan=plan,
+                qb_client=self.qbit_client,
+                catalog_path=self.catalog_path,
+                fastresume_dir=self.fastresume_dir,
+            )
+        except Exception as exc:
+            self._log(
+                f"reality_snapshot_failed phase={phase} error={type(exc).__name__}:{exc}",
+                "warning",
+            )
+            return None
+
+        snapshot["phase"] = phase
+        if error:
+            snapshot["error"] = str(error)
+        snapshot_path = artifact_dir / f"reality-{phase}.json"
+        write_json(snapshot_path, snapshot)
+        plan[f"_reality_snapshot_{phase}"] = snapshot
+        summary = snapshot.get("summary") or {}
+        self._log(
+            "reality_snapshot "
+            f"phase={phase} "
+            f"path={snapshot_path} "
+            f"group_state={snapshot.get('group_state')} "
+            f"rows={summary.get('rows', 0)}"
+        )
+        return snapshot
 
     def _build_qb_zfs_relocation_tool(self) -> QBZFSRelocationTool:
         return QBZFSRelocationTool(
@@ -2459,10 +2505,27 @@ class DemotionExecutor:
 
         if blocked:
             detail = "\n  ".join(blocked)
-            raise RuntimeError(
+            snapshot = plan.get("_reality_snapshot_pre") or {}
+            group_reason = str(snapshot.get("group_reason") or "").strip()
+            human_blockers: List[str] = []
+            for row in snapshot.get("rows") or []:
+                classification = str(row.get("classification") or "")
+                if classification not in {"qbit_transient", "incomplete_torrent", "qbit_missing"}:
+                    continue
+                human_blockers.append(
+                    f"{str(row.get('torrent_hash') or '')[:16]}: {row.get('operator_reason')}"
+                )
+                if len(human_blockers) >= 3:
+                    break
+            message = (
                 f"Preflight check blocked {len(blocked)}/{len(torrent_hashes)} torrent(s) — "
                 f"rehome aborted before any mutation:\n  {detail}"
             )
+            if group_reason:
+                message += f"\n  guidance: {group_reason}"
+            if human_blockers:
+                message += "\n  live_reads:\n  " + "\n  ".join(human_blockers)
+            raise RuntimeError(message)
 
         self._log(
             f"preflight_state_check passed torrents={len(torrent_hashes)}"
@@ -2673,7 +2736,10 @@ class DemotionExecutor:
         if decision == 'BLOCK':
             raise RuntimeError("Cannot execute BLOCKED plan")
 
+        artifact_dir: Optional[Path] = None
         preloaded_files = self._sanitize_plan_live_torrents(plan)
+        artifact_dir = self._relocation_artifact_dir(plan)
+        self._write_plan_reality_snapshot(plan, artifact_dir=artifact_dir, phase="pre")
         self._preflight_torrent_state_check(plan)
 
         self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
@@ -2714,6 +2780,8 @@ class DemotionExecutor:
             self._apply_rehome_provenance_tags(plan)
             if rescan:
                 self._rescan_after_rehome(plan)
+            if artifact_dir is not None:
+                self._write_plan_reality_snapshot(plan, artifact_dir=artifact_dir, phase="post")
 
             if run_id is not None:
                 run_conn = self._get_db_connection()
@@ -2732,6 +2800,13 @@ class DemotionExecutor:
             )
 
         except Exception as e:
+            if artifact_dir is not None:
+                self._write_plan_reality_snapshot(
+                    plan,
+                    artifact_dir=artifact_dir,
+                    phase="failure",
+                    error=str(e),
+                )
             if run_id is not None:
                 run_conn = self._get_db_connection()
                 try:

@@ -28,6 +28,7 @@ from rehome.normalize import (
     build_root_relocation_batch,
 )
 from rehome.qb_missing import audit_missing_root_drift, build_missing_sibling_reconnect_batch
+from rehome.reality import DEFAULT_FASTRESUME_DIR, build_plan_reality_snapshot
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
@@ -1777,6 +1778,104 @@ def qb_missing_remediate_cmd(
             lock_fh.close()
         except Exception:
             pass
+
+
+@cli.command("drift-audit")
+@click.option("--plan", "plan_path", type=click.Path(exists=True), required=True, help="Rehome plan or batch JSON to audit against live qB/catalog state")
+@click.option(
+    "--catalog",
+    type=click.Path(exists=True),
+    default=DEFAULT_CATALOG_PATH,
+    show_default=True,
+    help="Path to hashall catalog database",
+)
+@click.option(
+    "--fastresume-dir",
+    type=click.Path(exists=True),
+    default=str(DEFAULT_FASTRESUME_DIR),
+    show_default=True,
+    help="Directory containing qB .fastresume files",
+)
+@click.option("--output", "-o", type=click.Path(), help="Optional JSON report output path")
+def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
+    """Compare a rehome plan to live qB, fastresume, filesystem, and catalog state."""
+    from hashall.qbittorrent import get_qbittorrent_client
+
+    data = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+    plans = list(data.get("plans") or [])
+    if not plans:
+        plans = [data]
+
+    qbit = get_qbittorrent_client()
+    _wait_for_qb_ready(qbit)
+
+    snapshots = [
+        build_plan_reality_snapshot(
+            plan=plan,
+            qb_client=qbit,
+            catalog_path=Path(catalog),
+            fastresume_dir=Path(fastresume_dir),
+        )
+        for plan in plans
+    ]
+
+    group_states: dict[str, int] = {}
+    total_rows = 0
+    blocked_rows = 0
+    for snapshot in snapshots:
+        state = str(snapshot.get("group_state") or "unknown")
+        group_states[state] = group_states.get(state, 0) + 1
+        total_rows += int((snapshot.get("summary") or {}).get("rows", 0))
+        for row in snapshot.get("rows") or []:
+            if str(row.get("classification") or "") not in {"aligned_target", "catalog_drift_already_targeted"}:
+                blocked_rows += 1
+
+    report = {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "plan_path": str(Path(plan_path).expanduser().resolve()),
+        "catalog": str(Path(catalog).expanduser().resolve()),
+        "fastresume_dir": str(Path(fastresume_dir).expanduser().resolve()),
+        "summary": {
+            "plans": len(snapshots),
+            "rows": total_rows,
+            "group_states": group_states,
+            "attention_rows": blocked_rows,
+        },
+        "plans": snapshots,
+    }
+
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        click.echo(f"📝 wrote {output_path}")
+
+    click.echo("🔎 rehome drift audit")
+    click.echo(f"   plan_path: {report['plan_path']}")
+    click.echo(f"   plans: {report['summary']['plans']}")
+    click.echo(f"   rows: {report['summary']['rows']}")
+    click.echo(f"   attention_rows: {report['summary']['attention_rows']}")
+    if group_states:
+        click.echo("   group_states:")
+        for state, count in sorted(group_states.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            click.echo(f"     {count:>4}  {state}")
+    click.echo("   samples:")
+    printed = 0
+    for snapshot in snapshots:
+        for row in snapshot.get("rows") or []:
+            classification = str(row.get("classification") or "")
+            if classification in {"aligned_target", "catalog_drift_already_targeted"}:
+                continue
+            click.echo(
+                "     "
+                f"{str(row.get('torrent_hash') or '')[:16]} "
+                f"group={snapshot.get('group_state')} "
+                f"class={classification} "
+                f"reason={row.get('operator_reason')}"
+            )
+            printed += 1
+            if printed >= 5:
+                return
 
 
 def _db_open_readonly(catalog_path: Path) -> Optional[sqlite3.Connection]:
