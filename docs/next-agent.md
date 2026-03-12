@@ -18,7 +18,7 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.175`
+   - `hashall` semver is `0.4.176`
    - `qb-zfs-relocate` semver is `0.1.12`
    - single-plan live pilots are green on both major paths:
      - `REUSE`: `The.West.Wing.S07...`
@@ -47,7 +47,13 @@ If context is compacted, recover with this sequence:
    - `rehome apply` now uses the hardened `qb-zfs-relocate` transport for guarded relocation attachment.
 9. qB relocation-specific current state:
    - direct `qb-zfs-relocate` pilots already proved the guarded backend earlier
-   - stale-root `missingFiles` and stoppedDL repair lanes are now clear
+   - the old `/pool/data -> /pool/media` stale-root and stoppedDL repair lanes are clear
+   - the current live qB problem lane is different:
+     - `6` `missingFiles` rows on old `/data == /stash` roots
+     - all classified as `root_drift_to_surviving_sibling_target`
+     - payload groups:
+       - `Megalopolis...` (`4`)
+       - `Cleverman.S02...` (`2`)
    - latest refresh returned `OK`
    - `hashall rehome qb-missing-audit ...` now returns `0`
    - current scale-up target is `rehome apply`, not direct `qb-zfs-relocate`
@@ -61,7 +67,8 @@ If context is compacted, recover with this sequence:
    - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding`
    - use it before any mass remediation of qB `missingFiles` items
 12. First thing to do after compact if the task continues:
-   - do not resume the old stale-root remediation or stoppedDL repair lanes; they are already clear
+   - do not resume the old `/pool/data` stale-root remediation or stoppedDL repair lanes; they are already clear
+   - do investigate/remediate the current `6` old `/data == /stash` sibling-root drift rows instead
    - start from the latest successful mixed-batch artifacts:
      - `REUSE subset`: `~/.logs/hashall/reports/rehome-relocate/20260311-180840-a1041c6049c66abe/`
      - `MOVE`: `~/.logs/hashall/reports/rehome-relocate/20260311-182010-66eebb2df636b12a/`
@@ -98,6 +105,8 @@ If context is compacted, recover with this sequence:
      - reason: one member still points at `/pool/data/...`
 15. New 2026-03-12 relocate proof continuity:
    - commit `f3071ff` fixed a real code bug exposed by `Mickey.17...`
+   - new current safeguard:
+     - follow-up cleanup now blocks if any same-`payload_hash` sibling row still points at a non-target device or old `/data`/`/stash` alias
    - direct source verify proved the payload was good
    - the bug was:
      - false qB recheck completion detection without a real state transition

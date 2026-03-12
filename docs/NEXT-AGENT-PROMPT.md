@@ -24,7 +24,7 @@ Prompt-critical context (2026-03-11):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.175`.
+  - `hashall` version now `0.4.176`.
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -50,7 +50,11 @@ Prompt-critical context (2026-03-11):
   - commit `65eaa82` lets `qb-zfs-relocate` reuse an already-present destination payload when the old source path is gone.
   - a new `hashall rehome qb-missing-audit` command classifies stale-root `missingFiles` cohorts; the current live cohort is `49` items, currently reported as `root_drift_fastresume_stale`.
   - `qb-start-seeding-gradual` halt set (`35` hashes) is a subset of that `49` cohort.
-  - the stale-root `missingFiles` lane has since been remediated live; current non-healthy qB lane is `7` `stoppedDL` torrents.
+  - the old `/pool/data` stale-root lane has since been remediated live.
+  - current live qB non-healthy lane is now `6` `missingFiles` torrents on old `/data == /stash` roots:
+    - `Megalopolis...` (`4`)
+    - `Cleverman.S02...` (`2`)
+  - the updated audit classifies all `6` as `root_drift_to_surviving_sibling_target`.
   - commit `5d83419` hardened `bin/qb-repair-payload-group.sh` into a backed-up, journaled Python path:
     - `src/hashall/qb_repair_payload_group.py`
     - script semver `0.2.0`
@@ -103,6 +107,9 @@ Prompt-critical context (2026-03-11):
     - qB recheck completion detection had been too permissive
     - verify retry logic had been too narrow for `rehome` manifests
     - rerun ended `stoppedUP 100%` on `/pool/media/...`
+  - new preventive hardening:
+    - `rehome followup --cleanup` now blocks staged cleanup when any same-`payload_hash` torrent row still points at a non-target device or old `/data`/`/stash` alias
+    - `qb-missing-audit` now classifies sibling-root drift even when there is no simple direct mapped target path because a surviving sibling target already exists
     - healthy rows can switch `torrent_instances.payload_id` to the already-correct target payload row before cleanup
   - live cleanup result:
     - one pilot payload plus six `/pool/data` payload groups cleaned successfully

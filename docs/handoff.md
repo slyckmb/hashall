@@ -9,7 +9,7 @@
   - current script semver: `v0.1.12`
   - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
-- `hashall` package semver is now `0.4.175`.
+- `hashall` package semver is now `0.4.176`.
 - `qb-repair-payload-group.sh` was hardened in commit `5d83419`:
   - wrapper: `bin/qb-repair-payload-group.sh`
   - core module: `src/hashall/qb_repair_payload_group.py`
@@ -60,15 +60,31 @@
   - live proof on 2026-03-12:
     - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-111522-36390ecee324f1af/`
     - `Mickey.17.2025.1080p.iT.WEB-DL.DDP5.1.Atmos.H.264-BYNDR.mkv` completed `MOVE` successfully and ended `stoppedUP 100%` on `/pool/media/...`
+- A second stale-root drift class is now confirmed live on 2026-03-12:
+  - current qB snapshot is `stalledUP=5138`, `uploading=7`, `missingFiles=6`
+  - all `6` `missingFiles` rows are now classified by the updated audit as `root_drift_to_surviving_sibling_target`
+  - they are only two payload groups:
+    - `Megalopolis...` (`4` hashes)
+    - `Cleverman.S02...` (`2` hashes)
+  - common-English root cause:
+    - healthy sibling torrents for these payloads already exist on newer `/pool/media/...` target views
+    - these `6` hashes were left behind still pointing at old `/data == /stash` views
+    - the old stash/data files are now gone, so qB and `.fastresume` are looking in the wrong place
+  - this is not evidence of current fastresume scribbling; it is another older sibling-coverage / cleanup drift class
+- Follow-up cleanup is now hardened against creating more of this class:
+  - cleanup now checks for any surviving same-`payload_hash` torrent refs that still point at non-target devices or old `/data`/`/stash` aliases
+  - staged cleanup will stay blocked until those stale sibling refs are reconciled
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
   - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`
   - that stale-root `missingFiles` lane has now been remediated live in waves using `qb-zfs-relocate`
-  - current qB non-healthy set is no longer `missingFiles`; the live stoppedDL repair lane is now clear
-- current qB state snapshot after the repair lane clear:
-    - `stalledUP=5145`
-    - `uploading=5`
-  - there are no remaining `stoppedDL`, `stoppedUP`, or `missingFiles` rows in the active lane
+  - the older `/pool/data -> /pool/media` lane is no longer the active blocker
+  - the current `missingFiles` lane is the separate 6-item `/data == /stash` sibling-root drift class described above
+- current qB state snapshot after the new sibling-root audit:
+    - `stalledUP=5138`
+    - `uploading=7`
+    - `missingFiles=6`
+  - the active qB problem lane is now these `6` stale sibling-root drift rows
 - Guarded relocation coverage is current:
   - `tests/test_qb_zfs_relocate.py` previously passed locally for the guarded dataset relocation slice
   - `hashall rehome relocate-plan --help` works
@@ -182,6 +198,7 @@
 - `hashall refresh --verbose` keeps catalog scans updated; run it after any donor copy.
 - `hashall rehome auto --from <src> --to <dst> --limit <n> [--apply]` remains the canonical mover.
 - `hashall rehome relocate-plan` is now the explicit planner for root-to-root relocation cases that `auto` does not surface cleanly.
-- `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` is the canonical proof path for the legacy stale-root cohort; that lane is no longer the active blocker now that the `missingFiles` set has been cleared.
+- `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` remains the canonical proof path for the legacy `/pool/data` stale-root cohort.
+- `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/media/torrents/seeding` is now the canonical proof path for the current 6-item sibling-root drift cohort.
 - Do not let qB run `setLocation` as part of normal migration; we rely on offline fastresume repointing.
 - Keep the guard log tailing commands handy for monitoring long runs.

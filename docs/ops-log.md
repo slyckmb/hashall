@@ -118,6 +118,23 @@ Latest repair/handoff note (2026-03-10):
     - no active `stoppedUP`
 - Hardened repair artifacts:
   - initial dry-run artifact:
+
+Latest sibling-root drift note (2026-03-12):
+
+- `hashall` is now `0.4.176`.
+- Current qB snapshot is:
+  - `stalledUP=5138`
+  - `uploading=7`
+  - `missingFiles=6`
+- The updated `qb-missing-audit` now classifies all `6` current `missingFiles` rows as `root_drift_to_surviving_sibling_target`.
+- Live proof:
+  - `Megalopolis...` contributes `4` hashes
+  - `Cleverman.S02...` contributes `2` hashes
+  - all `6` still point at dead old `/data == /stash` roots in qB and `.fastresume`
+  - healthy sibling target views already exist on `/pool/media/...`
+- Preventive fix:
+  - `rehome followup --cleanup` now blocks staged cleanup whenever any same-`payload_hash` sibling torrent row still points at a non-target device or old `/data`/`/stash` alias
+  - this closes the historical gap that could leave stale sibling hashes behind after source cleanup
     - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
   - successful live apply artifact:
     - `out/qb-repair-payload-group/20260310-164254-0fff0ce260a5/repair-plan.json`

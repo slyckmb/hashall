@@ -8,7 +8,7 @@ Last updated: 2026-03-12
 - The current rsync-based donor transfer is still the data mover; qB is metadata-only.
 - `REUSE` continues in small batches; each apply must finish with `stoppedup`/`stalledup`, no new downloads, and clean cleanup messages.
 - `qb-zfs-relocate` has already proven the guarded live `pool-data -> pool-media` mover for pilot batches.
-- `qb-zfs-relocate` `v0.1.12` / `hashall 0.4.175` now include a live-proven fix for the `Mickey.17...` false-partial case:
+- `qb-zfs-relocate` `v0.1.12` / `hashall 0.4.176` now include a live-proven fix for the `Mickey.17...` false-partial case:
   - qB source recheck completion now requires a real transition into/out of `checking*`
   - verify retries one time when quick/exact evidence is clean but libtorrent transiently reports `partial_match` in `downloading*`
 - `rehome` now has an explicit root-to-root planner for this domain:
@@ -71,15 +71,20 @@ Last updated: 2026-03-12
   - interpretation: legacy stale-root drift, not current `qb-zfs-relocate` pilot mutations
 - That stale-root `missingFiles` lane has now been remediated live.
 - Current qB health snapshot:
-  - `stalledUP=5145`
-  - `uploading=5`
+  - `stalledUP=5138`
+  - `uploading=7`
+  - `missingFiles=6`
   - no active `stoppedDL`
   - no active `stoppedUP`
-- The active qB problem lane is now repair-oriented:
-  - this stoppedDL lane has now been cleared
-  - one hardened live repair fixed `0fff0ce260a58b789f857f6ad085a5d03622b952`
-  - the other six initially failed only because qB lacked write access to create missing sidecar files
-  - after changing just those six payload directories from `root:root 755` to owner `1026:101`, qB fetched the missing sidecars and all six returned to `stalledUP 100%`
+- The current active qB problem lane is a new stale sibling-root drift cohort:
+  - the `6` `missingFiles` rows are now classified as `root_drift_to_surviving_sibling_target`
+  - affected payload groups:
+    - `Megalopolis...` (`4` hashes)
+    - `Cleverman.S02...` (`2` hashes)
+  - the healthy payload bytes still exist under newer `/pool/media/...` sibling target views
+  - the broken rows still point at dead old `/data == /stash` roots in both qB and `.fastresume`
+  - this is a historical sibling coverage / cleanup drift class, not a current fastresume corruption signal
+  - use `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/media/torrents/seeding` to confirm the live set
 - `qb-start-seeding-gradual` halt at `2026-03-08 14:34` is explained historically:
   - `35` halted hashes were a direct subset of the old audited `49`
   - the daemon tripped on preexisting `missingFiles` rows in protected scope, not on a newly started torrent
@@ -91,7 +96,9 @@ Last updated: 2026-03-12
 3. Cleanup/canonical-root accounting should continue to dedupe by payload root, not by torrent hash.
 4. The next live gap is scaling from the first successful curated mixed batch to another curated batch from the remaining clean candidates.
 5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
-6. `MOVE` still needs stronger fail-closed behavior around dirty preexisting targets and stalled offline verify paths.
+6. Cleanup is now hardened against stale sibling refs:
+   - follow-up cleanup blocks when any same-`payload_hash` torrent row still points at a non-target device or old `/data`/`/stash` alias
+   - this closes the cleanup hole that could strand stale sibling hashes after source removal
 7. `Mickey.17...` is no longer a carve-out:
    - the original failure looked like bad source data because offline verify died around `71%` while qB still said `100%`
    - root cause was code, not content
@@ -167,3 +174,5 @@ Last updated: 2026-03-12
 9. Remaining follow-up backlog after the 2026-03-12 cleanup + reconcile wave:
    - only `1` tagged group remains in follow-up
    - payload `a1041c6049c66abe...` (`Longlegs...`) is still a real live failure because one member remains on `/pool/data/...` and reports `save_path_mismatch`
+10. Remaining live remediation gap:
+   - add a direct reconcile/remediate path for stale sibling-root drift groups so the `6` old `/data == /stash` hashes can be repointed onto their surviving `/pool/media/...` payload groups without another copy
