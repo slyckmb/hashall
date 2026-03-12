@@ -10,6 +10,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +27,7 @@ from rehome.normalize import (
     build_pool_path_normalization_batch,
     build_root_relocation_batch,
 )
-from rehome.qb_missing import audit_missing_root_drift
+from rehome.qb_missing import audit_missing_root_drift, build_missing_sibling_reconnect_batch
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
@@ -36,6 +37,24 @@ DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
 def _debug_enabled() -> bool:
     return os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _wait_for_qb_ready(qbit, timeout_seconds: float = 120.0) -> None:
+    deadline = time.monotonic() + max(5.0, float(timeout_seconds or 0.0))
+    last_error = ""
+    while time.monotonic() <= deadline:
+        try:
+            if hasattr(qbit, "_authenticated"):
+                qbit._authenticated = False  # type: ignore[attr-defined]
+            qbit.get_torrents()
+            return
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(2.0)
+    raise RuntimeError(
+        f"qBittorrent not ready within {int(timeout_seconds)}s"
+        + (f": {last_error}" if last_error else "")
+    )
 
 
 def _resolve_device_alias_read_only(catalog_path: Path, value: str) -> int:
@@ -1636,6 +1655,128 @@ def qb_missing_audit_cmd(source_root, target_root, fastresume_dir, catalog, outp
                 f"save={row.get('save_path')} "
                 f"mapped={row.get('mapped_content_path')}"
             )
+
+
+@cli.command("qb-missing-remediate")
+@click.option("--source-root", required=True, help="Old qB/root path prefix to remediate")
+@click.option("--target-root", required=True, help="Replacement root where healthy sibling payloads live")
+@click.option(
+    "--fastresume-dir",
+    type=click.Path(exists=True),
+    default="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup",
+    show_default=True,
+    help="Directory containing qB .fastresume files",
+)
+@click.option(
+    "--catalog",
+    type=click.Path(exists=True),
+    default=DEFAULT_CATALOG_PATH,
+    show_default=True,
+    help="Path to hashall catalog database",
+)
+@click.option("--hash", "torrent_hashes", multiple=True, help="Specific missing torrent hash to remediate (repeatable)")
+@click.option("--limit", type=int, default=0, show_default=True, help="Maximum payload groups to include")
+@click.option(
+    "--unique-view-subdir",
+    default=DEFAULT_UNIQUE_VIEW_SUBDIR,
+    show_default=True,
+    help="Subdirectory under target root for synthesized unique views",
+)
+@click.option("--output", "-o", type=click.Path(), help="Optional JSON batch output path")
+@click.option("--apply/--dryrun", default=False, show_default=True, help="Execute the remediation instead of only planning it")
+@click.option("--resume/--keep-paused", default=False, show_default=True, help="Resume repointed torrents after successful remediation")
+@click.option("--pilot-size", type=int, default=1, show_default=True, help="Resume pilot size when --resume is enabled")
+@click.option("--observe-seconds", type=float, default=60.0, show_default=True, help="Resume observe window when --resume is enabled")
+def qb_missing_remediate_cmd(
+    source_root,
+    target_root,
+    fastresume_dir,
+    catalog,
+    torrent_hashes,
+    limit,
+    unique_view_subdir,
+    output,
+    apply,
+    resume,
+    pilot_size,
+    observe_seconds,
+):
+    """Plan or remediate stale sibling-root missingFiles rows via guarded REUSE attach."""
+    from hashall.qbittorrent import get_qbittorrent_client
+    from hashall.qb_zfs_relocate import DockerQbController, QBZFSRelocationTool
+
+    qbit = get_qbittorrent_client()
+    qb_container = os.getenv("HASHALL_REHOME_QB_CONTAINER", "qbittorrent_vpn").strip() or "qbittorrent_vpn"
+    QBZFSRelocationTool(
+        qb_client=qbit,
+        process_controller=DockerQbController(qb_container),
+    )._ensure_qb_online_for_orchestration(timeout_seconds=120.0)
+    _wait_for_qb_ready(qbit)
+    report = build_missing_sibling_reconnect_batch(
+        qb_client=qbit,
+        source_root=source_root,
+        target_root=target_root,
+        fastresume_dir=Path(fastresume_dir),
+        catalog_path=Path(catalog),
+        torrent_hashes=torrent_hashes,
+        limit=max(0, int(limit or 0)),
+        unique_view_subdir=str(unique_view_subdir or DEFAULT_UNIQUE_VIEW_SUBDIR),
+    )
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        click.echo(f"📝 wrote {output_path}")
+
+    summary = report.get("summary") or {}
+    audit = report.get("audit") or {}
+    click.echo("🔧 qB missingFiles sibling-target remediation")
+    click.echo(f"   source_root: {report.get('source_root')}")
+    click.echo(f"   target_root: {report.get('target_root')}")
+    click.echo(f"   audit_rows: {audit.get('rows', 0)}")
+    click.echo(f"   selected_plans: {summary.get('plans', 0)}")
+    click.echo(f"   skipped: {summary.get('skipped', 0)}")
+    click.echo(f"   unique_view_targets: {summary.get('unique_view_targets', 0)}")
+    causes = audit.get("root_causes") or {}
+    if causes:
+        click.echo("   audit_root_causes:")
+        for cause, count in sorted(causes.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            click.echo(f"     {count:>4}  {cause}")
+
+    for plan in (report.get("plans") or [])[:5]:
+        click.echo(
+            "   plan "
+            f"payload={str(plan.get('payload_hash') or '')[:16]} "
+            f"torrents={len(plan.get('affected_torrents') or [])} "
+            f"target={plan.get('target_path')}"
+        )
+
+    if not apply:
+        return
+
+    plans = list(report.get("plans") or [])
+    if not plans:
+        click.echo("ℹ️  No remediation plans to apply.")
+        return
+
+    lock_fh = _acquire_rehome_lock()
+    try:
+        executor = DemotionExecutor(Path(catalog).expanduser())
+        executor.resume_after_relocate = bool(resume)
+        executor.resume_pilot_size = max(1, int(pilot_size or 1))
+        executor.resume_observe_seconds = max(0.0, float(observe_seconds or 0.0))
+        for idx, plan in enumerate(plans, start=1):
+            click.echo(
+                "▶️  remediation "
+                f"{idx}/{len(plans)} payload={str(plan.get('payload_hash') or '')[:16]} "
+                f"torrents={len(plan.get('affected_torrents') or [])}"
+            )
+            executor.execute(plan)
+    finally:
+        try:
+            lock_fh.close()
+        except Exception:
+            pass
 
 
 def _db_open_readonly(catalog_path: Path) -> Optional[sqlite3.Connection]:

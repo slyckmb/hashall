@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import quote
 
 from hashall.bencode import as_text
 from hashall.fastresume import normalize_save_path, read_fastresume
 from hashall.qbittorrent import QBittorrentClient, QBitTorrent
+from rehome.normalize import DEFAULT_UNIQUE_VIEW_SUBDIR
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -17,6 +21,14 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
         for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         if len(row) > 1
     }
+
+
+def _canonical(path: str | Path) -> Path:
+    return Path(path).expanduser().resolve()
+
+
+def ts_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _map_root(path: str, source_root: str, target_root: str) -> str:
@@ -185,6 +197,337 @@ def _payload_context(
             }
         )
     return {"payload_hash": payload_hash, "sibling_targets": sibling_targets}
+
+
+def _select_sibling_target(
+    conn: sqlite3.Connection,
+    *,
+    payload_hash: str,
+    target_root: str,
+    sibling_targets: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    normalized_target = normalize_save_path(target_root)
+    candidates: List[Dict[str, Any]] = []
+    for target in sibling_targets:
+        if not bool(target.get("healthy")):
+            continue
+        root_path = _safe_normalize_save_path(str(target.get("root_path") or ""))
+        if not root_path.startswith(normalized_target + "/"):
+            continue
+        row = conn.execute(
+            """
+            SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
+            FROM payloads
+            WHERE payload_hash = ? AND root_path = ? AND status = 'complete'
+            ORDER BY payload_id
+            LIMIT 1
+            """,
+            (payload_hash, root_path),
+        ).fetchone()
+        if row is None:
+            continue
+        candidates.append(
+            {
+                "payload_id": int(row["payload_id"] or 0),
+                "payload_hash": str(row["payload_hash"] or ""),
+                "device_id": int(row["device_id"] or 0),
+                "root_path": str(row["root_path"] or ""),
+                "file_count": int(row["file_count"] or 0),
+                "total_bytes": int(row["total_bytes"] or 0),
+                "status": str(row["status"] or ""),
+                "save_path": str(target.get("save_path") or ""),
+                "torrent_hash": str(target.get("torrent_hash") or ""),
+            }
+        )
+    if not candidates:
+        return None
+
+    def _sort_key(item: Dict[str, Any]) -> tuple[int, int, str]:
+        root_path = str(item.get("root_path") or "")
+        return (
+            1 if "/_rehome-unique/" in root_path else 0,
+            int(item.get("payload_id") or 0),
+            root_path,
+        )
+
+    return sorted(candidates, key=_sort_key)[0]
+
+
+def _fetch_stale_torrent_rows(
+    conn: sqlite3.Connection,
+    *,
+    torrent_hashes: Iterable[str],
+) -> List[sqlite3.Row]:
+    wanted = [str(torrent_hash or "").strip().lower() for torrent_hash in torrent_hashes if str(torrent_hash or "").strip()]
+    if not wanted:
+        return []
+    placeholders = ",".join(["?"] * len(wanted))
+    return conn.execute(
+        f"""
+        SELECT ti.torrent_hash,
+               ti.payload_id,
+               ti.device_id AS ti_device_id,
+               ti.save_path,
+               ti.root_name,
+               p.payload_hash,
+               p.device_id AS payload_device_id,
+               p.root_path,
+               p.file_count,
+               p.total_bytes,
+               p.status
+        FROM torrent_instances ti
+        JOIN payloads p ON p.payload_id = ti.payload_id
+        WHERE lower(ti.torrent_hash) IN ({placeholders})
+        ORDER BY ti.torrent_hash
+        """,
+        tuple(wanted),
+    ).fetchall()
+
+
+def _build_missing_view_targets(
+    *,
+    stale_rows: List[sqlite3.Row],
+    source_root: str,
+    target_root: str,
+    unique_view_subdir: str,
+) -> tuple[List[str], List[Dict[str, str]], int, int]:
+    normalized_source = normalize_save_path(source_root)
+    normalized_target = normalize_save_path(target_root)
+    seen_view_keys: set[tuple[str, str]] = set()
+    affected_torrents: List[str] = []
+    view_targets: List[Dict[str, str]] = []
+    collisions = 0
+    unique_views = 0
+
+    for row in stale_rows:
+        torrent_hash = str(row["torrent_hash"] or "").strip().lower()
+        save_path = str(row["save_path"] or "").strip()
+        root_name = str(row["root_name"] or "").strip()
+        if not torrent_hash or not save_path:
+            continue
+        target_save_path = _map_root(save_path, normalized_source, normalized_target)
+        if not target_save_path:
+            continue
+        affected_torrents.append(torrent_hash)
+        if not root_name:
+            continue
+        view_key = (target_save_path, root_name)
+        if view_key in seen_view_keys:
+            collisions += 1
+            target_save_path = str(
+                _canonical(Path(normalized_target) / unique_view_subdir / torrent_hash)
+            )
+            unique_views += 1
+            view_key = (target_save_path, root_name)
+        seen_view_keys.add(view_key)
+        view_targets.append(
+            {
+                "torrent_hash": torrent_hash,
+                "source_save_path": save_path,
+                "target_save_path": target_save_path,
+                "root_name": root_name,
+            }
+        )
+
+    return affected_torrents, view_targets, collisions, unique_views
+
+
+def build_missing_sibling_reconnect_batch(
+    *,
+    qb_client: QBittorrentClient,
+    source_root: str,
+    target_root: str,
+    fastresume_dir: Path,
+    catalog_path: Path,
+    torrent_hashes: Optional[Iterable[str]] = None,
+    limit: int = 0,
+    unique_view_subdir: str = DEFAULT_UNIQUE_VIEW_SUBDIR,
+) -> Dict[str, Any]:
+    audit = audit_missing_root_drift(
+        qb_client=qb_client,
+        source_root=source_root,
+        target_root=target_root,
+        fastresume_dir=fastresume_dir,
+        catalog_path=catalog_path,
+        state_filter=("missingFiles",),
+    )
+    requested = {
+        str(torrent_hash or "").strip().lower()
+        for torrent_hash in (torrent_hashes or [])
+        if str(torrent_hash or "").strip()
+    }
+    reconnect_root_causes = {
+        "root_drift_to_surviving_sibling_target",
+        "root_drift_fastresume_stale",
+    }
+    rows = [
+        row
+        for row in (audit.get("rows") or [])
+        if str(row.get("root_cause") or "") in reconnect_root_causes
+        and bool(row.get("sibling_targets"))
+        and (not requested or str(row.get("hash") or "").strip().lower() in requested)
+    ]
+
+    catalog_uri = f"file:{quote(str(Path(catalog_path).expanduser().resolve()), safe='/')}?mode=ro&immutable=1"
+    conn = sqlite3.connect(catalog_uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    plans: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    try:
+        rows_by_payload: dict[str, list[Dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            rows_by_payload[str(row.get("payload_hash") or "")].append(row)
+
+        for payload_hash, payload_rows in rows_by_payload.items():
+            if not payload_hash:
+                continue
+            donor = _select_sibling_target(
+                conn,
+                payload_hash=payload_hash,
+                target_root=target_root,
+                sibling_targets=[
+                    sibling
+                    for row in payload_rows
+                    for sibling in (row.get("sibling_targets") or [])
+                ],
+            )
+            if donor is None:
+                skipped.append(
+                    {
+                        "payload_hash": payload_hash,
+                        "reason": "no_surviving_target_payload",
+                        "torrent_hashes": [str(row.get("hash") or "") for row in payload_rows],
+                    }
+                )
+                continue
+
+            stale_rows = _fetch_stale_torrent_rows(
+                conn,
+                torrent_hashes=[str(row.get("hash") or "") for row in payload_rows],
+            )
+            affected_torrents, view_targets, collisions, unique_views = _build_missing_view_targets(
+                stale_rows=stale_rows,
+                source_root=source_root,
+                target_root=target_root,
+                unique_view_subdir=unique_view_subdir,
+            )
+            if not affected_torrents or not view_targets:
+                skipped.append(
+                    {
+                        "payload_hash": payload_hash,
+                        "reason": "no_reconnect_view_targets",
+                        "torrent_hashes": [str(row.get("hash") or "") for row in payload_rows],
+                    }
+                )
+                continue
+
+            source_rows = [
+                {
+                    "payload_id": int(row["payload_id"] or 0),
+                    "device_id": int(row["payload_device_id"] or 0),
+                    "root_path": str(row["root_path"] or ""),
+                    "file_count": int(row["file_count"] or 0),
+                    "total_bytes": int(row["total_bytes"] or 0),
+                    "status": str(row["status"] or ""),
+                }
+                for row in stale_rows
+            ]
+            payload_group = sorted(
+                source_rows
+                + [
+                    {
+                        "payload_id": int(donor["payload_id"] or 0),
+                        "device_id": int(donor["device_id"] or 0),
+                        "root_path": str(donor["root_path"] or ""),
+                        "file_count": int(donor["file_count"] or 0),
+                        "total_bytes": int(donor["total_bytes"] or 0),
+                        "status": str(donor["status"] or ""),
+                    }
+                ],
+                key=lambda item: (int(item.get("device_id") or 0), int(item.get("payload_id") or 0)),
+            )
+            unique_payload_group: List[Dict[str, Any]] = []
+            seen_payload_ids: set[int] = set()
+            for item in payload_group:
+                payload_id = int(item.get("payload_id") or 0)
+                if payload_id in seen_payload_ids:
+                    continue
+                seen_payload_ids.add(payload_id)
+                unique_payload_group.append(item)
+
+            primary_source = min(source_rows, key=lambda item: int(item.get("payload_id") or 0))
+            plans.append(
+                {
+                    "version": "1.0",
+                    "direction": "demote",
+                    "decision": "REUSE",
+                    "torrent_hash": affected_torrents[0],
+                    "payload_id": int(primary_source["payload_id"] or 0),
+                    "payload_hash": payload_hash,
+                    "reasons": [
+                        "Reconnect stale missingFiles siblings to surviving target payload without copy"
+                    ],
+                    "affected_torrents": affected_torrents,
+                    "source_path": str(primary_source["root_path"] or ""),
+                    "target_path": str(donor["root_path"] or ""),
+                    "source_device_id": int(primary_source["device_id"] or 0),
+                    "target_device_id": int(donor["device_id"] or 0),
+                    "seeding_roots": [
+                        normalize_save_path(source_root),
+                        normalize_save_path(target_root),
+                    ],
+                    "library_roots": [],
+                    "view_targets": view_targets,
+                    "payload_group": unique_payload_group,
+                    "file_count": int(donor["file_count"] or 0),
+                    "total_bytes": int(donor["total_bytes"] or 0),
+                    "normalization": {
+                        "mode": "qb_missing_sibling_reconnect",
+                        "source_root": normalize_save_path(source_root),
+                        "target_root": normalize_save_path(target_root),
+                        "view_collisions": int(collisions),
+                        "unique_view_targets": int(unique_views),
+                        "unique_view_subdir": str(unique_view_subdir),
+                        "donor_torrent_hash": str(donor["torrent_hash"] or ""),
+                        "donor_root_path": str(donor["root_path"] or ""),
+                        "audit_root_cause": "root_drift_to_surviving_sibling_target",
+                        "missing_hashes": [str(row.get("hash") or "") for row in payload_rows],
+                    },
+                }
+            )
+            if limit > 0 and len(plans) >= limit:
+                break
+    finally:
+        conn.close()
+
+    return {
+        "version": "1.0",
+        "generated_at": ts_iso(),
+        "mode": "qb_missing_sibling_reconnect",
+        "source_root": normalize_save_path(source_root),
+        "target_root": normalize_save_path(target_root),
+        "summary": {
+            "rows": len(rows),
+            "plans": len(plans),
+            "skipped": len(skipped),
+            "decision_reuse": len(plans),
+            "decision_move": 0,
+            "view_collisions": sum(
+                int((plan.get("normalization") or {}).get("view_collisions") or 0)
+                for plan in plans
+            ),
+            "unique_view_targets": sum(
+                int((plan.get("normalization") or {}).get("unique_view_targets") or 0)
+                for plan in plans
+            ),
+        },
+        "audit": {
+            "rows": int((audit.get("summary") or {}).get("rows") or 0),
+            "root_causes": dict(audit.get("root_causes") or {}),
+        },
+        "plans": plans,
+        "skipped": skipped,
+    }
 
 
 def _classify_root_cause(

@@ -1125,6 +1125,43 @@ def test_verify_and_validate_allow_reused_existing_destination_rows(tmp_path):
     assert "torrent_not_complete" not in row["issues"]
 
 
+def test_build_manifest_for_relocations_marks_missing_reconnect_rows_reused(tmp_path):
+    torrent_hash = "reconnect123"
+    row = _manifest_row(tmp_path, torrent_hash)
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["old_save_path"],
+                row["content_path"],
+                state="missingFiles",
+                progress=0.0,
+            )
+        }
+    )
+    manifest = qb_zfs_relocate.build_manifest_for_relocations(
+        qb_client=client,
+        relocations=[
+            {
+                "torrent_hash": torrent_hash,
+                "source_save_path": row["old_save_path"],
+                "target_save_path": row["new_save_path"],
+            }
+        ],
+        fastresume_dir=Path(tmp_path / "BT_backup"),
+        torrent_dir=Path(tmp_path / "torrents"),
+        source_root=str(tmp_path / "old_ds"),
+        dest_root=str(tmp_path / "new_ds"),
+        mode="qb_missing_sibling_reconnect",
+        apply_context={},
+    )
+
+    built = manifest["rows"][0]
+    assert built["dest_exists"] is True
+    assert built["copy_status"] == "reused_existing_dest"
+
+
 def test_validate_allows_already_repointed_rows_when_source_content_differs(tmp_path):
     torrent_hash = "repointed123def456abc123def456abc123def"
     row = _manifest_row(tmp_path, torrent_hash)

@@ -2414,6 +2414,11 @@ class DemotionExecutor:
         if not torrent_hashes:
             return
 
+        normalization = plan.get("normalization") or {}
+        allow_missingfiles = (
+            str(normalization.get("mode") or "").strip().lower()
+            == "qb_missing_sibling_reconnect"
+        )
         blocked: List[str] = []
 
         for torrent_hash in torrent_hashes:
@@ -2437,13 +2442,17 @@ class DemotionExecutor:
                 for marker in ("checking", "moving", "allocating")
             )
 
-            if state in self._PREFLIGHT_BLOCKED_STATES or is_transient:
+            blocked_states = set(self._PREFLIGHT_BLOCKED_STATES)
+            if allow_missingfiles:
+                blocked_states.discard("missingfiles")
+
+            if state in blocked_states or is_transient:
                 blocked.append(
                     f"{torrent_hash[:16]}: unsafe state={state!r} progress={progress:.4f}"
                 )
                 continue
 
-            if progress < 0.9999:
+            if progress < 0.9999 and not (allow_missingfiles and state == "missingfiles"):
                 blocked.append(
                     f"{torrent_hash[:16]}: incomplete progress={progress:.4f} state={state!r}"
                 )

@@ -2,16 +2,24 @@ from pathlib import Path
 from types import SimpleNamespace
 import sqlite3
 
-from rehome.qb_missing import audit_missing_root_drift
+from rehome.qb_missing import audit_missing_root_drift, build_missing_sibling_reconnect_batch
+from rehome.executor import DemotionExecutor
 from hashall.bencode import bencode_encode
 
 
 class FakeQBClient:
     def __init__(self, torrents):
         self._torrents = torrents
+        self._by_hash = {str(t.hash).lower(): t for t in torrents}
 
     def get_torrents(self):
         return list(self._torrents)
+
+    def get_torrent_info(self, torrent_hash):
+        return self._by_hash.get(str(torrent_hash).lower())
+
+    def get_torrent_files(self, torrent_hash):
+        return [SimpleNamespace(name="dummy", size=1)]
 
 
 def _write_fastresume(path: Path, *, save_path: str, qbt_save_path: str, qbt_download_path: str = "") -> None:
@@ -265,3 +273,296 @@ def test_audit_missing_root_drift_classifies_surviving_sibling_target(tmp_path):
             "healthy": True,
         }
     ]
+
+
+def test_build_missing_sibling_reconnect_batch_builds_reuse_plan_with_unique_views(tmp_path):
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY,
+                payload_hash TEXT,
+                device_id INTEGER,
+                root_path TEXT,
+                file_count INTEGER,
+                total_bytes INTEGER,
+                status TEXT
+            );
+            CREATE TABLE torrent_instances (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_id INTEGER,
+                device_id INTEGER,
+                save_path TEXT,
+                root_name TEXT
+            );
+            CREATE TABLE rehome_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                direction TEXT,
+                decision TEXT,
+                payload_hash TEXT,
+                status TEXT,
+                source_path TEXT,
+                target_path TEXT,
+                cleanup_source_required INTEGER DEFAULT 0,
+                cleanup_source_path TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status) VALUES (1, ?, 44, ?, 1, 123, 'complete')",
+            (
+                "payload-reconnect",
+                "/stash/media/torrents/seeding/cross-seed/PrivateHD/Cleverman.S02/Movie.mkv",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status) VALUES (2, ?, 141, ?, 1, 123, 'complete')",
+            (
+                "payload-reconnect",
+                "/pool/media/torrents/seeding/cross-seed/Aither (API)/Cleverman.S02/Movie.mkv",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name) VALUES (?, 1, 44, ?, ?)",
+            (
+                "deadbeef",
+                "/data/media/torrents/seeding/cross-seed/PrivateHD",
+                "Cleverman.S02",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name) VALUES (?, 1, 44, ?, ?)",
+            (
+                "badf00d",
+                "/data/media/torrents/seeding/cross-seed/PrivateHD",
+                "Cleverman.S02",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name) VALUES (?, 2, 141, ?, ?)",
+            (
+                "goodcafe",
+                "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+                "Cleverman.S02",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "deadbeef.fastresume",
+        save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+        qbt_save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+    )
+    _write_fastresume(
+        fastresume_dir / "badf00d.fastresume",
+        save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+        qbt_save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+    )
+
+    torrents = [
+        SimpleNamespace(
+            hash="deadbeef",
+            name="Cleverman",
+            state="missingFiles",
+            progress=0.0,
+            save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+            content_path="/data/media/torrents/seeding/cross-seed/PrivateHD/Cleverman.S02/Movie.mkv",
+        ),
+        SimpleNamespace(
+            hash="badf00d",
+            name="Cleverman",
+            state="missingFiles",
+            progress=0.0,
+            save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+            content_path="/data/media/torrents/seeding/cross-seed/PrivateHD/Cleverman.S02/Movie.mkv",
+        ),
+        SimpleNamespace(
+            hash="goodcafe",
+            name="Cleverman",
+            state="stalledUP",
+            progress=1.0,
+            save_path="/pool/media/torrents/seeding/cross-seed/Aither (API)",
+            content_path="/pool/media/torrents/seeding/cross-seed/Aither (API)/Cleverman.S02/Movie.mkv",
+        ),
+    ]
+
+    report = build_missing_sibling_reconnect_batch(
+        qb_client=FakeQBClient(torrents),
+        source_root="/data/media/torrents/seeding",
+        target_root="/pool/media/torrents/seeding",
+        fastresume_dir=fastresume_dir,
+        catalog_path=catalog,
+    )
+
+    assert report["summary"]["plans"] == 1
+    assert report["summary"]["unique_view_targets"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "REUSE"
+    assert plan["payload_hash"] == "payload-reconnect"
+    assert plan["target_path"] == "/pool/media/torrents/seeding/cross-seed/Aither (API)/Cleverman.S02/Movie.mkv"
+    assert plan["affected_torrents"] == ["badf00d", "deadbeef"]
+    assert plan["normalization"]["mode"] == "qb_missing_sibling_reconnect"
+    assert plan["normalization"]["view_collisions"] == 1
+    assert plan["normalization"]["unique_view_targets"] == 1
+    assert plan["view_targets"] == [
+        {
+            "torrent_hash": "badf00d",
+            "source_save_path": "/data/media/torrents/seeding/cross-seed/PrivateHD",
+            "target_save_path": "/pool/media/torrents/seeding/cross-seed/PrivateHD",
+            "root_name": "Cleverman.S02",
+        },
+        {
+            "torrent_hash": "deadbeef",
+            "source_save_path": "/data/media/torrents/seeding/cross-seed/PrivateHD",
+            "target_save_path": "/pool/media/torrents/seeding/_rehome-unique/deadbeef",
+            "root_name": "Cleverman.S02",
+        },
+    ]
+
+
+def test_build_missing_sibling_reconnect_batch_includes_fastresume_stale_rows_with_siblings(tmp_path):
+    target_root = str(tmp_path / "pool" / "media" / "torrents" / "seeding")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY,
+                payload_hash TEXT,
+                device_id INTEGER,
+                root_path TEXT,
+                file_count INTEGER,
+                total_bytes INTEGER,
+                status TEXT
+            );
+            CREATE TABLE torrent_instances (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_id INTEGER,
+                device_id INTEGER,
+                save_path TEXT,
+                root_name TEXT
+            );
+            CREATE TABLE rehome_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                direction TEXT,
+                decision TEXT,
+                payload_hash TEXT,
+                status TEXT,
+                source_path TEXT,
+                target_path TEXT,
+                cleanup_source_required INTEGER DEFAULT 0,
+                cleanup_source_path TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status) VALUES (1, ?, 44, ?, 1, 123, 'complete')",
+            (
+                "payload-reconnect",
+                "/stash/media/torrents/seeding/cross-seed/PrivateHD/Cleverman.S02/Movie.mkv",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status) VALUES (2, ?, 141, ?, 1, 123, 'complete')",
+            (
+                "payload-reconnect",
+                f"{target_root}/cross-seed/Aither (API)/Cleverman.S02/Movie.mkv",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name) VALUES (?, 1, 44, ?, ?)",
+            (
+                "deadbeef",
+                "/data/media/torrents/seeding/cross-seed/PrivateHD",
+                "Cleverman.S02",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name) VALUES (?, 2, 141, ?, ?)",
+            (
+                "goodcafe",
+                f"{target_root}/cross-seed/Aither (API)",
+                "Cleverman.S02",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    mapped_target = Path(target_root) / "cross-seed" / "PrivateHD" / "Cleverman.S02" / "Movie.mkv"
+    mapped_target.parent.mkdir(parents=True, exist_ok=True)
+    mapped_target.write_bytes(b"x")
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "deadbeef.fastresume",
+        save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+        qbt_save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+    )
+
+    torrents = [
+        SimpleNamespace(
+            hash="deadbeef",
+            name="Cleverman",
+            state="missingFiles",
+            progress=0.0,
+            save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+            content_path="/data/media/torrents/seeding/cross-seed/PrivateHD/Cleverman.S02/Movie.mkv",
+        ),
+        SimpleNamespace(
+            hash="goodcafe",
+            name="Cleverman",
+            state="stalledUP",
+            progress=1.0,
+            save_path=f"{target_root}/cross-seed/Aither (API)",
+            content_path=f"{target_root}/cross-seed/Aither (API)/Cleverman.S02/Movie.mkv",
+        ),
+    ]
+
+    report = build_missing_sibling_reconnect_batch(
+        qb_client=FakeQBClient(torrents),
+        source_root="/data/media/torrents/seeding",
+        target_root=target_root,
+        fastresume_dir=fastresume_dir,
+        catalog_path=catalog,
+    )
+
+    assert report["summary"]["plans"] == 1
+    assert report["plans"][0]["payload_hash"] == "payload-reconnect"
+
+
+def test_missing_reconnect_preflight_allows_missingfiles_state(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="deadbeef",
+                state="missingFiles",
+                progress=0.0,
+            ),
+            SimpleNamespace(
+                hash="badf00d",
+                state="missingFiles",
+                progress=0.0,
+            ),
+        ]
+    )
+
+    plan = {
+        "affected_torrents": ["deadbeef", "badf00d"],
+        "normalization": {"mode": "qb_missing_sibling_reconnect"},
+    }
+
+    executor._preflight_torrent_state_check(plan)

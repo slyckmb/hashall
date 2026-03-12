@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.12"
+SCRIPT_VERSION = "0.1.13"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -595,6 +595,11 @@ def build_manifest_for_relocations(
         for relocation in relocations
         if str(relocation.get("torrent_hash") or "").strip()
     ]
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode == "qb_missing_sibling_reconnect":
+        for row in rows:
+            if bool(row.get("dest_exists")):
+                row["copy_status"] = "reused_existing_dest"
     return {
         "version": "1.0",
         "generated_at": ts_iso(),
