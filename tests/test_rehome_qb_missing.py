@@ -151,3 +151,117 @@ def test_audit_missing_root_drift_leaves_unclassified_without_mapped_target(tmp_
 
     assert report["summary"]["rows"] == 1
     assert report["root_causes"] == {"missing_payload_no_mapped_target": 1}
+
+
+def test_audit_missing_root_drift_classifies_surviving_sibling_target(tmp_path):
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY,
+                payload_hash TEXT,
+                device_id INTEGER,
+                root_path TEXT,
+                status TEXT
+            );
+            CREATE TABLE torrent_instances (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_id INTEGER
+            );
+            CREATE TABLE rehome_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                direction TEXT,
+                decision TEXT,
+                payload_hash TEXT,
+                status TEXT,
+                source_path TEXT,
+                target_path TEXT,
+                cleanup_source_required INTEGER DEFAULT 0,
+                cleanup_source_path TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, status) VALUES (1, ?, 44, ?, 'complete')",
+            (
+                "payload-sibling",
+                "/stash/media/torrents/seeding/cross-seed/PrivateHD/Cleverman.S02/Movie.mkv",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, status) VALUES (2, ?, 141, ?, 'complete')",
+            (
+                "payload-sibling",
+                "/pool/media/torrents/seeding/cross-seed/Aither (API)/Cleverman.S02/Movie.mkv",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO torrent_instances (torrent_hash, payload_id) VALUES (?, 1)",
+            ("deadbeef",),
+        )
+        conn.execute(
+            "INSERT INTO torrent_instances (torrent_hash, payload_id) VALUES (?, 2)",
+            ("goodcafe",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "deadbeef.fastresume",
+        save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+        qbt_save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+    )
+
+    torrents = [
+        SimpleNamespace(
+            hash="deadbeef",
+            name="Cleverman",
+            state="missingFiles",
+            progress=0.0,
+            save_path="/data/media/torrents/seeding/cross-seed/PrivateHD",
+            content_path="/data/media/torrents/seeding/cross-seed/PrivateHD/Cleverman.S02/Movie.mkv",
+        ),
+        SimpleNamespace(
+            hash="goodcafe",
+            name="Cleverman",
+            state="stalledUP",
+            progress=1.0,
+            save_path="/pool/media/torrents/seeding/cross-seed/Aither (API)",
+            content_path="/pool/media/torrents/seeding/cross-seed/Aither (API)/Cleverman.S02/Movie.mkv",
+        ),
+    ]
+
+    report = audit_missing_root_drift(
+        qb_client=FakeQBClient(torrents),
+        source_root="/data/media/torrents/seeding",
+        target_root="/pool/media/torrents/seeding",
+        fastresume_dir=fastresume_dir,
+        catalog_path=catalog,
+    )
+
+    assert report["summary"]["rows"] == 1
+    assert report["root_causes"] == {"root_drift_to_surviving_sibling_target": 1}
+    row = report["rows"][0]
+    assert row["payload_hash"] == "payload-sibling"
+    assert row["mapped_target_exists"] is False
+    assert row["sibling_target_count"] == 1
+    assert row["sibling_targets"] == [
+        {
+            "torrent_hash": "goodcafe",
+            "save_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+            "root_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)/Cleverman.S02/Movie.mkv",
+            "ti_device_id": 0,
+            "payload_device_id": 141,
+            "status": "complete",
+            "qb_state": "stalledUP",
+            "qb_progress": 1.0,
+            "healthy": True,
+        }
+    ]

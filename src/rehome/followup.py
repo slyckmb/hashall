@@ -20,6 +20,10 @@ CLEANUP_REQUIRED_TAG = "rehome_cleanup_source_required"
 DEFAULT_CLEANUP_OBSERVE_SECONDS = 60.0
 DEFAULT_CLEANUP_POLL_SECONDS = 5.0
 DEFAULT_CLEANUP_STAGE_DIRNAME = ".rehome-cleanup-stage"
+PATH_ALIAS_PREFIXES = (
+    ("/data/media", "/stash/media"),
+    ("/stash/media", "/data/media"),
+)
 
 GOOD_STATES = {"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}
 TRANSIENT_REASONS = {
@@ -65,6 +69,46 @@ def _normalize_path(path: Optional[str]) -> str:
         return str(Path(path).resolve())
     except Exception:
         return str(path)
+
+
+def _alias_variants(path: Optional[str]) -> set[str]:
+    normalized = _normalize_path(path)
+    if not normalized:
+        return set()
+    variants = {normalized}
+    for old_prefix, new_prefix in PATH_ALIAS_PREFIXES:
+        if normalized == old_prefix:
+            variants.add(new_prefix)
+        elif normalized.startswith(old_prefix + "/"):
+            variants.add(new_prefix + normalized[len(old_prefix) :])
+    return variants
+
+
+def _source_save_prefixes(source_rows: Iterable[sqlite3.Row]) -> set[str]:
+    prefixes: set[str] = set()
+    for row in source_rows:
+        root_path = str(row["root_path"] or "").strip()
+        if not root_path:
+            continue
+        root = Path(root_path)
+        candidates = {root_path}
+        if root.parent != root:
+            candidates.add(str(root.parent))
+        for candidate in candidates:
+            prefixes.update(_alias_variants(candidate))
+    return {prefix.rstrip("/") or "/" for prefix in prefixes if prefix}
+
+
+def _path_matches_any_prefix(path: Optional[str], prefixes: set[str]) -> bool:
+    normalized = _normalize_path(path)
+    if not normalized:
+        return False
+    normalized = normalized.rstrip("/") or "/"
+    for prefix in prefixes:
+        base = prefix.rstrip("/") or "/"
+        if normalized == base or normalized.startswith(base + "/"):
+            return True
+    return False
 
 
 def _state_reason(state: Optional[str]) -> Optional[str]:
@@ -203,6 +247,53 @@ def _load_cleanup_sources(rows: Iterable[sqlite3.Row], payload_hash: str) -> lis
         )
         for row in rows
     ]
+
+
+def _find_stale_payload_refs(
+    conn: sqlite3.Connection,
+    *,
+    payload_hash: str,
+    target_device: int,
+    source_save_prefixes: set[str],
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT ti.torrent_hash,
+               ti.device_id AS ti_device_id,
+               ti.save_path AS ti_save_path,
+               p.payload_id,
+               p.device_id AS payload_device_id,
+               p.root_path
+        FROM torrent_instances ti
+        JOIN payloads p ON p.payload_id = ti.payload_id
+        WHERE p.payload_hash = ?
+        ORDER BY ti.torrent_hash
+        """,
+        (payload_hash,),
+    ).fetchall()
+    stale_rows: list[dict[str, Any]] = []
+    for row in rows:
+        ti_device = int(row["ti_device_id"] or 0)
+        payload_device = int(row["payload_device_id"] or 0)
+        save_path = str(row["ti_save_path"] or "")
+        stale = (
+            (target_device and ti_device != target_device)
+            or (target_device and payload_device != target_device)
+            or _path_matches_any_prefix(save_path, source_save_prefixes)
+        )
+        if not stale:
+            continue
+        stale_rows.append(
+            {
+                "torrent_hash": str(row["torrent_hash"] or ""),
+                "ti_device_id": ti_device,
+                "payload_device_id": payload_device,
+                "save_path": save_path,
+                "root_path": str(row["root_path"] or ""),
+                "payload_id": int(row["payload_id"] or 0),
+            }
+        )
+    return stale_rows
 
 
 def _derive_target_root(row: sqlite3.Row, expected_save: str) -> str:
@@ -507,22 +598,7 @@ def run_followup(
             ]
 
             source_device = int(source_rows[0]["device_id"]) if source_rows else 0
-            stale_refs = 0
-            if source_device:
-                stale_refs = int(
-                    conn.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM torrent_instances ti
-                        JOIN payloads p ON p.payload_id = ti.payload_id
-                        WHERE p.payload_hash = ?
-                          AND p.device_id = ?
-                          AND COALESCE(ti.save_path, '') LIKE '/stash/%'
-                        """,
-                        (payload_hash, source_device),
-                    ).fetchone()[0]
-                    or 0
-                )
+            source_save_prefixes = _source_save_prefixes(source_rows)
 
             qb_checks: list[dict[str, Any]] = []
             qb_reasons: list[str] = []
@@ -636,7 +712,17 @@ def run_followup(
                 qb_reasons.extend(gate.reasons)
                 qb_checks.append(gate.__dict__)
 
-            if stale_refs > 0:
+            cleanup_required = CLEANUP_REQUIRED_TAG in group["tags"]
+            stale_ref_details: list[dict[str, Any]] = []
+            if target_device:
+                stale_ref_details = _find_stale_payload_refs(
+                    conn,
+                    payload_hash=payload_hash,
+                    target_device=target_device,
+                    source_save_prefixes=source_save_prefixes,
+                )
+            stale_refs = len(stale_ref_details)
+            if stale_refs > 0 and cleanup and cleanup_required:
                 db_reasons.append("stale_refs_on_source_payload")
                 source_reasons.append("source_has_torrent_refs")
 
@@ -648,7 +734,6 @@ def run_followup(
             else:
                 outcome = "pending"
 
-            cleanup_required = CLEANUP_REQUIRED_TAG in group["tags"]
             cleanup_result = "skipped"
             cleanup_errors: list[str] = []
             deleted_paths: list[str] = []
@@ -704,6 +789,7 @@ def run_followup(
                     "qb_checks": qb_checks,
                     "db_reasons": sorted(set(db_reasons)),
                     "source_reasons": sorted(set(source_reasons)),
+                    "stale_ref_details": stale_ref_details,
                 }
             )
 
