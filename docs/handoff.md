@@ -9,7 +9,7 @@
   - current script semver: `v0.1.11`
   - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
-- `hashall` package semver is now `0.4.173`.
+- `hashall` package semver is now `0.4.174`.
 - `qb-repair-payload-group.sh` was hardened in commit `5d83419`:
   - wrapper: `bin/qb-repair-payload-group.sh`
   - core module: `src/hashall/qb_repair_payload_group.py`
@@ -148,15 +148,20 @@
       - verifier stall behavior (`Wilding`)
 11. Live staged cleanup is now proven on `/pool/data -> /pool/media` follow-up:
     - one pilot payload and six additional pool-data payload groups completed `cleanup_result=done`
-    - no qB regressions were observed during the cleanup observe windows
-    - the post-cleanup qB snapshot was:
-      - `stalledUP=5147`
-      - `uploading=4`
+    - follow-up reconcile then auto-healed the catalog-only backlog for healthy groups
+    - two final cleanup retries initially restored because of source-side ownership/permission errors:
+      - `/pool/data/cross-seed/PrivateHD`
+      - `/stash/media/torrents/seeding/cross-seed/seedpool (API)/Stranger.Things.S03.1080p.NF.WEB-DL.DDP5.1.x264-NTG`
+    - after a narrow ownership fix on those source paths, both cleanup retries completed `done`
 12. Current follow-up backlog after the cleanup wave:
-    - `9` tagged groups remain in follow-up
-    - `4` are still `ok` but are non-pool-data cleanup candidates (`source_device_id=44` or `0`)
-    - `5` remain `failed` because catalog/device rows still do not point at the target device
-13. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
+    - only `1` tagged group remains in follow-up:
+      - payload `a1041c6049c66abe...` (`Longlegs...`)
+      - reason: one live qB row still seeds from `/pool/data/...` and reports `save_path_mismatch`
+    - everything else in the cleanup-required lane is now drained
+13. Current qB health snapshot after cleanup + reconcile:
+    - `stalledUP=5147`
+    - `uploading=4`
+14. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 
 ## Key Logs
 

@@ -89,8 +89,10 @@ Last updated: 2026-03-12
 4. The next live gap is scaling from the first successful curated mixed batch to another curated batch from the remaining clean candidates.
 5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
 6. `MOVE` still needs stronger fail-closed behavior around dirty preexisting targets and stalled offline verify paths.
-7. Staged follow-up cleanup is now proven live for pool-data groups:
+7. Staged follow-up cleanup is now proven live for pool-data and adjacent backlog groups:
    - one pilot payload plus six additional `/pool/data` groups completed `cleanup_result=done`
+   - follow-up reconcile then converted the healthy catalog-only cleanup backlog into actionable groups
+   - two final retries initially restored because of narrow source-side ownership/permission errors, then completed after targeted ownership fixes
    - post-cleanup qB remained healthy (`stalledUP=5147`, `uploading=4`)
    - same-pool migration waves no longer need to leave every green source payload behind
 
@@ -154,7 +156,6 @@ Last updated: 2026-03-12
     - preexisting-target rejection/reporting for `MOVE`
     - offline-verify stagnation detection
     - better lock-holder diagnostics on `~/.hashall/rehome.lock`
-8. Remaining follow-up backlog after the 2026-03-12 cleanup wave:
-   - `9` tagged groups remain in follow-up
-   - `4` are still `ok` but are not the immediate `/pool/data` pressure lane (`source_device_id=44` or `0`)
-   - `5` remain `failed` due to stale catalog/device state and need reconciliation before cleanup
+8. Remaining follow-up backlog after the 2026-03-12 cleanup + reconcile wave:
+   - only `1` tagged group remains in follow-up
+   - payload `a1041c6049c66abe...` (`Longlegs...`) is still a real live failure because one member remains on `/pool/data/...` and reports `save_path_mismatch`

@@ -256,3 +256,20 @@ Latest staged follow-up cleanup note (2026-03-12):
   - `9` tagged groups remain
   - `4` are still `ok` but are non-pool-data or source-device-unknown cleanup candidates
   - `5` remain blocked by stale catalog/device state and need reconciliation before cleanup
+
+Latest follow-up reconcile note (2026-03-12):
+
+- Commit `2511ce2` added follow-up-side catalog reconcile for healthy rows:
+  - target device is now inferred from the active candidate hashes, not every torrent sharing the payload hash
+  - healthy rows can switch `torrent_instances.payload_id` to the already-correct target payload row before cleanup
+  - canonical-target fallback handles sibling views that intentionally reuse one target payload row
+- Live result:
+  - cleanup backlog collapsed from `9` groups to `3`
+  - `2` cleanup retries initially restored because of narrow source-side ownership/permission errors:
+    - `/pool/data/cross-seed/PrivateHD`
+    - `/stash/media/torrents/seeding/cross-seed/seedpool (API)/Stranger.Things.S03.1080p.NF.WEB-DL.DDP5.1.x264-NTG`
+  - after a targeted ownership fix, both retries completed `cleanup_result=done`
+- Current end-state:
+  - follow-up now shows only `1` remaining failed group:
+    - payload `a1041c6049c66abe...` (`Longlegs...`)
+    - one live qB row still seeds from `/pool/data/...` and reports `save_path_mismatch`
