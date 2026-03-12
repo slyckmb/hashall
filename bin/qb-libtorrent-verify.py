@@ -481,6 +481,31 @@ def classify_result(verified: bool, exact_tree: bool, ratio: float) -> str:
     return "no_match"
 
 
+def finalize_verify_result(quick: dict, verify: dict) -> dict:
+    """Promote instant-complete checks that never emitted checking_files.
+
+    Some tiny or cache-hot torrents can jump from checking_resume_data straight
+    to a fully-complete seeding state immediately after force_recheck(). When
+    that happens, libtorrent has still accepted all bytes as valid, but the
+    older guard treated the missing checking_files transition as a hard failure.
+    """
+    verified = bool(verify.get("verified"))
+    reason = str(verify.get("verify_reason") or "")
+    state = str(verify.get("verify_state") or "").strip().lower()
+    ratio = float(verify.get("verify_ratio", 0.0) or 0.0)
+    exact_tree = bool(quick.get("exact_tree"))
+    if verified:
+        return verify
+    if not exact_tree or ratio < 0.9999 or reason != "no_recheck_transition":
+        return verify
+    if state not in {"seeding", "uploading", "stalledup", "forcedup", "pausedup", "finished"}:
+        return verify
+    promoted = dict(verify)
+    promoted["verified"] = True
+    promoted["verify_reason"] = "instant_complete_without_checking_transition"
+    return promoted
+
+
 def main() -> int:
     args = build_parser().parse_args()
     lt = import_libtorrent()
@@ -537,6 +562,7 @@ def main() -> int:
                 label=str(candidate),
                 stalled_timeout_s=float(args.stalled_timeout),
             )
+        verify = finalize_verify_result(quick, verify)
         classification = classify_result(
             verified=bool(verify["verified"]),
             exact_tree=bool(quick["exact_tree"]),

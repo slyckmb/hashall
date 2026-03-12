@@ -198,13 +198,6 @@ def _classify_row(row: Dict[str, Any]) -> tuple[str, str, str]:
             "Repair or recheck the torrent first, then retry migration once it is back at 100%.",
         )
 
-    if expected_target_content and not target_exists:
-        return (
-            "target_view_missing",
-            "The new destination view that this torrent expects does not exist yet in the required shape.",
-            "Build or repair the target view before attempting to repoint this torrent.",
-        )
-
     if qbit_on_target and fr_on_target:
         if catalog_on_target and payload_on_target:
             return (
@@ -244,6 +237,13 @@ def _classify_row(row: Dict[str, Any]) -> tuple[str, str, str]:
             "source_only",
             "This torrent is still only backed by the old source payload; no target copy/view is ready yet.",
             "Copy or build the target payload/view first, then repoint the torrent.",
+        )
+
+    if expected_target_content and not target_exists:
+        return (
+            "target_view_missing",
+            "The new destination view that this torrent expects does not exist yet in the required shape.",
+            "Build or repair the target view before attempting to repoint this torrent.",
         )
 
     return (

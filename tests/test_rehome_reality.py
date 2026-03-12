@@ -238,3 +238,44 @@ def test_drift_audit_cli_prints_group_state(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "ready_repoint_or_reconcile" in result.output
     assert "stale_runtime_and_fastresume_root" in result.output
+
+
+def test_build_plan_reality_snapshot_classifies_move_source_only(tmp_path):
+    source_root = tmp_path / "pool-data" / "thegeeks" / "Book.epub"
+    target_root = tmp_path / "pool-media" / "thegeeks" / "Book.epub"
+    source_root.parent.mkdir(parents=True, exist_ok=True)
+    source_root.write_bytes(b"book")
+
+    catalog = tmp_path / "catalog.db"
+    _make_catalog(catalog, payload_root=str(source_root), save_path=str(source_root.parent))
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(source_root.parent),
+        qbt_save_path=str(source_root.parent),
+    )
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="Book.epub",
+                state="stalledUP",
+                progress=1.0,
+                save_path=str(source_root.parent),
+                content_path=str(source_root),
+            )
+        ]
+    )
+
+    snapshot = build_plan_reality_snapshot(
+        plan=_make_plan(source_root, target_root),
+        qb_client=qb,
+        catalog_path=catalog,
+        fastresume_dir=fastresume_dir,
+    )
+
+    assert snapshot["group_state"] == "ready_repoint_or_reconcile"
+    assert snapshot["rows"][0]["classification"] == "source_only"

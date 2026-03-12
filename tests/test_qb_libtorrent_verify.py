@@ -75,3 +75,33 @@ def test_update_stall_watch_resets_when_progress_moves() -> None:
     assert next_progress_at == 200.0
     assert next_done == 50
     assert next_wanted == 100
+
+
+def test_finalize_verify_result_promotes_instant_complete_exact_tree() -> None:
+    quick = {"exact_tree": True}
+    verify = {
+        "verified": False,
+        "verify_reason": "no_recheck_transition",
+        "verify_state": "seeding",
+        "verify_ratio": 1.0,
+    }
+
+    out = MODULE.finalize_verify_result(quick, verify)
+
+    assert out["verified"] is True
+    assert out["verify_reason"] == "instant_complete_without_checking_transition"
+
+
+def test_finalize_verify_result_keeps_non_exact_tree_partial() -> None:
+    quick = {"exact_tree": False}
+    verify = {
+        "verified": False,
+        "verify_reason": "no_recheck_transition",
+        "verify_state": "seeding",
+        "verify_ratio": 1.0,
+    }
+
+    out = MODULE.finalize_verify_result(quick, verify)
+
+    assert out["verified"] is False
+    assert out["verify_reason"] == "no_recheck_transition"
