@@ -173,6 +173,106 @@ class RecheckingFakeClient(FakeClient):
         return info
 
 
+class SlowStartRecheckingFakeClient(FakeClient):
+    def __init__(self, torrents_by_hash):
+        super().__init__(torrents_by_hash)
+        self._polls = {}
+
+    def recheck_torrent(self, torrent_hash):
+        if super().recheck_torrent(torrent_hash):
+            self._polls[torrent_hash] = 3
+            return True
+        return False
+
+    def get_torrent_info(self, torrent_hash):
+        info = self.torrents_by_hash.get(torrent_hash)
+        if info is None:
+            return None
+        remaining = self._polls.get(torrent_hash, 0)
+        if remaining > 0:
+            self._polls[torrent_hash] = remaining - 1
+            if remaining == 3:
+                info.state = "stalledUP"
+                info.progress = 1.0
+            elif remaining == 2:
+                info.state = "checkingUP"
+                info.progress = 0.4
+            else:
+                info.state = "missingFiles"
+                info.progress = 0.0
+        return info
+
+
+class RetryingVerifier(FakeVerifier):
+    def __init__(self):
+        super().__init__()
+        self._attempt = 0
+
+    def verify(
+        self,
+        torrent_path,
+        candidate_path,
+        report_path,
+        *,
+        timeout_seconds,
+        quick_only,
+        show_progress,
+    ):
+        self._attempt += 1
+        self.calls.append(
+            {
+                "torrent_path": str(torrent_path),
+                "candidate_path": str(candidate_path),
+                "report_path": str(report_path),
+                "timeout_seconds": float(timeout_seconds),
+                "quick_only": bool(quick_only),
+                "show_progress": bool(show_progress),
+            }
+        )
+        if self._attempt == 1:
+            payload = {
+                "summary": {
+                    "verified": 0,
+                    "best_path": str(candidate_path),
+                    "best_classification": "partial_match",
+                },
+                "results": [
+                    {
+                        "path": str(candidate_path),
+                        "exact_tree": True,
+                        "quick_ratio": 1.0,
+                        "missing_count_quick": 0,
+                        "extra_count_quick": 0,
+                        "classification": "partial_match",
+                        "verify_state": "downloading",
+                        "verify_ratio": 0.7148,
+                    }
+                ],
+            }
+        else:
+            payload = {
+                "summary": {
+                    "verified": 1,
+                    "best_path": str(candidate_path),
+                    "best_classification": "exact_tree",
+                },
+                "results": [
+                    {
+                        "path": str(candidate_path),
+                        "exact_tree": True,
+                        "quick_ratio": 1.0,
+                        "missing_count_quick": 0,
+                        "extra_count_quick": 0,
+                        "classification": "exact_tree",
+                        "verify_state": "seeding",
+                        "verify_ratio": 1.0,
+                    }
+                ],
+            }
+        write_json(report_path, payload)
+        return payload
+
+
 def _torrent_info(torrent_hash, name, save_path, content_path, state="pausedUP", progress=1.0):
     return SimpleNamespace(
         hash=torrent_hash,
@@ -1046,7 +1146,7 @@ def test_validate_allows_already_repointed_rows_when_source_content_differs(tmp_
                 row["name"],
                 row["new_save_path"],
                 row["dest_content_path"],
-                state="stoppedUP",
+                state="stalledUP",
                 progress=1.0,
             )
         }
@@ -1112,7 +1212,7 @@ def test_verify_failure_can_recheck_source_and_record_qb_result(tmp_path):
                 row["name"],
                 row["old_save_path"],
                 row["content_path"],
-                state="stoppedUP",
+                state="stalledUP",
                 progress=1.0,
             )
         }
@@ -1137,7 +1237,92 @@ def test_verify_failure_can_recheck_source_and_record_qb_result(tmp_path):
     assert client.recheck_calls == [torrent_hash]
     assert row["verify_status"] == "verify_failed"
     assert row["source_recheck_status"] == "completed"
-    assert row["source_recheck_before_state"] == "stoppedUP"
+    assert row["source_recheck_before_state"] == "stalledUP"
+    assert row["source_recheck_after_state"] == "missingFiles"
+    assert row["source_recheck_after_progress"] == 0.0
+
+
+def test_verify_retries_transient_exact_tree_partial_after_copy(tmp_path):
+    torrent_hash = "verifyretrycopied"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["copy_status"] = "pending"
+    manifest_path = tmp_path / "verify-retry-after-copy.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["old_save_path"],
+                row["content_path"],
+                state="stalledUP",
+                progress=1.0,
+            )
+        }
+    )
+    verifier = RetryingVerifier()
+    tool = QBZFSRelocationTool(
+        qb_client=client,
+        runner=FakeRunner(),
+        verifier=verifier,
+    )
+
+    rc = tool.verify(manifest_path=manifest_path, timeout_seconds=30.0, quick_only=False)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    assert rc == 0
+    assert len(verifier.calls) == 2
+    assert row["verify_status"] == "verified"
+    assert row["verify_attempts"] == 2
+    assert row["verify_classification"] == "exact_tree"
+    assert row["source_recheck_status"] == "not_needed"
+
+
+def test_verify_source_recheck_waits_for_actual_transition(tmp_path):
+    torrent_hash = "verifyslowstart"
+    row = _manifest_row(tmp_path, torrent_hash)
+    manifest_path = tmp_path / "verify-slowstart.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    client = SlowStartRecheckingFakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                row["name"],
+                row["old_save_path"],
+                row["content_path"],
+                state="stalledUP",
+                progress=1.0,
+            )
+        }
+    )
+    tool = QBZFSRelocationTool(
+        qb_client=client,
+        runner=FakeRunner(),
+        verifier=FailingVerifier(),
+        sleep_fn=lambda _seconds: None,
+    )
+
+    rc = tool.verify(
+        manifest_path=manifest_path,
+        timeout_seconds=30.0,
+        quick_only=False,
+        recheck_source_on_fail=True,
+        recheck_timeout_seconds=30.0,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    assert rc == 1
+    assert client.recheck_calls == [torrent_hash]
+    assert row["source_recheck_status"] == "completed"
+    assert row["source_recheck_before_state"] == "stalledUP"
     assert row["source_recheck_after_state"] == "missingFiles"
     assert row["source_recheck_after_progress"] == 0.0
 

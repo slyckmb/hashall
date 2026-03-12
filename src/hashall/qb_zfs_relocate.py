@@ -20,7 +20,7 @@ from hashall.qbittorrent import QBittorrentClient, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-zfs-relocate"
-SCRIPT_VERSION = "0.1.11"
+SCRIPT_VERSION = "0.1.12"
 SCRIPT_LAST_UPDATED = "2026-03-08"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FASTRESUME_DIR = Path(
@@ -549,6 +549,7 @@ def build_manifest_row_for_relocation(
         "verify_status": "pending",
         "verify_report_path": "",
         "verify_classification": "",
+        "verify_attempts": 0,
         "source_recheck_status": "pending",
         "source_recheck_before_state": "",
         "source_recheck_before_progress": 0.0,
@@ -858,6 +859,7 @@ class QBZFSRelocationTool:
         manifest.setdefault("global_issues", [])
         for row in manifest.get("rows", []):
             row.setdefault("verify_classification", "")
+            row.setdefault("verify_attempts", 0)
             row.setdefault("source_recheck_status", "pending")
             row.setdefault("source_recheck_before_state", "")
             row.setdefault("source_recheck_before_progress", 0.0)
@@ -977,6 +979,92 @@ class QBZFSRelocationTool:
             return False, summary, "cleanup_verify_report_path_mismatch"
         return True, summary, ""
 
+    @staticmethod
+    def _verify_candidate_result(payload: Dict[str, Any], candidate_path: Path) -> Dict[str, Any]:
+        candidate_s = str(candidate_path)
+        for result in payload.get("results") or []:
+            if str(result.get("path") or "") == candidate_s:
+                return dict(result)
+        return {}
+
+    def _should_retry_verify_after_exact_quick_match(
+        self,
+        *,
+        row: Dict[str, Any],
+        payload: Dict[str, Any],
+        candidate_path: Path,
+        quick_only: bool,
+    ) -> bool:
+        if quick_only:
+            return False
+        copy_status = str(row.get("copy_status") or "")
+        if copy_status not in {"", "pending", "copied"}:
+            return False
+        summary = dict(payload.get("summary") or {})
+        if int(summary.get("verified", 0) or 0) > 0:
+            return False
+        if str(summary.get("best_path") or "") != str(candidate_path):
+            return False
+        result = self._verify_candidate_result(payload, candidate_path)
+        if not result:
+            return False
+        if not bool(result.get("exact_tree")):
+            return False
+        if float(result.get("quick_ratio", 0.0) or 0.0) < 1.0:
+            return False
+        if int(result.get("missing_count_quick", 0) or 0) != 0:
+            return False
+        if int(result.get("extra_count_quick", 0) or 0) != 0:
+            return False
+        if str(result.get("classification") or summary.get("best_classification") or "") != "partial_match":
+            return False
+        return str(result.get("verify_state") or "").lower() in {"downloading", "downloading_metadata"}
+
+    def _run_verify_with_retry(
+        self,
+        *,
+        row: Dict[str, Any],
+        torrent_path: Path,
+        dest_content: Path,
+        verify_dir: Path,
+        timeout_seconds: float,
+        quick_only: bool,
+    ) -> Tuple[Dict[str, Any], Path, int]:
+        attempts = 0
+        while True:
+            attempts += 1
+            report_path = (
+                verify_dir / f"{row['hash']}.json"
+                if attempts == 1
+                else verify_dir / f"{row['hash']}.retry{attempts - 1}.json"
+            )
+            payload = self.verifier.verify(
+                torrent_path,
+                dest_content,
+                report_path,
+                timeout_seconds=timeout_seconds,
+                quick_only=quick_only,
+                show_progress=True,
+            )
+            if attempts >= 2 or not self._should_retry_verify_after_exact_quick_match(
+                row=row,
+                payload=payload,
+                candidate_path=dest_content,
+                quick_only=quick_only,
+            ):
+                return payload, report_path, attempts
+            result = self._verify_candidate_result(payload, dest_content)
+            emit_log(
+                "verify_retry",
+                phase="verify",
+                hash=row["hash"],
+                attempt=attempts + 1,
+                reason="exact_quick_match_partial_after_copy",
+                state=str(result.get("verify_state") or ""),
+                ratio=round(float(result.get("verify_ratio", 0.0) or 0.0), 6),
+            )
+            self.sleep_fn(2.0)
+
     def _recheck_source_after_verify_failure(
         self,
         row: Dict[str, Any],
@@ -1011,8 +1099,13 @@ class QBZFSRelocationTool:
             return snapshot
         snapshot["requested"] = True
         deadline = time.time() + max(1.0, float(timeout_seconds))
+        transition_deadline = min(
+            deadline,
+            time.time() + max(3.0, min(15.0, float(timeout_seconds) * 0.1)),
+        )
         started_at = time.monotonic()
         last_emit_at = 0.0
+        recheck_started = False
         while True:
             info = self.qb_client.get_torrent_info(str(row.get("hash") or ""))
             state = str(getattr(info, "state", "") or "")
@@ -1021,7 +1114,14 @@ class QBZFSRelocationTool:
             snapshot["after_progress"] = progress
             elapsed = max(0.0, time.monotonic() - started_at)
             snapshot["elapsed_seconds"] = elapsed
-            if info is not None and not state.lower().startswith("checking"):
+            started_marker = (
+                state.lower().startswith("checking")
+                or state != before_state
+                or abs(progress - before_progress) > 1e-9
+            )
+            if started_marker:
+                recheck_started = True
+            if info is not None and recheck_started and not state.lower().startswith("checking"):
                 snapshot["completed"] = True
                 snapshot["status"] = "completed"
                 emit_log(
@@ -1029,6 +1129,18 @@ class QBZFSRelocationTool:
                     phase="verify",
                     hash=row["hash"],
                     status="completed",
+                    elapsed=format_hms(elapsed),
+                    state=state,
+                    progress=progress,
+                )
+                return snapshot
+            if not recheck_started and time.time() >= transition_deadline:
+                snapshot["status"] = "no_transition"
+                emit_log(
+                    "source_recheck_end",
+                    phase="verify",
+                    hash=row["hash"],
+                    status="no_transition",
                     elapsed=format_hms(elapsed),
                     state=state,
                     progress=progress,
@@ -1691,14 +1803,13 @@ class QBZFSRelocationTool:
                 add_issue(row, "destination_payload_missing")
                 results.append({"hash": row["hash"], "status": row["verify_status"]})
             else:
-                report_path = verify_dir / f"{row['hash']}.json"
-                payload = self.verifier.verify(
-                    torrent_path,
-                    dest_content,
-                    report_path,
+                payload, report_path, verify_attempts = self._run_verify_with_retry(
+                    row=row,
+                    torrent_path=torrent_path,
+                    dest_content=dest_content,
+                    verify_dir=verify_dir,
                     timeout_seconds=timeout_seconds,
                     quick_only=quick_only,
-                    show_progress=True,
                 )
                 summary = dict(payload.get("summary") or {})
                 verified = int(summary.get("verified", 0) or 0) > 0 and str(
@@ -1708,6 +1819,7 @@ class QBZFSRelocationTool:
                 row["verify_status"] = "verified" if verified else "verify_failed"
                 row["verify_report_path"] = str(report_path)
                 row["verify_classification"] = str(summary.get("best_classification") or "")
+                row["verify_attempts"] = int(verify_attempts)
                 if verified:
                     remove_issue(row, "offline_verify_failed")
                     row["source_recheck_status"] = "not_needed"
@@ -1730,6 +1842,7 @@ class QBZFSRelocationTool:
                         "status": row["verify_status"],
                         "classification": row.get("verify_classification"),
                         "report_path": str(report_path),
+                        "verify_attempts": int(row.get("verify_attempts") or 1),
                         "source_recheck_status": row.get("source_recheck_status"),
                         "source_recheck_after_state": row.get("source_recheck_after_state"),
                         "source_recheck_after_progress": row.get("source_recheck_after_progress"),
