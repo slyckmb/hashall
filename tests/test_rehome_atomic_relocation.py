@@ -76,13 +76,20 @@ def test_copy_with_rsync_progress_applies_bwlimit_env(tmp_path, monkeypatch):
 
     commands = []
 
-    def fake_run(cmd, check=True):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         commands.append(cmd)
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
     monkeypatch.setenv("REHOME_RSYNC_BWLIMIT_KBPS", "51200")
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
 
     source = tmp_path / "source.bin"
     source.write_bytes(b"x")
@@ -103,13 +110,20 @@ def test_copy_with_rsync_progress_ignores_invalid_bwlimit_env(tmp_path, monkeypa
     commands = []
     messages = []
 
-    def fake_run(cmd, check=True):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         commands.append(cmd)
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
     monkeypatch.setenv("REHOME_RSYNC_BWLIMIT_KBPS", "abc")
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
     monkeypatch.setattr(executor, "_log", lambda message, prefix="info": messages.append((prefix, message)))
 
     source = tmp_path / "source.bin"
@@ -122,6 +136,78 @@ def test_copy_with_rsync_progress_ignores_invalid_bwlimit_env(tmp_path, monkeypa
     cmd = commands[0]
     assert not any(part.startswith("--bwlimit=") for part in cmd)
     assert any(prefix == "warning" and "REHOME_RSYNC_BWLIMIT_KBPS" in msg for prefix, msg in messages)
+
+
+def test_ensure_target_donor_rejects_dirty_preexisting_target(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    monkeypatch.setattr(executor, "_spot_check_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        executor,
+        "_copy_with_rsync_progress",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("copy should not run")),
+    )
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "movie.mkv").write_bytes(b"payload")
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "movie.mkv").write_bytes(b"payload")
+    (target / "extra.nfo").write_bytes(b"extra")
+
+    plan = {
+        "decision": "MOVE",
+        "source_path": str(source),
+        "target_path": str(target),
+        "file_count": 1,
+        "total_bytes": len(b"payload"),
+        "target_device_id": 44,
+    }
+
+    with pytest.raises(RuntimeError, match="Refusing MOVE into preexisting non-empty target") as excinfo:
+        executor._ensure_target_donor(plan)
+
+    message = str(excinfo.value)
+    assert "expected_files=1" in message
+    assert "actual_files=2" in message
+    assert f"expected_bytes={len(b'payload')}" in message
+
+
+def test_ensure_target_donor_reuses_exact_preexisting_target(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    monkeypatch.setattr(executor, "_spot_check_payload", lambda *args, **kwargs: None)
+    copy_called = {"value": False}
+
+    def fake_copy(*_args, **_kwargs):
+        copy_called["value"] = True
+
+    monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "movie.mkv").write_bytes(b"payload")
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "movie.mkv").write_bytes(b"payload")
+
+    plan = {
+        "decision": "MOVE",
+        "source_path": str(source),
+        "target_path": str(target),
+        "file_count": 1,
+        "total_bytes": len(b"payload"),
+        "target_device_id": 44,
+    }
+
+    donor = executor._ensure_target_donor(plan)
+
+    assert copy_called["value"] is False
+    assert donor.acquisition_mode == "existing"
+    assert donor.move_strategy == "idempotent_reconcile"
+    assert donor.moved_payload is False
+    assert donor.target_preexisting is True
 
 
 def test_atomic_relocation_rollback_uses_qb_runtime_source_path(tmp_path, monkeypatch):
@@ -572,13 +658,20 @@ def test_execute_move_cross_filesystem_uses_rsync_and_defers_source_cleanup(tmp_
 
     rsync_calls = {}
 
-    def fake_run(cmd, check):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         rsync_calls["cmd"] = cmd
         target_path.mkdir(parents=True, exist_ok=True)
         (target_path / "video.mkv").write_bytes(b"x")
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
-    monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
     monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         executor,
@@ -615,12 +708,19 @@ def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path,
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
 
-    def fake_run(cmd, check):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         target_path.mkdir(parents=True, exist_ok=True)
         (target_path / "video.mkv").write_bytes(b"x")
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
-    monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
     def fail_attach(*_args, **_kwargs):
         raise RuntimeError("relocation failed")
 
@@ -710,12 +810,19 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
 
-    def fake_run(cmd, check):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         target_path.mkdir(parents=True, exist_ok=True)
         (target_path / "video.mkv").write_bytes(b"x")
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
-    monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
     monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
     monkeypatch.setattr("rehome.executor.get_payload_file_rows", lambda *_args, **_kwargs: [])
 

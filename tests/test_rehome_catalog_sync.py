@@ -297,6 +297,80 @@ def test_hardened_fastresume_stops_qb_before_validate_for_patch_mode(tmp_path, m
     assert phase_times["validate"] >= 0.0
 
 
+def test_hardened_fastresume_rechecks_source_on_verify_failure_by_default(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "rows": [
+            {
+                "hash": "hash-a",
+                "selected": True,
+                "state": "stalledUP",
+                "verified": False,
+                "old_save_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+                "new_save_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+                "content_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)/Sample.mkv",
+                "dest_content_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)/Sample.mkv",
+            }
+        ]
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest))
+
+    class FakeRelocationTool:
+        def __init__(self, path: Path):
+            self.path = path
+            self.verify_kwargs = None
+
+        def _load_manifest(self, path: Path):
+            return __import__("json").loads(Path(path).read_text())
+
+        def _checkpoint_manifest(self, path: Path, manifest):
+            Path(path).write_text(__import__("json").dumps(manifest))
+
+        def _pause_selected(self, rows):
+            for row in rows:
+                row["state"] = "stoppedUP"
+
+        def _refresh_rows_from_qb(self, rows):
+            return None
+
+        def verify(self, **kwargs):
+            self.verify_kwargs = dict(kwargs)
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["verified"] = True
+                row["verify_status"] = "verified"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def validate(self, **kwargs):
+            return 1
+
+        def patch(self, **kwargs):
+            return 1
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClient(default_path="/pool/data/media/torrents/seeding/cross-seed/Aither (API)")
+    relocation_tool = FakeRelocationTool(manifest_path)
+
+    monkeypatch.setattr(executor, "_relocation_artifact_dir", lambda plan: tmp_path)
+    monkeypatch.setattr(executor, "_build_hardened_relocation_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr(executor, "_build_qb_zfs_relocation_tool", lambda: relocation_tool)
+
+    executor._attach_torrents_via_hardened_fastresume(
+        {"payload_hash": "payload-hash"},
+        TargetDonor(
+            source_path=tmp_path / "src",
+            target_path=tmp_path / "dst",
+            target_device_id=141,
+            acquisition_mode="reuse",
+        ),
+        relocations=[],
+    )
+
+    assert relocation_tool.verify_kwargs["recheck_source_on_fail"] is True
+    assert relocation_tool.verify_kwargs["recheck_timeout_seconds"] == executor.relocation_recheck_timeout_seconds
+
+
 def test_hardened_fastresume_post_patch_ignores_unpatched_rows(tmp_path, monkeypatch):
     manifest_path = tmp_path / "manifest.json"
     manifest = {

@@ -6,6 +6,7 @@ import click
 import fcntl
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -153,18 +154,32 @@ def _acquire_rehome_lock() -> "file":
     lock_dir = Path.home() / ".hashall"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "rehome.lock"
-    lock_fh = open(lock_path, "w")
+    lock_fh = open(lock_path, "a+")
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         lock_fh.close()
+        holder = ""
+        try:
+            holder = lock_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            holder = ""
+        holder_suffix = f" holder={holder}" if holder else ""
         click.echo(
             "❌ Another rehome apply is already running "
-            f"(lock held: {lock_path}). Aborting.",
+            f"(lock held: {lock_path}{holder_suffix}). Aborting.",
             err=True,
         )
         raise SystemExit(1)
-    lock_fh.write(f"pid={os.getpid()}\n")
+    metadata = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "cwd": str(Path.cwd()),
+    }
+    lock_fh.seek(0)
+    lock_fh.truncate()
+    lock_fh.write("\n".join(f"{key}={value}" for key, value in metadata.items()) + "\n")
     lock_fh.flush()
     return lock_fh
 

@@ -50,6 +50,15 @@ class TargetDonor:
     target_preexisting: bool = False
 
 
+@dataclass(frozen=True)
+class PathStats:
+    path: Path
+    exists: bool
+    is_file: bool
+    file_count: int
+    total_bytes: int
+
+
 class DemotionExecutor:
     """
     Executes demotion plans.
@@ -148,6 +157,22 @@ class DemotionExecutor:
             )
         except ValueError:
             self.relocation_verify_timeout_seconds = 1800.0
+        self.recheck_source_on_verify_fail = (
+            os.getenv("HASHALL_REHOME_RECHECK_SOURCE_ON_VERIFY_FAIL", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        try:
+            self.relocation_recheck_timeout_seconds = max(
+                60.0,
+                float(
+                    os.getenv(
+                        "HASHALL_REHOME_SOURCE_RECHECK_TIMEOUT_SECONDS",
+                        str(self.relocation_verify_timeout_seconds),
+                    )
+                ),
+            )
+        except ValueError:
+            self.relocation_recheck_timeout_seconds = self.relocation_verify_timeout_seconds
         try:
             self.resume_pilot_size = max(
                 1, int(os.getenv("HASHALL_REHOME_QB_PILOT_SIZE", "1"))
@@ -230,6 +255,96 @@ class DemotionExecutor:
         icon = prefixes.get(prefix, "ℹ️")
         print(f"{icon} {message}")
 
+    def _path_stats(self, path: Path) -> PathStats:
+        """Return file-count and byte totals for a file or directory path."""
+        target = Path(path)
+        if not target.exists():
+            return PathStats(
+                path=target,
+                exists=False,
+                is_file=False,
+                file_count=0,
+                total_bytes=0,
+            )
+        if target.is_file():
+            return PathStats(
+                path=target,
+                exists=True,
+                is_file=True,
+                file_count=1,
+                total_bytes=int(target.stat().st_size),
+            )
+
+        file_count = 0
+        total_bytes = 0
+        for candidate in target.rglob("*"):
+            if not candidate.is_file():
+                continue
+            file_count += 1
+            total_bytes += int(candidate.stat().st_size)
+        return PathStats(
+            path=target,
+            exists=True,
+            is_file=False,
+            file_count=file_count,
+            total_bytes=total_bytes,
+        )
+
+    @staticmethod
+    def _format_path_stats(
+        stats: PathStats,
+        *,
+        expected_count: Optional[int] = None,
+        expected_bytes: Optional[int] = None,
+    ) -> str:
+        fields = [
+            f"path={stats.path}",
+            f"exists={str(stats.exists).lower()}",
+            f"is_file={str(stats.is_file).lower()}",
+            f"actual_files={stats.file_count}",
+            f"actual_bytes={stats.total_bytes}",
+        ]
+        if expected_count is not None:
+            fields.append(f"expected_files={int(expected_count)}")
+        if expected_bytes is not None:
+            fields.append(f"expected_bytes={int(expected_bytes)}")
+        return " ".join(fields)
+
+    @staticmethod
+    def _path_stats_match(stats: PathStats, expected_count: int, expected_bytes: int) -> bool:
+        return (
+            stats.exists
+            and int(stats.file_count) == int(expected_count)
+            and int(stats.total_bytes) == int(expected_bytes)
+        )
+
+    @staticmethod
+    def _path_stats_empty(stats: PathStats) -> bool:
+        return stats.exists and int(stats.file_count) == 0 and int(stats.total_bytes) == 0
+
+    def _assert_path_matches_expected(
+        self,
+        path: Path,
+        *,
+        expected_count: int,
+        expected_bytes: int,
+        label: str,
+    ) -> PathStats:
+        stats = self._path_stats(path)
+        if self._path_stats_match(stats, expected_count, expected_bytes):
+            return stats
+
+        if not stats.exists:
+            reason = "missing"
+        elif int(stats.file_count) != int(expected_count):
+            reason = "file_count_mismatch"
+        else:
+            reason = "total_bytes_mismatch"
+        raise RuntimeError(
+            f"{label} mismatch reason={reason} "
+            f"{self._format_path_stats(stats, expected_count=expected_count, expected_bytes=expected_bytes)}"
+        )
+
     def _verify_file_count(self, path: Path, expected_count: int) -> bool:
         """
         Verify file count matches expected.
@@ -241,14 +356,8 @@ class DemotionExecutor:
         Returns:
             True if counts match
         """
-        if not path.exists():
-            return False
-
-        if path.is_file():
-            return expected_count == 1
-
-        actual_count = sum(1 for _ in path.rglob('*') if _.is_file())
-        return actual_count == expected_count
+        stats = self._path_stats(path)
+        return bool(stats.exists and int(stats.file_count) == int(expected_count))
 
     def _verify_total_bytes(self, path: Path, expected_bytes: int) -> bool:
         """
@@ -261,14 +370,8 @@ class DemotionExecutor:
         Returns:
             True if bytes match
         """
-        if not path.exists():
-            return False
-
-        if path.is_file():
-            return path.stat().st_size == expected_bytes
-
-        actual_bytes = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
-        return actual_bytes == expected_bytes
+        stats = self._path_stats(path)
+        return bool(stats.exists and int(stats.total_bytes) == int(expected_bytes))
 
     def _is_cross_filesystem(self, source_path: Path, target_parent: Path) -> bool:
         """Return True when source and target parent are on different filesystems."""
@@ -526,7 +629,8 @@ class DemotionExecutor:
             manifest_path=manifest_path,
             timeout_seconds=self.relocation_verify_timeout_seconds,
             quick_only=False,
-            recheck_source_on_fail=False,
+            recheck_source_on_fail=self.recheck_source_on_verify_fail,
+            recheck_timeout_seconds=self.relocation_recheck_timeout_seconds,
         )
         if verify_code != 0:
             raise RuntimeError(f"offline verify failed manifest={manifest_path}")
@@ -3195,10 +3299,12 @@ class DemotionExecutor:
         # 1. Verify existing payload on stash
         t0 = time.monotonic()
         self._log(f"step=verify_stash_payload path={target_path}")
-        if not self._verify_file_count(target_path, plan['file_count']):
-            raise RuntimeError(f"Stash payload file count mismatch at {target_path}")
-        if not self._verify_total_bytes(target_path, plan['total_bytes']):
-            raise RuntimeError(f"Stash payload total bytes mismatch at {target_path}")
+        self._assert_path_matches_expected(
+            target_path,
+            expected_count=plan["file_count"],
+            expected_bytes=plan["total_bytes"],
+            label="Stash payload",
+        )
 
         # Spot-check (optional)
         self._spot_check_payload(target_path, target_device_id, spot_check)
@@ -3250,10 +3356,12 @@ class DemotionExecutor:
         decision = str(plan.get("decision") or "").upper()
         if decision == "REUSE":
             self._log(f"step=verify_pool_payload path={target_path}")
-            if not self._verify_file_count(target_path, plan["file_count"]):
-                raise RuntimeError(f"Pool payload file count mismatch at {target_path}")
-            if not self._verify_total_bytes(target_path, plan["total_bytes"]):
-                raise RuntimeError(f"Pool payload total bytes mismatch at {target_path}")
+            self._assert_path_matches_expected(
+                target_path,
+                expected_count=plan["file_count"],
+                expected_bytes=plan["total_bytes"],
+                label="Pool payload",
+            )
             self._spot_check_payload(target_path, target_device_id, spot_check)
             return TargetDonor(
                 source_path=source_path,
@@ -3269,30 +3377,55 @@ class DemotionExecutor:
         moved_payload = False
         move_strategy = "rsync_copy_first"
         target_preexisting = target_path.exists()
+        target_stats = self._path_stats(target_path)
+        cleanup_partial_target = not target_preexisting
 
         if source_path.exists():
-            if not self._verify_file_count(source_path, plan["file_count"]):
-                raise RuntimeError("Source file count mismatch")
-            if not self._verify_total_bytes(source_path, plan["total_bytes"]):
-                raise RuntimeError("Source total bytes mismatch")
+            self._assert_path_matches_expected(
+                source_path,
+                expected_count=plan["file_count"],
+                expected_bytes=plan["total_bytes"],
+                label="Source payload",
+            )
 
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                self._copy_with_rsync_progress(source_path, target_path)
-                moved_payload = not target_preexisting
-            except Exception as e:
-                if not target_preexisting and target_path.exists():
-                    try:
-                        if target_path.is_dir():
-                            shutil.rmtree(target_path)
-                        else:
-                            target_path.unlink()
-                    except Exception as cleanup_error:
-                        self._log(
-                            f"cleanup_partial_target_failed path={target_path} error={cleanup_error}",
-                            "warning",
+            if target_preexisting:
+                if self._path_stats_match(target_stats, plan["file_count"], plan["total_bytes"]):
+                    move_strategy = "idempotent_reconcile"
+                    self._log(
+                        "step=verify_target "
+                        f"target_preexisting=true mode=idempotent_reconcile "
+                        f"{self._format_path_stats(target_stats, expected_count=plan['file_count'], expected_bytes=plan['total_bytes'])}"
+                    )
+                elif not self._path_stats_empty(target_stats):
+                    raise RuntimeError(
+                        "Refusing MOVE into preexisting non-empty target "
+                        + self._format_path_stats(
+                            target_stats,
+                            expected_count=plan["file_count"],
+                            expected_bytes=plan["total_bytes"],
                         )
-                raise RuntimeError(f"Failed to move payload: {e}")
+                    )
+                else:
+                    cleanup_partial_target = True
+
+            if move_strategy != "idempotent_reconcile":
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    self._copy_with_rsync_progress(source_path, target_path)
+                    moved_payload = True
+                except Exception as e:
+                    if cleanup_partial_target and target_path.exists():
+                        try:
+                            if target_path.is_dir():
+                                shutil.rmtree(target_path)
+                            else:
+                                target_path.unlink()
+                        except Exception as cleanup_error:
+                            self._log(
+                                f"cleanup_partial_target_failed path={target_path} error={cleanup_error}",
+                                "warning",
+                            )
+                    raise RuntimeError(f"Failed to move payload: {e}")
         else:
             if not target_path.exists():
                 raise RuntimeError(f"Source path does not exist: {source_path}")
@@ -3300,10 +3433,12 @@ class DemotionExecutor:
             self._log("step=verify_source source_missing=true mode=idempotent_reconcile", "warning")
 
         self._log(f"step=verify_target path={target_path}")
-        if not self._verify_file_count(target_path, plan["file_count"]):
-            raise RuntimeError("Target file count mismatch after move")
-        if not self._verify_total_bytes(target_path, plan["total_bytes"]):
-            raise RuntimeError("Target total bytes mismatch after move")
+        self._assert_path_matches_expected(
+            target_path,
+            expected_count=plan["file_count"],
+            expected_bytes=plan["total_bytes"],
+            label="Target payload after move",
+        )
         self._spot_check_payload(target_path, target_device_id, spot_check)
 
         return TargetDonor(
