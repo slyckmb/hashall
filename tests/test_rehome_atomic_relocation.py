@@ -54,6 +54,27 @@ class FakeQbitClient:
         return []
 
 
+class SequencedStateQbitClient(FakeQbitClient):
+    def __init__(self, states):
+        super().__init__()
+        self._states = list(states)
+        self._calls = 0
+
+    def get_torrent_info(self, torrent_hash: str):
+        idx = min(self._calls, len(self._states) - 1)
+        state, progress = self._states[idx]
+        self._calls += 1
+        return SimpleNamespace(
+            save_path=self.save_paths.get(torrent_hash, self.default_path),
+            auto_tmm=False,
+            state=state,
+            progress=progress,
+            amount_left=0,
+            size=1024,
+            completed=int(1024 * progress),
+        )
+
+
 def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
@@ -69,6 +90,43 @@ def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
 
     # t1 should be rolled back to source path
     assert executor.qbit_client.save_paths["t1"] == "/stash/seeding"
+
+
+def test_preflight_waits_for_transient_qbit_settle(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = SequencedStateQbitClient(
+        [("checkingResumeData", 0.0), ("stalledUP", 1.0)]
+    )
+    executor.preflight_settle_attempts = 2
+    executor.preflight_settle_seconds = 7.0
+
+    plan = {"affected_torrents": ["abc123"]}
+
+    executor._preflight_torrent_state_check_with_settle(plan)
+
+    assert sleeps == [7.0]
+
+
+def test_preflight_raises_after_transient_settle_window_exhausted(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = SequencedStateQbitClient(
+        [("checkingResumeData", 0.0), ("checkingResumeData", 0.0), ("checkingResumeData", 0.0)]
+    )
+    executor.preflight_settle_attempts = 2
+    executor.preflight_settle_seconds = 5.0
+
+    plan = {"affected_torrents": ["abc123"]}
+
+    with pytest.raises(RuntimeError, match="checkingresumedata"):
+        executor._preflight_torrent_state_check_with_settle(plan)
+
+    assert sleeps == [5.0, 5.0]
 
 
 def test_copy_with_rsync_progress_applies_bwlimit_env(tmp_path, monkeypatch):

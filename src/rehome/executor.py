@@ -60,6 +60,13 @@ class PathStats:
     total_bytes: int
 
 
+@dataclass(frozen=True)
+class PreflightCheckStatus:
+    blocked: Tuple[str, ...]
+    transient_only: bool
+    message: str
+
+
 class DemotionExecutor:
     """
     Executes demotion plans.
@@ -117,6 +124,18 @@ class DemotionExecutor:
             )
         except ValueError:
             self.recheck_safety_margin = 2.0
+        try:
+            self.preflight_settle_attempts = max(
+                0, int(os.getenv("HASHALL_REHOME_PREFLIGHT_SETTLE_ATTEMPTS", "3"))
+            )
+        except ValueError:
+            self.preflight_settle_attempts = 3
+        try:
+            self.preflight_settle_seconds = max(
+                1.0, float(os.getenv("HASHALL_REHOME_PREFLIGHT_SETTLE_SECONDS", "20"))
+            )
+        except ValueError:
+            self.preflight_settle_seconds = 20.0
         try:
             self.recheck_max_seconds = max(
                 self.recheck_base_seconds,
@@ -2448,21 +2467,18 @@ class DemotionExecutor:
         "error",
     })
 
-    def _preflight_torrent_state_check(self, plan: Dict) -> None:
+    def _evaluate_preflight_torrent_state_check(self, plan: Dict) -> PreflightCheckStatus:
         """
-        Block execution if any affected torrent is not seed-ready.
+        Evaluate whether any affected torrent is unsafe for rehome mutation.
 
         This is the primary guard against recurrence of the Feb-2026 disaster:
         torrents that are not 100% complete carry an active qBt-downloadPath in
         their fastresume file; rehoming them via setLocation leaves that field
         pointing at the old (now-wrong) path, causing stoppedDL on next qB restart.
-
-        Raises:
-            RuntimeError: If any torrent fails the state/progress check.
         """
         torrent_hashes = plan.get("affected_torrents") or []
         if not torrent_hashes:
-            return
+            return PreflightCheckStatus(blocked=(), transient_only=False, message="")
 
         normalization = plan.get("normalization") or {}
         allow_missingfiles = (
@@ -2470,6 +2486,8 @@ class DemotionExecutor:
             == "qb_missing_sibling_reconnect"
         )
         blocked: List[str] = []
+        transient_blocked = 0
+        hard_blocked = 0
 
         for torrent_hash in torrent_hashes:
             info = self.qbit_client.get_torrent_info(torrent_hash)
@@ -2477,6 +2495,7 @@ class DemotionExecutor:
                 blocked.append(
                     f"{torrent_hash[:16]}: not found in qBittorrent"
                 )
+                hard_blocked += 1
                 continue
 
             state = str(getattr(info, "state", "") or "").strip().lower()
@@ -2500,12 +2519,17 @@ class DemotionExecutor:
                 blocked.append(
                     f"{torrent_hash[:16]}: unsafe state={state!r} progress={progress:.4f}"
                 )
+                if is_transient:
+                    transient_blocked += 1
+                else:
+                    hard_blocked += 1
                 continue
 
             if progress < 0.9999 and not (allow_missingfiles and state == "missingfiles"):
                 blocked.append(
                     f"{torrent_hash[:16]}: incomplete progress={progress:.4f} state={state!r}"
                 )
+                hard_blocked += 1
 
         if blocked:
             detail = "\n  ".join(blocked)
@@ -2532,11 +2556,55 @@ class DemotionExecutor:
                 message += "\n  group_warnings:\n  " + "\n  ".join(group_warnings[:3])
             if human_blockers:
                 message += "\n  live_reads:\n  " + "\n  ".join(human_blockers)
-            raise RuntimeError(message)
+            return PreflightCheckStatus(
+                blocked=tuple(blocked),
+                transient_only=bool(blocked) and transient_blocked > 0 and hard_blocked == 0,
+                message=message,
+            )
 
-        self._log(
-            f"preflight_state_check passed torrents={len(torrent_hashes)}"
+        return PreflightCheckStatus(
+            blocked=(),
+            transient_only=False,
+            message=f"preflight_state_check passed torrents={len(torrent_hashes)}",
         )
+
+    def _preflight_torrent_state_check(self, plan: Dict) -> None:
+        """Block execution if any affected torrent is not seed-ready."""
+        status = self._evaluate_preflight_torrent_state_check(plan)
+        if status.blocked:
+            raise RuntimeError(status.message)
+        self._log(status.message)
+
+    def _preflight_torrent_state_check_with_settle(
+        self, plan: Dict, *, artifact_dir: Optional[Path] = None
+    ) -> None:
+        """
+        Retry transient qB preflight blockers for a bounded settle window.
+
+        qB frequently leaves torrents in a short `checkingResumeData` or
+        `moving` state immediately after a successful prior plan. Those rows are
+        unsafe to mutate, but aborting the entire remaining batch immediately is
+        needlessly brittle. For transient-only blocks, wait briefly, refresh the
+        live snapshot, and retry before failing closed.
+        """
+        attempts = 1 + max(0, int(self.preflight_settle_attempts))
+        for attempt in range(1, attempts + 1):
+            if artifact_dir is not None:
+                self._write_plan_reality_snapshot(plan, artifact_dir=artifact_dir, phase="pre")
+            status = self._evaluate_preflight_torrent_state_check(plan)
+            if not status.blocked:
+                self._log(status.message)
+                return
+            if not status.transient_only or attempt >= attempts:
+                raise RuntimeError(status.message)
+            self._log(
+                "preflight_settle_wait "
+                f"attempt={attempt}/{attempts - 1} "
+                f"wait_s={self.preflight_settle_seconds:.0f} "
+                f"blocked={len(status.blocked)}",
+                "warning",
+            )
+            time.sleep(self.preflight_settle_seconds)
 
     @staticmethod
     def _split_tags(raw_tags: Optional[str]) -> List[str]:
@@ -2746,8 +2814,7 @@ class DemotionExecutor:
         artifact_dir: Optional[Path] = None
         preloaded_files = self._sanitize_plan_live_torrents(plan)
         artifact_dir = self._relocation_artifact_dir(plan)
-        self._write_plan_reality_snapshot(plan, artifact_dir=artifact_dir, phase="pre")
-        self._preflight_torrent_state_check(plan)
+        self._preflight_torrent_state_check_with_settle(plan, artifact_dir=artifact_dir)
 
         self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
 
