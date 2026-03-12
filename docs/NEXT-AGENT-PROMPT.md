@@ -24,7 +24,7 @@ Prompt-critical context (2026-03-11):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.174`.
+  - `hashall` version now `0.4.175`.
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -98,6 +98,11 @@ Prompt-critical context (2026-03-11):
     - `hashall rehome followup --cleanup` now does `rename -> observe -> delete` with automatic restore on qB regression
   - follow-up-side catalog reconcile is now live:
     - commit `2511ce2`
+  - commit `f3071ff` fixed and live-proved the `Mickey.17...` false-partial verify case:
+    - source bytes were good
+    - qB recheck completion detection had been too permissive
+    - verify retry logic had been too narrow for `rehome` manifests
+    - rerun ended `stoppedUP 100%` on `/pool/media/...`
     - healthy rows can switch `torrent_instances.payload_id` to the already-correct target payload row before cleanup
   - live cleanup result:
     - one pilot payload plus six `/pool/data` payload groups cleaned successfully

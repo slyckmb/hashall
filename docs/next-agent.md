@@ -18,7 +18,8 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.174`
+   - `hashall` semver is `0.4.175`
+   - `qb-zfs-relocate` semver is `0.1.12`
    - single-plan live pilots are green on both major paths:
      - `REUSE`: `The.West.Wing.S07...`
      - `MOVE`: `Megalopolis.2024.REPACK...`
@@ -95,6 +96,17 @@ If context is compacted, recover with this sequence:
      - exactly one failed group remains
      - payload `a1041c6049c66abe...` (`Longlegs...`)
      - reason: one member still points at `/pool/data/...`
+15. New 2026-03-12 relocate proof continuity:
+   - commit `f3071ff` fixed a real code bug exposed by `Mickey.17...`
+   - direct source verify proved the payload was good
+   - the bug was:
+     - false qB recheck completion detection without a real state transition
+     - too-narrow retry gating for transient exact-tree `partial_match` verifies in `rehome`-shaped manifests
+   - live rerun report dir:
+     - `~/.logs/hashall/reports/rehome-relocate/20260312-111522-36390ecee324f1af/`
+   - final result:
+     - `MOVE` succeeded
+     - qB ended `stoppedUP 100%` on `/pool/media/...`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

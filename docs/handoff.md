@@ -6,10 +6,10 @@
   - entrypoint: `bin/qb-zfs-relocate.py`
   - core module: `src/hashall/qb_zfs_relocate.py`
   - phases: `plan`, `copy`, `verify`, `validate`, `patch`, `resume`, `cleanup`, `rollback`
-  - current script semver: `v0.1.11`
+  - current script semver: `v0.1.12`
   - wrapper-driven runs write timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
   - `migrate` supports staged safe cleanup via `--auto-cleanup=safe`
-- `hashall` package semver is now `0.4.174`.
+- `hashall` package semver is now `0.4.175`.
 - `qb-repair-payload-group.sh` was hardened in commit `5d83419`:
   - wrapper: `bin/qb-repair-payload-group.sh`
   - core module: `src/hashall/qb_repair_payload_group.py`
@@ -53,6 +53,13 @@
 - commit `21ea673` added streamed rsync progress for `rehome` MOVE copy windows:
   - long `MOVE` transfers now emit `copy_progress percent=... elapsed=... eta=...`
   - a long pause after `step=move_payload` is no longer expected on new runs
+- commit `f3071ff` fixed a real false-negative verify path exposed by `Mickey.17...`:
+  - source bytes and a clean target copy both verified `exact_tree`
+  - bug 1: source recheck completion could mark `completed` before qB ever entered a real `checking*` state
+  - bug 2: transient post-copy `partial_match` results were not retried when `rehome` supplied hardened manifest rows with `copy_status=pending`
+  - live proof on 2026-03-12:
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-111522-36390ecee324f1af/`
+    - `Mickey.17.2025.1080p.iT.WEB-DL.DDP5.1.Atmos.H.264-BYNDR.mkv` completed `MOVE` successfully and ended `stoppedUP 100%` on `/pool/media/...`
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
   - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`

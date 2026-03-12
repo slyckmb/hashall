@@ -257,6 +257,21 @@ Latest staged follow-up cleanup note (2026-03-12):
   - `4` are still `ok` but are non-pool-data or source-device-unknown cleanup candidates
   - `5` remain blocked by stale catalog/device state and need reconciliation before cleanup
 
+Latest relocate bugfix note (2026-03-12):
+
+- `hashall` is now `0.4.175`.
+- `qb-zfs-relocate` is now `v0.1.12`.
+- Commit `f3071ff` fixed and live-proved the `Mickey.17...` false-partial verify case.
+  - source bytes were good; direct source verify passed `exact_tree`
+  - a clean target copy also passed `exact_tree`
+  - root causes:
+    - qB source recheck completion detection was too permissive
+    - transient exact-tree `partial_match` results were not retried when `rehome` supplied `copy_status=pending`
+  - live proof report dir:
+    - `~/.logs/hashall/reports/rehome-relocate/20260312-111522-36390ecee324f1af/`
+  - final state:
+    - `stoppedUP 100%` on `/pool/media/...`
+
 Latest follow-up reconcile note (2026-03-12):
 
 - Commit `2511ce2` added follow-up-side catalog reconcile for healthy rows:

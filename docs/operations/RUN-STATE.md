@@ -8,6 +8,9 @@ Last updated: 2026-03-12
 - The current rsync-based donor transfer is still the data mover; qB is metadata-only.
 - `REUSE` continues in small batches; each apply must finish with `stoppedup`/`stalledup`, no new downloads, and clean cleanup messages.
 - `qb-zfs-relocate` has already proven the guarded live `pool-data -> pool-media` mover for pilot batches.
+- `qb-zfs-relocate` `v0.1.12` / `hashall 0.4.175` now include a live-proven fix for the `Mickey.17...` false-partial case:
+  - qB source recheck completion now requires a real transition into/out of `checking*`
+  - verify retries one time when quick/exact evidence is clean but libtorrent transiently reports `partial_match` in `downloading*`
 - `rehome` now has an explicit root-to-root planner for this domain:
   - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding`
   - shared-root sibling collisions are now surfaced and get synthesized unique destination views.
@@ -89,7 +92,12 @@ Last updated: 2026-03-12
 4. The next live gap is scaling from the first successful curated mixed batch to another curated batch from the remaining clean candidates.
 5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
 6. `MOVE` still needs stronger fail-closed behavior around dirty preexisting targets and stalled offline verify paths.
-7. Staged follow-up cleanup is now proven live for pool-data and adjacent backlog groups:
+7. `Mickey.17...` is no longer a carve-out:
+   - the original failure looked like bad source data because offline verify died around `71%` while qB still said `100%`
+   - root cause was code, not content
+   - direct source verify and a clean target-copy verify both proved `exact_tree`
+   - rerun result on 2026-03-12: `MOVE` completed successfully and qB ended `stoppedUP 100%` on `/pool/media/...`
+8. Staged follow-up cleanup is now proven live for pool-data and adjacent backlog groups:
    - one pilot payload plus six additional `/pool/data` groups completed `cleanup_result=done`
    - follow-up reconcile then converted the healthy catalog-only cleanup backlog into actionable groups
    - two final retries initially restored because of narrow source-side ownership/permission errors, then completed after targeted ownership fixes
@@ -156,6 +164,6 @@ Last updated: 2026-03-12
     - preexisting-target rejection/reporting for `MOVE`
     - offline-verify stagnation detection
     - better lock-holder diagnostics on `~/.hashall/rehome.lock`
-8. Remaining follow-up backlog after the 2026-03-12 cleanup + reconcile wave:
+9. Remaining follow-up backlog after the 2026-03-12 cleanup + reconcile wave:
    - only `1` tagged group remains in follow-up
    - payload `a1041c6049c66abe...` (`Longlegs...`) is still a real live failure because one member remains on `/pool/data/...` and reports `save_path_mismatch`
