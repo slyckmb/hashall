@@ -970,8 +970,9 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
     with open(plan_path) as f:
         plan_data = json.load(f)
 
-    # Check if batch plan
-    is_batch = plan_data.get('batch', False)
+    # Batch plan files are now commonly represented as {"plans": [...]} even
+    # when they do not carry the older explicit batch=true marker.
+    is_batch = bool(plan_data.get('batch', False) or isinstance(plan_data.get('plans'), list))
 
     if is_batch:
         # Batch plan
@@ -1822,10 +1823,13 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
     group_states: dict[str, int] = {}
     total_rows = 0
     blocked_rows = 0
+    out_of_plan_groups = 0
     for snapshot in snapshots:
         state = str(snapshot.get("group_state") or "unknown")
         group_states[state] = group_states.get(state, 0) + 1
         total_rows += int((snapshot.get("summary") or {}).get("rows", 0))
+        if int((snapshot.get("summary") or {}).get("out_of_plan_siblings", 0)) > 0:
+            out_of_plan_groups += 1
         for row in snapshot.get("rows") or []:
             if str(row.get("classification") or "") not in {"aligned_target", "catalog_drift_already_targeted"}:
                 blocked_rows += 1
@@ -1840,6 +1844,7 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
             "rows": total_rows,
             "group_states": group_states,
             "attention_rows": blocked_rows,
+            "plans_with_out_of_plan_siblings": out_of_plan_groups,
         },
         "plans": snapshots,
     }
@@ -1855,6 +1860,10 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
     click.echo(f"   plans: {report['summary']['plans']}")
     click.echo(f"   rows: {report['summary']['rows']}")
     click.echo(f"   attention_rows: {report['summary']['attention_rows']}")
+    click.echo(
+        "   plans_with_out_of_plan_siblings: "
+        f"{report['summary']['plans_with_out_of_plan_siblings']}"
+    )
     if group_states:
         click.echo("   group_states:")
         for state, count in sorted(group_states.items(), key=lambda item: (-int(item[1]), str(item[0]))):

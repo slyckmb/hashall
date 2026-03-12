@@ -158,6 +158,49 @@ def _catalog_rows_by_hash(
         conn.close()
 
 
+def _catalog_payload_group_members(
+    catalog_path: Optional[Path],
+    payload_hash: str,
+) -> List[Dict[str, Any]]:
+    payload_hash = str(payload_hash or "").strip()
+    if not catalog_path or not payload_hash:
+        return []
+
+    uri = f"file:{Path(catalog_path).expanduser().resolve()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        ti_columns = _table_columns(conn, "torrent_instances")
+        save_path_expr = "ti.save_path" if "save_path" in ti_columns else "''"
+        ti_device_expr = "ti.device_id" if "device_id" in ti_columns else "0"
+        rows = conn.execute(
+            f"""
+            SELECT lower(ti.torrent_hash) AS torrent_hash,
+                   {save_path_expr} AS ti_save_path,
+                   {ti_device_expr} AS ti_device_id,
+                   p.root_path AS payload_root_path,
+                   p.device_id AS payload_device_id
+            FROM torrent_instances ti
+            JOIN payloads p ON p.payload_id = ti.payload_id
+            WHERE p.payload_hash = ?
+            ORDER BY lower(ti.torrent_hash)
+            """,
+            (payload_hash,),
+        ).fetchall()
+        return [
+            {
+                "torrent_hash": str(row["torrent_hash"] or "").strip().lower(),
+                "catalog_ti_save_path": _normalize_path(row["ti_save_path"]),
+                "catalog_ti_device_id": int(row["ti_device_id"] or 0),
+                "catalog_payload_root_path": _normalize_path(row["payload_root_path"]),
+                "catalog_payload_device_id": int(row["payload_device_id"] or 0),
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
 def _classify_row(row: Dict[str, Any], *, phase: str = "pre") -> tuple[str, str, str]:
     qbit_state = str(row.get("qbit_state") or "").strip().lower()
     qbit_progress = float(row.get("qbit_progress") or 0.0)
@@ -329,6 +372,7 @@ def build_plan_reality_snapshot(
         if str(torrent_hash or "").strip()
     ]
     catalog_rows = _catalog_rows_by_hash(catalog_path, affected)
+    payload_group_members = _catalog_payload_group_members(catalog_path, plan.get("payload_hash") or "")
     view_targets = {
         str(target.get("torrent_hash") or "").strip().lower(): dict(target)
         for target in (plan.get("view_targets") or [])
@@ -394,6 +438,20 @@ def build_plan_reality_snapshot(
         rows.append(row)
 
     summary_counts = Counter(str(row.get("classification") or "") for row in rows)
+    affected_set = set(affected)
+    sibling_members = [member for member in payload_group_members if member.get("torrent_hash")]
+    uncovered_members = [
+        member for member in sibling_members if member["torrent_hash"] not in affected_set
+    ]
+    group_warnings: List[str] = []
+    if uncovered_members:
+        sample_hashes = ",".join(member["torrent_hash"][:16] for member in uncovered_members[:5])
+        group_warnings.append(
+            "Catalog still has "
+            f"{len(uncovered_members)} out-of-plan sibling torrent(s) for this payload hash; "
+            "full cleanup/convergence should wait until they are audited too "
+            f"(sample={sample_hashes})."
+        )
     group_state, group_reason = _summarize_group(rows, phase=phase)
     return {
         "generated_at": _ts_iso(),
@@ -408,6 +466,11 @@ def build_plan_reality_snapshot(
         "summary": {
             "rows": len(rows),
             "classifications": dict(summary_counts),
+            "payload_group_siblings": len(sibling_members),
+            "plan_rows": len(affected),
+            "out_of_plan_siblings": len(uncovered_members),
         },
+        "group_warnings": group_warnings,
+        "out_of_plan_siblings": uncovered_members,
         "rows": rows,
     }

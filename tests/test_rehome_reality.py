@@ -367,3 +367,60 @@ def test_build_plan_reality_snapshot_keeps_preflight_transient_blocking(tmp_path
 
     assert snapshot["group_state"] == "blocked_qbit_transient"
     assert snapshot["rows"][0]["classification"] == "qbit_transient"
+
+
+def test_build_plan_reality_snapshot_reports_out_of_plan_siblings(tmp_path):
+    source_root = tmp_path / "pool-data" / "cross-seed" / "Tracker" / "Movie.mkv"
+    target_root = tmp_path / "pool-media" / "cross-seed" / "Tracker" / "Movie.mkv"
+    source_root.parent.mkdir(parents=True, exist_ok=True)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    source_root.write_bytes(b"old")
+    target_root.write_bytes(b"new")
+
+    catalog = tmp_path / "catalog.db"
+    _make_catalog(catalog, payload_root=str(source_root), save_path=str(source_root.parent))
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.execute(
+            """
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, tags)
+            VALUES ('def456', 1, 231, ?, 'rehome')
+            """,
+            (str(source_root.parent),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(source_root.parent),
+        qbt_save_path=str(source_root.parent),
+    )
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="Movie.mkv",
+                state="stalledUP",
+                progress=1.0,
+                save_path=str(source_root.parent),
+                content_path=str(source_root),
+            )
+        ]
+    )
+
+    snapshot = build_plan_reality_snapshot(
+        plan=_make_plan(source_root, target_root),
+        qb_client=qb,
+        catalog_path=catalog,
+        fastresume_dir=fastresume_dir,
+    )
+
+    assert snapshot["summary"]["out_of_plan_siblings"] == 1
+    assert snapshot["summary"]["payload_group_siblings"] == 2
+    assert snapshot["out_of_plan_siblings"][0]["torrent_hash"] == "def456"
+    assert snapshot["group_warnings"]

@@ -582,13 +582,17 @@ class DemotionExecutor:
         write_json(snapshot_path, snapshot)
         plan[f"_reality_snapshot_{phase}"] = snapshot
         summary = snapshot.get("summary") or {}
+        warnings = snapshot.get("group_warnings") or []
         self._log(
             "reality_snapshot "
             f"phase={phase} "
             f"path={snapshot_path} "
             f"group_state={snapshot.get('group_state')} "
-            f"rows={summary.get('rows', 0)}"
+            f"rows={summary.get('rows', 0)} "
+            f"out_of_plan_siblings={summary.get('out_of_plan_siblings', 0)}"
         )
+        for warning in warnings[:3]:
+            self._log(f"reality_warning phase={phase} detail={warning}", "warning")
         return snapshot
 
     def _build_qb_zfs_relocation_tool(self) -> QBZFSRelocationTool:
@@ -2523,6 +2527,9 @@ class DemotionExecutor:
             )
             if group_reason:
                 message += f"\n  guidance: {group_reason}"
+            group_warnings = list(snapshot.get("group_warnings") or [])
+            if group_warnings:
+                message += "\n  group_warnings:\n  " + "\n  ".join(group_warnings[:3])
             if human_blockers:
                 message += "\n  live_reads:\n  " + "\n  ".join(human_blockers)
             raise RuntimeError(message)
