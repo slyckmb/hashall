@@ -2,7 +2,19 @@
 
 ## Key Facts
 
-- `hashall` package semver is now `0.4.178`.
+- `hashall` package semver is now `0.4.179`.
+- New 2026-03-12 verifier/reality hardening landed after the `Wakanda` false-negative:
+  - `bin/qb-libtorrent-verify.py` now promotes instant-complete `exact_tree` results that jump straight to healthy `seeding`/`stalledUP` without ever emitting a `checking_files` transition
+  - this fixes tiny or cache-hot torrents that were being misclassified as `partial_match` with `verify_reason=no_recheck_transition` even though all bytes matched
+  - `src/rehome/reality.py` now classifies ordinary source-only `MOVE` rows as `source_only` / `ready_repoint_or_reconcile` instead of the noisier false `target_view_missing`
+  - live proof:
+    - payload `6bb9bb5432f39cbb...`
+    - title: `David Khune - Wakanda - Native American Magic.epub`
+    - failed pre-fix report: `~/.logs/hashall/reports/rehome-relocate/20260312-145411-6bb9bb5432f39cbb/`
+    - successful rerun: `~/.logs/hashall/reports/rehome-relocate/20260312-145812-6bb9bb5432f39cbb/`
+  - targeted validation for this slice:
+    - `pytest tests/test_qb_libtorrent_verify.py tests/test_rehome_reality.py tests/test_rehome_qb_missing.py tests/test_rehome_followup.py tests/test_rehome_catalog_sync.py -q`
+    - result: `41 passed`
 - New stale-assumption hardening landed on 2026-03-12:
   - shared module: `src/rehome/reality.py`
   - new CLI: `hashall rehome drift-audit --plan <plan.json>`

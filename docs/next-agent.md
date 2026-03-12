@@ -18,13 +18,18 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.178`
+   - `hashall` semver is `0.4.179`
    - `qb-zfs-relocate` semver is `0.1.13`
    - `rehome` now has a shared reality snapshot / drift-audit layer:
      - module: `src/rehome/reality.py`
      - CLI: `hashall rehome drift-audit --plan <plan.json>`
      - `rehome apply` artifact dirs now contain `reality-pre.json`, `reality-post.json`, and `reality-failure.json`
      - preflight failures include plain-English guidance from those live snapshots
+   - latest follow-up fix after the first `Wakanda` failure:
+      - `qb-libtorrent-verify.py` now promotes instant-complete `exact_tree` verifies that never emit `checking_files`
+      - `reality.py` now classifies normal source-only `MOVE` rows as `source_only`
+      - successful report dir:
+        - `~/.logs/hashall/reports/rehome-relocate/20260312-145812-6bb9bb5432f39cbb/`
    - single-plan live pilots are green on both major paths:
      - `REUSE`: `The.West.Wing.S07...`
      - `MOVE`: `Megalopolis.2024.REPACK...`

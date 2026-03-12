@@ -4,7 +4,7 @@ Last updated: 2026-03-12
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.4.178`.
+- `hashall` is now `0.4.179`.
 - `rehome` now has a shared live-reality snapshot layer in `src/rehome/reality.py`.
 - New proactive audit command:
   - `hashall rehome drift-audit --plan <plan.json> [--output <file>]`
@@ -15,6 +15,11 @@ Last updated: 2026-03-12
 - Snapshot purpose:
   - compare qB runtime state, fastresume paths, catalog rows, and actual filesystem existence before trusting a plan
   - explain blocked/skipped rows in plain English instead of only raw qB state strings
+- Latest verifier/reality follow-up on 2026-03-12:
+  - `qb-libtorrent-verify.py` now treats instant-complete `exact_tree` results as healthy when libtorrent jumps directly to `seeding`/`stalledUP` without a visible `checking_files` transition
+  - this closed the false-negative exposed by `David Khune - Wakanda - Native American Magic.epub`
+  - `rehome` reality snapshots now classify plain source-only `MOVE` rows as `source_only` rather than `target_view_missing`
+  - the `Wakanda` rerun completed successfully at `~/.logs/hashall/reports/rehome-relocate/20260312-145812-6bb9bb5432f39cbb/`
 - Current group-state outputs include:
   - `ready_catalog_reconcile`
   - `ready_repoint_or_reconcile`
@@ -29,9 +34,12 @@ Last updated: 2026-03-12
 - The current rsync-based donor transfer is still the data mover; qB is metadata-only.
 - `REUSE` continues in small batches; each apply must finish with `stoppedup`/`stalledup`, no new downloads, and clean cleanup messages.
 - `qb-zfs-relocate` has already proven the guarded live `pool-data -> pool-media` mover for pilot batches.
-- `qb-zfs-relocate` `v0.1.13` / `hashall 0.4.177` now include a live-proven fix for the `Mickey.17...` false-partial case:
+- `qb-zfs-relocate` `v0.1.13` / `hashall 0.4.179` now include live-proven verifier fixes for both:
+  - the `Mickey.17...` false-partial case
+  - the `Wakanda` instant-complete false-negative case
   - qB source recheck completion now requires a real transition into/out of `checking*`
   - verify retries one time when quick/exact evidence is clean but libtorrent transiently reports `partial_match` in `downloading*`
+  - verify also now promotes `exact_tree + verify_ratio=1.0 + no_recheck_transition + healthy upload state` to a successful result
 - `rehome` now has an explicit root-to-root planner for this domain:
   - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding`
   - shared-root sibling collisions are now surfaced and get synthesized unique destination views.
