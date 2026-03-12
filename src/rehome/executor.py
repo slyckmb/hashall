@@ -9,6 +9,8 @@ import shutil
 import os
 import errno
 import subprocess
+import re
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 import json
@@ -30,6 +32,7 @@ from hashall.qb_zfs_relocate import (
     QBZFSRelocationTool,
     build_manifest_for_relocations,
     emit_log,
+    format_hms,
     row_selection,
     write_json,
 )
@@ -367,10 +370,64 @@ class DemotionExecutor:
         self._log(
             f"step=move_payload method=rsync low_priority=true source={source_path} target={target_path}"
         )
+        start = time.monotonic()
         try:
-            subprocess.run(cmd, check=True)
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            if proc.stdout is None:
+                raise RuntimeError("Failed to capture rsync stdout")
+            last_progress_at = 0.0
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip()
+                progress = self._parse_rsync_progress_line(line)
+                if progress is not None:
+                    percent, copied, rate, eta = progress
+                    now = time.monotonic()
+                    if last_progress_at <= 0.0 or now - last_progress_at >= 5.0 or percent >= 100.0:
+                        copied_field = f" copied={copied}" if copied else ""
+                        rate_field = f" rate={rate}" if rate else ""
+                        eta_field = f" eta={eta}" if eta else ""
+                        self._log(
+                            "copy_progress"
+                            f" percent={percent:.2f}"
+                            f" elapsed={format_hms(now - start)}"
+                            f"{eta_field}{copied_field}{rate_field}"
+                        )
+                        last_progress_at = now
+                elif line:
+                    self._log(f"copy_detail line={line}")
+            returncode = proc.wait()
+            if returncode != 0:
+                raise subprocess.CalledProcessError(returncode, cmd)
+            self._log(f"step=move_payload_complete elapsed={format_hms(time.monotonic() - start)}")
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"Failed to copy payload with rsync: {exc}") from exc
+
+    @staticmethod
+    def _parse_rsync_progress_line(line: str) -> Optional[Tuple[float, str, str, str]]:
+        line = (line or "").strip()
+        if not line or "%" not in line:
+            return None
+        match = re.search(
+            r"(?P<copied>[0-9][0-9,\.]*[A-Za-z]*)\s+"
+            r"(?P<percent>[0-9]+(?:\.[0-9]+)?)%\s+"
+            r"(?P<rate>[0-9][0-9,\.]*[A-Za-z/]+)\s+"
+            r"(?P<eta>[0-9:]+)(?:\s+\(xfr#[^)]+\))?",
+            line,
+        )
+        if not match:
+            return None
+        return (
+            float(match.group("percent")),
+            str(match.group("copied") or ""),
+            str(match.group("rate") or ""),
+            str(match.group("eta") or ""),
+        )
 
     def _relocation_artifact_dir(self, plan: Dict) -> Path:
         payload_hash = str(plan.get("payload_hash") or "unknown")[:16]

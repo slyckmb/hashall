@@ -1805,3 +1805,43 @@ def test_reuse_fallback_derives_save_path_for_single_entry_nested_file(tmp_path)
         / "cross-seed"
         / "seedpool (API)"
     )
+
+
+def test_parse_rsync_progress_line_extracts_percent_eta():
+    parsed = DemotionExecutor._parse_rsync_progress_line(
+        "  38.85G  98.19%   224.31MB/s    0:00:03 (xfr#178, to-chk=0/180)"
+    )
+
+    assert parsed == (98.19, "38.85G", "224.31MB/s", "0:00:03")
+
+
+def test_copy_with_rsync_progress_emits_progress_and_completion(tmp_path, monkeypatch, capsys):
+    source_path = tmp_path / "src"
+    target_path = tmp_path / "dst"
+    source_path.mkdir()
+    (source_path / "payload.bin").write_bytes(b"data")
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter(
+                [
+                    "  1.00G   5.00%    50.00MB/s    0:00:19 (xfr#1, to-chk=9/10)\n",
+                    " 20.00G 100.00%   210.00MB/s    0:00:00 (xfr#10, to-chk=0/10)\n",
+                ]
+            )
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("rehome.executor.shutil.which", lambda _cmd: None)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor._copy_with_rsync_progress(source_path, target_path)
+
+    output = capsys.readouterr().out
+    assert "step=move_payload method=rsync" in output
+    assert "copy_progress percent=5.00" in output
+    assert "eta=0:00:19" in output
+    assert "copy_progress percent=100.00" in output
+    assert "step=move_payload_complete elapsed=" in output
