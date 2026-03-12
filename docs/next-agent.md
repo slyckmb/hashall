@@ -18,7 +18,7 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.171`
+   - `hashall` semver is `0.4.173`
    - single-plan live pilots are green on both major paths:
      - `REUSE`: `The.West.Wing.S07...`
      - `MOVE`: `Megalopolis.2024.REPACK...`
@@ -81,6 +81,19 @@ If context is compacted, recover with this sequence:
    - audit conclusion:
      - no broad fastresume-corruption signal was found
      - next code work should target dirty-target rejection, verify-stall detection, and stronger lock diagnostics
+14. New 2026-03-12 cleanup continuity:
+   - commit `f960483` added staged safe cleanup to `hashall rehome followup --cleanup`
+   - the path now renames source roots into hidden staging, observes qB on target save paths, then deletes or restores
+   - live cleanup already succeeded for:
+     - one pilot payload (`English.Teacher...`)
+     - six additional `/pool/data` payload groups
+   - post-cleanup qB snapshot:
+     - `stalledUP=5147`
+     - `uploading=4`
+   - remaining follow-up backlog:
+     - `9` tagged groups total
+     - `4` still `ok` but non-pool-data or source-device-unknown
+     - `5` still `failed` due to stale catalog/device state
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

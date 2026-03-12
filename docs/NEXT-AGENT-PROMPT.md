@@ -24,7 +24,7 @@ Prompt-critical context (2026-03-11):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.171`.
+  - `hashall` version now `0.4.173`.
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -93,6 +93,16 @@ Prompt-critical context (2026-03-11):
       - fail-closed MOVE rejection on dirty targets
       - offline verify stagnation detection
       - stronger rehome lock-holder diagnostics
+  - staged follow-up cleanup is now live in `rehome`:
+    - commit `f960483`
+    - `hashall rehome followup --cleanup` now does `rename -> observe -> delete` with automatic restore on qB regression
+    - live result so far:
+      - one pilot payload plus six `/pool/data` payload groups cleaned successfully
+      - post-cleanup qB snapshot: `stalledUP=5147`, `uploading=4`
+    - remaining follow-up backlog:
+      - `9` tagged groups total
+      - `4` still `ok` but non-pool-data or source-device-unknown
+      - `5` still `failed` due to stale catalog/device state
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

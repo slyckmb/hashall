@@ -239,3 +239,20 @@ Latest cleanup note (2026-03-12):
   - qB observe window on the target save paths
   - delete only after the observe window stays healthy
   - restore staged roots immediately if qB regresses
+
+Latest staged follow-up cleanup note (2026-03-12):
+
+- Commit `f960483` landed the staged safe cleanup path in `rehome followup`.
+- Live cleanup pilot success:
+  - payload `ab23b3ff...` (`English.Teacher...`)
+  - `cleanup_attempted=1`, `cleanup_done=1`, `cleanup_failed=0`
+- Live pool-data cleanup wave success:
+  - six more `/pool/data` payload groups completed `cleanup_result=done`
+  - no cleanup failures
+  - qB post-cleanup health snapshot:
+    - `stalledUP=5147`
+    - `uploading=4`
+- Remaining follow-up backlog after the cleanup wave:
+  - `9` tagged groups remain
+  - `4` are still `ok` but are non-pool-data or source-device-unknown cleanup candidates
+  - `5` remain blocked by stale catalog/device state and need reconciliation before cleanup
