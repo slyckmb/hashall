@@ -2,6 +2,26 @@
 
 ## Key Facts
 
+- `hashall` package semver is now `0.4.178`.
+- New stale-assumption hardening landed on 2026-03-12:
+  - shared module: `src/rehome/reality.py`
+  - new CLI: `hashall rehome drift-audit --plan <plan.json>`
+  - every `rehome apply` run now writes `reality-pre.json`, `reality-post.json`, and `reality-failure.json` beside the hardened manifest
+  - these snapshots compare live qB state, fastresume path fields, catalog rows, and filesystem existence instead of trusting any one source of truth
+  - row classifications now include:
+    - `aligned_target`
+    - `catalog_drift_already_targeted`
+    - `stale_runtime_and_fastresume_root`
+    - `stale_runtime_root`
+    - `stale_fastresume_root`
+    - `target_view_missing`
+    - `qbit_transient`
+    - `incomplete_torrent`
+    - `mixed_drift`
+  - preflight failures now include plain-English guidance derived from the live snapshot instead of only raw qB state strings
+  - targeted validation for this slice:
+    - `pytest tests/test_rehome_reality.py tests/test_rehome_cli_followup.py tests/test_rehome_cli_lock.py tests/test_rehome_qb_missing.py tests/test_rehome_followup.py tests/test_rehome_catalog_sync.py -q`
+    - result: `40 passed`
 - `qb-zfs-relocate` remains the hardened live migration backend for guarded qB dataset relocation:
   - entrypoint: `bin/qb-zfs-relocate.py`
   - core module: `src/hashall/qb_zfs_relocate.py`

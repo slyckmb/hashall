@@ -3,6 +3,27 @@
 Canonical living state:
 `docs/operations/RUN-STATE.md`
 
+Latest stale-assumption hardening note (2026-03-12):
+
+- `hashall` is now `0.4.178`.
+- New shared reality/drift module:
+  - `src/rehome/reality.py`
+- New proactive audit command:
+  - `hashall rehome drift-audit --plan <plan.json>`
+- `rehome apply` now writes live state snapshots into each per-run artifact directory:
+  - `reality-pre.json`
+  - `reality-post.json`
+  - `reality-failure.json`
+- The snapshot compares:
+  - qB runtime state
+  - `.fastresume` path fields
+  - catalog payload/torrent-instance rows
+  - expected target views from the plan
+  - actual source/target existence on disk
+- Targeted validation passed locally:
+  - `pytest tests/test_rehome_reality.py tests/test_rehome_cli_followup.py tests/test_rehome_cli_lock.py tests/test_rehome_qb_missing.py tests/test_rehome_followup.py tests/test_rehome_catalog_sync.py -q`
+  - result: `40 passed`
+
 Latest critical operations note (2026-03-06):
 
 - `qb-stoppeddl-bucket` now clean (`active=0 total_entries=0`) in live checks.

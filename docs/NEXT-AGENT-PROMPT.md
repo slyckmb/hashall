@@ -3,7 +3,7 @@
 Canonical state document:
 `docs/operations/RUN-STATE.md`
 
-Prompt-critical context (2026-03-11):
+Prompt-critical context (2026-03-12):
 
 - New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
   - `bin/qb-zfs-relocate.py` (`v0.1.8`)
@@ -24,7 +24,15 @@ Prompt-critical context (2026-03-11):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.177`.
+  - `hashall` version now `0.4.178`.
+  - `rehome` now has a shared stale-assumption / reality layer:
+    - module: `src/rehome/reality.py`
+    - CLI: `hashall rehome drift-audit --plan <plan.json>`
+    - every `rehome apply` artifact dir now includes:
+      - `reality-pre.json`
+      - `reality-post.json`
+      - `reality-failure.json`
+    - preflight failures now include plain-English guidance and sample live blocker reads from the snapshot
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.

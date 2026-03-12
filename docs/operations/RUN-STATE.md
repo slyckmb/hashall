@@ -2,6 +2,27 @@
 
 Last updated: 2026-03-12
 
+## Live Reality / Drift
+
+- `hashall` is now `0.4.178`.
+- `rehome` now has a shared live-reality snapshot layer in `src/rehome/reality.py`.
+- New proactive audit command:
+  - `hashall rehome drift-audit --plan <plan.json> [--output <file>]`
+- Each `rehome apply` run now writes live drift snapshots beside its hardened manifest:
+  - `reality-pre.json`
+  - `reality-post.json`
+  - `reality-failure.json`
+- Snapshot purpose:
+  - compare qB runtime state, fastresume paths, catalog rows, and actual filesystem existence before trusting a plan
+  - explain blocked/skipped rows in plain English instead of only raw qB state strings
+- Current group-state outputs include:
+  - `ready_catalog_reconcile`
+  - `ready_repoint_or_reconcile`
+  - `blocked_qbit_transient`
+  - `blocked_incomplete`
+  - `blocked_target_view_missing`
+  - `mixed_attention_required`
+
 ## Pool Migration Status
 
 - Donor acquisition and offline attach are the shared backbone for both `REUSE` and `MOVE`.
