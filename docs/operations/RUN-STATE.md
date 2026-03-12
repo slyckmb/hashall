@@ -33,6 +33,10 @@ Last updated: 2026-03-11
   - all three sibling views verified `exact_tree`
   - qB ended `stalledUP 100%` on `/pool/media/...`
   - source cleanup remained deferred/manual
+- Long `MOVE` copy windows now stream rsync progress:
+  - commit `21ea673`
+  - new runs emit `copy_progress percent=... elapsed=... eta=...`
+  - a long silent pause after `step=move_payload` on new runs is now abnormal
 - Operational guard remains: scale `MOVE` in small batches even after the pilot; keep cleanup deferred until post-run observation is established.
 - Do not treat `rehome auto` returning `0 MOVE groups` as the final answer for explicit root-to-root relocation anymore; use `rehome relocate-plan` for that case.
 - The current safe model is unified:
@@ -80,6 +84,7 @@ Last updated: 2026-03-11
 3. Cleanup/canonical-root accounting should continue to dedupe by payload root, not by torrent hash.
 4. The next live gap is scaling from the first successful curated mixed batch to another curated batch from the remaining clean candidates.
 5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
+6. `MOVE` still needs stronger fail-closed behavior around dirty preexisting targets and stalled offline verify paths.
 
 ## Logs to Watch
 
@@ -117,3 +122,27 @@ Last updated: 2026-03-11
      - `Greenland.2020.Repack...` MOVE completed successfully
    - qB now shows all affected `Brave New World` and `Greenland` torrents as `stalledUP 100%` on `/pool/media/...`
 4. Preserve the narrow ownership fix pattern for future sidecar fetches: if qB can read media files but cannot create missing sidecars, check for `root:root 755` payload directories first.
+5. The next curated live batch is now also green:
+   - plan: `out/rehome-plan-pool-data-to-media-next4c.json`
+   - successful payload groups:
+     - `Brave.New.World.US.S01...`
+     - `Greenland.2020.Repack...`
+     - `Azrael...`
+     - `Stranger.Things.S03...`
+   - shared post-apply summary:
+     - `25 torrent(s) checked, all in acceptable state`
+6. Current carve-outs from the clean `MOVE` lane:
+   - `Magic.City.S01...`
+     - failed after copy with `Target file count mismatch after move`
+     - observed runtime stats: source `8 files / 106474639951 bytes`, target `9 files / 110028001871 bytes`
+     - treat as dirty-target/preexisting-content case until code rejects this earlier
+   - `Wilding.2023...`
+     - copy completed and target verify passed
+     - offline verify then stalled at `checking_files 0.00%` for `15m+`
+     - treat as verifier-stall case until code adds stagnation detection
+7. Audit conclusion from the recent failures:
+   - no evidence of a broad fastresume patch corruption bug
+   - the remaining code gaps are:
+     - preexisting-target rejection/reporting for `MOVE`
+     - offline-verify stagnation detection
+     - better lock-holder diagnostics on `~/.hashall/rehome.lock`

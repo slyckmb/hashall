@@ -42,10 +42,13 @@
   - small live `rehome` pilots are now green on both major paths:
     - `REUSE`: `The.West.Wing.S07...` cross-device reuse group completed and catalog-synced on rerun via `rehome_reconcile_only`
     - `MOVE`: `Megalopolis.2024.REPACK...` moved from `/pool/data/...` to `/pool/media/...`, verified `exact_tree`, patched, resumed, and left source cleanup deferred
-  - mixed-state reruns are now handled safely:
-    - commit `85b91af` added partial reconcile support for batches where some rows are already repointed and verified while others were skipped
-    - post-patch save-path verification now ignores rows that were not actually patched
-    - this unblocked the live `Longlegs` mixed-batch rerun
+- mixed-state reruns are now handled safely:
+  - commit `85b91af` added partial reconcile support for batches where some rows are already repointed and verified while others were skipped
+  - post-patch save-path verification now ignores rows that were not actually patched
+  - this unblocked the live `Longlegs` mixed-batch rerun
+- commit `21ea673` added streamed rsync progress for `rehome` MOVE copy windows:
+  - long `MOVE` transfers now emit `copy_progress percent=... elapsed=... eta=...`
+  - a long pause after `step=move_payload` is no longer expected on new runs
 - New stale-root audit exists for missing qB items:
   - CLI: `hashall rehome qb-missing-audit`
   - the original audited live cohort was `49` `missingFiles` items classified as `root_drift_fastresume_stale`
@@ -112,9 +115,35 @@
        - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-183147-adf55dffe6443f6a/`
        - all `8` torrents ended `stalledUP 100%` on `/pool/media/...`
    - source cleanup remained deferred/manual for all three payload groups
-8. The next live scale-up should start from a new curated batch built from the remaining clean candidates, explicitly excluding the bad `Shining.Girls` reuse group and the known skipped `Longlegs` row.
-9. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
-10. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
+8. Second curated live scale-up is now also green:
+   - plan file: `out/rehome-plan-pool-data-to-media-next4c.json`
+   - all four `MOVE` payload groups completed successfully:
+     - `Brave.New.World.US.S01...`
+     - `Greenland.2020.Repack...`
+     - `Azrael...`
+     - `Stranger.Things.S03...`
+   - shared log ended with:
+     - `✅ Summary: 25 torrent(s) checked, all in acceptable state`
+9. Two `MOVE` carve-outs are now known and should stay out of the clean batch lane until separately investigated:
+   - `Magic.City.S01...`
+     - failed after copy with `Target file count mismatch after move`
+     - observed runtime stats:
+       - source: `8 files / 106474639951 bytes`
+       - target: `9 files / 110028001871 bytes`
+     - interpretation: dirty/preexisting target content, not a broad fastresume corruption signal
+   - `Wilding.2023...`
+     - copy completed and target verify passed
+     - offline verify then sat at `checking_files 0.00%` for `15m+`
+     - interpretation: verifier-control-path issue until re-tested, not proof of mover corruption
+10. Deep audit conclusion on the recent failures:
+    - there is no evidence of a broad errant fastresume scribbler in current `rehome` / `qb-zfs-relocate`
+    - the recent failures have been:
+      - stale-root drift already remediated
+      - dirty/preexisting destination content (`Magic City`)
+      - bad reuse candidate (`Shining.Girls`)
+      - verifier stall behavior (`Wilding`)
+11. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
+12. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 
 ## Key Logs
 

@@ -76,7 +76,23 @@ Prompt-critical context (2026-03-11):
   - one real bad reuse candidate is now known and should be excluded:
     - `Shining.Girls...` REUSE group from `mixed4`
     - all three rows failed destination offline verify as `partial_match`
-  - do not rerun `mixed4`; build the next curated batch from the remaining clean candidates
+  - later curated batch `next4c` is also green:
+    - `Brave.New.World.US.S01...`
+    - `Greenland.2020.Repack...`
+    - `Azrael...`
+    - `Stranger.Things.S03...`
+    - shared summary: `25 torrent(s) checked, all in acceptable state`
+  - two current `MOVE` carve-outs should stay excluded from the clean batch lane:
+    - `Magic.City.S01...`
+      - dirty/preexisting target; observed source `8 files / 106474639951 bytes`, target `9 files / 110028001871 bytes`
+    - `Wilding.2023...`
+      - copy completed and target verify passed, but offline verify stalled at `checking_files 0.00%` for `15m+`
+  - audit conclusion:
+    - no broad errant fastresume edit bug was found
+    - next code work should harden:
+      - fail-closed MOVE rejection on dirty targets
+      - offline verify stagnation detection
+      - stronger rehome lock-holder diagnostics
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

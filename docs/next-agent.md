@@ -67,6 +67,20 @@ If context is compacted, recover with this sequence:
      - `MOVE`: `~/.logs/hashall/reports/rehome-relocate/20260311-183147-adf55dffe6443f6a/`
    - exclude the bad `Shining.Girls` reuse group from future batches
    - generate the next curated batch from the remaining clean candidates rather than rerunning `mixed4`
+13. Later 2026-03-11 continuity beyond `mixed3`:
+   - `next4c` is now green:
+     - `Brave.New.World.US.S01...`
+     - `Greenland.2020.Repack...`
+     - `Azrael...`
+     - `Stranger.Things.S03...`
+   - shared summary ended with:
+     - `25 torrent(s) checked, all in acceptable state`
+   - two current carve-outs from the clean MOVE lane:
+     - `Magic.City.S01...` dirty/preexisting target (`8 files / 106474639951 bytes` source vs `9 files / 110028001871 bytes` target)
+     - `Wilding.2023...` offline verify stalled at `checking_files 0.00%` for `15m+`
+   - audit conclusion:
+     - no broad fastresume-corruption signal was found
+     - next code work should target dirty-target rejection, verify-stall detection, and stronger lock diagnostics
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`

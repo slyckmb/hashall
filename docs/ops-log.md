@@ -187,3 +187,40 @@ Latest mixed-batch note (2026-03-11):
     - report dir: `~/.logs/hashall/reports/rehome-relocate/20260311-183147-adf55dffe6443f6a/`
     - all `8` torrents ended `stalledUP 100%` on `/pool/media/...`
 - Cleanup remained deferred/manual for all three successful payload groups.
+
+Latest scale-up / audit note (2026-03-11):
+
+- Commit `21ea673` improved MOVE observability:
+  - `rehome` now streams rsync copy progress with elapsed/ETA during long `MOVE` copy windows
+- Curated live batch `next4c` completed successfully:
+  - plan file: `out/rehome-plan-pool-data-to-media-next4c.json`
+  - successful payload groups:
+    - `Brave.New.World.US.S01...`
+    - `Greenland.2020.Repack...`
+    - `Azrael...`
+    - `Stranger.Things.S03...`
+  - shared post-apply summary:
+    - `25 torrent(s) checked, all in acceptable state`
+- Two MOVE carve-outs were confirmed during this wave:
+  - `Magic.City.S01...`
+    - failed after copy with `Target file count mismatch after move`
+    - runtime stats at failure:
+      - source `8 files / 106474639951 bytes`
+      - target `9 files / 110028001871 bytes`
+    - interpretation: destination was already dirty/preexisting; not evidence of a general fastresume bug
+  - `Wilding.2023...`
+    - copy completed and target verify passed
+    - offline verify then remained at `checking_files 0.00%` for `15m+`
+    - interpretation: verifier-control-path issue until stagnation detection is added
+- Deep audit conclusion for the recent failures:
+  - no evidence of a broad errant fastresume edit path in current `rehome` / `qb-zfs-relocate`
+  - observed failure classes were:
+    - already-remediated stale-root drift
+    - bad reuse candidate (`Shining.Girls`)
+    - dirty/preexisting target content (`Magic City`)
+    - verifier stall behavior (`Wilding`)
+- Next code slice should harden:
+  - fail-closed `MOVE` rejection on dirty preexisting targets
+  - richer source/target count/byte mismatch reporting
+  - offline verify stagnation detection
+  - lock-holder diagnostics for `~/.hashall/rehome.lock`
