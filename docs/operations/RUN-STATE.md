@@ -4,7 +4,7 @@ Last updated: 2026-03-12
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.4.180`.
+- `hashall` is now `0.4.181`.
 - `rehome` now has a shared live-reality snapshot layer in `src/rehome/reality.py`.
 - New proactive audit command:
   - `hashall rehome drift-audit --plan <plan.json> [--output <file>]`
@@ -24,6 +24,15 @@ Last updated: 2026-03-12
     - group state: `settling_after_apply`
   - that means a clean apply no longer writes a misleading `blocked_qbit_transient` post snapshot just because qB is briefly checking the newly patched target
   - the `Wakanda` rerun completed successfully at `~/.logs/hashall/reports/rehome-relocate/20260312-145812-6bb9bb5432f39cbb/`
+- Latest proactive stale-sibling follow-up on 2026-03-12:
+  - `rehome apply` now treats any plan file with a top-level `plans` list as a batch apply input, even when `batch=true` is absent
+  - the reality layer now reports out-of-plan sibling coverage directly in each snapshot:
+    - `payload_group_siblings`
+    - `plan_rows`
+    - `out_of_plan_siblings`
+    - `group_warnings`
+  - `hashall rehome drift-audit` now summarizes how many plans still have uncovered same-`payload_hash` siblings
+  - executor logs those uncovered-sibling warnings during apply so later cleanup drift does not stay silent
 - Current group-state outputs include:
   - `ready_catalog_reconcile`
   - `ready_repoint_or_reconcile`

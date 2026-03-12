@@ -2,7 +2,22 @@
 
 ## Key Facts
 
-- `hashall` package semver is now `0.4.180`.
+- `hashall` package semver is now `0.4.181`.
+- New 2026-03-12 batch/staleness hardening landed after restarting the next live pool-data batch:
+  - `rehome apply` now accepts any JSON with a top-level `plans` list as a batch plan, even without the older explicit `batch=true` marker
+  - this fixes the `KeyError: 'decision'` crash when applying generated plan slices like `out/rehome-plan-pool-data-to-media-stale-next4-20260312.json`
+  - the live reality layer now reports out-of-plan sibling coverage:
+    - snapshot summary fields:
+      - `payload_group_siblings`
+      - `plan_rows`
+      - `out_of_plan_siblings`
+    - top-level warnings:
+      - `group_warnings`
+    - drift-audit summary now prints `plans_with_out_of_plan_siblings`
+  - executor now logs `reality_warning ...` when a plan only covers part of a payload group, so cleanup/convergence risk is visible before later drift appears
+  - targeted validation for this slice:
+    - `pytest tests/test_rehome_cli_apply.py tests/test_rehome_reality.py tests/test_rehome_catalog_sync.py tests/test_rehome_qb_missing.py tests/test_rehome_followup.py tests/test_qb_libtorrent_verify.py -q`
+    - result: `46 passed`
 - New 2026-03-12 verifier/reality hardening landed after the `Wakanda` false-negative:
   - `bin/qb-libtorrent-verify.py` now promotes instant-complete `exact_tree` results that jump straight to healthy `seeding`/`stalledUP` without ever emitting a `checking_files` transition
   - this fixes tiny or cache-hot torrents that were being misclassified as `partial_match` with `verify_reason=no_recheck_transition` even though all bytes matched
