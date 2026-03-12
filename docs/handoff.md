@@ -39,6 +39,10 @@
   - non-reconcile `MOVE` runs now explicitly stop qB before patch-mode validate:
     - this removes the false `torrent_not_stopped` blocker that appeared after successful copy + offline verify
     - the live `Megalopolis.2024.REPACK...` pilot proved the corrected path
+  - current remaining operational gap before 2026-03-12 cleanup work:
+    - successful `MOVE` groups still leave the source `/pool/data/...` payload in place
+    - executor logs `MANUAL_ACTION_REQUIRED` and sets `cleanup_source_deferred=true`
+    - this means `/pool/data -> /pool/media` waves temporarily double-consume pool space until follow-up cleanup runs
   - small live `rehome` pilots are now green on both major paths:
     - `REUSE`: `The.West.Wing.S07...` cross-device reuse group completed and catalog-synced on rerun via `rehome_reconcile_only`
     - `MOVE`: `Megalopolis.2024.REPACK...` moved from `/pool/data/...` to `/pool/media/...`, verified `exact_tree`, patched, resumed, and left source cleanup deferred
@@ -142,8 +146,12 @@
       - dirty/preexisting destination content (`Magic City`)
       - bad reuse candidate (`Shining.Girls`)
       - verifier stall behavior (`Wilding`)
-11. Preserve the staged cleanup contract: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
-12. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
+11. Current cleanup gap to close next:
+    - `rehome followup --cleanup` still deletes source roots directly after a green verify outcome
+    - that path is too blunt for same-pool `/pool/data -> /pool/media` work
+    - the next code slice should port the guarded `rename -> observe -> delete` cleanup model from `qb-zfs-relocate`
+12. Preserve the staged cleanup contract once that lands: qB online, live save-path match, prior verify report present, rename-to-staging, observe, then delete.
+13. Keep future direct `qb-zfs-relocate` runs on timestamped manifests or pass explicit per-run `--manifest` paths.
 
 ## Key Logs
 

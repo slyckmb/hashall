@@ -224,3 +224,18 @@ Latest scale-up / audit note (2026-03-11):
   - richer source/target count/byte mismatch reporting
   - offline verify stagnation detection
   - lock-holder diagnostics for `~/.hashall/rehome.lock`
+
+Latest cleanup note (2026-03-12):
+
+- The active operational gap is now source cleanup, not migrate correctness.
+- Green `/pool/data -> /pool/media` `MOVE` waves are still leaving duplicate canonical payloads behind on `/pool/data/...`.
+- Current code path:
+  - `rehome apply` intentionally leaves source cleanup deferred
+  - `rehome followup --cleanup` still needs the guarded staged-delete contract from `qb-zfs-relocate`
+- Operational consequence:
+  - repeated successful migration waves temporarily double-consume pool space on the same zpool
+- Next code slice should port:
+  - source-root rename into hidden staging
+  - qB observe window on the target save paths
+  - delete only after the observe window stays healthy
+  - restore staged roots immediately if qB regresses

@@ -1,6 +1,6 @@
 # Operational Run State
 
-Last updated: 2026-03-11
+Last updated: 2026-03-12
 
 ## Pool Migration Status
 
@@ -12,6 +12,10 @@ Last updated: 2026-03-11
   - `hashall rehome relocate-plan --source-device pool-data --source-root /pool/data/media/torrents/seeding --target-device pool-media --target-root /pool/media/torrents/seeding`
   - shared-root sibling collisions are now surfaced and get synthesized unique destination views.
 - `rehome apply` now uses the hardened `qb-zfs-relocate` backend for donor verification, offline fastresume patching, restart checks, and deferred cleanup.
+- Successful `MOVE` waves are currently space-heavy:
+  - source `/pool/data/...` payloads remain in place after a green apply
+  - this is why `/pool` usage rises during repeated `/pool/data -> /pool/media` migration waves
+  - until follow-up cleanup is hardened, treat pool headroom as a gating resource for batch size
 - Cross-device `REUSE` reruns now have a catalog-reconcile path:
   - if qB is already on the target save paths and offline verify passes, `rehome apply` logs `rehome_reconcile_only`
   - relocation validate/patch are skipped
@@ -85,6 +89,11 @@ Last updated: 2026-03-11
 4. The next live gap is scaling from the first successful curated mixed batch to another curated batch from the remaining clean candidates.
 5. `hashall payload siblings` read-only catalog bug is fixed in commit `74ea2b5`; use that command freely against the live catalog now.
 6. `MOVE` still needs stronger fail-closed behavior around dirty preexisting targets and stalled offline verify paths.
+7. `rehome followup --cleanup` still needs the guarded staged delete contract from `qb-zfs-relocate`:
+   - rename source root into hidden staging
+   - observe qB on target save paths
+   - delete staged source only after soak passes
+   - restore staged source on any qB regression
 
 ## Logs to Watch
 
@@ -141,8 +150,12 @@ Last updated: 2026-03-11
      - offline verify then stalled at `checking_files 0.00%` for `15m+`
      - treat as verifier-stall case until code adds stagnation detection
 7. Audit conclusion from the recent failures:
-   - no evidence of a broad fastresume patch corruption bug
-   - the remaining code gaps are:
-     - preexisting-target rejection/reporting for `MOVE`
-     - offline-verify stagnation detection
-     - better lock-holder diagnostics on `~/.hashall/rehome.lock`
+  - no evidence of a broad fastresume patch corruption bug
+  - the remaining code gaps are:
+    - preexisting-target rejection/reporting for `MOVE`
+    - offline-verify stagnation detection
+    - better lock-holder diagnostics on `~/.hashall/rehome.lock`
+8. Immediate cleanup risk:
+   - `rehome` has already proven multiple green `/pool/data -> /pool/media` batches
+   - those wins are currently leaving duplicate canonical payloads behind on `/pool/data`
+   - cleanup hardening is the next highest-value code slice because it directly reclaims pool space without weakening rollback safety
