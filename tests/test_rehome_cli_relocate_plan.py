@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 
@@ -110,3 +111,92 @@ def test_relocate_plan_accepts_device_aliases(tmp_path: Path):
     assert data["plans"][0]["decision"] == "MOVE"
     assert data["plans"][0]["source_path"] == str(source_path)
     assert data["plans"][0]["target_path"] == str(target_path)
+
+
+def test_relocate_plan_seeds_from_live_qbit_old_root(monkeypatch, tmp_path: Path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool" / "data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool" / "media" / "torrents" / "seeding"
+
+    live_source_path = source_root / "cross-seed" / "Aither (API)" / "Movie.2024.mkv"
+    stale_source_path = source_root / "cross-seed" / "Aither (API)" / "Stale.2024.mkv"
+    live_source_path.parent.mkdir(parents=True, exist_ok=True)
+    live_source_path.write_bytes(b"source-bytes")
+    stale_source_path.write_bytes(b"stale-bytes")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute("INSERT INTO devices (device_id, device_alias) VALUES (231, 'pool-data')")
+    conn.execute("INSERT INTO devices (device_id, device_alias) VALUES (141, 'pool-media')")
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES
+          (1, 'hash-live', 231, ?, 1, ?, 'complete'),
+          (2, 'hash-stale', 231, ?, 1, ?, 'complete')
+        """,
+        (str(live_source_path), len(b"source-bytes"), str(stale_source_path), len(b"stale-bytes")),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category)
+        VALUES
+          ('livehash', 1, 231, ?, ?, 'cross-seed'),
+          ('stalehash', 2, 231, ?, ?, 'cross-seed')
+        """,
+        (
+            str(source_root / "cross-seed" / "Aither (API)"),
+            live_source_path.name,
+            str(source_root / "cross-seed" / "Aither (API)"),
+            stale_source_path.name,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class FakeQbit:
+        def test_connection(self):
+            return True
+
+        def login(self):
+            return True
+
+        def get_torrents(self):
+            return [
+                SimpleNamespace(
+                    hash="livehash",
+                    save_path=str(source_root / "cross-seed" / "Aither (API)"),
+                )
+            ]
+
+    monkeypatch.setattr("rehome.cli.get_qbittorrent_client", lambda: FakeQbit())
+
+    out_path = tmp_path / "relocate-plan-live-qb.json"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "relocate-plan",
+            "--catalog",
+            str(db_path),
+            "--source-device",
+            "pool-data",
+            "--source-root",
+            str(source_root),
+            "--target-device",
+            "pool-media",
+            "--target-root",
+            str(target_root),
+            "--all-mismatches",
+            "-o",
+            str(out_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+    assert data["seed_scope"]["mode"] == "live_qb_root"
+    assert data["seed_scope"]["qbit_hashes"] == 1
+    assert data["seed_scope"]["mapped_payload_hashes"] == 1
+    assert data["summary"]["candidates"] == 1
+    assert data["plans"][0]["payload_hash"] == "hash-live"

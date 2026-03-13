@@ -21,6 +21,7 @@ import rehome
 from rehome import executor as rehome_executor
 from rehome import view_builder as rehome_view_builder
 from rehome import __version__
+from hashall.qbittorrent import get_qbittorrent_client
 from rehome.followup import run_followup
 from rehome.normalize import (
     DEFAULT_UNIQUE_VIEW_SUBDIR,
@@ -81,6 +82,81 @@ def _resolve_device_alias_read_only(catalog_path: Path, value: str) -> int:
         f"No device found with alias {value!r}. "
         "Run 'make devices' to list registered devices and their aliases."
     )
+
+
+def _resolve_live_qb_seed_payload_hashes(
+    *,
+    catalog_path: Path,
+    source_root: str,
+) -> tuple[Optional[set[str]], dict[str, object]]:
+    source_root_norm = str(Path(source_root).resolve())
+    info: dict[str, object] = {
+        "mode": "catalog_fallback",
+        "source_root": source_root_norm,
+        "qbit_hashes": 0,
+        "mapped_payload_hashes": 0,
+        "unmapped_hashes": [],
+        "reason": "",
+    }
+    try:
+        qbit = get_qbittorrent_client()
+        if not qbit.test_connection() or not qbit.login():
+            info["reason"] = "qbit_unavailable"
+            return None, info
+
+        live_hashes = sorted(
+            {
+                str(getattr(torrent, "hash", "") or "").strip().lower()
+                for torrent in (qbit.get_torrents() or [])
+                if str(getattr(torrent, "save_path", "") or "").startswith(source_root_norm)
+            }
+        )
+        info["qbit_hashes"] = len(live_hashes)
+        if not live_hashes:
+            info["mode"] = "live_qb_root"
+            return set(), info
+
+        catalog_uri = (
+            f"file:{quote(str(catalog_path.expanduser().resolve()), safe='/')}?mode=ro&immutable=1"
+        )
+        conn = sqlite3.connect(catalog_uri, uri=True)
+        try:
+            mapped: dict[str, str] = {}
+            chunk_size = 500
+            for offset in range(0, len(live_hashes), chunk_size):
+                chunk = live_hashes[offset : offset + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT lower(ti.torrent_hash) AS torrent_hash, p.payload_hash
+                    FROM torrent_instances ti
+                    JOIN payloads p ON p.payload_id = ti.payload_id
+                    WHERE lower(ti.torrent_hash) IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    torrent_hash = str(row[0] or "").strip().lower()
+                    payload_hash = str(row[1] or "").strip()
+                    if torrent_hash and payload_hash:
+                        mapped[torrent_hash] = payload_hash
+        finally:
+            conn.close()
+
+        seed_payload_hashes = {payload_hash for payload_hash in mapped.values() if payload_hash}
+        unmapped_hashes = sorted(hash_ for hash_ in live_hashes if hash_ not in mapped)
+        info.update(
+            {
+                "mode": "live_qb_root",
+                "mapped_payload_hashes": len(seed_payload_hashes),
+                "unmapped_hashes": unmapped_hashes,
+                "reason": "",
+            }
+        )
+        return seed_payload_hashes, info
+    except Exception as exc:
+        info["reason"] = str(exc)
+        return None, info
 
 
 def _print_post_apply_summary(executor: "DemotionExecutor", plans: list) -> bool:
@@ -1124,20 +1200,28 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, cleanup_
     click.echo(f"   cleanup_attempted: {summary.get('cleanup_attempted', 0)}")
     click.echo(f"   cleanup_done: {summary.get('cleanup_done', 0)}")
     click.echo(f"   cleanup_failed: {summary.get('cleanup_failed', 0)}")
+    click.echo(f"   cleanup_safe_now: {summary.get('cleanup_safe_now', 0)}")
+    click.echo(f"   cleanup_retain_for_rollback: {summary.get('cleanup_retain_for_rollback', 0)}")
+    click.echo(f"   cleanup_blocked: {summary.get('cleanup_blocked', 0)}")
+    click.echo(f"   cleanup_already_cleaned: {summary.get('cleanup_already_cleaned', 0)}")
 
     for entry in report.get("entries", []):
         payload_hash = str(entry.get("payload_hash", ""))
         click.echo(
             f"payload={payload_hash[:16]} outcome={entry.get('outcome')} "
             f"cleanup_required={str(bool(entry.get('cleanup_required'))).lower()} "
-            f"cleanup_result={entry.get('cleanup_result')}"
+            f"cleanup_result={entry.get('cleanup_result')} "
+            f"cleanup_disposition={entry.get('cleanup_disposition')}"
         )
         db_reasons = entry.get("db_reasons") or []
         source_reasons = entry.get("source_reasons") or []
+        cleanup_disposition_reasons = entry.get("cleanup_disposition_reasons") or []
         if db_reasons:
             click.echo(f"  db_reasons={','.join(db_reasons)}")
         if source_reasons:
             click.echo(f"  source_reasons={','.join(source_reasons)}")
+        if cleanup_disposition_reasons:
+            click.echo(f"  cleanup_reasons={','.join(cleanup_disposition_reasons)}")
         if print_torrents:
             for gate in entry.get("qb_checks", []):
                 reasons = gate.get("reasons") or []
@@ -1335,6 +1419,21 @@ def relocate_plan_cmd(
         raise click.Abort()
 
     try:
+        seed_payload_hashes = set(payload_hashes) if payload_hashes else None
+        seed_info: dict[str, object] = {
+            "mode": "explicit_payload_hashes" if payload_hashes else "catalog_fallback",
+            "source_root": str(Path(source_root).resolve()),
+            "qbit_hashes": 0,
+            "mapped_payload_hashes": len(seed_payload_hashes or []),
+            "unmapped_hashes": [],
+            "reason": "",
+        }
+        if seed_payload_hashes is None:
+            seed_payload_hashes, seed_info = _resolve_live_qb_seed_payload_hashes(
+                catalog_path=catalog_path,
+                source_root=source_root,
+            )
+
         report = build_root_relocation_batch(
             catalog_path=catalog_path,
             source_device=int(source_device),
@@ -1342,12 +1441,13 @@ def relocate_plan_cmd(
             source_root=source_root,
             target_root=target_root,
             reference_root=reference_root,
-            payload_hashes=set(payload_hashes) if payload_hashes else None,
+            payload_hashes=seed_payload_hashes,
             limit=limit,
             flat_only=flat_only,
             unique_view_subdir=unique_view_subdir,
             mode="root_relocation",
         )
+        report["seed_scope"] = seed_info
     except Exception as e:
         click.echo(f"❌ relocate-plan failed: {e}", err=True)
         raise click.Abort()
@@ -1372,6 +1472,16 @@ def relocate_plan_cmd(
         f"collisions:{summary.get('view_collisions', 0)} "
         f"unique_views:{summary.get('unique_view_targets', 0)}"
     )
+    seed_scope = report.get("seed_scope") or {}
+    click.echo(
+        "seed_scope="
+        f"mode:{seed_scope.get('mode')} "
+        f"qbit_hashes:{seed_scope.get('qbit_hashes', 0)} "
+        f"mapped_payloads:{seed_scope.get('mapped_payload_hashes', 0)} "
+        f"unmapped_hashes:{len(seed_scope.get('unmapped_hashes') or [])}"
+    )
+    if seed_scope.get("reason"):
+        click.echo(f"seed_scope_reason={seed_scope.get('reason')}")
     if plans:
         for plan in plans[:5]:
             click.echo(

@@ -56,6 +56,37 @@ class CleanupSource:
     stage_path: Path
 
 
+def _classify_cleanup_disposition(
+    *,
+    cleanup_required: bool,
+    cleanup_sources: list["CleanupSource"],
+    outcome: str,
+    db_reasons: list[str],
+    source_reasons: list[str],
+    stale_refs: int,
+) -> tuple[str, list[str]]:
+    if not cleanup_required:
+        return "not_required", []
+
+    if not cleanup_sources:
+        return "already_cleaned", ["no_source_payload_rows"]
+
+    existing_sources = [source for source in cleanup_sources if source.root_path.exists()]
+    if not existing_sources:
+        return "already_cleaned", ["source_paths_absent"]
+
+    if stale_refs > 0:
+        return "blocked_stale_refs", ["stale_refs_on_source_payload"]
+
+    if outcome != "ok":
+        reasons = sorted(set(db_reasons + source_reasons))
+        if not reasons:
+            reasons = ["retain_for_rollback"]
+        return "retain_for_rollback", reasons
+
+    return "cleanup_safe_now", []
+
+
 def _split_tags(raw: Optional[str]) -> set[str]:
     if not raw:
         return set()
@@ -552,6 +583,11 @@ def run_followup(
         cleanup_attempted = 0
         cleanup_done = 0
         cleanup_failed = 0
+        cleanup_safe_now = 0
+        cleanup_retain_for_rollback = 0
+        cleanup_blocked = 0
+        cleanup_already_cleaned = 0
+        cleanup_not_required = 0
 
         for payload_hash in payload_keys:
             group = payload_candidates[payload_hash]
@@ -713,6 +749,7 @@ def run_followup(
                 qb_checks.append(gate.__dict__)
 
             cleanup_required = CLEANUP_REQUIRED_TAG in group["tags"]
+            cleanup_sources = _load_cleanup_sources(source_rows, payload_hash) if cleanup_required else []
             stale_ref_details: list[dict[str, Any]] = []
             if target_device:
                 stale_ref_details = _find_stale_payload_refs(
@@ -734,14 +771,32 @@ def run_followup(
             else:
                 outcome = "pending"
 
+            cleanup_disposition, cleanup_disposition_reasons = _classify_cleanup_disposition(
+                cleanup_required=cleanup_required,
+                cleanup_sources=cleanup_sources,
+                outcome=outcome,
+                db_reasons=sorted(set(db_reasons)),
+                source_reasons=sorted(set(source_reasons)),
+                stale_refs=stale_refs,
+            )
+            if cleanup_disposition == "cleanup_safe_now":
+                cleanup_safe_now += 1
+            elif cleanup_disposition == "retain_for_rollback":
+                cleanup_retain_for_rollback += 1
+            elif cleanup_disposition == "blocked_stale_refs":
+                cleanup_blocked += 1
+            elif cleanup_disposition == "already_cleaned":
+                cleanup_already_cleaned += 1
+            elif cleanup_disposition == "not_required":
+                cleanup_not_required += 1
+
             cleanup_result = "skipped"
             cleanup_errors: list[str] = []
             deleted_paths: list[str] = []
             staged_paths: list[str] = []
             cleanup_checks: list[dict[str, Any]] = []
-            if cleanup and cleanup_required and outcome == "ok":
+            if cleanup and cleanup_disposition == "cleanup_safe_now":
                 cleanup_attempted += 1
-                cleanup_sources = _load_cleanup_sources(source_rows, payload_hash)
                 cleanup_result, deleted_paths, cleanup_errors, staged_paths, cleanup_checks = _cleanup_sources_with_staging(
                     qbit_client=qbit,
                     payload_hash=payload_hash,
@@ -786,6 +841,9 @@ def run_followup(
                     "cleanup_errors": cleanup_errors,
                     "cleanup_checks": cleanup_checks,
                     "cleanup_observe_seconds": float(cleanup_observe_seconds),
+                    "cleanup_disposition": cleanup_disposition,
+                    "cleanup_disposition_reasons": cleanup_disposition_reasons,
+                    "cleanup_safe_now": cleanup_disposition == "cleanup_safe_now",
                     "qb_checks": qb_checks,
                     "db_reasons": sorted(set(db_reasons)),
                     "source_reasons": sorted(set(source_reasons)),
@@ -818,6 +876,11 @@ def run_followup(
                 "cleanup_attempted": cleanup_attempted,
                 "cleanup_done": cleanup_done,
                 "cleanup_failed": cleanup_failed,
+                "cleanup_safe_now": cleanup_safe_now,
+                "cleanup_retain_for_rollback": cleanup_retain_for_rollback,
+                "cleanup_blocked": cleanup_blocked,
+                "cleanup_already_cleaned": cleanup_already_cleaned,
+                "cleanup_not_required": cleanup_not_required,
             },
             "entries": entries,
         }

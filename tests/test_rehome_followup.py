@@ -178,6 +178,8 @@ def test_followup_cleanup_retries_and_clears_cleanup_required(monkeypatch, tmp_p
 
     assert report["summary"]["cleanup_attempted"] == 1
     assert report["summary"]["cleanup_done"] == 1
+    assert report["summary"]["cleanup_safe_now"] == 1
+    assert report["entries"][0]["cleanup_disposition"] == "cleanup_safe_now"
     assert source_dir.exists() is False
     removed_tags = [call for call in fake.remove_calls if call[0] == "torrent-clean"]
     assert removed_tags
@@ -504,9 +506,12 @@ def test_followup_cleanup_blocks_stale_sibling_refs_on_old_alias(monkeypatch, tm
     assert report["summary"]["groups_ok"] == 0
     assert report["summary"]["groups_pending"] == 1
     assert report["summary"]["cleanup_attempted"] == 0
+    assert report["summary"]["cleanup_blocked"] == 1
     entry = report["entries"][0]
     assert entry["db_reasons"] == ["stale_refs_on_source_payload"]
     assert entry["source_reasons"] == ["source_has_torrent_refs"]
+    assert entry["cleanup_disposition"] == "blocked_stale_refs"
+    assert entry["cleanup_disposition_reasons"] == ["stale_refs_on_source_payload"]
     assert entry["stale_ref_details"] == [
         {
             "torrent_hash": "torrent-stale",
@@ -517,4 +522,58 @@ def test_followup_cleanup_blocks_stale_sibling_refs_on_old_alias(monkeypatch, tm
             "payload_id": 2,
         }
     ]
+    assert source_dir.exists() is True
+
+
+def test_followup_marks_cleanup_safe_now_without_apply(monkeypatch, tmp_path: Path):
+    db_path = _make_db(tmp_path)
+    source_dir = tmp_path / "source-safe"
+    source_dir.mkdir()
+    (source_dir / "file.mkv").write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        f"""
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES
+          (1, 'hash-safe-now', 141, '/pool/media/torrents/seeding/cross-seed/Aither (API)/Movie.mkv', 1, 3, 'complete'),
+          (2, 'hash-safe-now', 231, '{source_dir}', 1, 3, 'complete');
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, tags)
+        VALUES ('torrent-safe-now', 1, 141, '/pool/media/torrents/seeding/cross-seed/Aither (API)',
+                'rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_verify_pending,rehome_cleanup_source_required');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fake = FakeQbitClient()
+    fake.torrents_by_tag["rehome_verify_pending"] = [
+        SimpleNamespace(
+            hash="torrent-safe-now",
+            tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrents_by_tag["rehome_cleanup_source_required"] = [
+        SimpleNamespace(
+            hash="torrent-safe-now",
+            tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrent_info["torrent-safe-now"] = SimpleNamespace(
+        hash="torrent-safe-now",
+        tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_verify_pending,rehome_cleanup_source_required",
+        progress=1.0,
+        state="stalledUP",
+        auto_tmm=False,
+        save_path="/pool/media/torrents/seeding/cross-seed/Aither (API)",
+    )
+
+    monkeypatch.setattr("rehome.followup.get_qbittorrent_client", lambda: fake)
+
+    report = run_followup(catalog_path=db_path, cleanup=False)
+
+    assert report["summary"]["cleanup_safe_now"] == 1
+    entry = report["entries"][0]
+    assert entry["cleanup_disposition"] == "cleanup_safe_now"
+    assert entry["cleanup_safe_now"] is True
     assert source_dir.exists() is True

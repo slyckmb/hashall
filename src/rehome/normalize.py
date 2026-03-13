@@ -509,7 +509,7 @@ def build_root_relocation_batch(
             payload_hash = str(row["payload_hash"] or "").strip()
             if not payload_hash:
                 continue
-            if payload_hashes and payload_hash not in payload_hashes:
+            if payload_hashes is not None and payload_hash not in payload_hashes:
                 continue
             if payload_hash not in payload_rows_by_hash:
                 payload_rows_by_hash[payload_hash] = []
