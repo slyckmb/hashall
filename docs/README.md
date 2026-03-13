@@ -13,12 +13,12 @@ Purpose: minimal, canonical documentation set for CLI agents.
 7. `docs/project/PLAN.md` - Active roadmap and backlog.
 8. `README.md` - Project overview and onboarding.
 
-## Compatibility Stubs
+## Active Continuity Docs
 
-Legacy names are retained as pointer stubs to avoid breaking workflows.
-Historical content snapshots are preserved under:
-
-- `docs/archive/2026-doc-reduction/snapshot/`
+- `docs/handoff.md` - Compact-safe current handoff summary.
+- `docs/next-agent.md` - Compact-safe recovery checklist.
+- `docs/NEXT-AGENT-PROMPT.md` - Prompt-safe compact recovery summary.
+- `docs/ops-log.md` - Rolling operational log when recent context matters.
 
 ## Hygiene
 
@@ -29,3 +29,4 @@ Validate active-doc links with:
 ## Archive
 
 Historical and superseded docs live in `docs/archive/`.
+Active-tree duplicates should be archived rather than left behind as compatibility stubs.

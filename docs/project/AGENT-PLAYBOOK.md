@@ -51,8 +51,7 @@ Root compatibility wrappers are allowed for stable operator commands only.
 ## Documentation Rules
 
 - Update canonical docs, not deprecated duplicates.
-- Keep compatibility stubs brief and pointer-only.
-- Archive superseded material under `docs/archive/`.
+- Archive superseded material under `docs/archive/`; do not keep active-tree compatibility stubs once the canonical replacement is established.
 - Run `python3 scripts/check_doc_links.py` after docs edits.
 
 ## Safety Rules

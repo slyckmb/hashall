@@ -121,7 +121,7 @@ hashall link execute 1 --dry-run
 hashall link execute 1
 ```
 
-See `docs/tooling/link-guide.md` for complete workflow.
+See `docs/tooling/CLI-OPERATIONS.md` for the canonical workflow.
 
 ### 5. View Device Statistics
 
@@ -302,7 +302,7 @@ See `benchmarks/` for detailed results and analysis.
 - **Canonical paths** - Symlinks resolved to avoid double-scanning
 - **Direct SQL** - No JSON intermediates, fast queries
 
-See `docs/architecture/architecture.md` for complete details.
+See `docs/architecture/SYSTEM.md` for the canonical architecture overview.
 
 ---
 
@@ -318,7 +318,7 @@ hashall export old.db --root /pool --out /tmp/pool.json
 hashall import /tmp/pool.json --device /pool
 ```
 
-See `docs/architecture/architecture.md` for migration guide.
+See `docs/tooling/REHOME-RUNBOOK.md` for the canonical migration/runbook flow.
 
 ---
 
@@ -354,7 +354,7 @@ See `docs/architecture/architecture.md` for migration guide.
 ## 🤝 Contributing
 
 Contributions welcome! Please:
-1. Read `docs/architecture/architecture.md` to understand the unified catalog model
+1. Read `docs/architecture/SYSTEM.md` to understand the unified catalog model
 2. Check existing issues or create a new one
 3. Submit PRs with tests and documentation
 

@@ -634,7 +634,7 @@ catalog.db
 
 **Sync Process:** Connects to qBittorrent, maps torrents to payloads, and updates the catalog.
 
-**CLI usage:** See `docs/tooling/cli.md` (payload commands).
+**CLI usage:** See `docs/tooling/CLI-OPERATIONS.md` (payload commands).
 
 ---
 
@@ -661,11 +661,11 @@ catalog.db
 
 **Architecture:** Plan → Review → Apply workflow
 
-**Detailed Usage:** See `docs/tooling/REHOME.md`
+**Detailed Usage:** See `docs/tooling/REHOME-RUNBOOK.md`
 
 ### 8.2 Planning Phase
 
-**Command:** `rehome plan` (details in `docs/tooling/REHOME.md`)
+**Command:** `rehome plan` (details in `docs/tooling/REHOME-RUNBOOK.md`)
 
 **Modes:** single-torrent, batch by payload hash, batch by tag.
 
@@ -702,7 +702,7 @@ catalog.db
 
 ### 8.3 Application Phase
 
-**Command:** `rehome apply <plan_file>` (details in `docs/tooling/REHOME.md`)
+**Command:** `rehome apply <plan_file>` (details in `docs/tooling/REHOME-RUNBOOK.md`)
 
 **Modes:**
 - `--dryrun`: Preview actions without making changes
@@ -744,7 +744,7 @@ catalog.db
 - For MOVE plans, payload is rolled back to source on failure
 - Cleanup is skipped on any relocation failure
 
-**Usage examples:** See `docs/tooling/REHOME.md`.
+**Usage examples:** See `docs/tooling/REHOME-RUNBOOK.md`.
 
 ### 8.4 qBittorrent Integration
 
