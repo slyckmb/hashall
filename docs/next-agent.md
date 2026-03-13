@@ -18,25 +18,31 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.5.1`
+   - `hashall` semver is `0.6.0`
    - latest planner-expansion hardening:
      - `relocate-plan` now includes already-targeted same-`payload_hash` siblings instead of silently planning only source-root members
-     - refreshed pool-data -> pool-media remainder is now `31` plans / `189` rows
-     - refreshed drift summary:
-       - `attention_rows=105`
-       - `plans_with_out_of_plan_siblings=11`
-       - `18 ready_repoint_or_reconcile`
-       - `6 ready_catalog_reconcile`
-       - `5 blocked_qbit_sibling_gap`
-       - `2 blocked_target_view_missing`
-     - use this richer `refresh5` view as the new source of truth for the remaining migration lane
-   - latest unique-target hardening:
-     - new `rehome apply` runs create/assign one target payload row per migrated hash instead of collapsing the whole group onto one target `payload_id`
-     - drift snapshots now surface legacy shared-target groups through:
-       - `shared_payload_rows`
-       - `shared_payload_torrents`
-       - `shared_payload_members`
-     - this is the first code slice aimed at eliminating N->1 hitchhiker targets on `/pool/media`
+   - latest de-hitchhike hardening:
+     - multi-hash root-relocation plans now default to per-hash unique target roots
+     - `qb-missing-remediate` reconnect plans now do the same
+     - stash->pool `rehome` view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
+     - successful attaches now remove an unused intermediate donor root when the full sibling group is covered in-plan
+   - `refresh6` is now the source of truth for the remaining pool-data -> pool-media lane:
+     - `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
+     - `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`
+     - `plans=31`
+     - `rows=189`
+     - `attention_rows=167`
+     - `plans_with_out_of_plan_siblings=11`
+     - `23 ready_repoint_or_reconcile`
+     - `5 blocked_qbit_sibling_gap`
+     - `3 blocked_target_view_missing`
+   - live proof immediately before this hardening:
+     - `Cinderella.2021...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
+     - its post snapshot still warned about one shared payload row because that run started before the `0.6.0` planner landed
+   - next clean live slice already prepared:
+     - `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
+     - `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
+     - `MOVE`, `affected_torrents=9`, `out_of_plan_siblings=0`, `unique_view_targets=9`
    - latest preflight feedback hardening:
      - `_preflight_existing_view_conflicts()` now emits progress / view-done / complete heartbeat lines
      - this closes the long silent window between `step=verify_target` and `step=build_views` when an existing target tree is large but healthy

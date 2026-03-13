@@ -24,25 +24,35 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.5.1`.
+  - `hashall` version now `0.6.0`.
   - latest planner-expansion hardening:
     - `relocate-plan` now includes already-targeted same-`payload_hash` siblings instead of silently limiting batches to source-root members
-    - refreshed pool-data -> pool-media remainder is now `31` plans / `189` rows
-    - refreshed drift summary:
-      - `attention_rows=105`
-      - `plans_with_out_of_plan_siblings=11`
-      - `18 ready_repoint_or_reconcile`
-      - `6 ready_catalog_reconcile`
-      - `5 blocked_qbit_sibling_gap`
-      - `2 blocked_target_view_missing`
-    - treat `out/rehome-plan-pool-data-to-media-refresh5-20260313.json` and `...-drift.json` as the active remainder baseline
   - newest migration invariant:
-    - `rehome apply` now creates or assigns one target payload row per migrated hash based on the actual built destination root
-    - drift snapshots now expose legacy shared-target groups with:
-      - `shared_payload_rows`
-      - `shared_payload_torrents`
-      - `shared_payload_members`
+    - multi-hash root-relocation plans now default to per-hash unique target roots
+    - `qb-missing-remediate` reconnect plans now follow the same rule
+    - stash->pool `rehome` view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
+    - successful attaches now remove an unused intermediate donor root when the full sibling group is covered in-plan
     - use this to distinguish old hitchhiker debt from new runs, which should now converge toward unique per-hash target payloads
+  - active remainder baseline is now:
+    - `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
+    - `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`
+    - `plans=31`
+    - `rows=189`
+    - `attention_rows=167`
+    - `plans_with_out_of_plan_siblings=11`
+    - `23 ready_repoint_or_reconcile`
+    - `5 blocked_qbit_sibling_gap`
+    - `3 blocked_target_view_missing`
+  - latest live proof before the planner flip:
+    - `Cinderella.2021...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
+    - its post snapshot still warned about a shared payload row because the run started before the `0.6.0` de-hitchhike planner landed
+  - next clean live slice:
+    - `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
+    - `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
+    - `MOVE`
+    - `affected_torrents=9`
+    - `out_of_plan_siblings=0`
+    - `unique_view_targets=9`
   - latest preflight feedback hardening:
     - `_preflight_existing_view_conflicts()` now emits:
       - `preflight_target_views_progress`

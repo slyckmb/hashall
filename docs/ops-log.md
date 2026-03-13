@@ -3,30 +3,38 @@
 Canonical living state:
 `docs/operations/RUN-STATE.md`
 
-Latest stale-assumption hardening note (2026-03-12):
+Latest stale-assumption hardening note (2026-03-13):
 
-- `hashall` is now `0.5.1`.
-- New 2026-03-13 planner-expansion note:
-  - `relocate-plan` now pulls already-targeted same-`payload_hash` siblings into root-to-root batches
-  - refreshed pool-data -> pool-media remainder is now represented as `31` plans / `189` rows instead of the older partial `12`-plan view
-  - latest drift summary:
-    - `attention_rows=105`
-    - `plans_with_out_of_plan_siblings=11`
-    - `18 ready_repoint_or_reconcile`
-    - `6 ready_catalog_reconcile`
-    - `5 blocked_qbit_sibling_gap`
-    - `2 blocked_target_view_missing`
-  - this surfaced hidden family members earlier, which is the intended anti-staleness behavior
-- New 2026-03-13 unique-target payload note:
-  - `rehome` no longer writes fresh migrations back onto one shared target payload row
-  - catalog sync now creates per-hash target payload rows from the actual built destination roots
-  - drift snapshots now report legacy shared-target groups via:
-    - `shared_payload_rows`
-    - `shared_payload_torrents`
-    - `shared_payload_members`
+- `hashall` is now `0.6.0`.
+- New de-hitchhike note:
+  - root-to-root relocation planning now defaults multi-hash groups to per-hash unique target roots
+  - missing-file reconnect plans now follow the same rule
+  - stash->pool `rehome` view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
+  - successful attaches now remove an unused intermediate donor root when the full sibling group is covered in-plan
   - targeted validation:
-    - `pytest tests/test_rehome_catalog_sync.py tests/test_rehome_reality.py tests/test_rehome_followup.py tests/test_rehome_qb_missing.py tests/test_qb_libtorrent_verify.py tests/test_rehome_cli_apply.py -q`
-    - result: `53 passed`
+    - `pytest tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py tests/test_rehome_mapping.py tests/test_rehome_catalog_sync.py -q -k 'unique or payload_rows or preflight_existing_view_conflicts_logs_progress_for_missing_targets'`
+    - `pytest tests/test_rehome_atomic_relocation.py -q -k cleanup_unused_target_donor_removes_intermediate_root`
+    - result: `7 passed`
+- Live proof note:
+  - `Cinderella.2021...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
+  - its post snapshot still warned about one shared payload row because the run started before the `0.6.0` planner landed
+- New active remainder baseline:
+  - `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
+  - `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`
+  - `plans=31`
+  - `rows=189`
+  - `attention_rows=167`
+  - `plans_with_out_of_plan_siblings=11`
+  - group states:
+    - `23 ready_repoint_or_reconcile`
+    - `5 blocked_qbit_sibling_gap`
+    - `3 blocked_target_view_missing`
+- Next clean live slice is prepared and dry-run green:
+  - `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
+  - `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
+  - `MOVE`
+  - `affected_torrents=9`
+  - `unique_view_targets=9`
 
 - `hashall` is now `0.4.186`.
 - New 2026-03-12 preflight feedback note:

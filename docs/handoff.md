@@ -2,28 +2,43 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.5.1`.
-- New 2026-03-13 planner-expansion hardening:
-  - `relocate-plan` now includes already-targeted siblings for the same `payload_hash` instead of silently planning only the source-root subset
-  - this makes refreshed pool-data -> pool-media plans noisier but more truthful: the current refreshed remainder is `31` plans / `189` rows, not the older misleading `12`-plan subset
-  - current refreshed drift summary from `out/rehome-plan-pool-data-to-media-refresh5-20260313-drift.json`:
+- `hashall` semver baseline is now `0.6.0`.
+- New 2026-03-13 de-hitchhike baseline:
+  - root-to-root relocation planning now defaults multi-hash payload groups to per-hash unique target roots instead of only uniquifying literal target collisions
+  - `qb-missing-remediate` reconnect plans now follow the same rule, so reconnects stop recreating shared hitchhiker targets
+  - `rehome` stash->pool view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
+  - successful attaches now remove an unused intermediate donor root when the entire sibling group is in-plan, so the run does not leave a hidden extra canonical target tree behind
+  - targeted validation for this slice:
+    - `pytest tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py tests/test_rehome_mapping.py tests/test_rehome_catalog_sync.py -q -k 'unique or payload_rows or preflight_existing_view_conflicts_logs_progress_for_missing_targets'`
+    - `pytest tests/test_rehome_atomic_relocation.py -q -k cleanup_unused_target_donor_removes_intermediate_root`
+    - result: `7 passed`
+- Latest live proof under the older pre-fix planner:
+  - `Cinderella.2021...` completed operationally
+  - report dir: `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
+  - qB ended healthy on `/pool/media/...`
+  - the post snapshot still warned that the catalog grouped the 4 hashes into `1` shared payload row
+  - that warning is the exact structural gap the new `0.6.0` planner/executor slice is meant to close
+- Current refreshed pool-data -> pool-media remainder is now `refresh6`:
+  - plan: `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
+  - drift: `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`
+  - summary:
     - `plans=31`
-    - `attention_rows=105`
+    - `rows=189`
+    - `attention_rows=167`
     - `plans_with_out_of_plan_siblings=11`
     - group states:
-      - `18 ready_repoint_or_reconcile`
-      - `6 ready_catalog_reconcile`
+      - `23 ready_repoint_or_reconcile`
       - `5 blocked_qbit_sibling_gap`
-      - `2 blocked_target_view_missing`
-  - operator meaning:
-    - the planner is no longer hiding family members that already live under `/pool/media`
-    - remaining brittleness is now concentrated in partial sibling coverage and legacy shared-target debt, not silent underplanning
-- New 2026-03-13 unique-payload rehome slice:
-  - the main code creator of fresh N->1 hitchhiker groups was `rehome` catalog sync, not rsync/view building
-  - `rehome apply` used to assign one target `payload_id` to every migrated hash in a group
-  - it now assigns or creates one target payload row per hash using the actual built destination root
-  - drift snapshots now warn when a payload hash is still grouped into shared catalog payload rows
-  - this is the first step toward eliminating shared hitchhiker target groups from new pool-media migrations
+      - `3 blocked_target_view_missing`
+  - the higher `attention_rows` count is expected: under the new unique-target invariant, many previously “already targeted” family members now show up honestly as `source_only` rows that still need their own destination payload roots
+- Next live candidate already proven clean in dry-run:
+  - plan: `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
+  - drift: `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
+  - `Twisters.2024...`
+  - `decision=MOVE`
+  - `affected_torrents=9`
+  - `out_of_plan_siblings=0`
+  - `unique_view_targets=9`
 
 - `hashall` package semver is now `0.4.186`.
 - New 2026-03-12 preflight feedback hardening landed after the long `Snowfall...` quiet window:
