@@ -2,11 +2,35 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.6.6`.
+- `hashall` semver baseline is now `0.6.8`.
+- Active docs are now intentionally minimal and stub-free:
+  - canonical active set:
+    - `README.md`
+    - `docs/README.md`
+    - `docs/REQUIREMENTS.md`
+    - `docs/architecture/SYSTEM.md`
+    - `docs/tooling/CLI-OPERATIONS.md`
+    - `docs/tooling/REHOME-RUNBOOK.md`
+    - `docs/operations/RUN-STATE.md`
+    - `docs/project/AGENT-PLAYBOOK.md`
+    - `docs/project/PLAN.md`
+    - continuity docs:
+      - `docs/handoff.md`
+      - `docs/ops-log.md`
+      - `docs/next-agent.md`
+      - `docs/NEXT-AGENT-PROMPT.md`
+  - superseded active-tree docs were archived under `docs/archive/2026-doc-consolidation/`
+  - do not recreate active-tree compatibility stubs
 - Anchor the current model on this invariant:
   - a qB item needs its own unique payload tree / file-structure instantiation on disk
   - that tree should normally be built from donor bytes via hardlinks, not by creating redundant physical copies
   - when these notes say `unique target`, `de-hitchhike`, or `_rehome-unique/<hash>`, read that as “unique per-item payload tree,” not “force duplicate bytes”
+- New 2026-03-13 hardlink-normalization baseline:
+  - `rehome` view construction no longer accepts a preexisting identical destination copy as “good enough”
+  - `src/rehome/view_builder.py` now atomically relinks identical destination files back to the donor inode, so successful rehome/reconnect runs do not leave duplicate bytes behind
+  - `bin/qb-repair-fresh.py` now does the same normalization during same-fs repair preparation
+  - live implication:
+    - if a target file already exists with identical bytes, the code should now convert it into a hardlink-backed per-item payload tree instead of preserving a redundant copy
 - New 2026-03-13 planner stale-no-op hardening baseline:
   - `relocate-plan` now skips groups when every per-hash view target is already `source_save_path == target_save_path`
   - this closes the deferred-cleanup stale-planner gap that kept resurfacing fully converged groups like `Brave.New.World.US.S01...`
@@ -56,7 +80,7 @@
       - `move=7`
       - `skipped=2` (`already_targeted_view_targets`)
 
-- `hashall` package semver is now `0.6.3`.
+- `hashall` package semver is now `0.6.8`.
 - New 2026-03-12 preflight feedback hardening landed after the long `Snowfall...` quiet window:
   - `_preflight_existing_view_conflicts()` now emits:
     - `preflight_target_views_progress`

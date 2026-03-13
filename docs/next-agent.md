@@ -18,11 +18,16 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.6.6`
+   - `hashall` semver is `0.6.8`
+   - active docs are now reduced to the canonical set in `docs/README.md`; do not recreate active-tree stubs, use `docs/archive/2026-doc-consolidation/` for superseded material
    - anchor invariant:
      - each qB item needs its own correct payload tree on disk
      - that tree should normally be instantiated from donor bytes via hardlinks, not redundant physical copies
      - `unique target root` means unique per-item payload structure
+   - latest hardlink-normalization fixes:
+     - `src/rehome/view_builder.py` now relinks identical preexisting destination files to donor inodes
+     - `bin/qb-repair-fresh.py` now does the same during fresh repair prep
+     - these two fixes close the known duplicate-byte leak that was leaving new jdupes groups behind after otherwise-successful runs
    - latest planner stale-no-op hardening:
      - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
      - this removes fully converged families from the active remainder even when source cleanup is still deferred

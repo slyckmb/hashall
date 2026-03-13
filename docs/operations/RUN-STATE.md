@@ -4,11 +4,32 @@ Last updated: 2026-03-13
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.6.6`.
+- `hashall` is now `0.6.8`.
+- Active docs are now intentionally minimal and stub-free:
+  - canonical active docs:
+    - `README.md`
+    - `docs/README.md`
+    - `docs/REQUIREMENTS.md`
+    - `docs/architecture/SYSTEM.md`
+    - `docs/tooling/CLI-OPERATIONS.md`
+    - `docs/tooling/REHOME-RUNBOOK.md`
+    - `docs/operations/RUN-STATE.md`
+    - `docs/project/AGENT-PLAYBOOK.md`
+    - `docs/project/PLAN.md`
+  - continuity docs:
+    - `docs/handoff.md`
+    - `docs/ops-log.md`
+    - `docs/next-agent.md`
+    - `docs/NEXT-AGENT-PROMPT.md`
+  - superseded material now lives in `docs/archive/2026-doc-consolidation/`
 - Anchor the current migration/rehome model on this invariant:
   - each qB item needs its own correct payload tree on disk
   - that tree should normally be instantiated from donor content via hardlinks
   - `unique target` means unique per-item file structure, not mandatory duplicate physical copies
+- New 2026-03-13 duplicate-byte hardening:
+  - `src/rehome/view_builder.py` now relinks preexisting identical destination files to the donor inode instead of silently accepting copied bytes
+  - `bin/qb-repair-fresh.py` now normalizes existing identical targets the same way
+  - this closes the known “successful run leaves new jdupes groups behind” leak in both the rehome path and the fresh repair-prep path
 - New 2026-03-13 planner stale-no-op hardening:
   - `relocate-plan` now skips groups when all per-hash view targets already have `source_save_path == target_save_path`
   - this removes fully converged families from the live remainder even when source cleanup is still deferred
@@ -53,7 +74,7 @@ Last updated: 2026-03-13
     - `out/rehome-plan-pool-data-to-media-refresh9-20260313.json`
     - `candidates=29`, `reuse=22`, `move=7`, `skipped=2`
 
-- `hashall` is now `0.6.3`.
+- `hashall` is now `0.6.8`.
 - Latest 2026-03-12 preflight feedback note:
   - `preflight_target_views` now emits bounded heartbeat lines during long existing-target scans:
     - `preflight_target_views_progress`

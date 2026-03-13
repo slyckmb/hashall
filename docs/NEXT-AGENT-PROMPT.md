@@ -24,11 +24,16 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.6.6`.
+  - `hashall` version now `0.6.8`.
+  - active docs are now intentionally minimal and stub-free; use the canonical set in `docs/README.md` and archive superseded material instead of leaving active-tree pointers.
   - anchor invariant for all migration/rehome work:
     - a qB item needs its own correct payload tree / file-structure instantiation on disk
     - that tree should normally be instantiated from donor payloads via hardlinks
     - `unique target` means unique per-item payload structure, not duplicate physical byte copies
+  - latest hardlink-normalization fixes:
+    - `src/rehome/view_builder.py` now relinks identical existing destination files to donor inodes
+    - `bin/qb-repair-fresh.py` now relinks identical existing repair targets the same way
+    - successful runs should no longer preserve copied bytes in those two paths just because the destination file already existed
   - latest planner stale-no-op hardening:
     - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
     - this removes fully converged families from the active remainder even when source cleanup is still deferred

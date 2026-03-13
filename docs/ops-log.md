@@ -5,10 +5,18 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-13):
 
-- `hashall` is now `0.6.6`.
+- `hashall` is now `0.6.8`.
 - Anchor note:
   - the intended invariant is unique per-item qB payload trees, instantiated from donor payloads via hardlinks where possible
   - do not read `unique target` or `de-hitchhike` as “make redundant physical copies”
+- New 2026-03-13 repo hygiene note:
+  - active docs were reduced to a minimal canonical set
+  - duplicate/stub docs were archived under `docs/archive/2026-doc-consolidation/`
+  - active-tree compatibility stubs should not be reintroduced
+- New 2026-03-13 hardlink-normalization note:
+  - `rehome` view construction now relinks identical preexisting destination files to donor inodes
+  - `qb-repair-fresh` now does the same during same-fs target preparation
+  - this closes the main code paths that were preserving copied bytes instead of hardlink-backed per-item payload trees
 - New 2026-03-13 planner stale-no-op hardening:
   - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
   - this closes the deferred-cleanup planner gap that kept resurfacing fully converged families like `Brave.New.World.US.S01...`
@@ -56,7 +64,7 @@ Latest stale-assumption hardening note (2026-03-13):
   - `affected_torrents=9`
   - `unique_view_targets=9`
 
-- `hashall` is now `0.6.3`.
+- `hashall` is now `0.6.8`.
 - New 2026-03-12 preflight feedback note:
   - `_preflight_existing_view_conflicts()` now emits heartbeat / completion lines during long existing-target scans
   - new log keys:
