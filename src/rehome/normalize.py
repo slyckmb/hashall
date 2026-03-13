@@ -61,20 +61,19 @@ def _resolve_rel(
     return to_relpath(remapped, base_root)
 
 
-def _fetch_device_torrents(
+def _fetch_payload_torrents(
     conn: sqlite3.Connection,
     payload_hash: str,
-    device_id: int,
 ) -> List[sqlite3.Row]:
     return conn.execute(
         """
         SELECT ti.torrent_hash, ti.save_path, ti.root_name, ti.category, ti.tags
         FROM torrent_instances ti
         JOIN payloads p ON p.payload_id = ti.payload_id
-        WHERE p.payload_hash = ? AND p.device_id = ?
+        WHERE p.payload_hash = ?
         ORDER BY ti.torrent_hash
         """,
-        (payload_hash, device_id),
+        (payload_hash,),
     ).fetchall()
 
 
@@ -335,11 +334,16 @@ def _build_target_view_targets(
             continue
 
         save_path = _canonical(save_path_raw)
-        target_save_path = _map_target_save_path(
-            source_save_path=save_path,
-            source_root=source_root,
-            target_root=target_root,
-        )
+        if is_under(save_path, source_root):
+            target_save_path = _map_target_save_path(
+                source_save_path=save_path,
+                source_root=source_root,
+                target_root=target_root,
+            )
+        elif is_under(save_path, target_root):
+            target_save_path = save_path
+        else:
+            target_save_path = None
         if target_save_path is None:
             continue
 
@@ -474,7 +478,7 @@ def build_root_relocation_batch(
             file_count = int(row["file_count"] or 0)
             total_bytes = int(row["total_bytes"] or 0)
 
-            device_torrents = _fetch_device_torrents(conn, payload_hash, source_device)
+            device_torrents = _fetch_payload_torrents(conn, payload_hash)
             if not device_torrents:
                 skipped.append(
                     NormalizationSkip(
