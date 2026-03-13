@@ -599,6 +599,245 @@ def test_hardened_fastresume_reconcile_subset_filters_plan(tmp_path, monkeypatch
     ]
 
 
+def test_hardened_fastresume_reconcile_subset_excludes_reconciled_rows_from_patch(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "rows": [
+            {
+                "hash": "hash-reconcile",
+                "selected": True,
+                "state": "stalledUP",
+                "verified": False,
+                "old_save_path": "/pool/media/torrents/seeding/_rehome-unique/hash-reconcile",
+                "new_save_path": "/pool/media/torrents/seeding/_rehome-unique/hash-reconcile",
+                "content_path": "/pool/media/torrents/seeding/_rehome-unique/hash-reconcile/Twisters.mkv",
+                "dest_content_path": "/pool/media/torrents/seeding/_rehome-unique/hash-reconcile/Twisters.mkv",
+            },
+            {
+                "hash": "hash-patch",
+                "selected": True,
+                "state": "missingFiles",
+                "progress": 0.0,
+                "verified": False,
+                "old_save_path": "/pool/media/torrents/seeding/cross-seed/seedpool (API)",
+                "new_save_path": "/pool/media/torrents/seeding/_rehome-unique/hash-patch",
+                "content_path": "/pool/media/torrents/seeding/cross-seed/seedpool (API)/Twisters/Twisters.mkv",
+                "dest_content_path": "/pool/media/torrents/seeding/_rehome-unique/hash-patch/Twisters",
+                "copy_status": "pending",
+                "path_shape_match": False,
+            },
+        ]
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest))
+
+    class FakeController:
+        def __init__(self):
+            self.running = True
+
+        def is_stopped(self):
+            return not self.running
+
+        def stop(self):
+            self.running = False
+
+        def start(self):
+            self.running = True
+
+    class FakeRelocationTool:
+        def __init__(self, path: Path):
+            self.path = path
+            self.controller = FakeController()
+            self.validate_selected = []
+
+        def _ensure_controller(self):
+            return self.controller
+
+        def _wait_for_qb_online(self):
+            return None
+
+        def _load_manifest(self, path: Path):
+            return __import__("json").loads(Path(path).read_text())
+
+        def _checkpoint_manifest(self, path: Path, manifest):
+            Path(path).write_text(__import__("json").dumps(manifest))
+
+        def _pause_selected(self, rows):
+            for row in rows:
+                row["state"] = "stoppedUP"
+
+        def _refresh_rows_from_qb(self, rows):
+            return None
+
+        def verify(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["verified"] = True
+                row["verify_status"] = "verified"
+                row["verify_classification"] = "exact_tree"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def validate(self, *, manifest_path: Path, **kwargs):
+            payload = self._load_manifest(manifest_path)
+            self.validate_selected = [
+                row["hash"] for row in payload["rows"] if row.get("selected")
+            ]
+            for row in payload["rows"]:
+                row["issues"] = [] if row.get("selected") else list(row.get("issues") or [])
+                row["actionable"] = bool(row.get("selected"))
+            self._checkpoint_manifest(manifest_path, payload)
+            return 0
+
+        def patch(self, *, manifest_path: Path, **kwargs):
+            payload = self._load_manifest(manifest_path)
+            for row in payload["rows"]:
+                if row.get("selected"):
+                    row["patch_status"] = "patched"
+            self._checkpoint_manifest(manifest_path, payload)
+            return 0
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClient(
+        default_path="/pool/media/torrents/seeding/_rehome-unique/hash-patch"
+    )
+    executor.resume_after_relocate = False
+    relocation_tool = FakeRelocationTool(manifest_path)
+
+    monkeypatch.setattr(executor, "_relocation_artifact_dir", lambda plan: tmp_path)
+    monkeypatch.setattr(executor, "_build_hardened_relocation_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr(executor, "_build_qb_zfs_relocation_tool", lambda: relocation_tool)
+
+    plan = {
+        "payload_hash": "payload-hash",
+        "torrent_hash": "hash-patch",
+        "affected_torrents": ["hash-reconcile", "hash-patch"],
+        "view_targets": [
+            {"torrent_hash": "hash-reconcile", "target_save_path": "/pool/media/torrents/seeding/_rehome-unique/hash-reconcile"},
+            {"torrent_hash": "hash-patch", "target_save_path": "/pool/media/torrents/seeding/_rehome-unique/hash-patch"},
+        ],
+    }
+
+    phase_times = executor._attach_torrents_via_hardened_fastresume(
+        plan,
+        TargetDonor(
+            source_path=tmp_path / "src",
+            target_path=tmp_path / "dst",
+            target_device_id=141,
+            acquisition_mode="reuse",
+        ),
+        relocations=[],
+    )
+
+    assert phase_times["validate"] >= 0.0
+    assert relocation_tool.validate_selected == ["hash-patch"]
+
+    updated = __import__("json").loads(manifest_path.read_text())
+    rows = {row["hash"]: row for row in updated["rows"]}
+    assert rows["hash-reconcile"]["selected"] is False
+    assert rows["hash-reconcile"]["resume_status"] == "already_repointed"
+    assert rows["hash-patch"]["patch_status"] == "patched"
+
+
+def test_hardened_fastresume_restarts_qb_after_validate_failure(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "rows": [
+            {
+                "hash": "hash-a",
+                "selected": True,
+                "state": "stalledUP",
+                "verified": False,
+                "old_save_path": "/pool/data/media/torrents/seeding/cross-seed/Aither (API)",
+                "new_save_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+                "content_path": "/pool/data/media/torrents/seeding/cross-seed/Aither (API)/Megalopolis.mkv",
+                "dest_content_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)/Megalopolis.mkv",
+            }
+        ]
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest))
+
+    class FakeController:
+        def __init__(self):
+            self.running = True
+            self.stop_calls = 0
+            self.start_calls = 0
+
+        def is_stopped(self):
+            return not self.running
+
+        def stop(self):
+            self.running = False
+            self.stop_calls += 1
+
+        def start(self):
+            self.running = True
+            self.start_calls += 1
+
+    class FakeRelocationTool:
+        def __init__(self, path: Path):
+            self.path = path
+            self.controller = FakeController()
+            self.wait_calls = 0
+
+        def _ensure_controller(self):
+            return self.controller
+
+        def _wait_for_qb_online(self):
+            self.wait_calls += 1
+
+        def _load_manifest(self, path: Path):
+            return __import__("json").loads(Path(path).read_text())
+
+        def _checkpoint_manifest(self, path: Path, manifest):
+            Path(path).write_text(__import__("json").dumps(manifest))
+
+        def _pause_selected(self, rows):
+            for row in rows:
+                row["state"] = "stoppedUP"
+
+        def _refresh_rows_from_qb(self, rows):
+            return None
+
+        def verify(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["verified"] = True
+                row["verify_status"] = "verified"
+                row["verify_classification"] = "exact_tree"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def validate(self, **kwargs):
+            return 1
+
+        def patch(self, **kwargs):
+            raise AssertionError("patch should not be called after validate failure")
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClient(default_path="/pool/media/torrents/seeding/cross-seed/Aither (API)")
+    relocation_tool = FakeRelocationTool(manifest_path)
+
+    monkeypatch.setattr(executor, "_relocation_artifact_dir", lambda plan: tmp_path)
+    monkeypatch.setattr(executor, "_build_hardened_relocation_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr(executor, "_build_qb_zfs_relocation_tool", lambda: relocation_tool)
+
+    with pytest.raises(RuntimeError, match="rehome relocation validate failed"):
+        executor._attach_torrents_via_hardened_fastresume(
+            {"payload_hash": "payload-hash"},
+            TargetDonor(
+                source_path=tmp_path / "src",
+                target_path=tmp_path / "dst",
+                target_device_id=141,
+                acquisition_mode="reuse",
+            ),
+            relocations=[],
+        )
+
+    assert relocation_tool.controller.stop_calls == 1
+    assert relocation_tool.controller.start_calls == 1
+    assert relocation_tool.wait_calls == 1
+
+
 def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
     db_path = tmp_path / "catalog.db"
     stash_mount = tmp_path / "stash" / "media"
@@ -2088,6 +2327,7 @@ def test_execute_reuse_skips_stale_sibling_hash_with_missing_files(tmp_path, mon
     payload_file.parent.mkdir(parents=True, exist_ok=True)
     payload_file.write_bytes(b"payload")
     payload_size = payload_file.stat().st_size
+    payload_inode = payload_file.stat().st_ino
 
     view_save = tmp_path / "views" / "cross-seed" / "TrackerA"
     view_save.mkdir(parents=True, exist_ok=True)
@@ -2139,7 +2379,8 @@ def test_execute_reuse_skips_stale_sibling_hash_with_missing_files(tmp_path, mon
 
     built = view_save / payload_file.name
     assert built.exists()
-    assert built.stat().st_ino == payload_file.stat().st_ino
+    assert built.stat().st_ino == payload_inode
+    assert not payload_file.exists()
     assert plan["affected_torrents"] == ["hash_live"]
     assert [t["torrent_hash"] for t in plan["view_targets"]] == ["hash_live"]
 

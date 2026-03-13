@@ -692,3 +692,61 @@ def test_missing_reconnect_preflight_allows_missingfiles_state(tmp_path):
     }
 
     executor._preflight_torrent_state_check(plan)
+
+
+def test_preflight_allows_missingfiles_for_ready_repoint_snapshot(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="deadbeef",
+                state="missingFiles",
+                progress=0.0,
+            ),
+        ]
+    )
+
+    plan = {
+        "affected_torrents": ["deadbeef"],
+        "normalization": {"mode": "root_relocation"},
+        "_reality_snapshot_pre": {
+            "group_state": "ready_repoint_or_reconcile",
+            "rows": [
+                {
+                    "torrent_hash": "deadbeef",
+                    "classification": "target_view_missing",
+                }
+            ],
+        },
+    }
+
+    executor._preflight_torrent_state_check(plan)
+
+
+def test_preflight_allows_missingfiles_for_target_view_missing_snapshot(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="deadbeef",
+                state="missingFiles",
+                progress=0.0,
+            ),
+        ]
+    )
+
+    plan = {
+        "affected_torrents": ["deadbeef"],
+        "normalization": {"mode": "root_relocation"},
+        "_reality_snapshot_pre": {
+            "group_state": "blocked_target_view_missing",
+            "rows": [
+                {
+                    "torrent_hash": "deadbeef",
+                    "classification": "target_view_missing",
+                }
+            ],
+        },
+    }
+
+    executor._preflight_torrent_state_check(plan)

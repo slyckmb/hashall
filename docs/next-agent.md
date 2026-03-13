@@ -18,7 +18,17 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.6.0`
+   - `hashall` semver is `0.6.2`
+   - latest bridge hardening after the first Twisters failures:
+     - planner prefers surviving target donors for stale already-targeted rows
+     - single-file unique views keep `root_dir/file` layout
+     - mixed `reconcile_subset + patch_one` hardened manifests are now supported
+     - qB is restarted automatically if validate/patch fails after `qb_stop`
+     - reality snapshots classify these rows as `stale_runtime_and_fastresume_root`
+   - live Twisters proof:
+     - `~/.logs/hashall/reports/rehome-relocate/20260313-112558-9962465e30b69544/`
+     - `9/9` verified `exact_tree`
+     - `reconcile_rows=8 patch_rows=1`
    - latest planner-expansion hardening:
      - `relocate-plan` now includes already-targeted same-`payload_hash` siblings instead of silently planning only source-root members
    - latest de-hitchhike hardening:
@@ -38,7 +48,7 @@ If context is compacted, recover with this sequence:
      - `3 blocked_target_view_missing`
    - live proof immediately before this hardening:
      - `Cinderella.2021...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
-     - its post snapshot still warned about one shared payload row because that run started before the `0.6.0` planner landed
+     - its post snapshot still warned about one shared payload row because that run started before the de-hitchhike planner landed
    - next clean live slice already prepared:
      - `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
      - `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
@@ -53,12 +63,13 @@ If context is compacted, recover with this sequence:
      - live proof:
        - `The.Long.Walk.2025...` `REUSE` completed cleanly at `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
    - current live migration baseline:
-     - `old_path_count=45`
-     - `new_path_count=306`
+     - `old_path_count=34`
+     - `new_path_count=317`
      - qB health:
        - `stalledup=5147`
        - `uploading=5`
        - `stoppeddl=1` (`Alien Romulus`, repair lane only)
+       - `stalleddl=2` (outside the pool-data lane under `/data/media/.../radarr`)
    - `qb-zfs-relocate` semver is `0.1.13`
    - latest stale reconnect proof:
      - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated

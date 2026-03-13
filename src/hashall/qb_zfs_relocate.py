@@ -390,7 +390,7 @@ def is_stopped_state(state: str) -> bool:
 
 
 def should_trust_offline_verify_over_qb_progress(row: Dict[str, Any]) -> bool:
-    return bool(row.get("verified")) and str(row.get("copy_status") or "") == "reused_existing_dest"
+    return bool(row.get("verified"))
 
 
 def load_torrent_metadata(path: Path) -> Dict[str, Any]:
@@ -1948,7 +1948,10 @@ class QBZFSRelocationTool:
                     same_content_path = False
                 if same_content_path:
                     issues.append("source_and_destination_paths_identical")
-            if not bool(row.get("path_shape_match")):
+            verified_exact_tree = bool(row.get("verified")) and str(
+                row.get("verify_classification") or ""
+            ) == "exact_tree"
+            if not bool(row.get("path_shape_match")) and not verified_exact_tree:
                 issues.append("path_shape_mismatch")
             if not bool(row.get("verified")):
                 issues.append("offline_verify_failed")

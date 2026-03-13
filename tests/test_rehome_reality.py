@@ -181,6 +181,70 @@ def test_build_plan_reality_snapshot_classifies_catalog_drift_already_targeted(t
     assert "catalog still reflects older state" in row["operator_reason"]
 
 
+def test_build_plan_reality_snapshot_classifies_legacy_runtime_root_when_catalog_already_targeted(tmp_path):
+    source_root = tmp_path / "pool-media" / "_rehome-unique" / "abc123" / "Movie"
+    target_root = source_root
+    source_root.mkdir(parents=True, exist_ok=True)
+    (source_root / "Movie.mkv").write_bytes(b"new")
+
+    legacy_runtime_root = tmp_path / "pool-media" / "cross-seed" / "seedpool (API)" / "Movie"
+    legacy_runtime_root.mkdir(parents=True, exist_ok=True)
+    (legacy_runtime_root / "Movie.mkv").write_bytes(b"old")
+
+    catalog = tmp_path / "catalog.db"
+    _make_catalog(catalog, payload_root=str(legacy_runtime_root / "Movie.mkv"), save_path=str(source_root.parent))
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(legacy_runtime_root.parent),
+        qbt_save_path=str(legacy_runtime_root.parent),
+    )
+
+    plan = {
+        "direction": "demote",
+        "decision": "REUSE",
+        "payload_hash": "payload-1",
+        "source_path": str(source_root),
+        "target_path": str(source_root),
+        "affected_torrents": ["abc123"],
+        "view_targets": [
+            {
+                "torrent_hash": "abc123",
+                "source_save_path": str(source_root.parent),
+                "target_save_path": str(source_root.parent),
+                "root_name": source_root.name,
+            }
+        ],
+    }
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="Movie",
+                state="missingFiles",
+                progress=0.0,
+                save_path=str(legacy_runtime_root.parent),
+                content_path=str(legacy_runtime_root / "Movie.mkv"),
+            )
+        ]
+    )
+
+    snapshot = build_plan_reality_snapshot(
+        plan=plan,
+        qb_client=qb,
+        catalog_path=catalog,
+        fastresume_dir=fastresume_dir,
+    )
+
+    assert snapshot["group_state"] == "ready_repoint_or_reconcile"
+    row = snapshot["rows"][0]
+    assert row["classification"] == "stale_runtime_and_fastresume_root"
+    assert "stuck on an older runtime root" in row["operator_reason"]
+
+
 def test_drift_audit_cli_prints_group_state(tmp_path, monkeypatch):
     source_root = tmp_path / "pool-data" / "cross-seed" / "seedpool (API)" / "Movie.mkv"
     target_root = tmp_path / "pool-media" / "cross-seed" / "seedpool (API)" / "Movie.mkv"

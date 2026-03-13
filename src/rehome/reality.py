@@ -330,6 +330,20 @@ def _classify_row(row: Dict[str, Any], *, phase: str = "pre") -> tuple[str, str,
             "Safe reconnect/repoint candidate: patch fastresume and qB to the target view, then reconcile the catalog.",
         )
 
+    if (
+        target_exists
+        and catalog_on_target
+        and qbit_save
+        and fastresume_save
+        and qbit_save == fastresume_save
+        and qbit_save != expected_target_save
+    ):
+        return (
+            "stale_runtime_and_fastresume_root",
+            "The good target view exists and the catalog already points there, but qB and fastresume are still stuck on an older runtime root.",
+            "Safe reconnect/repoint candidate: patch fastresume and qB to the target view, then reconcile the catalog.",
+        )
+
     if qbit_on_source and target_exists:
         return (
             "stale_runtime_root",

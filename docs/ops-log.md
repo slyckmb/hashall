@@ -5,7 +5,17 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-13):
 
-- `hashall` is now `0.6.0`.
+- `hashall` is now `0.6.2`.
+- New 2026-03-13 Twisters bridge hardening:
+  - planner now prefers surviving target donors for stale already-targeted rows
+  - single-file unique targets keep `root_dir/file` layout
+  - mixed `reconcile_subset + patch_one` manifests now work
+  - qB is restarted automatically if validate/patch fails after `qb_stop`
+  - reality snapshots now classify this lane as `stale_runtime_and_fastresume_root`
+  - live proof:
+    - `Twisters.2024...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-112558-9962465e30b69544/`
+    - `9/9` verified `exact_tree`
+    - `reconcile_rows=8 patch_rows=1`
 - New de-hitchhike note:
   - root-to-root relocation planning now defaults multi-hash groups to per-hash unique target roots
   - missing-file reconnect plans now follow the same rule
@@ -17,7 +27,7 @@ Latest stale-assumption hardening note (2026-03-13):
     - result: `7 passed`
 - Live proof note:
   - `Cinderella.2021...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
-  - its post snapshot still warned about one shared payload row because the run started before the `0.6.0` planner landed
+  - its post snapshot still warned about one shared payload row because the run started before the de-hitchhike planner landed
 - New active remainder baseline:
   - `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
   - `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`
@@ -36,7 +46,7 @@ Latest stale-assumption hardening note (2026-03-13):
   - `affected_torrents=9`
   - `unique_view_targets=9`
 
-- `hashall` is now `0.4.186`.
+- `hashall` is now `0.6.2`.
 - New 2026-03-12 preflight feedback note:
   - `_preflight_existing_view_conflicts()` now emits heartbeat / completion lines during long existing-target scans
   - new log keys:
@@ -51,10 +61,10 @@ Latest stale-assumption hardening note (2026-03-13):
   - live proof:
     - `The.Long.Walk.2025...` `REUSE` completed successfully with the new `step=preflight_target_views` phase
     - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
-  - current live migration baseline:
-    - `old_path_count=45`
-    - `new_path_count=306`
-    - qB health: `stalledup=5147`, `uploading=5`, `stoppeddl=1`
+  - current live migration baseline after the Twisters rerun:
+    - `old_path_count=34`
+    - `new_path_count=317`
+    - qB health: `stalledup=5152`, `stoppeddl=1`, `stalleddl=2`
 - New 2026-03-12 `qb-missing-remediate` note:
   - old `/data -> /pool/data` reuse-drift rows can now reconnect against an exact mapped target payload even when the surviving target catalog row has a different `payload_hash`
   - this fixed the `Peppermint...` gap where dry-run previously showed `selected_plans: 0`

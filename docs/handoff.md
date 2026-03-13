@@ -2,7 +2,18 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.6.0`.
+- `hashall` semver baseline is now `0.6.2`.
+- New 2026-03-13 Twisters bridge hardening baseline:
+  - planner now prefers surviving target donors when stale rows already point at target-side payloads
+  - unique single-file directory-root target views now preserve the expected `root_dir/file` shape instead of flattening to a bare filename
+  - mixed `reconcile_subset + patch_one` hardened manifests now work, so `8` already-correct rows can be left alone while the one stale sibling is patched
+  - qB is now restarted automatically if a hardened validate/patch failure happens after `qb_stop`
+  - reality snapshots now classify these rows as `stale_runtime_and_fastresume_root` instead of the noisier false `mixed_drift`
+  - live proof:
+    - `Twisters.2024...` completed successfully at `~/.logs/hashall/reports/rehome-relocate/20260313-112558-9962465e30b69544/`
+    - `9/9` rows verified `exact_tree`
+    - bridge log: `rehome_reconcile_subset ... reconcile_rows=8 patch_rows=1`
+    - current qB result: no remaining `missingFiles` in that group
 - New 2026-03-13 de-hitchhike baseline:
   - root-to-root relocation planning now defaults multi-hash payload groups to per-hash unique target roots instead of only uniquifying literal target collisions
   - `qb-missing-remediate` reconnect plans now follow the same rule, so reconnects stop recreating shared hitchhiker targets
@@ -17,30 +28,18 @@
   - report dir: `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
   - qB ended healthy on `/pool/media/...`
   - the post snapshot still warned that the catalog grouped the 4 hashes into `1` shared payload row
-  - that warning is the exact structural gap the new `0.6.0` planner/executor slice is meant to close
-- Current refreshed pool-data -> pool-media remainder is now `refresh6`:
-  - plan: `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
-  - drift: `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`
-  - summary:
-    - `plans=31`
-    - `rows=189`
-    - `attention_rows=167`
-    - `plans_with_out_of_plan_siblings=11`
-    - group states:
-      - `23 ready_repoint_or_reconcile`
-      - `5 blocked_qbit_sibling_gap`
-      - `3 blocked_target_view_missing`
-  - the higher `attention_rows` count is expected: under the new unique-target invariant, many previously “already targeted” family members now show up honestly as `source_only` rows that still need their own destination payload roots
-- Next live candidate already proven clean in dry-run:
-  - plan: `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
-  - drift: `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
-  - `Twisters.2024...`
-  - `decision=MOVE`
-  - `affected_torrents=9`
-  - `out_of_plan_siblings=0`
-  - `unique_view_targets=9`
+  - that warning is the exact structural gap the new de-hitchhike planner/executor slice is meant to close
+- Current live migration remainder after the Twisters success:
+  - `old_path_count=34`
+  - `new_path_count=317`
+  - qB health snapshot:
+    - `stalledup=5152`
+    - `stoppeddl=1` (`Alien Romulus`, still repair-lane only)
+    - `stalleddl=2` (non-pool-data outliers under `/data/media/torrents/seeding/radarr`)
+  - next operator step:
+    - refresh/cut the next conservative slice from the remaining `34` old-path rows instead of reusing the older `refresh6` summary verbatim
 
-- `hashall` package semver is now `0.4.186`.
+- `hashall` package semver is now `0.6.2`.
 - New 2026-03-12 preflight feedback hardening landed after the long `Snowfall...` quiet window:
   - `_preflight_existing_view_conflicts()` now emits:
     - `preflight_target_views_progress`
@@ -63,10 +62,10 @@
   - live proof after the hardening:
     - `The.Long.Walk.2025...` `REUSE` completed successfully with the new `step=preflight_target_views` phase
     - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
-  - current live migration baseline after that wave:
-    - `old_path_count=45`
-    - `new_path_count=306`
-    - qB health: `stalledup=5147`, `uploading=5`, `stoppeddl=1` (`Alien Romulus`, still repair-lane only)
+  - current live migration baseline after the later Twisters wave:
+    - `old_path_count=34`
+    - `new_path_count=317`
+    - qB health: `stalledup=5152`, `stoppeddl=1`, `stalleddl=2`
 - New 2026-03-12 stale-root reconnect hardening landed after the `Peppermint` gap:
   - `hashall rehome qb-missing-remediate` now accepts `root_drift_after_rehome_reuse` rows when the mapped target payload exists under a different catalog `payload_hash`
   - reconnect donor selection now falls back to the exact mapped target payload row instead of requiring same-`payload_hash` sibling donors

@@ -77,7 +77,14 @@ def derive_view_layout(
     single_file_direct_dst: Optional[Path] = None
     if single_file:
         first_rel = _normalize_rel_path(files[0].name, common_prefix, root_name, payload_root)
-        if len(first_rel.parts) == 1 and target_save_path.name == first_rel.name:
+        first_name_parts = Path(files[0].name).parts
+        if (
+            root_name
+            and len(first_name_parts) > 1
+            and first_name_parts[0] == root_name
+        ):
+            view_root = target_save_path / root_name
+        elif len(first_rel.parts) == 1 and target_save_path.name == first_rel.name:
             single_file_direct_dst = target_save_path
             view_root = target_save_path.parent
         else:

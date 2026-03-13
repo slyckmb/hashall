@@ -4,7 +4,17 @@ Last updated: 2026-03-13
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.6.0`.
+- `hashall` is now `0.6.2`.
+- New 2026-03-13 Twisters bridge hardening:
+  - surviving target donors are now preferred for stale already-targeted rows
+  - single-file unique targets preserve `root_dir/file` layout
+  - mixed `reconcile_subset + patch_one` hardened manifests now work
+  - validate/patch failures after `qb_stop` now restart qB before returning
+  - reality snapshots now call this class `stale_runtime_and_fastresume_root`
+  - live proof:
+    - `Twisters.2024...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-112558-9962465e30b69544/`
+    - `9/9` rows verified `exact_tree`
+    - `reconcile_rows=8 patch_rows=1`
 - New 2026-03-13 de-hitchhike invariant:
   - root-to-root relocation planning now defaults multi-hash groups to per-hash unique target roots
   - missing-file reconnect plans now do the same
@@ -17,32 +27,20 @@ Last updated: 2026-03-13
     - `pytest tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py tests/test_rehome_mapping.py tests/test_rehome_catalog_sync.py -q -k 'unique or payload_rows or preflight_existing_view_conflicts_logs_progress_for_missing_targets'`
     - `pytest tests/test_rehome_atomic_relocation.py -q -k cleanup_unused_target_donor_removes_intermediate_root`
     - result: `7 passed`
-- Latest live proof:
+- Earlier live proof under the older pre-fix planner:
   - `Cinderella.2021...` completed successfully at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
   - qB ended healthy on `/pool/media/...`
-  - its post snapshot still warned about one shared payload row because the run started before the `0.6.0` de-hitchhike planner landed
-- Latest refreshed artifacts:
-  - `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
-  - `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`
-  - refreshed drift summary:
-    - `plans=31`
-    - `rows=189`
-    - `attention_rows=167`
-    - `plans_with_out_of_plan_siblings=11`
-    - group states:
-      - `23 ready_repoint_or_reconcile`
-      - `5 blocked_qbit_sibling_gap`
-      - `3 blocked_target_view_missing`
-  - the higher `attention_rows` count is expected under the new unique-target rule: rows that previously hid behind a shared donor are now correctly shown as `source_only`
-- Next clean live slice is prepared and dry-run validated:
-  - `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
-  - `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
-  - `decision=MOVE`
-  - `affected_torrents=9`
-  - `out_of_plan_siblings=0`
-  - `unique_view_targets=9`
+  - its post snapshot still warned about one shared payload row because the run started before the de-hitchhike planner landed
+- Current live remainder after the Twisters success:
+  - `old_path_count=34`
+  - `new_path_count=317`
+  - qB health snapshot:
+    - `stalledup=5152`
+    - `stoppeddl=1` (`Alien Romulus`, real repair lane)
+    - `stalleddl=2` (non-pool-data `/data/media/.../radarr` outliers)
+  - the next migration slice should be refreshed from the remaining `34` old-path rows
 
-- `hashall` is now `0.4.186`.
+- `hashall` is now `0.6.2`.
 - Latest 2026-03-12 preflight feedback note:
   - `preflight_target_views` now emits bounded heartbeat lines during long existing-target scans:
     - `preflight_target_views_progress`
@@ -57,13 +55,13 @@ Last updated: 2026-03-13
   - live proof:
     - `The.Long.Walk.2025...` `REUSE` completed cleanly after this change
     - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
-  - current live pool-data baseline:
-    - `old_path_count=45`
-    - `new_path_count=306`
+  - current live pool-data baseline after the Twisters rerun:
+    - `old_path_count=34`
+    - `new_path_count=317`
     - qB health snapshot:
-      - `stalledup=5147`
-      - `uploading=5`
+      - `stalledup=5152`
       - `stoppeddl=1` (`Alien Romulus`, real repair lane)
+      - `stalleddl=2` (outside the pool-data lane)
 - Latest stale reconnect hardening on 2026-03-12:
   - `qb-missing-remediate` now builds guarded reconnect plans for `root_drift_after_rehome_reuse` rows when the mapped target payload exists under a different catalog `payload_hash`
   - that exact gap was proven live on `Peppermint...`:

@@ -713,30 +713,20 @@ class DemotionExecutor:
 
         manifest = tool._load_manifest(manifest_path)
         rows = row_selection(manifest["rows"])
+        self._normalize_verified_manifest_rows_for_patch(rows)
         reconcile_hashes = self._hardened_manifest_reconcile_hashes(rows)
-        if reconcile_hashes and len(reconcile_hashes) == len(rows):
-            self._log(
-                f"rehome_reconcile_only manifest={manifest_path} rows={len(rows)}"
-            )
-            self._restore_reconcile_rows(rows)
-            tool._checkpoint_manifest(manifest_path, manifest)
-            plan["catalog_reconcile_only"] = True
-            phase_times["validate"] = 0.0
-            phase_times["patch"] = 0.0
-            phase_times["post_patch"] = 0.0
-            return phase_times
-        if reconcile_hashes and all(
-            str(row.get("hash") or "") in reconcile_hashes or not bool(row.get("verified"))
-            for row in rows
-        ):
-            self._log(
-                "rehome_reconcile_subset "
-                f"manifest={manifest_path} rows={len(rows)} reconcile_rows={len(reconcile_hashes)}"
-            )
+        patch_hashes = self._hardened_manifest_patch_hashes(rows, reconcile_hashes)
+        if reconcile_hashes:
             reconcile_rows = [
                 row for row in rows if str(row.get("hash") or "") in reconcile_hashes
             ]
             self._restore_reconcile_rows(reconcile_rows)
+            for row in reconcile_rows:
+                row["selected"] = False
+        if reconcile_hashes and not patch_hashes:
+            self._log(
+                f"rehome_reconcile_only manifest={manifest_path} rows={len(rows)}"
+            )
             self._filter_plan_to_hashes(plan, reconcile_hashes)
             tool._checkpoint_manifest(manifest_path, manifest)
             plan["catalog_reconcile_only"] = True
@@ -744,69 +734,88 @@ class DemotionExecutor:
             phase_times["patch"] = 0.0
             phase_times["post_patch"] = 0.0
             return phase_times
+        if reconcile_hashes:
+            self._log(
+                "rehome_reconcile_subset "
+                f"manifest={manifest_path} rows={len(rows)} "
+                f"reconcile_rows={len(reconcile_hashes)} patch_rows={len(patch_hashes)}"
+            )
+            tool._checkpoint_manifest(manifest_path, manifest)
+            plan["catalog_reconcile_only"] = False
 
         t0 = time.monotonic()
         controller = tool._ensure_controller()
-        if not controller.is_stopped():
-            emit_log("qb_stop", phase="validate", reason="prepare_for_patch")
-            controller.stop()
-        validate_code = tool.validate(
-            manifest_path=manifest_path,
-            allow_partials=False,
-            for_patch=True,
-            journal_path=patch_journal_path,
-            require_stopped_qb=True,
-            require_torrents_stopped=False,
-        )
-        if validate_code != 0:
-            raise RuntimeError(f"rehome relocation validate failed manifest={manifest_path}")
-        phase_times["validate"] = time.monotonic() - t0
-
-        t0 = time.monotonic()
-        patch_code = tool.patch(
-            manifest_path=manifest_path,
-            journal_path=patch_journal_path,
-            apply=True,
-            auto_stop_qb=True,
-        )
-        if patch_code != 0:
-            raise RuntimeError(f"rehome relocation patch failed manifest={manifest_path}")
-        phase_times["patch"] = time.monotonic() - t0
-
-        t0 = time.monotonic()
-        if self.resume_after_relocate:
-            resume_code = tool.resume(
+        controller_stopped_for_patch = False
+        try:
+            if not controller.is_stopped():
+                emit_log("qb_stop", phase="validate", reason="prepare_for_patch")
+                controller.stop()
+                controller_stopped_for_patch = True
+            validate_code = tool.validate(
                 manifest_path=manifest_path,
-                apply=True,
-                pilot_size=self.resume_pilot_size,
-                observe_seconds=self.resume_observe_seconds,
-                resume_remaining=True,
-                recheck_on_failure=self.force_recheck_after_relocate,
+                allow_partials=False,
+                for_patch=True,
+                journal_path=patch_journal_path,
+                require_stopped_qb=True,
+                require_torrents_stopped=False,
             )
-            if resume_code != 0:
-                raise RuntimeError(f"rehome relocation resume failed manifest={manifest_path}")
-        else:
-            controller = tool._ensure_controller()
-            if controller.is_stopped():
-                controller.start()
-            tool._wait_for_qb_online()
-            manifest = tool._load_manifest(manifest_path)
-            for row in row_selection(manifest["rows"]):
-                if str(row.get("patch_status") or "") != "patched":
-                    continue
-                info = self.qbit_client.get_torrent_info(str(row.get("hash") or ""))
-                if info is None:
-                    raise RuntimeError(f"qB info unavailable after patch for torrent {row['hash'][:16]}")
-                if canonicalize_path(Path(info.save_path).resolve()) != canonicalize_path(
-                    Path(str(row.get("new_save_path") or "")).resolve()
-                ):
-                    raise RuntimeError(
-                        f"save_path verification failed after patch hash={row['hash'][:16]} "
-                        f"expected={row.get('new_save_path')} actual={getattr(info, 'save_path', '')}"
-                    )
-                row["resume_status"] = "kept_paused"
-            tool._checkpoint_manifest(manifest_path, manifest)
-        phase_times["post_patch"] = time.monotonic() - t0
+            if validate_code != 0:
+                raise RuntimeError(f"rehome relocation validate failed manifest={manifest_path}")
+            phase_times["validate"] = time.monotonic() - t0
+
+            t0 = time.monotonic()
+            patch_code = tool.patch(
+                manifest_path=manifest_path,
+                journal_path=patch_journal_path,
+                apply=True,
+                auto_stop_qb=True,
+            )
+            if patch_code != 0:
+                raise RuntimeError(f"rehome relocation patch failed manifest={manifest_path}")
+            phase_times["patch"] = time.monotonic() - t0
+
+            t0 = time.monotonic()
+            if self.resume_after_relocate:
+                resume_code = tool.resume(
+                    manifest_path=manifest_path,
+                    apply=True,
+                    pilot_size=self.resume_pilot_size,
+                    observe_seconds=self.resume_observe_seconds,
+                    resume_remaining=True,
+                    recheck_on_failure=self.force_recheck_after_relocate,
+                )
+                if resume_code != 0:
+                    raise RuntimeError(f"rehome relocation resume failed manifest={manifest_path}")
+            else:
+                controller = tool._ensure_controller()
+                if controller.is_stopped():
+                    controller.start()
+                tool._wait_for_qb_online()
+                manifest = tool._load_manifest(manifest_path)
+                for row in row_selection(manifest["rows"]):
+                    if str(row.get("patch_status") or "") != "patched":
+                        continue
+                    info = self.qbit_client.get_torrent_info(str(row.get("hash") or ""))
+                    if info is None:
+                        raise RuntimeError(f"qB info unavailable after patch for torrent {row['hash'][:16]}")
+                    if canonicalize_path(Path(info.save_path).resolve()) != canonicalize_path(
+                        Path(str(row.get("new_save_path") or "")).resolve()
+                    ):
+                        raise RuntimeError(
+                            f"save_path verification failed after patch hash={row['hash'][:16]} "
+                            f"expected={row.get('new_save_path')} actual={getattr(info, 'save_path', '')}"
+                        )
+                    row["resume_status"] = "kept_paused"
+                tool._checkpoint_manifest(manifest_path, manifest)
+            phase_times["post_patch"] = time.monotonic() - t0
+        except Exception:
+            if controller_stopped_for_patch:
+                controller = tool._ensure_controller()
+                if controller.is_stopped():
+                    emit_log("qb_start", phase="failure_recovery", reason="restore_after_relocation_failure")
+                    controller.start()
+                    tool._wait_for_qb_online()
+            raise
         return phase_times
 
     @staticmethod
@@ -829,6 +838,31 @@ class DemotionExecutor:
                 continue
             reconcile_hashes.add(str(row.get("hash") or ""))
         return reconcile_hashes
+
+    @staticmethod
+    def _hardened_manifest_patch_hashes(
+        rows: Sequence[Dict[str, object]], reconcile_hashes: set[str]
+    ) -> set[str]:
+        patch_hashes: set[str] = set()
+        for row in rows:
+            torrent_hash = str(row.get("hash") or "")
+            if not torrent_hash or torrent_hash in reconcile_hashes:
+                continue
+            if not bool(row.get("verified")):
+                continue
+            patch_hashes.add(torrent_hash)
+        return patch_hashes
+
+    @staticmethod
+    def _normalize_verified_manifest_rows_for_patch(rows: Sequence[Dict[str, object]]) -> None:
+        for row in rows:
+            if not bool(row.get("verified")):
+                continue
+            if str(row.get("verify_classification") or "") == "exact_tree":
+                row["path_shape_match"] = True
+            copy_status = str(row.get("copy_status") or "").strip()
+            if copy_status in {"", "pending"}:
+                row["copy_status"] = "reused_existing_dest"
 
     @staticmethod
     def _filter_plan_to_hashes(plan: Dict[str, object], allowed_hashes: set[str]) -> None:
@@ -1258,16 +1292,14 @@ class DemotionExecutor:
 
                 common_prefix = _common_prefix(files)
                 single_file = payload_root.is_file()
-                single_file_direct_dst: Optional[Path] = None
-                if single_file:
-                    first_rel = _normalize_rel_path(files[0].name, common_prefix, root_name, payload_root)
-                    if len(first_rel.parts) == 1 and target_save_path.name == first_rel.name:
-                        single_file_direct_dst = target_save_path
-                        view_root = target_save_path.parent
-                    else:
-                        view_root = target_save_path
-                else:
-                    view_root = target_save_path / (root_name or payload_root.name)
+                layout = derive_view_layout(
+                    payload_root=payload_root,
+                    target_save_path=target_save_path,
+                    files=files,
+                    root_name=root_name,
+                )
+                view_root = layout.view_root
+                single_file_direct_dst = layout.single_file_direct_dst
 
                 for file_idx, file_row in enumerate(files, 1):
                     rel = _normalize_rel_path(file_row.name, common_prefix, root_name, payload_root)
@@ -2654,6 +2686,13 @@ class DemotionExecutor:
             str(normalization.get("mode") or "").strip().lower()
             == "qb_missing_sibling_reconnect"
         )
+        snapshot = plan.get("_reality_snapshot_pre") or {}
+        snapshot_rows = {
+            str(row.get("torrent_hash") or "").strip().lower(): row
+            for row in (snapshot.get("rows") or [])
+            if str(row.get("torrent_hash") or "").strip()
+        }
+        snapshot_group_state = str(snapshot.get("group_state") or "").strip()
         blocked: List[str] = []
         transient_blocked = 0
         hard_blocked = 0
@@ -2680,8 +2719,28 @@ class DemotionExecutor:
                 for marker in ("checking", "moving", "allocating")
             )
 
+            snapshot_row = snapshot_rows.get(str(torrent_hash).strip().lower(), {})
+            snapshot_classification = str(snapshot_row.get("classification") or "").strip()
+            allow_row_missingfiles = bool(
+                allow_missingfiles
+                or (
+                    state == "missingfiles"
+                    and snapshot_classification in {
+                        "source_only",
+                        "target_view_missing",
+                        "stale_runtime_root",
+                        "stale_runtime_and_fastresume_root",
+                        "catalog_drift_already_targeted",
+                    }
+                    and snapshot_group_state
+                    in {
+                        "ready_repoint_or_reconcile",
+                        "blocked_target_view_missing",
+                    }
+                )
+            )
             blocked_states = set(self._PREFLIGHT_BLOCKED_STATES)
-            if allow_missingfiles:
+            if allow_row_missingfiles:
                 blocked_states.discard("missingfiles")
 
             if state in blocked_states or is_transient:
@@ -2694,7 +2753,7 @@ class DemotionExecutor:
                     hard_blocked += 1
                 continue
 
-            if progress < 0.9999 and not (allow_missingfiles and state == "missingfiles"):
+            if progress < 0.9999 and not (allow_row_missingfiles and state == "missingfiles"):
                 blocked.append(
                     f"{torrent_hash[:16]}: incomplete progress={progress:.4f} state={state!r}"
                 )
@@ -2702,7 +2761,6 @@ class DemotionExecutor:
 
         if blocked:
             detail = "\n  ".join(blocked)
-            snapshot = plan.get("_reality_snapshot_pre") or {}
             group_reason = str(snapshot.get("group_reason") or "").strip()
             human_blockers: List[str] = []
             for row in snapshot.get("rows") or []:

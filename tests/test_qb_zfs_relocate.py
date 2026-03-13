@@ -1206,6 +1206,45 @@ def test_validate_allows_already_repointed_rows_when_source_content_differs(tmp_
     assert row["actionable"] is True
 
 
+def test_validate_trusts_verified_exact_tree_over_stale_cached_qb_state(tmp_path):
+    torrent_hash = "verifytrust"
+    row = _manifest_row(tmp_path, torrent_hash)
+    row["state"] = "missingFiles"
+    row["progress"] = 0.0
+    row["copy_status"] = "pending"
+    row["verified"] = True
+    row["verify_status"] = "verified"
+    row["verify_classification"] = "exact_tree"
+    row["path_shape_match"] = False
+    manifest_path = tmp_path / "validate-trust.json"
+    write_json(
+        manifest_path,
+        {"rows": [row], "global_issues": [], "phase_history": [], "selection": {"hashes": [torrent_hash]}},
+    )
+    tool = QBZFSRelocationTool(
+        qb_client=FakeClient({}),
+        runner=FakeRunner(),
+        verifier=FakeVerifier(),
+        process_controller=FakeController(stopped=True),
+    )
+
+    validate_rc = tool.validate(
+        manifest_path=manifest_path,
+        allow_partials=False,
+        for_patch=True,
+        journal_path=tmp_path / "patch-journal.jsonl",
+        require_stopped_qb=True,
+        require_torrents_stopped=False,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    assert validate_rc == 0
+    assert "torrent_not_complete" not in row["issues"]
+    assert "path_shape_mismatch" not in row["issues"]
+    assert row["actionable"] is True
+
+
 def test_verify_emits_progress_events_and_requests_show_progress(tmp_path, capsys):
     torrent_hash = "verifyprogress"
     row = _manifest_row(tmp_path, torrent_hash)

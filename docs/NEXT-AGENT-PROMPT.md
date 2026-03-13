@@ -24,7 +24,17 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.6.0`.
+  - `hashall` version now `0.6.2`.
+  - latest Twisters bridge hardening:
+    - planner prefers surviving target donors for stale already-targeted rows
+    - unique single-file targets now keep `root_dir/file` layout
+    - mixed `reconcile_subset + patch_one` manifests are supported
+    - qB is restarted automatically after validate/patch failures that happen after `qb_stop`
+    - reality snapshots classify this lane as `stale_runtime_and_fastresume_root`
+  - latest live proof:
+    - `Twisters.2024...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-112558-9962465e30b69544/`
+    - `9/9` verified `exact_tree`
+    - `reconcile_rows=8 patch_rows=1`
   - latest planner-expansion hardening:
     - `relocate-plan` now includes already-targeted same-`payload_hash` siblings instead of silently limiting batches to source-root members
   - newest migration invariant:
@@ -45,7 +55,7 @@ Prompt-critical context (2026-03-12):
     - `3 blocked_target_view_missing`
   - latest live proof before the planner flip:
     - `Cinderella.2021...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
-    - its post snapshot still warned about a shared payload row because the run started before the `0.6.0` de-hitchhike planner landed
+    - its post snapshot still warned about a shared payload row because the run started before the de-hitchhike planner landed
   - next clean live slice:
     - `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
     - `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
@@ -66,12 +76,13 @@ Prompt-critical context (2026-03-12):
     - live proof:
       - `The.Long.Walk.2025...` `REUSE` completed cleanly at `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
   - current live migration baseline:
-    - `old_path_count=45`
-    - `new_path_count=306`
+    - `old_path_count=34`
+    - `new_path_count=317`
     - qB health:
       - `stalledup=5147`
       - `uploading=5`
       - `stoppeddl=1` (`Alien Romulus`, repair lane only)
+      - `stalleddl=2` (outside the pool-data lane under `/data/media/.../radarr`)
   - latest stale reconnect proof:
     - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated
     - `qb-missing-remediate` now builds guarded reconnect plans for `root_drift_after_rehome_reuse` rows when the surviving mapped target payload exists under a different catalog `payload_hash`
