@@ -558,215 +558,215 @@ def run_refresh(
 
             dedup_mode = "execute" if not skip_dedup else "off"
 
-        with logger.patch_stdout():
-            print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-            print(f"  catalog  {catalog_path}")
-            print(f"  workers  {workers}")
-            print(f"  dedup    {dedup_mode}")
-            if logger.verbose:
-                print(f"  log      {log_path}")
-            if published_seed_state_path is not None:
-                print(f"  seed-state  {published_seed_state_path}")
-            print(f"\n  Scan roots ({len(all_roots)}):")
-            for i, (path, alias, role) in enumerate(all_roots, 1):
-                print(f"    [{i}] {alias:<20} {role:<7}  {path}")
+            with logger.patch_stdout():
+                print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+                print(f"  catalog  {catalog_path}")
+                print(f"  workers  {workers}")
+                print(f"  dedup    {dedup_mode}")
+                if logger.verbose:
+                    print(f"  log      {log_path}")
+                if published_seed_state_path is not None:
+                    print(f"  seed-state  {published_seed_state_path}")
+                print(f"\n  Scan roots ({len(all_roots)}):")
+                for i, (path, alias, role) in enumerate(all_roots, 1):
+                    print(f"    [{i}] {alias:<20} {role:<7}  {path}")
 
-            _validate_refresh_roots(catalog_path, all_roots)
+                _validate_refresh_roots(catalog_path, all_roots)
 
-            # ── Preflight: fail closed on catalog integrity issues ────────────────
-            preflight_label = "doctor preflight"
-            preflight_cmd = [python, "-m", "hashall.cli", "doctor", "preflight"] + db_args
-            preflight_t0 = datetime.now()
-            preflight_ok = False
-            preflight_report: dict[str, Any] = {}
-            preflight_error = ""
-            print(f"\n[refresh] {preflight_label}")
-            print(f"  $ {' '.join(preflight_cmd)}")
-            try:
-                preflight_ok, preflight_report = _run_catalog_preflight(catalog_path)
-            except Exception as exc:
+                # ── Preflight: fail closed on catalog integrity issues ────────────────
+                preflight_label = "doctor preflight"
+                preflight_cmd = [python, "-m", "hashall.cli", "doctor", "preflight"] + db_args
+                preflight_t0 = datetime.now()
                 preflight_ok = False
-                preflight_error = str(exc)
-                preflight_report = {
-                    "ok": False,
-                    "error": preflight_error,
-                    "checks": [],
-                    "summary": {"total_checks": 0, "failed_error": 1, "failed_warning": 0},
-                }
-            preflight_elapsed = (datetime.now() - preflight_t0).total_seconds()
-            print(f"  elapsed {_fmt_elapsed(preflight_elapsed)}  {'OK' if preflight_ok else 'FAILED'}")
-            logger.record_step(
-                preflight_label,
-                preflight_cmd,
-                preflight_ok,
-                preflight_elapsed,
-                stdout=json.dumps(preflight_report, indent=2),
-            )
-            summary = preflight_report.get("summary", {})
-            print(
-                "  preflight_summary "
-                f"failed_error={int(summary.get('failed_error', 0) or 0)} "
-                f"failed_warning={int(summary.get('failed_warning', 0) or 0)} "
-                f"total_checks={int(summary.get('total_checks', 0) or 0)}"
-            )
-            if preflight_error:
-                print(f"  preflight_error {preflight_error}")
-            if not preflight_ok:
-                for check in preflight_report.get("checks", []):
-                    if bool(check.get("ok")):
-                        continue
-                    print(
-                        "    fail "
-                        f"{str(check.get('severity') or 'error')} "
-                        f"{str(check.get('name') or 'unknown')} "
-                        f"{str(check.get('message') or '')}"
-                    )
-                print("  [refresh] catalog preflight failed — skipping refresh execution steps")
-            overall_ok = overall_ok and preflight_ok
-
-            if preflight_ok:
-                # ── Step 1: scan active_root ──────────────────────────────────────────
-                ok, _ = _run_step(
-                    f"scan active_root ({active_root})",
-                    [python, "-m", "hashall.cli", "scan", active_root,
-                     "--parallel", "--workers", str(workers)] + db_args,
+                preflight_report: dict[str, Any] = {}
+                preflight_error = ""
+                print(f"\n[refresh] {preflight_label}")
+                print(f"  $ {' '.join(preflight_cmd)}")
+                try:
+                    preflight_ok, preflight_report = _run_catalog_preflight(catalog_path)
+                except Exception as exc:
+                    preflight_ok = False
+                    preflight_error = str(exc)
+                    preflight_report = {
+                        "ok": False,
+                        "error": preflight_error,
+                        "checks": [],
+                        "summary": {"total_checks": 0, "failed_error": 1, "failed_warning": 0},
+                    }
+                preflight_elapsed = (datetime.now() - preflight_t0).total_seconds()
+                print(f"  elapsed {_fmt_elapsed(preflight_elapsed)}  {'OK' if preflight_ok else 'FAILED'}")
+                logger.record_step(
+                    preflight_label,
+                    preflight_cmd,
+                    preflight_ok,
+                    preflight_elapsed,
+                    stdout=json.dumps(preflight_report, indent=2),
                 )
-                overall_ok = overall_ok and ok
+                summary = preflight_report.get("summary", {})
+                print(
+                    "  preflight_summary "
+                    f"failed_error={int(summary.get('failed_error', 0) or 0)} "
+                    f"failed_warning={int(summary.get('failed_warning', 0) or 0)} "
+                    f"total_checks={int(summary.get('total_checks', 0) or 0)}"
+                )
+                if preflight_error:
+                    print(f"  preflight_error {preflight_error}")
+                if not preflight_ok:
+                    for check in preflight_report.get("checks", []):
+                        if bool(check.get("ok")):
+                            continue
+                        print(
+                            "    fail "
+                            f"{str(check.get('severity') or 'error')} "
+                            f"{str(check.get('name') or 'unknown')} "
+                            f"{str(check.get('message') or '')}"
+                        )
+                    print("  [refresh] catalog preflight failed — skipping refresh execution steps")
+                overall_ok = overall_ok and preflight_ok
 
-                # ── Step 2: scan dest_root ────────────────────────────────────────────
-                if dest_root != active_root:
+                if preflight_ok:
+                    # ── Step 1: scan active_root ──────────────────────────────────────────
                     ok, _ = _run_step(
-                        f"scan dest_root ({dest_root})",
-                        [python, "-m", "hashall.cli", "scan", dest_root,
+                        f"scan active_root ({active_root})",
+                        [python, "-m", "hashall.cli", "scan", active_root,
                          "--parallel", "--workers", str(workers)] + db_args,
                     )
                     overall_ok = overall_ok and ok
 
-                # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
-                ok, _ = _run_step(
-                    f"dupes auto-upgrade (active={active_device})",
-                    [python, "-m", "hashall.cli", "dupes",
-                     "--device", active_device, "--auto-upgrade"] + db_args,
-                )
-                overall_ok = overall_ok and ok
-
-                # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
-                ok, _ = _run_step(
-                    f"dupes auto-upgrade (dest={dest_device})",
-                    [python, "-m", "hashall.cli", "dupes",
-                     "--device", dest_device, "--auto-upgrade"] + db_args,
-                )
-                overall_ok = overall_ok and ok
-
-                # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
-                for managed_path, managed_alias in (managed_roots or []):
-                    ok, _ = _run_step(
-                        f"scan managed root ({managed_path})",
-                        [python, "-m", "hashall.cli", "scan", managed_path,
-                         "--parallel", "--workers", str(workers)] + db_args,
-                    )
-                    overall_ok = overall_ok and ok
-
-                    ok, _ = _run_step(
-                        f"dupes auto-upgrade (managed={managed_alias})",
-                        [python, "-m", "hashall.cli", "dupes",
-                         "--device", managed_alias, "--auto-upgrade"] + db_args,
-                    )
-                    overall_ok = overall_ok and ok
-
-                    if not skip_dedup:
-                        plan_name = f"refresh-{managed_alias}-{timestamp}"
-                        ok, stdout = _run_step(
-                            f"link plan ({managed_alias})",
-                            [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                             "--device", managed_alias, "--min-size", "1048576"] + db_args,
-                            capture=True,
-                    )
-                    overall_ok = overall_ok and ok
-
-                    if ok:
-                        plan_id = _parse_link_plan_id(stdout)
-                        if plan_id:
-                            execute_cmd = [
-                                python, "-m", "hashall.cli", "link", "execute", plan_id,
-                                "--yes",
-                            ] + db_args
-                            label = f"link execute plan_id={plan_id} ({managed_alias})"
-                            print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
-                            ok, _ = _run_step(label, execute_cmd)
-                            overall_ok = overall_ok and ok
-                        else:
-                            print(f"  [refresh] no parsable plan_id in link plan output for {managed_alias} — skipping execute")
-
-                # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
-                if not skip_dedup:
-                    for dev_alias in (active_device, dest_device):
-                        plan_name = f"refresh-{dev_alias}-{timestamp}"
-                        ok, stdout = _run_step(
-                            f"link plan ({dev_alias})",
-                            [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                             "--device", dev_alias, "--min-size", "1048576"] + db_args,
-                            capture=True,
+                    # ── Step 2: scan dest_root ────────────────────────────────────────────
+                    if dest_root != active_root:
+                        ok, _ = _run_step(
+                            f"scan dest_root ({dest_root})",
+                            [python, "-m", "hashall.cli", "scan", dest_root,
+                             "--parallel", "--workers", str(workers)] + db_args,
                         )
                         overall_ok = overall_ok and ok
 
-                        if ok:
-                            plan_id = _parse_link_plan_id(stdout)
-                            if plan_id:
-                                execute_cmd = [
-                                    python, "-m", "hashall.cli", "link", "execute", plan_id,
-                                    "--yes",
-                                ] + db_args
-                                label = f"link execute plan_id={plan_id} ({dev_alias})"
-                                print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
-                                ok, _ = _run_step(label, execute_cmd)
-                                overall_ok = overall_ok and ok
-                            else:
-                                print(f"  [refresh] no parsable plan_id in link plan output for {dev_alias} — skipping execute")
+                    # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
+                    ok, _ = _run_step(
+                        f"dupes auto-upgrade (active={active_device})",
+                        [python, "-m", "hashall.cli", "dupes",
+                         "--device", active_device, "--auto-upgrade"] + db_args,
+                    )
+                    overall_ok = overall_ok and ok
 
-                # ── Step 5: payload sync --upgrade-missing ────────────────────────────
-                ok, payload_stdout = _run_step(
-                    "payload sync --upgrade-missing",
-                    [python, "-m", "hashall.cli", "payload", "sync",
-                     "--upgrade-missing"] + db_args,
-                    capture=True,
-                )
-                overall_ok = overall_ok and ok
-                if ok:
-                    upgrade_summary = _parse_upgrade_summary(payload_stdout)
-                    min_ratio_env = os.environ.get("HASHALL_REFRESH_UPGRADE_MIN_COMPLETE_RATIO", "0.90")
-                    try:
-                        min_ratio = float(min_ratio_env)
-                    except ValueError:
-                        min_ratio = 0.90
-                    min_ratio = max(0.0, min(1.0, min_ratio))
-                    if upgrade_summary is None:
-                        overall_ok = False
-                        print("  [refresh] payload sync quality gate FAILED: missing upgrade_summary")
-                    else:
-                        queued = int(upgrade_summary.get("queued", 0))
-                        completed = int(upgrade_summary.get("completed", 0))
-                        failed = int(upgrade_summary.get("failed", 0))
-                        ratio = 1.0 if queued <= 0 else (float(completed) / float(queued))
-                        print(
-                            "  payload_sync_gate "
-                            f"min_complete_ratio={min_ratio:.3f} "
-                            f"queued={queued} completed={completed} failed={failed} ratio={ratio:.3f}"
+                    # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
+                    ok, _ = _run_step(
+                        f"dupes auto-upgrade (dest={dest_device})",
+                        [python, "-m", "hashall.cli", "dupes",
+                         "--device", dest_device, "--auto-upgrade"] + db_args,
+                    )
+                    overall_ok = overall_ok and ok
+
+                    # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
+                    for managed_path, managed_alias in (managed_roots or []):
+                        ok, _ = _run_step(
+                            f"scan managed root ({managed_path})",
+                            [python, "-m", "hashall.cli", "scan", managed_path,
+                             "--parallel", "--workers", str(workers)] + db_args,
                         )
-                        if failed > 0 or ratio < min_ratio:
+                        overall_ok = overall_ok and ok
+
+                        ok, _ = _run_step(
+                            f"dupes auto-upgrade (managed={managed_alias})",
+                            [python, "-m", "hashall.cli", "dupes",
+                             "--device", managed_alias, "--auto-upgrade"] + db_args,
+                        )
+                        overall_ok = overall_ok and ok
+
+                        if not skip_dedup:
+                            plan_name = f"refresh-{managed_alias}-{timestamp}"
+                            ok, stdout = _run_step(
+                                f"link plan ({managed_alias})",
+                                [python, "-m", "hashall.cli", "link", "plan", plan_name,
+                                 "--device", managed_alias, "--min-size", "1048576"] + db_args,
+                                capture=True,
+                            )
+                            overall_ok = overall_ok and ok
+
+                            if ok:
+                                plan_id = _parse_link_plan_id(stdout)
+                                if plan_id:
+                                    execute_cmd = [
+                                        python, "-m", "hashall.cli", "link", "execute", plan_id,
+                                        "--yes",
+                                    ] + db_args
+                                    label = f"link execute plan_id={plan_id} ({managed_alias})"
+                                    print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
+                                    ok, _ = _run_step(label, execute_cmd)
+                                    overall_ok = overall_ok and ok
+                                else:
+                                    print(f"  [refresh] no parsable plan_id in link plan output for {managed_alias} — skipping execute")
+
+                    # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
+                    if not skip_dedup:
+                        for dev_alias in (active_device, dest_device):
+                            plan_name = f"refresh-{dev_alias}-{timestamp}"
+                            ok, stdout = _run_step(
+                                f"link plan ({dev_alias})",
+                                [python, "-m", "hashall.cli", "link", "plan", plan_name,
+                                 "--device", dev_alias, "--min-size", "1048576"] + db_args,
+                                capture=True,
+                            )
+                            overall_ok = overall_ok and ok
+
+                            if ok:
+                                plan_id = _parse_link_plan_id(stdout)
+                                if plan_id:
+                                    execute_cmd = [
+                                        python, "-m", "hashall.cli", "link", "execute", plan_id,
+                                        "--yes",
+                                    ] + db_args
+                                    label = f"link execute plan_id={plan_id} ({dev_alias})"
+                                    print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
+                                    ok, _ = _run_step(label, execute_cmd)
+                                    overall_ok = overall_ok and ok
+                                else:
+                                    print(f"  [refresh] no parsable plan_id in link plan output for {dev_alias} — skipping execute")
+
+                    # ── Step 5: payload sync --upgrade-missing ────────────────────────────
+                    ok, payload_stdout = _run_step(
+                        "payload sync --upgrade-missing",
+                        [python, "-m", "hashall.cli", "payload", "sync",
+                         "--upgrade-missing"] + db_args,
+                        capture=True,
+                    )
+                    overall_ok = overall_ok and ok
+                    if ok:
+                        upgrade_summary = _parse_upgrade_summary(payload_stdout)
+                        min_ratio_env = os.environ.get("HASHALL_REFRESH_UPGRADE_MIN_COMPLETE_RATIO", "0.90")
+                        try:
+                            min_ratio = float(min_ratio_env)
+                        except ValueError:
+                            min_ratio = 0.90
+                        min_ratio = max(0.0, min(1.0, min_ratio))
+                        if upgrade_summary is None:
                             overall_ok = False
-                            print("  [refresh] payload sync quality gate FAILED")
+                            print("  [refresh] payload sync quality gate FAILED: missing upgrade_summary")
+                        else:
+                            queued = int(upgrade_summary.get("queued", 0))
+                            completed = int(upgrade_summary.get("completed", 0))
+                            failed = int(upgrade_summary.get("failed", 0))
+                            ratio = 1.0 if queued <= 0 else (float(completed) / float(queued))
+                            print(
+                                "  payload_sync_gate "
+                                f"min_complete_ratio={min_ratio:.3f} "
+                                f"queued={queued} completed={completed} failed={failed} ratio={ratio:.3f}"
+                            )
+                            if failed > 0 or ratio < min_ratio:
+                                overall_ok = False
+                                print("  [refresh] payload sync quality gate FAILED")
 
-            # ── Summary ───────────────────────────────────────────────────────────
-            sep = "─" * 57
-            print(f"\n{sep}")
-            if overall_ok:
-                print("refresh  OK — all steps succeeded")
-            else:
-                print("refresh  PARTIAL — one or more steps failed (see above)")
-            print(f"log  {log_path}")
+                # ── Summary ───────────────────────────────────────────────────────────
+                sep = "─" * 57
+                print(f"\n{sep}")
+                if overall_ok:
+                    print("refresh  OK — all steps succeeded")
+                else:
+                    print("refresh  PARTIAL — one or more steps failed (see above)")
+                print(f"log  {log_path}")
 
-            logger.dump_json(json_path)
+                logger.dump_json(json_path)
     finally:
         lock_fh.close()
 

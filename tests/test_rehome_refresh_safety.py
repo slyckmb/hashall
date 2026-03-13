@@ -10,6 +10,11 @@ import rehome.config as config_mod
 from rehome.auto import _parse_link_plan_id, _parse_upgrade_summary, _run_catalog_preflight
 
 
+class _DummyLock:
+    def close(self) -> None:
+        return None
+
+
 def test_parse_upgrade_summary_extracts_counts() -> None:
     parsed = _parse_upgrade_summary(
         "noise\nupgrade_summary queued=12 started=12 completed=9 failed=3 elapsed_s=55\n"
@@ -113,6 +118,7 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
     monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr("rehome.runlog.RunLogger", _FakeRunLogger)
     monkeypatch.setattr("rehome.seed_state.publish_seed_root_state", _fake_publish_seed_root_state)
+    monkeypatch.setattr("rehome.cli._acquire_refresh_lock", lambda: _DummyLock())
 
     exit_code = auto_mod.run_refresh(
         catalog_path=db_path,
@@ -133,6 +139,93 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
     assert any("link execute 56 --yes" in line for line in command_lines)
     assert published["cfg"]["default_dest_root"] == "/pool/media/torrents/seeding"
     assert published["cfg"]["managed_roots"] == []
+
+
+def test_run_refresh_keeps_logger_open_while_patch_stdout_is_active(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "catalog.db"
+    db_path.write_text("")
+
+    class _Result:
+        def __init__(self, stdout: str = "", returncode: int = 0):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = returncode
+
+    class _FakePopen:
+        def __init__(self, cmd):
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    class _GuardedRunLogger:
+        def __init__(self, *args, **kwargs):
+            self.verbose = False
+            self.debug = False
+            self.closed = False
+
+        @contextmanager
+        def patch_stdout(self):
+            if self.closed:
+                raise RuntimeError("logger already closed")
+            yield
+
+        def write_raw(self, text: str) -> None:
+            return None
+
+        def record_step(self, *args, **kwargs) -> None:
+            return None
+
+        def dump_json(self, *args, **kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.closed = True
+            return None
+
+    monkeypatch.setattr(auto_mod, "_validate_refresh_roots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        auto_mod,
+        "_run_catalog_preflight",
+        lambda *args, **kwargs: (
+            True,
+            {"ok": True, "checks": [], "summary": {"failed_error": 0, "failed_warning": 0, "total_checks": 1}},
+        ),
+    )
+    monkeypatch.setattr(
+        auto_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: _Result(
+            stdout="upgrade_summary queued=0 started=0 completed=0 failed=0 elapsed_s=0\n"
+        ),
+    )
+    monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr("rehome.runlog.RunLogger", _GuardedRunLogger)
+    monkeypatch.setattr(
+        "rehome.seed_state.publish_seed_root_state",
+        lambda cfg=None, path=None: (Path("/tmp/seed-root-state.json"), {"writer": "hashall"}),
+    )
+    monkeypatch.setattr("rehome.cli._acquire_refresh_lock", lambda: _DummyLock())
+
+    exit_code = auto_mod.run_refresh(
+        catalog_path=db_path,
+        active_root="/stash/media",
+        dest_root="/pool/media/torrents/seeding",
+        active_device="stash",
+        dest_device="pool-media",
+        workers=1,
+        skip_dedup=True,
+        managed_roots=[],
+        verbose=False,
+        debug=False,
+    )
+
+    assert exit_code == 0
 
 
 def test_hashall_cli_run_header_includes_run_start_metadata(monkeypatch, capsys) -> None:
