@@ -129,6 +129,25 @@ def test_preflight_raises_after_transient_settle_window_exhausted(tmp_path, monk
     assert sleeps == [5.0, 5.0]
 
 
+def test_preflight_blocks_qbit_sibling_gap_snapshot(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    plan = {
+        "affected_torrents": ["abc123"],
+        "_reality_snapshot_pre": {
+            "group_state": "blocked_qbit_sibling_gap",
+            "group_reason": "qB still has same-name sibling torrents outside this plan.",
+            "group_warnings": [
+                "qB still has 4 same-name out-of-plan torrent(s) that match this payload's size."
+            ],
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="same-name out-of-plan sibling"):
+        executor._preflight_torrent_state_check_with_settle(plan)
+
+
 def test_copy_with_rsync_progress_applies_bwlimit_env(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
 

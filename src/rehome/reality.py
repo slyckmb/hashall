@@ -201,6 +201,67 @@ def _catalog_payload_group_members(
         conn.close()
 
 
+def _qb_out_of_plan_siblings(
+    *,
+    plan: Dict[str, Any],
+    qb_client: Any,
+    affected_hashes: set[str],
+    catalog_sibling_hashes: set[str],
+    matched_names: Iterable[str],
+) -> List[Dict[str, Any]]:
+    """
+    Find qB-visible sibling candidates that are not covered by the current plan.
+
+    These rows are especially important when older rehome waves left behind
+    qB-only stale references that the current catalog no longer ties to the
+    active payload hash. Match conservatively on exact name plus exact size.
+    """
+    try:
+        torrents = list(qb_client.get_torrents() or [])
+    except Exception:
+        return []
+
+    names = {str(name or "").strip() for name in matched_names if str(name or "").strip()}
+    size_hint = int(plan.get("total_bytes") or 0)
+    uncovered: List[Dict[str, Any]] = []
+    for info in torrents:
+        torrent_hash = str(getattr(info, "hash", "") or "").strip().lower()
+        if not torrent_hash:
+            continue
+        if torrent_hash in affected_hashes or torrent_hash in catalog_sibling_hashes:
+            continue
+
+        name = str(getattr(info, "name", "") or "").strip()
+        if names and name not in names:
+            continue
+
+        try:
+            size = int(getattr(info, "size", 0) or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size_hint and size and size != size_hint:
+            continue
+
+        try:
+            progress = float(getattr(info, "progress", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        uncovered.append(
+            {
+                "torrent_hash": torrent_hash,
+                "qbit_name": name,
+                "qbit_state": str(getattr(info, "state", "") or ""),
+                "qbit_progress": progress,
+                "qbit_save_path": _normalize_path(getattr(info, "save_path", "")),
+                "qbit_content_path": _normalize_path(getattr(info, "content_path", "")),
+                "qbit_size": size,
+            }
+        )
+
+    uncovered.sort(key=lambda row: (str(row.get("qbit_name") or ""), str(row.get("torrent_hash") or "")))
+    return uncovered
+
+
 def _classify_row(row: Dict[str, Any], *, phase: str = "pre") -> tuple[str, str, str]:
     qbit_state = str(row.get("qbit_state") or "").strip().lower()
     qbit_progress = float(row.get("qbit_progress") or 0.0)
@@ -440,19 +501,56 @@ def build_plan_reality_snapshot(
     summary_counts = Counter(str(row.get("classification") or "") for row in rows)
     affected_set = set(affected)
     sibling_members = [member for member in payload_group_members if member.get("torrent_hash")]
-    uncovered_members = [
+    uncovered_catalog_members = [
         member for member in sibling_members if member["torrent_hash"] not in affected_set
     ]
+    catalog_sibling_hashes = {
+        str(member.get("torrent_hash") or "").strip().lower()
+        for member in sibling_members
+        if str(member.get("torrent_hash") or "").strip()
+    }
+    matched_names = {
+        str(row.get("name") or "").strip()
+        for row in rows
+        if str(row.get("name") or "").strip()
+    }
+    expected_root_name = str(
+        Path(str(plan.get("target_path") or plan.get("source_path") or "")).name
+    ).strip()
+    if expected_root_name:
+        matched_names.add(expected_root_name)
+    uncovered_qbit_members = _qb_out_of_plan_siblings(
+        plan=plan,
+        qb_client=qb_client,
+        affected_hashes=affected_set,
+        catalog_sibling_hashes=catalog_sibling_hashes,
+        matched_names=matched_names,
+    )
+    uncovered_members = uncovered_catalog_members + uncovered_qbit_members
     group_warnings: List[str] = []
-    if uncovered_members:
-        sample_hashes = ",".join(member["torrent_hash"][:16] for member in uncovered_members[:5])
+    if uncovered_catalog_members:
+        sample_hashes = ",".join(member["torrent_hash"][:16] for member in uncovered_catalog_members[:5])
         group_warnings.append(
             "Catalog still has "
-            f"{len(uncovered_members)} out-of-plan sibling torrent(s) for this payload hash; "
+            f"{len(uncovered_catalog_members)} out-of-plan sibling torrent(s) for this payload hash; "
             "full cleanup/convergence should wait until they are audited too "
             f"(sample={sample_hashes})."
         )
+    if uncovered_qbit_members:
+        sample_hashes = ",".join(member["torrent_hash"][:16] for member in uncovered_qbit_members[:5])
+        group_warnings.append(
+            "qB still has "
+            f"{len(uncovered_qbit_members)} same-name out-of-plan torrent(s) that match this payload's size; "
+            "moving only the selected row could strand those stale sibling refs "
+            f"(sample={sample_hashes})."
+        )
     group_state, group_reason = _summarize_group(rows, phase=phase)
+    if uncovered_qbit_members and phase == "pre":
+        group_state = "blocked_qbit_sibling_gap"
+        group_reason = (
+            "qB still has same-name sibling torrents outside this plan, so the migration should not mutate a "
+            "partial view until those stale refs are audited or reconnected."
+        )
     return {
         "generated_at": _ts_iso(),
         "phase": phase,
@@ -469,8 +567,12 @@ def build_plan_reality_snapshot(
             "payload_group_siblings": len(sibling_members),
             "plan_rows": len(affected),
             "out_of_plan_siblings": len(uncovered_members),
+            "catalog_out_of_plan_siblings": len(uncovered_catalog_members),
+            "qbit_out_of_plan_siblings": len(uncovered_qbit_members),
         },
         "group_warnings": group_warnings,
         "out_of_plan_siblings": uncovered_members,
+        "out_of_plan_catalog_siblings": uncovered_catalog_members,
+        "out_of_plan_qbit_siblings": uncovered_qbit_members,
         "rows": rows,
     }

@@ -2562,6 +2562,25 @@ class DemotionExecutor:
                 message=message,
             )
 
+        snapshot = plan.get("_reality_snapshot_pre") or {}
+        if str(snapshot.get("group_state") or "").strip() == "blocked_qbit_sibling_gap":
+            group_reason = str(snapshot.get("group_reason") or "").strip()
+            group_warnings = list(snapshot.get("group_warnings") or [])
+            message = (
+                "Preflight check blocked 1/1 payload group(s) — "
+                "rehome aborted before any mutation:\n"
+                "  qB has same-name out-of-plan sibling torrents for this payload."
+            )
+            if group_reason:
+                message += f"\n  guidance: {group_reason}"
+            if group_warnings:
+                message += "\n  group_warnings:\n  " + "\n  ".join(group_warnings[:3])
+            return PreflightCheckStatus(
+                blocked=("qbit_sibling_gap",),
+                transient_only=False,
+                message=message,
+            )
+
         return PreflightCheckStatus(
             blocked=(),
             transient_only=False,

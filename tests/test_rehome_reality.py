@@ -424,3 +424,59 @@ def test_build_plan_reality_snapshot_reports_out_of_plan_siblings(tmp_path):
     assert snapshot["summary"]["payload_group_siblings"] == 2
     assert snapshot["out_of_plan_siblings"][0]["torrent_hash"] == "def456"
     assert snapshot["group_warnings"]
+
+
+def test_build_plan_reality_snapshot_blocks_qbit_only_out_of_plan_siblings(tmp_path):
+    source_root = tmp_path / "pool-data" / "cross-seed" / "seedpool (API)" / "Movie.mkv"
+    target_root = tmp_path / "pool-media" / "cross-seed" / "seedpool (API)" / "Movie.mkv"
+    source_root.parent.mkdir(parents=True, exist_ok=True)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    source_root.write_bytes(b"old")
+    target_root.write_bytes(b"new")
+
+    catalog = tmp_path / "catalog.db"
+    _make_catalog(catalog, payload_root=str(source_root), save_path=str(source_root.parent))
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(source_root.parent),
+        qbt_save_path=str(source_root.parent),
+    )
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="Movie.mkv",
+                state="stalledUP",
+                progress=1.0,
+                save_path=str(source_root.parent),
+                content_path=str(source_root),
+                size=3,
+            ),
+            SimpleNamespace(
+                hash="orphan999",
+                name="Movie.mkv",
+                state="missingFiles",
+                progress=0.0,
+                save_path="/data/media/torrents/seeding/cross-seed/seedpool (API)",
+                content_path="/data/media/torrents/seeding/cross-seed/seedpool (API)/Movie.mkv",
+                size=3,
+            ),
+        ]
+    )
+
+    snapshot = build_plan_reality_snapshot(
+        plan=_make_plan(source_root, target_root) | {"total_bytes": 3},
+        qb_client=qb,
+        catalog_path=catalog,
+        fastresume_dir=fastresume_dir,
+    )
+
+    assert snapshot["group_state"] == "blocked_qbit_sibling_gap"
+    assert snapshot["summary"]["out_of_plan_siblings"] == 1
+    assert snapshot["summary"]["qbit_out_of_plan_siblings"] == 1
+    assert snapshot["out_of_plan_qbit_siblings"][0]["torrent_hash"] == "orphan999"
+    assert any("same-name out-of-plan torrent" in warning for warning in snapshot["group_warnings"])
