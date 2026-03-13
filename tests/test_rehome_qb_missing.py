@@ -403,7 +403,7 @@ def test_build_missing_sibling_reconnect_batch_builds_reuse_plan_with_unique_vie
     )
 
     assert report["summary"]["plans"] == 1
-    assert report["summary"]["unique_view_targets"] == 1
+    assert report["summary"]["unique_view_targets"] == 2
     plan = report["plans"][0]
     assert plan["decision"] == "REUSE"
     assert plan["payload_hash"] == "payload-reconnect"
@@ -411,12 +411,12 @@ def test_build_missing_sibling_reconnect_batch_builds_reuse_plan_with_unique_vie
     assert plan["affected_torrents"] == ["badf00d", "deadbeef"]
     assert plan["normalization"]["mode"] == "qb_missing_sibling_reconnect"
     assert plan["normalization"]["view_collisions"] == 1
-    assert plan["normalization"]["unique_view_targets"] == 1
+    assert plan["normalization"]["unique_view_targets"] == 2
     assert plan["view_targets"] == [
         {
             "torrent_hash": "badf00d",
             "source_save_path": "/data/media/torrents/seeding/cross-seed/PrivateHD",
-            "target_save_path": "/pool/media/torrents/seeding/cross-seed/PrivateHD",
+            "target_save_path": "/pool/media/torrents/seeding/_rehome-unique/badf00d",
             "root_name": "Cleverman.S02",
         },
         {

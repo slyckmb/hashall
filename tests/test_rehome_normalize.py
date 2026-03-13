@@ -457,15 +457,18 @@ def test_root_relocation_plan_synthesizes_unique_view_targets_for_colliding_sibl
 
     assert report["summary"]["candidates"] == 1
     assert report["summary"]["view_collisions"] == 1
-    assert report["summary"]["unique_view_targets"] == 1
+    assert report["summary"]["unique_view_targets"] == 2
 
     plan = report["plans"][0]
     assert plan["affected_torrents"] == ["thash21a", "thash21b"]
     assert plan["normalization"]["view_collisions"] == 1
-    assert plan["normalization"]["unique_view_targets"] == 1
+    assert plan["normalization"]["unique_per_torrent"] is True
+    assert plan["normalization"]["unique_view_targets"] == 2
 
     by_hash = {row["torrent_hash"]: row for row in plan["view_targets"]}
-    assert by_hash["thash21a"]["target_save_path"] == str(target_root / "tv")
+    assert by_hash["thash21a"]["target_save_path"] == str(
+        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21a"
+    )
     assert by_hash["thash21b"]["target_save_path"] == str(
         target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21b"
     )
@@ -519,11 +522,14 @@ def test_root_relocation_plan_includes_already_targeted_siblings_in_same_payload
     )
 
     assert report["summary"]["candidates"] == 1
-    assert report["summary"]["unique_view_targets"] == 1
+    assert report["summary"]["unique_view_targets"] == 2
     plan = report["plans"][0]
     assert plan["affected_torrents"] == ["thash22a", "thash22b"]
+    assert plan["normalization"]["unique_per_torrent"] is True
     by_hash = {row["torrent_hash"]: row for row in plan["view_targets"]}
-    assert by_hash["thash22a"]["target_save_path"] == str(target_root / "tv")
+    assert by_hash["thash22a"]["target_save_path"] == str(
+        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22a"
+    )
     assert by_hash["thash22b"]["target_save_path"] == str(
         target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22b"
     )

@@ -3924,6 +3924,43 @@ class DemotionExecutor:
         else:
             plan.pop("cleanup_source_deferred_path", None)
 
+    def _cleanup_unused_target_donor(self, plan: Dict, donor: TargetDonor) -> bool:
+        snapshot = plan.get("_reality_snapshot_pre") or {}
+        summary = snapshot.get("summary") or {}
+        if int(summary.get("out_of_plan_siblings", 0) or 0) > 0:
+            self._log(
+                "  cleanup_unused_target_donor_skipped "
+                "reason=out_of_plan_siblings_present",
+                "warning",
+            )
+            return False
+
+        constructed_roots = {
+            canonicalize_path(Path(str(value)).resolve())
+            for value in (plan.get("constructed_payload_roots") or {}).values()
+            if str(value).strip()
+        }
+        donor_root = canonicalize_path(donor.target_path.resolve())
+        if donor_root in constructed_roots or not constructed_roots:
+            return False
+        if not donor_root.exists():
+            return False
+
+        try:
+            if donor_root.is_dir():
+                shutil.rmtree(donor_root)
+            else:
+                donor_root.unlink()
+            plan["cleanup_unused_target_donor"] = str(donor_root)
+            self._log(f"  cleanup_unused_target_donor path={donor_root}")
+            return True
+        except Exception as exc:
+            self._log(
+                f"  cleanup_unused_target_donor_failed path={donor_root} error={exc}",
+                "warning",
+            )
+            return False
+
     def _rollback_move_donor(self, execute_plan: Dict, donor: TargetDonor) -> None:
         self._log("relocation_failed rolling_back_payload", "error")
         if donor.moved_payload:
@@ -3971,6 +4008,7 @@ class DemotionExecutor:
             allow_set_location_fallback=True,
         )
         phase_times.update(attach_times)
+        self._cleanup_unused_target_donor(execute_plan, donor)
 
         t0 = time.monotonic()
         self._log(f"step=cleanup_stash path={donor.source_path} relocated={len(plan.get('affected_torrents') or [])}")
@@ -4005,6 +4043,7 @@ class DemotionExecutor:
                 allow_set_location_fallback=False,
             )
             phase_times.update(attach_times)
+            self._cleanup_unused_target_donor(execute_plan, donor)
         except Exception:
             self._rollback_move_donor(execute_plan, donor)
             raise

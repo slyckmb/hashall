@@ -378,11 +378,9 @@ def _build_missing_view_targets(
 ) -> tuple[List[str], List[Dict[str, str]], int, int]:
     normalized_source = normalize_save_path(source_root)
     normalized_target = normalize_save_path(target_root)
-    seen_view_keys: set[tuple[str, str]] = set()
-    affected_torrents: List[str] = []
-    view_targets: List[Dict[str, str]] = []
+    candidates: List[tuple[str, str, str, str]] = []
+    baseline_view_keys: set[tuple[str, str]] = set()
     collisions = 0
-    unique_views = 0
 
     for row in stale_rows:
         torrent_hash = str(row["torrent_hash"] or "").strip().lower()
@@ -393,18 +391,35 @@ def _build_missing_view_targets(
         target_save_path = _map_root(save_path, normalized_source, normalized_target)
         if not target_save_path:
             continue
-        affected_torrents.append(torrent_hash)
         if not root_name:
             continue
         view_key = (target_save_path, root_name)
-        if view_key in seen_view_keys:
+        if view_key in baseline_view_keys:
             collisions += 1
+        baseline_view_keys.add(view_key)
+        candidates.append((torrent_hash, save_path, root_name, target_save_path))
+
+    affected_torrents = [torrent_hash for torrent_hash, _, _, _ in candidates]
+    force_unique_targets = len(candidates) > 1
+    seen_view_keys: set[tuple[str, str]] = set()
+    view_targets: List[Dict[str, str]] = []
+    unique_views = 0
+
+    for torrent_hash, save_path, root_name, baseline_target_save_path in candidates:
+        target_save_path = baseline_target_save_path
+        if force_unique_targets:
             target_save_path = str(
                 _canonical(Path(normalized_target) / unique_view_subdir / torrent_hash)
             )
-            unique_views += 1
-            view_key = (target_save_path, root_name)
-        seen_view_keys.add(view_key)
+            if target_save_path != baseline_target_save_path:
+                unique_views += 1
+        elif (target_save_path, root_name) in seen_view_keys:
+            target_save_path = str(
+                _canonical(Path(normalized_target) / unique_view_subdir / torrent_hash)
+            )
+            if target_save_path != baseline_target_save_path:
+                unique_views += 1
+        seen_view_keys.add((target_save_path, root_name))
         view_targets.append(
             {
                 "torrent_hash": torrent_hash,

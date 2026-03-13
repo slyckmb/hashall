@@ -287,6 +287,32 @@ def test_ensure_target_donor_reuses_exact_preexisting_target(tmp_path, monkeypat
     assert donor.target_preexisting is True
 
 
+def test_cleanup_unused_target_donor_removes_intermediate_root(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    donor_root = tmp_path / "pool-media" / "cross-seed" / "Donor"
+    donor_root.mkdir(parents=True, exist_ok=True)
+    (donor_root / "movie.mkv").write_bytes(b"movie")
+
+    unique_root = tmp_path / "pool-media" / "_rehome-unique" / "hash-a" / "Movie"
+    unique_root.mkdir(parents=True, exist_ok=True)
+    (unique_root / "movie.mkv").write_bytes(b"movie")
+
+    plan = {
+        "_reality_snapshot_pre": {"summary": {"out_of_plan_siblings": 0}},
+        "constructed_payload_roots": {"hash-a": str(unique_root)},
+    }
+
+    removed = executor._cleanup_unused_target_donor(
+        plan,
+        SimpleNamespace(target_path=donor_root),
+    )
+
+    assert removed is True
+    assert not donor_root.exists()
+    assert plan["cleanup_unused_target_donor"] == str(donor_root.resolve())
+
+
 def test_atomic_relocation_rollback_uses_qb_runtime_source_path(tmp_path, monkeypatch):
     class AliasQbitClient(FakeQbitClient):
         def __init__(self):

@@ -22,6 +22,7 @@ from hashall.payload import (
     get_torrent_siblings,
 )
 from hashall.pathing import canonicalize_path, to_relpath, is_under, remap_to_mount_alias
+from rehome.normalize import DEFAULT_UNIQUE_VIEW_SUBDIR
 
 
 @dataclass
@@ -130,7 +131,7 @@ def _build_view_targets(
             device_mounts[int(device_id)] = mounts
     mount_groups: List[List[Path]] = list(device_mounts.values())
 
-    view_targets = []
+    raw_targets = []
     for torrent_hash, save_path, root_name, device_id in rows:
         if not save_path:
             raise ValueError(f"Missing save_path for torrent {torrent_hash}")
@@ -182,14 +183,32 @@ def _build_view_targets(
         rel = save_path_path.relative_to(source_root)
         target_save_path = (target_root / rel).resolve()
 
-        view_targets.append({
+        raw_targets.append({
             "torrent_hash": torrent_hash,
             "source_save_path": str(save_path_path),
             "target_save_path": str(target_save_path),
             "root_name": root_name,
         })
 
-    return view_targets
+    if len(raw_targets) <= 1:
+        return raw_targets
+
+    unique_targets = []
+    for target in raw_targets:
+        torrent_hash = str(target["torrent_hash"])
+        unique_target_save_path = canonicalize_path(
+            target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / torrent_hash
+        )
+        unique_targets.append(
+            {
+                "torrent_hash": torrent_hash,
+                "source_save_path": target["source_save_path"],
+                "target_save_path": str(unique_target_save_path),
+                "root_name": target["root_name"],
+            }
+        )
+
+    return unique_targets
 
 
 class DemotionPlanner:

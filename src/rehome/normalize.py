@@ -318,13 +318,12 @@ def _build_target_view_targets(
     source_root: Path,
     target_root: Path,
     unique_on_collision: bool,
+    unique_per_torrent: bool,
     unique_view_subdir: str,
 ) -> Tuple[List[str], List[Dict[str, str]], int, int]:
-    affected_torrents: List[str] = []
-    view_targets: List[Dict[str, str]] = []
-    seen_view_keys: Set[Tuple[str, str]] = set()
+    candidates: List[Tuple[str, Path, str, Path]] = []
+    baseline_view_keys: Set[Tuple[str, str]] = set()
     collisions = 0
-    unique_views = 0
 
     for torrent_row in device_torrents:
         torrent_hash = str(torrent_row["torrent_hash"] or "").strip()
@@ -347,22 +346,43 @@ def _build_target_view_targets(
         if target_save_path is None:
             continue
 
-        affected_torrents.append(torrent_hash)
         if not root_name:
             continue
 
         view_key = (str(target_save_path), root_name)
-        if view_key in seen_view_keys:
+        if view_key in baseline_view_keys:
             collisions += 1
-            if unique_on_collision:
+        baseline_view_keys.add(view_key)
+        candidates.append((torrent_hash, save_path, root_name, target_save_path))
+
+    affected_torrents = [torrent_hash for torrent_hash, _, _, _ in candidates]
+    force_unique_targets = bool(unique_per_torrent and len(candidates) > 1)
+    view_targets: List[Dict[str, str]] = []
+    unique_views = 0
+    seen_view_keys: Set[Tuple[str, str]] = set()
+
+    for torrent_hash, save_path, root_name, baseline_target_save_path in candidates:
+        target_save_path = baseline_target_save_path
+        if force_unique_targets:
+            target_save_path = _choose_unique_target_save(
+                target_root=target_root,
+                torrent_hash=torrent_hash,
+                unique_view_subdir=unique_view_subdir,
+            )
+            if target_save_path != baseline_target_save_path:
+                unique_views += 1
+        else:
+            view_key = (str(target_save_path), root_name)
+            if view_key in seen_view_keys and unique_on_collision:
                 target_save_path = _choose_unique_target_save(
                     target_root=target_root,
                     torrent_hash=torrent_hash,
                     unique_view_subdir=unique_view_subdir,
                 )
-                unique_views += 1
-                view_key = (str(target_save_path), root_name)
+                if target_save_path != baseline_target_save_path:
+                    unique_views += 1
 
+        view_key = (str(target_save_path), root_name)
         seen_view_keys.add(view_key)
         view_targets.append(
             {
@@ -388,6 +408,7 @@ def build_root_relocation_batch(
     limit: int = 0,
     flat_only: bool = True,
     unique_on_collision: bool = True,
+    unique_per_torrent: bool = True,
     unique_view_subdir: str = DEFAULT_UNIQUE_VIEW_SUBDIR,
     mode: str = "root_relocation",
 ) -> Dict:
@@ -616,6 +637,7 @@ def build_root_relocation_batch(
                 source_root=source_root_path,
                 target_root=target_root_path,
                 unique_on_collision=unique_on_collision,
+                unique_per_torrent=unique_per_torrent,
                 unique_view_subdir=unique_view_subdir,
             )
 
@@ -691,6 +713,7 @@ def build_root_relocation_batch(
                     "target_root": str(target_root_path),
                     "source_device_id": int(source_device),
                     "target_device_id": int(target_device),
+                    "unique_per_torrent": bool(unique_per_torrent),
                     "view_collisions": int(view_collisions),
                     "unique_view_targets": int(unique_view_targets),
                     "unique_view_subdir": _sanitize_path_component(unique_view_subdir),
@@ -773,6 +796,7 @@ def build_pool_path_normalization_batch(
         payload_hashes=payload_hashes,
         limit=limit,
         flat_only=flat_only,
+        unique_per_torrent=True,
         mode="normalize_pool_paths",
     )
     report["pool_device"] = int(pool_device)
