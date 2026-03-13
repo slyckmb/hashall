@@ -41,6 +41,14 @@ Last updated: 2026-03-13
     - `bin/db-refresh-step4_5-link-dedup.sh` now writes a structured per-device summary JSON and logs the plan status / failed-action preview after dry-run and apply
   - operator meaning:
     - a refresh/dedupe run should now end with an explicit step-3.5 summary artifact instead of forcing diagnosis from a raw shared log tail
+  - latest refresh status:
+    - `~/.logs/hashall/rehome/refresh/20260313-172217.log`
+    - ended `OK`
+    - one follow-up anomaly remains:
+      - root `99/99` `V.for.Vendetta...` under `/pool/media/torrents/seeding/cross-seed/hawke-uno/...`
+      - logged `files=0 bytes=0`
+      - `Upgrade ended incomplete: groups=0`
+    - this is an explicit backlog item, not a refresh-run failure
 - New 2026-03-13 planner stale-no-op hardening:
   - `relocate-plan` now skips groups when all per-hash view targets already have `source_save_path == target_save_path`
   - this removes fully converged families from the live remainder even when source cleanup is still deferred

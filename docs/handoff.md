@@ -39,6 +39,15 @@
   - new behavior:
     - `hashall link execute` now prints the jdupes log glob for the plan and a failed-action preview
     - `bin/db-refresh-step4_5-link-dedup.sh` now writes a structured per-device summary JSON and logs dry-run/apply rc plus failed-action preview
+  - latest completed refresh:
+    - `~/.logs/hashall/rehome/refresh/20260313-172217.log`
+    - ended `OK`
+    - one follow-up anomaly remains:
+      - root `99/99` `V.for.Vendetta...`
+      - `/pool/media/torrents/seeding/cross-seed/hawke-uno/V.for.Vendetta...`
+      - logged `files=0 bytes=0`
+      - `Upgrade ended incomplete: groups=0`
+    - keep this as an explicit idle-time investigation task; it did not invalidate the refresh run
 - New 2026-03-13 planner stale-no-op hardening baseline:
   - `relocate-plan` now skips groups when every per-hash view target is already `source_save_path == target_save_path`
   - this closes the deferred-cleanup stale-planner gap that kept resurfacing fully converged groups like `Brave.New.World.US.S01...`

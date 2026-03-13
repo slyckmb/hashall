@@ -18,6 +18,9 @@ Unified roadmap + active backlog for development and operations.
    - `~noHL` sibling expansion,
    - guarded repair vs rehome decisioning,
    - and de-hitchhiked per-item target-tree construction on `pool-media`.
+7. Investigate the incomplete `V for Vendetta` refresh-upgrade root when the active migration/cleanup lane is idle:
+   - refresh `20260313-172217` ended `OK`, but root `99/99` for `/pool/media/torrents/seeding/cross-seed/hawke-uno/V.for.Vendetta...` logged `files=0 bytes=0`
+   - treat this as a follow-up refresh/catalog/upgrade anomaly, not as proof that refresh itself failed
 
 ## Ranked Priorities
 
@@ -95,6 +98,7 @@ Unified roadmap + active backlog for development and operations.
 4. Run a live `MOVE` pilot only when the planner surfaces a real donor-acquisition case again.
 5. Use the `Alien Romulus` group as the first deliberate `~noHL` rehome/repair proving task once the current cleanup + planner hardening slice is stable.
 6. Afterwards, continue the wider `~noHL` lane.
+7. When the live migration lane is stable, investigate the incomplete `V for Vendetta` refresh-upgrade root from refresh `20260313-172217`.
 
 ## Current Operating Rules
 
