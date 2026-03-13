@@ -2,7 +2,7 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.6.9`.
+- `hashall` semver baseline is now `0.6.11`.
 - Active docs are now intentionally minimal and stub-free:
   - canonical active set:
     - `README.md`
@@ -54,7 +54,7 @@
   - live proof:
     - `Brave.New.World.US.S01...` completed successfully at `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
     - a fresh remainder plan now drops from `31` candidates to `29`
-    - refreshed source of truth is now `refresh9`, not `refresh8`
+    - refresh-seeded remainder plans are no longer the active source of truth once a live-qB-seeded plan is available
 - New 2026-03-13 Twisters bridge hardening baseline:
   - planner now prefers surviving target donors when stale rows already point at target-side payloads
   - unique single-file directory-root target views now preserve the expected `root_dir/file` shape instead of flattening to a bare filename
@@ -90,12 +90,15 @@
     - `stoppeddl=1` (`Alien Romulus`, still repair-lane only)
     - `stalleddl=2` (non-pool-data outliers under `/data/media/torrents/seeding/radarr`)
   - next operator step:
-    - use `out/rehome-plan-pool-data-to-media-refresh9-20260313.json` for the next conservative slice
-    - refreshed summary:
-      - `candidates=29`
-      - `reuse=22`
+    - use `out/rehome-plan-pool-data-to-media-liveqb-20260313.json` for the next conservative slice
+    - live-qB-seeded summary:
+      - `seed_scope=mode:live_qb_root`
+      - `qbit_hashes=34`
+      - `mapped_payloads=14`
+      - `candidates=14`
+      - `reuse=7`
       - `move=7`
-      - `skipped=2` (`already_targeted_view_targets`)
+      - `covered old-root hashes=34/34`
   - explicit next proving task to keep in the active backlog:
     - `Alien Romulus`
     - why it matters:

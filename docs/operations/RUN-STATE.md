@@ -4,7 +4,7 @@ Last updated: 2026-03-13
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.6.9`.
+- `hashall` is now `0.6.11`.
 - Active docs are now intentionally minimal and stub-free:
   - canonical active docs:
     - `README.md`
@@ -54,7 +54,7 @@ Last updated: 2026-03-13
   - this removes fully converged families from the live remainder even when source cleanup is still deferred
   - live proof:
     - `Brave.New.World.US.S01...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
-    - the fresh remainder plan drops from `31` candidates (`refresh8`) to `29` candidates (`refresh9`)
+    - refresh-seeded stale-no-op trimming dropped the older remainder from `31` (`refresh8`) to `29` (`refresh9`)
 - New 2026-03-13 Twisters bridge hardening:
   - surviving target donors are now preferred for stale already-targeted rows
   - single-file unique targets preserve `root_dir/file` layout
@@ -82,16 +82,20 @@ Last updated: 2026-03-13
   - `Cinderella.2021...` completed successfully at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
   - qB ended healthy on `/pool/media/...`
   - its post snapshot still warned about one shared payload row because the run started before the de-hitchhike planner landed
-- Current live remainder after the Twisters + Brave success:
+- Current live remainder after the Twisters + Brave success is now seeded from live qB old-root rows:
   - `old_path_count=34`
   - `new_path_count=317`
   - qB health snapshot:
     - `stalledup=5152`
     - `stoppeddl=1` (`Alien Romulus`, real repair lane)
     - `stalleddl=2` (non-pool-data `/data/media/.../radarr` outliers)
-  - next source-of-truth artifacts:
-    - `out/rehome-plan-pool-data-to-media-refresh9-20260313.json`
-    - `candidates=29`, `reuse=22`, `move=7`, `skipped=2`
+  - next source-of-truth artifact:
+    - `out/rehome-plan-pool-data-to-media-liveqb-20260313.json`
+    - `seed_scope=live_qb_root`
+    - `qbit_hashes=34`
+    - `mapped_payloads=14`
+    - `candidates=14`, `reuse=7`, `move=7`, `skipped=0`
+    - `covered old-root hashes=34/34`
 - New explicit next proving task:
   - use the `Alien Romulus` payload family as the next focused `rehome` / repair / `~noHL` engineering lane after the current cleanup + planner work
   - current observed live shape:

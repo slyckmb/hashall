@@ -100,14 +100,15 @@ def _resolve_live_qb_seed_payload_hashes(
     }
     try:
         qbit = get_qbittorrent_client()
-        if not qbit.test_connection() or not qbit.login():
-            info["reason"] = "qbit_unavailable"
+        live_torrents = list(qbit.get_torrents() or [])
+        if not live_torrents:
+            info["reason"] = str(getattr(qbit, "last_error", "") or "qbit_unavailable")
             return None, info
 
         live_hashes = sorted(
             {
                 str(getattr(torrent, "hash", "") or "").strip().lower()
-                for torrent in (qbit.get_torrents() or [])
+                for torrent in live_torrents
                 if str(getattr(torrent, "save_path", "") or "").startswith(source_root_norm)
             }
         )
@@ -149,6 +150,7 @@ def _resolve_live_qb_seed_payload_hashes(
             {
                 "mode": "live_qb_root",
                 "mapped_payload_hashes": len(seed_payload_hashes),
+                "source_torrent_hashes": live_hashes,
                 "unmapped_hashes": unmapped_hashes,
                 "reason": "",
             }
@@ -1438,6 +1440,7 @@ def relocate_plan_cmd(
             "source_root": str(Path(source_root).resolve()),
             "qbit_hashes": 0,
             "mapped_payload_hashes": len(seed_payload_hashes or []),
+            "source_torrent_hashes": [],
             "unmapped_hashes": [],
             "reason": "",
         }
@@ -1447,6 +1450,12 @@ def relocate_plan_cmd(
                 source_root=source_root,
             )
 
+        scoped_torrent_hashes = (
+            set(seed_info.get("source_torrent_hashes") or [])
+            if seed_info.get("mode") == "live_qb_root"
+            else None
+        )
+
         report = build_root_relocation_batch(
             catalog_path=catalog_path,
             source_device=int(source_device),
@@ -1455,6 +1464,7 @@ def relocate_plan_cmd(
             target_root=target_root,
             reference_root=reference_root,
             payload_hashes=seed_payload_hashes,
+            source_torrent_hashes=scoped_torrent_hashes,
             limit=limit,
             flat_only=flat_only,
             unique_view_subdir=unique_view_subdir,

@@ -82,7 +82,11 @@ If context is compacted, recover with this sequence:
      - `old_path_count=34`
      - `new_path_count=317`
      - active remainder plan:
-       - `out/rehome-plan-pool-data-to-media-refresh9-20260313.json`
+       - `out/rehome-plan-pool-data-to-media-liveqb-20260313.json`
+       - `seed_scope=live_qb_root`
+       - `qbit_hashes=34`
+       - `mapped_payloads=14`
+       - `candidates=14`, `reuse=7`, `move=7`, `covered old-root hashes=34/34`
        - `29` candidates (`22 REUSE`, `7 MOVE`, `2` skipped as already targeted no-ops)
     - qB health:
       - `stalledup=5147`

@@ -94,8 +94,12 @@ Prompt-critical context (2026-03-12):
     - `old_path_count=34`
     - `new_path_count=317`
     - next source-of-truth remainder plan:
-      - `out/rehome-plan-pool-data-to-media-refresh9-20260313.json`
-      - `29` candidates (`22 REUSE`, `7 MOVE`, `2` skipped already-targeted no-ops)
+      - `out/rehome-plan-pool-data-to-media-liveqb-20260313.json`
+      - `seed_scope=live_qb_root`
+      - `qbit_hashes=34`
+      - `mapped_payloads=14`
+      - `14` candidates (`7 REUSE`, `7 MOVE`, `0` skipped)
+      - `covered old-root hashes=34/34`
     - qB health:
       - `stalledup=5147`
       - `uploading=5`

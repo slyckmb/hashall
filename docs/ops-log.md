@@ -5,7 +5,7 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-13):
 
-- `hashall` is now `0.6.9`.
+- `hashall` is now `0.6.11`.
 - Anchor note:
   - the intended invariant is unique per-item qB payload trees, instantiated from donor payloads via hardlinks where possible
   - do not read `unique target` or `de-hitchhike` as “make redundant physical copies”
@@ -22,7 +22,7 @@ Latest stale-assumption hardening note (2026-03-13):
   - this closes the deferred-cleanup planner gap that kept resurfacing fully converged families like `Brave.New.World.US.S01...`
   - live proof:
     - `Brave.New.World.US.S01...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
-    - `refresh9` drops from `31` candidates to `29`
+    - the refresh-seeded remainder is no longer the active planner source once a live-qB-seeded plan exists
 - New 2026-03-13 refresh/jdupes diagnosis note:
   - the last `refresh --verbose` completed its orchestration and left step 3.5 as backlog, not as a still-running refresh worker
   - the actionable failure in that run was buried in jdupes group output:
@@ -98,6 +98,15 @@ Latest stale-assumption hardening note (2026-03-13):
     - `old_path_count=34`
     - `new_path_count=317`
     - qB health: `stalledup=5152`, `stoppeddl=1`, `stalleddl=2`
+  - new live-qB-seeded remainder baseline:
+    - `out/rehome-plan-pool-data-to-media-liveqb-20260313.json`
+    - `seed_scope=live_qb_root`
+    - `qbit_hashes=34`
+    - `mapped_payloads=14`
+    - `candidates=14`
+    - `reuse=7`
+    - `move=7`
+    - `covered old-root hashes=34/34`
 - New 2026-03-12 `qb-missing-remediate` note:
   - old `/data -> /pool/data` reuse-drift rows can now reconnect against an exact mapped target payload even when the surviving target catalog row has a different `payload_hash`
   - this fixed the `Peppermint...` gap where dry-run previously showed `selected_plans: 0`

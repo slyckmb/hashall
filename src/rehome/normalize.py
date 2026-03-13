@@ -210,6 +210,8 @@ def _preferred_expected_target(
         if not root_path_raw:
             continue
         candidate = _canonical(root_path_raw)
+        if candidate == source_path:
+            continue
         if not is_under(candidate, target_root):
             continue
         if int(payload_row["file_count"] or 0) != int(expected_file_count):
@@ -353,6 +355,7 @@ def _build_target_view_targets(
     device_torrents: Sequence[sqlite3.Row],
     source_root: Path,
     target_root: Path,
+    source_torrent_hashes: Optional[Set[str]] = None,
     unique_on_collision: bool,
     unique_per_torrent: bool,
     unique_view_subdir: str,
@@ -366,6 +369,8 @@ def _build_target_view_targets(
         save_path_raw = str(torrent_row["save_path"] or "").strip()
         root_name = str(torrent_row["root_name"] or "").strip()
         if not torrent_hash or not save_path_raw:
+            continue
+        if source_torrent_hashes is not None and torrent_hash not in source_torrent_hashes:
             continue
 
         save_path = _canonical(save_path_raw)
@@ -441,6 +446,7 @@ def build_root_relocation_batch(
     target_root: str,
     reference_root: Optional[str] = None,
     payload_hashes: Optional[Set[str]] = None,
+    source_torrent_hashes: Optional[Set[str]] = None,
     limit: int = 0,
     flat_only: bool = True,
     unique_on_collision: bool = True,
@@ -463,6 +469,11 @@ def build_root_relocation_batch(
     source_root_path = _canonical(source_root)
     target_root_path = _canonical(target_root)
     reference_root_path = _canonical(reference_root) if reference_root else None
+    source_torrent_hashes_norm = (
+        {str(item or "").strip().lower() for item in source_torrent_hashes if str(item or "").strip()}
+        if source_torrent_hashes is not None
+        else None
+    )
 
     plans: List[Dict] = []
     skipped: List[NormalizationSkip] = []
@@ -672,6 +683,7 @@ def build_root_relocation_batch(
                 device_torrents=device_torrents,
                 source_root=source_root_path,
                 target_root=target_root_path,
+                source_torrent_hashes=source_torrent_hashes_norm,
                 unique_on_collision=unique_on_collision,
                 unique_per_torrent=unique_per_torrent,
                 unique_view_subdir=unique_view_subdir,
@@ -688,10 +700,18 @@ def build_root_relocation_batch(
                 )
                 continue
 
-            if all(
+            all_view_targets_already_targeted = all(
                 _canonical(str(view.get("source_save_path") or ""))
                 == _canonical(str(view.get("target_save_path") or ""))
                 for view in view_targets
+            )
+            any_view_still_under_source_root = any(
+                is_under(_canonical(str(view.get("source_save_path") or "")), source_root_path)
+                for view in view_targets
+                if str(view.get("source_save_path") or "").strip()
+            )
+            if all_view_targets_already_targeted and (
+                source_path == target_path or not any_view_still_under_source_root
             ):
                 skipped.append(
                     NormalizationSkip(
