@@ -7,7 +7,9 @@ from datetime import datetime
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import time
+import re
 from typing import Any, Dict, Iterable, Optional
 
 from hashall.qbittorrent import get_qbittorrent_client
@@ -20,6 +22,7 @@ CLEANUP_REQUIRED_TAG = "rehome_cleanup_source_required"
 DEFAULT_CLEANUP_OBSERVE_SECONDS = 60.0
 DEFAULT_CLEANUP_POLL_SECONDS = 5.0
 DEFAULT_CLEANUP_STAGE_DIRNAME = ".rehome-cleanup-stage"
+DEFAULT_CLEANUP_RETENTION_HOURS = 24.0
 PATH_ALIAS_PREFIXES = (
     ("/data/media", "/stash/media"),
     ("/stash/media", "/data/media"),
@@ -32,6 +35,7 @@ TRANSIENT_REASONS = {
     "stale_refs_on_source_payload",
     "source_has_torrent_refs",
 }
+REHOME_DATE_RE = re.compile(r"^rehome_at_(\d{8})$")
 
 
 @dataclass
@@ -64,6 +68,7 @@ def _classify_cleanup_disposition(
     db_reasons: list[str],
     source_reasons: list[str],
     stale_refs: int,
+    retention_active: bool,
 ) -> tuple[str, list[str]]:
     if not cleanup_required:
         return "not_required", []
@@ -84,7 +89,35 @@ def _classify_cleanup_disposition(
             reasons = ["retain_for_rollback"]
         return "retain_for_rollback", reasons
 
+    if retention_active:
+        return "retain_for_rollback", ["rollback_retention_window"]
+
     return "cleanup_safe_now", []
+
+
+def _latest_rehome_date(tags: set[str]) -> Optional[datetime]:
+    latest: Optional[datetime] = None
+    for tag in tags:
+        match = REHOME_DATE_RE.match(str(tag or "").strip())
+        if not match:
+            continue
+        try:
+            dt = datetime.strptime(match.group(1), "%Y%m%d")
+        except ValueError:
+            continue
+        if latest is None or dt > latest:
+            latest = dt
+    return latest
+
+
+def _cleanup_retention_active(*, tags: set[str], retention_hours: float, now: datetime) -> bool:
+    if retention_hours <= 0:
+        return False
+    latest = _latest_rehome_date(tags)
+    if latest is None:
+        return False
+    age_seconds = (now.replace(tzinfo=None) - latest).total_seconds()
+    return age_seconds < float(retention_hours) * 3600.0
 
 
 def _split_tags(raw: Optional[str]) -> set[str]:
@@ -191,6 +224,22 @@ def _delete_path(path: Path) -> None:
         shutil.rmtree(path)
     else:
         path.unlink()
+
+
+def _repair_permissions_for_cleanup(path: Path) -> bool:
+    if not path.exists():
+        return True
+    cmd_specs = [
+        ["sudo", "chown", "-R", "michael:michael", str(path)],
+        ["sudo", "find", str(path), "-type", "d", "-exec", "chmod", "2775", "{}", "+"],
+        ["sudo", "find", str(path), "-type", "f", "-exec", "chmod", "664", "{}", "+"],
+    ]
+    for cmd in cmd_specs:
+        try:
+            subprocess.run(cmd, check=True)
+        except Exception:
+            return False
+    return True
 
 
 def _path_stats(path: Path) -> dict[str, int | bool]:
@@ -451,12 +500,24 @@ def _cleanup_sources_with_staging(
         return "failed", deleted_paths, cleanup_errors, staged_paths, cleanup_checks
 
     renamed: list[CleanupSource] = []
+    permission_repaired = False
     try:
         for source in source_rows:
             if not source.root_path.exists():
                 continue
-            source.stage_path.parent.mkdir(parents=True, exist_ok=True)
-            source.root_path.rename(source.stage_path)
+            try:
+                source.stage_path.parent.mkdir(parents=True, exist_ok=True)
+                source.root_path.rename(source.stage_path)
+            except PermissionError:
+                repair_targets = [source.root_path.parent, source.root_path]
+                repaired = False
+                if not permission_repaired:
+                    repaired = all(_repair_permissions_for_cleanup(path) for path in repair_targets)
+                    permission_repaired = repaired
+                if not repaired:
+                    raise
+                source.stage_path.parent.mkdir(parents=True, exist_ok=True)
+                source.root_path.rename(source.stage_path)
             renamed.append(source)
             staged_paths.append(str(source.stage_path))
 
@@ -506,6 +567,7 @@ def run_followup(
     limit: int = 0,
     retry_failed: bool = False,
     cleanup_observe_seconds: float = DEFAULT_CLEANUP_OBSERVE_SECONDS,
+    cleanup_retention_hours: float = DEFAULT_CLEANUP_RETENTION_HOURS,
 ) -> dict[str, Any]:
     """Run a follow-up pass for rehome tag state and optional source cleanup."""
     qbit = get_qbittorrent_client()
@@ -588,6 +650,8 @@ def run_followup(
         cleanup_blocked = 0
         cleanup_already_cleaned = 0
         cleanup_not_required = 0
+
+        now = datetime.now().astimezone()
 
         for payload_hash in payload_keys:
             group = payload_candidates[payload_hash]
@@ -749,6 +813,11 @@ def run_followup(
                 qb_checks.append(gate.__dict__)
 
             cleanup_required = CLEANUP_REQUIRED_TAG in group["tags"]
+            retention_active = _cleanup_retention_active(
+                tags=group["tags"],
+                retention_hours=float(cleanup_retention_hours),
+                now=now,
+            )
             cleanup_sources = _load_cleanup_sources(source_rows, payload_hash) if cleanup_required else []
             stale_ref_details: list[dict[str, Any]] = []
             if target_device:
@@ -778,6 +847,7 @@ def run_followup(
                 db_reasons=sorted(set(db_reasons)),
                 source_reasons=sorted(set(source_reasons)),
                 stale_refs=stale_refs,
+                retention_active=retention_active,
             )
             if cleanup_disposition == "cleanup_safe_now":
                 cleanup_safe_now += 1
@@ -841,6 +911,8 @@ def run_followup(
                     "cleanup_errors": cleanup_errors,
                     "cleanup_checks": cleanup_checks,
                     "cleanup_observe_seconds": float(cleanup_observe_seconds),
+                    "cleanup_retention_hours": float(cleanup_retention_hours),
+                    "cleanup_retention_active": retention_active,
                     "cleanup_disposition": cleanup_disposition,
                     "cleanup_disposition_reasons": cleanup_disposition_reasons,
                     "cleanup_safe_now": cleanup_disposition == "cleanup_safe_now",

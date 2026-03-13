@@ -1177,13 +1177,15 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
               help="Include rehome_verify_failed groups in this pass")
 @click.option("--cleanup-observe-seconds", type=float, default=60.0,
               help="Observe qB for this many seconds after staging source cleanup before delete")
+@click.option("--cleanup-retention-hours", type=float, default=24.0,
+              help="Minimum rollback-retention window before cleanup is allowed (0 = disable)")
 @click.option("--strict", is_flag=True,
               help="Exit non-zero if any group remains pending or failed")
 @click.option("--output", type=click.Path(),
               help="Write JSON report to file")
 @click.option("--print-torrents", is_flag=True,
               help="Print per-torrent follow-up gate details")
-def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, cleanup_observe_seconds, strict, output, print_torrents):
+def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, cleanup_observe_seconds, cleanup_retention_hours, strict, output, print_torrents):
     """Run rehome verification follow-up and optional deferred cleanup retry."""
     catalog_path = Path(catalog)
     try:
@@ -1194,6 +1196,7 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, cleanup_
             limit=limit,
             retry_failed=retry_failed,
             cleanup_observe_seconds=float(cleanup_observe_seconds),
+            cleanup_retention_hours=float(cleanup_retention_hours),
         )
     except Exception as e:
         click.echo(f"❌ FOLLOWUP failed: {e}", err=True)
@@ -1213,6 +1216,7 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, cleanup_
     click.echo(f"   cleanup_retain_for_rollback: {summary.get('cleanup_retain_for_rollback', 0)}")
     click.echo(f"   cleanup_blocked: {summary.get('cleanup_blocked', 0)}")
     click.echo(f"   cleanup_already_cleaned: {summary.get('cleanup_already_cleaned', 0)}")
+    click.echo(f"   cleanup_not_required: {summary.get('cleanup_not_required', 0)}")
 
     for entry in report.get("entries", []):
         payload_hash = str(entry.get("payload_hash", ""))

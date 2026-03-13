@@ -577,3 +577,124 @@ def test_followup_marks_cleanup_safe_now_without_apply(monkeypatch, tmp_path: Pa
     assert entry["cleanup_disposition"] == "cleanup_safe_now"
     assert entry["cleanup_safe_now"] is True
     assert source_dir.exists() is True
+
+
+def test_followup_retains_recent_cleanup_for_rollback_window(monkeypatch, tmp_path: Path):
+    db_path = _make_db(tmp_path)
+    source_dir = tmp_path / "source-retain"
+    source_dir.mkdir()
+    (source_dir / "file.mkv").write_bytes(b"abc")
+
+    today_tag = "rehome_at_20260313"
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        f"""
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES
+          (1, 'hash-retain', 141, '/pool/media/torrents/seeding/cross-seed/Aither (API)/Movie.mkv', 1, 3, 'complete'),
+          (2, 'hash-retain', 231, '{source_dir}', 1, 3, 'complete');
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, tags)
+        VALUES ('torrent-retain', 1, 141, '/pool/media/torrents/seeding/cross-seed/Aither (API)',
+                'rehome,rehome_from_pool_data,rehome_to_pool_media,{today_tag},rehome_verify_pending,rehome_cleanup_source_required');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fake = FakeQbitClient()
+    fake.torrents_by_tag["rehome_verify_pending"] = [
+        SimpleNamespace(
+            hash="torrent-retain",
+            tags=f"rehome,rehome_from_pool_data,rehome_to_pool_media,{today_tag},rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrents_by_tag["rehome_cleanup_source_required"] = [
+        SimpleNamespace(
+            hash="torrent-retain",
+            tags=f"rehome,rehome_from_pool_data,rehome_to_pool_media,{today_tag},rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrent_info["torrent-retain"] = SimpleNamespace(
+        hash="torrent-retain",
+        tags=f"rehome,rehome_from_pool_data,rehome_to_pool_media,{today_tag},rehome_verify_pending,rehome_cleanup_source_required",
+        progress=1.0,
+        state="stalledUP",
+        auto_tmm=False,
+        save_path="/pool/media/torrents/seeding/cross-seed/Aither (API)",
+    )
+
+    monkeypatch.setattr("rehome.followup.get_qbittorrent_client", lambda: fake)
+
+    report = run_followup(catalog_path=db_path, cleanup=False, cleanup_retention_hours=24.0)
+
+    assert report["summary"]["cleanup_retain_for_rollback"] == 1
+    entry = report["entries"][0]
+    assert entry["cleanup_disposition"] == "retain_for_rollback"
+    assert entry["cleanup_disposition_reasons"] == ["rollback_retention_window"]
+    assert entry["cleanup_retention_active"] is True
+    assert source_dir.exists() is True
+
+
+def test_followup_cleanup_repairs_permissions_and_retries(monkeypatch, tmp_path: Path):
+    db_path = _make_db(tmp_path)
+    source_dir = tmp_path / "source-repair"
+    source_dir.mkdir()
+    (source_dir / "file.mkv").write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        f"""
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES
+          (1, 'hash-repair', 141, '/pool/media/torrents/seeding/cross-seed/Aither (API)/Movie.mkv', 1, 3, 'complete'),
+          (2, 'hash-repair', 231, '{source_dir}', 1, 3, 'complete');
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, tags)
+        VALUES ('torrent-repair', 1, 141, '/pool/media/torrents/seeding/cross-seed/Aither (API)',
+                'rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_at_20260201,rehome_verify_pending,rehome_cleanup_source_required');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fake = FakeQbitClient()
+    fake.torrents_by_tag["rehome_verify_pending"] = [
+        SimpleNamespace(
+            hash="torrent-repair",
+            tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_at_20260201,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrents_by_tag["rehome_cleanup_source_required"] = [
+        SimpleNamespace(
+            hash="torrent-repair",
+            tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_at_20260201,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrent_info["torrent-repair"] = SimpleNamespace(
+        hash="torrent-repair",
+        tags="rehome,rehome_from_pool_data,rehome_to_pool_media,rehome_at_20260201,rehome_verify_pending,rehome_cleanup_source_required",
+        progress=1.0,
+        state="stalledUP",
+        auto_tmm=False,
+        save_path="/pool/media/torrents/seeding/cross-seed/Aither (API)",
+    )
+
+    rename_calls = {"count": 0}
+    real_rename = Path.rename
+
+    def fake_rename(self, target):
+        if self == source_dir and rename_calls["count"] == 0:
+            rename_calls["count"] += 1
+            raise PermissionError("denied")
+        return real_rename(self, target)
+
+    monkeypatch.setattr("rehome.followup.get_qbittorrent_client", lambda: fake)
+    monkeypatch.setattr("rehome.followup._repair_permissions_for_cleanup", lambda path: True)
+    monkeypatch.setattr(Path, "rename", fake_rename)
+
+    report = run_followup(catalog_path=db_path, cleanup=True, cleanup_retention_hours=0)
+
+    assert report["summary"]["cleanup_attempted"] == 1
+    assert report["summary"]["cleanup_done"] == 1
+    assert report["entries"][0]["cleanup_result"] == "done"
+    assert source_dir.exists() is False
