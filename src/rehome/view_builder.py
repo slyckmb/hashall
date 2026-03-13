@@ -25,6 +25,12 @@ class ViewBuildResult:
     total_bytes: int
 
 
+@dataclass(frozen=True)
+class ViewLayout:
+    view_root: Path
+    single_file_direct_dst: Optional[Path]
+
+
 def _common_prefix(files: List[QBitFile]) -> Optional[str]:
     if not files:
         return None
@@ -51,6 +57,35 @@ def _normalize_rel_path(
     ):
         return Path(*path.parts[1:]) if len(path.parts) > 1 else Path(path.name)
     return path
+
+
+def derive_view_layout(
+    payload_root: Path,
+    target_save_path: Path,
+    files: List[QBitFile],
+    root_name: Optional[str] = None,
+) -> ViewLayout:
+    """Compute the destination layout for a torrent-specific payload view."""
+    if not files:
+        raise RuntimeError("Torrent file list is empty")
+
+    payload_root = Path(payload_root)
+    target_save_path = Path(target_save_path)
+
+    common_prefix = _common_prefix(files)
+    single_file = payload_root.is_file()
+    single_file_direct_dst: Optional[Path] = None
+    if single_file:
+        first_rel = _normalize_rel_path(files[0].name, common_prefix, root_name, payload_root)
+        if len(first_rel.parts) == 1 and target_save_path.name == first_rel.name:
+            single_file_direct_dst = target_save_path
+            view_root = target_save_path.parent
+        else:
+            view_root = target_save_path
+    else:
+        view_root = target_save_path / (root_name or payload_root.name)
+
+    return ViewLayout(view_root=view_root, single_file_direct_dst=single_file_direct_dst)
 
 
 def _ensure_hardlink(
@@ -186,22 +221,19 @@ def build_torrent_view(
         raise RuntimeError("Single-file payload but torrent has multiple files")
 
     common_prefix = _common_prefix(files)
-    single_file_direct_dst: Optional[Path] = None
-    if single_file:
-        # Normal qB save_path points to a directory; tolerate file-form save_path too.
-        first_rel = _normalize_rel_path(files[0].name, common_prefix, root_name, payload_root)
-        if len(first_rel.parts) == 1 and target_save_path.name == first_rel.name:
-            single_file_direct_dst = target_save_path
-            view_root = target_save_path.parent
-            if progress_cb:
-                progress_cb(
-                    "build_views_progress phase=single_file_direct_target "
-                    f"target={target_save_path} view_root={view_root}"
-                )
-        else:
-            view_root = target_save_path
-    else:
-        view_root = target_save_path / (root_name or payload_root.name)
+    layout = derive_view_layout(
+        payload_root=payload_root,
+        target_save_path=target_save_path,
+        files=files,
+        root_name=root_name,
+    )
+    view_root = layout.view_root
+    single_file_direct_dst = layout.single_file_direct_dst
+    if single_file_direct_dst is not None and progress_cb:
+        progress_cb(
+            "build_views_progress phase=single_file_direct_target "
+            f"target={target_save_path} view_root={view_root}"
+        )
 
     total_bytes = 0
     for f in files:

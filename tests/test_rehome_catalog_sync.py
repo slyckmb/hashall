@@ -1481,6 +1481,273 @@ def test_reuse_cross_device_without_target_payload_row_creates_target_payload(tm
     assert torrent_row == (payload_rows[1][0], 141, str(target_file.parent))
 
 
+def test_reuse_catalog_sync_creates_unique_target_payload_rows_per_hash(tmp_path, monkeypatch):
+    db_path = tmp_path / "catalog.db"
+    source_mount = tmp_path / "pool" / "data"
+    target_mount = tmp_path / "pool" / "media"
+    source_root = source_mount / "cross-seed" / "TorrentLeech" / "Show.S01"
+    target_root_a = target_mount / "cross-seed" / "Aither (API)" / "Show.S01"
+    target_root_b = target_mount / "_rehome-unique" / "hash-b" / "Show.S01"
+
+    source_root.mkdir(parents=True, exist_ok=True)
+    target_root_a.mkdir(parents=True, exist_ok=True)
+    target_root_b.mkdir(parents=True, exist_ok=True)
+
+    payload_bytes = b"episode-bytes"
+    (source_root / "episode.mkv").write_bytes(payload_bytes)
+    (target_root_a / "episode.mkv").write_bytes(payload_bytes)
+    (target_root_b / "episode.mkv").write_bytes(payload_bytes)
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT NOT NULL,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'incomplete',
+            last_built_at REAL,
+            updated_at REAL
+        );
+
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            device_id INTEGER,
+            save_path TEXT,
+            root_name TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at)
+        VALUES (10, 'payload_hash_unique_reuse', 231, ?, 1, ?, 'complete', 123.0)
+        """,
+        (str(source_root), len(payload_bytes)),
+    )
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+        VALUES (?, 10, 231, ?, 'Show.S01')
+        """,
+        [
+            ("hash-a", str(source_mount / "cross-seed" / "TorrentLeech")),
+            ("hash-b", str(source_mount / "cross-seed" / "TorrentLeech")),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    plan = {
+        "version": "1.0",
+        "direction": "demote",
+        "decision": "REUSE",
+        "torrent_hash": "hash-a",
+        "payload_id": 10,
+        "payload_hash": "payload_hash_unique_reuse",
+        "affected_torrents": ["hash-a", "hash-b"],
+        "source_path": str(source_root),
+        "target_path": str(target_root_a),
+        "source_device_id": 231,
+        "target_device_id": 141,
+        "file_count": 1,
+        "total_bytes": len(payload_bytes),
+        "view_targets": [
+            {
+                "torrent_hash": "hash-a",
+                "source_save_path": str(source_mount / "cross-seed" / "TorrentLeech"),
+                "target_save_path": str(target_root_a.parent),
+                "root_name": target_root_a.name,
+            },
+            {
+                "torrent_hash": "hash-b",
+                "source_save_path": str(source_mount / "cross-seed" / "TorrentLeech"),
+                "target_save_path": str(target_root_b.parent),
+                "root_name": target_root_b.name,
+            },
+        ],
+        "constructed_payload_roots": {
+            "hash-a": str(target_root_a),
+            "hash-b": str(target_root_b),
+        },
+    }
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    monkeypatch.setattr(executor, "_sync_files_catalog_for_reuse_cleanup", lambda *args, **kwargs: None)
+
+    executor._sync_catalog_after_rehome(plan)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        payload_rows = conn.execute(
+            """
+            SELECT payload_id, root_path
+            FROM payloads
+            WHERE payload_hash = 'payload_hash_unique_reuse'
+            ORDER BY payload_id
+            """
+        ).fetchall()
+        torrent_rows = conn.execute(
+            """
+            SELECT torrent_hash, payload_id, device_id, save_path
+            FROM torrent_instances
+            WHERE torrent_hash IN ('hash-a', 'hash-b')
+            ORDER BY torrent_hash
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert payload_rows == [
+        (10, str(source_root)),
+        (11, str(target_root_a)),
+        (12, str(target_root_b)),
+    ]
+    assert torrent_rows == [
+        ("hash-a", 11, 141, str(target_root_a.parent)),
+        ("hash-b", 12, 141, str(target_root_b.parent)),
+    ]
+    assert plan["target_payload_ids"] == {"hash-a": 11, "hash-b": 12}
+    assert plan["target_payload_id"] == 11
+
+
+def test_move_catalog_sync_creates_unique_target_payload_rows_per_hash(tmp_path, monkeypatch):
+    db_path = tmp_path / "catalog.db"
+    source_mount = tmp_path / "pool" / "data"
+    target_mount = tmp_path / "pool" / "media"
+    source_root = source_mount / "cross-seed" / "TorrentLeech" / "Movie.2024"
+    target_root_a = target_mount / "cross-seed" / "Aither (API)" / "Movie.2024"
+    target_root_b = target_mount / "_rehome-unique" / "hash-b" / "Movie.2024"
+
+    source_root.mkdir(parents=True, exist_ok=True)
+    target_root_a.mkdir(parents=True, exist_ok=True)
+    target_root_b.mkdir(parents=True, exist_ok=True)
+
+    payload_bytes = b"movie-bytes"
+    (source_root / "Movie.2024.mkv").write_bytes(payload_bytes)
+    (target_root_a / "Movie.2024.mkv").write_bytes(payload_bytes)
+    (target_root_b / "Movie.2024.mkv").write_bytes(payload_bytes)
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT NOT NULL,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'incomplete',
+            last_built_at REAL,
+            updated_at REAL
+        );
+
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            device_id INTEGER,
+            save_path TEXT,
+            root_name TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at)
+        VALUES (10, 'payload_hash_unique_move', 231, ?, 1, ?, 'complete', 456.0)
+        """,
+        (str(source_root), len(payload_bytes)),
+    )
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+        VALUES (?, 10, 231, ?, 'Movie.2024')
+        """,
+        [
+            ("hash-a", str(source_mount / "cross-seed" / "TorrentLeech")),
+            ("hash-b", str(source_mount / "cross-seed" / "TorrentLeech")),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    plan = {
+        "version": "1.0",
+        "direction": "demote",
+        "decision": "MOVE",
+        "torrent_hash": "hash-a",
+        "payload_id": 10,
+        "payload_hash": "payload_hash_unique_move",
+        "affected_torrents": ["hash-a", "hash-b"],
+        "source_path": str(source_root),
+        "target_path": str(target_root_a),
+        "source_device_id": 231,
+        "target_device_id": 141,
+        "file_count": 1,
+        "total_bytes": len(payload_bytes),
+        "view_targets": [
+            {
+                "torrent_hash": "hash-a",
+                "source_save_path": str(source_mount / "cross-seed" / "TorrentLeech"),
+                "target_save_path": str(target_root_a.parent),
+                "root_name": target_root_a.name,
+            },
+            {
+                "torrent_hash": "hash-b",
+                "source_save_path": str(source_mount / "cross-seed" / "TorrentLeech"),
+                "target_save_path": str(target_root_b.parent),
+                "root_name": target_root_b.name,
+            },
+        ],
+        "constructed_payload_roots": {
+            "hash-a": str(target_root_a),
+            "hash-b": str(target_root_b),
+        },
+    }
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    monkeypatch.setattr(executor, "_sync_files_catalog_for_move", lambda *args, **kwargs: None)
+
+    executor._sync_catalog_after_rehome(plan)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        payload_rows = conn.execute(
+            """
+            SELECT payload_id, device_id, root_path
+            FROM payloads
+            WHERE payload_hash = 'payload_hash_unique_move'
+            ORDER BY payload_id
+            """
+        ).fetchall()
+        torrent_rows = conn.execute(
+            """
+            SELECT torrent_hash, payload_id, device_id, save_path
+            FROM torrent_instances
+            WHERE torrent_hash IN ('hash-a', 'hash-b')
+            ORDER BY torrent_hash
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert payload_rows == [
+        (10, 141, str(target_root_a)),
+        (11, 141, str(target_root_b)),
+    ]
+    assert torrent_rows == [
+        ("hash-a", 10, 141, str(target_root_a.parent)),
+        ("hash-b", 11, 141, str(target_root_b.parent)),
+    ]
+    assert plan["target_payload_ids"] == {"hash-a": 10, "hash-b": 11}
+    assert plan["target_payload_id"] == 10
+
+
 def test_build_views_skips_duplicate_target_entries(tmp_path):
     db_path = tmp_path / "catalog.db"
     conn = sqlite3.connect(db_path)

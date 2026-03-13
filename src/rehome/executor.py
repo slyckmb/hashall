@@ -41,6 +41,7 @@ from rehome.view_builder import (
     _ensure_hardlink,
     _normalize_rel_path,
     build_torrent_view,
+    derive_view_layout,
 )
 from rehome.reality import build_plan_reality_snapshot
 
@@ -1054,6 +1055,8 @@ class DemotionExecutor:
         progress_every = 5 if total <= 50 else 25
         files_cache: Dict[str, List] = dict(preloaded_files or {})
         seen_view_targets: set[tuple[str, str]] = set()
+        view_roots_by_key: Dict[tuple[str, str], str] = {}
+        constructed_payload_roots: Dict[str, str] = {}
         skipped_hashes: set[str] = set()
 
         conn = self._get_db_connection()
@@ -1081,6 +1084,9 @@ class DemotionExecutor:
                 root_name = target.get("root_name")
                 view_key = (str(target_save_path), str(root_name or ""))
                 if view_key in seen_view_targets:
+                    existing_root = view_roots_by_key.get(view_key)
+                    if existing_root:
+                        constructed_payload_roots[torrent_hash.lower()] = existing_root
                     self._log(
                         "  build_views_progress phase=skip_duplicate_view "
                         f"done={idx}/{total} hash={torrent_hash[:16]}"
@@ -1112,6 +1118,12 @@ class DemotionExecutor:
                     )
                     continue
 
+                layout = derive_view_layout(
+                    payload_root=payload_root,
+                    target_save_path=target_save_path,
+                    files=files,
+                    root_name=root_name,
+                )
                 link_start = time.monotonic()
                 try:
                     result = build_torrent_view(
@@ -1145,6 +1157,9 @@ class DemotionExecutor:
                     f"  build_views_progress phase=link done={idx}/{total} "
                     f"hash={torrent_hash[:16]} elapsed_s={link_elapsed:.1f}"
                 )
+                built_root = str(result.view_root.resolve())
+                view_roots_by_key[view_key] = built_root
+                constructed_payload_roots[torrent_hash.lower()] = built_root
 
             if skipped_hashes:
                 before = len(plan.get("affected_torrents") or [])
@@ -1170,6 +1185,14 @@ class DemotionExecutor:
                 )
                 if not filtered_torrents:
                     raise RuntimeError("No live torrents remain after build_views file checks")
+            if constructed_payload_roots:
+                prior_roots = {
+                    str(key).strip().lower(): str(value)
+                    for key, value in (plan.get("constructed_payload_roots") or {}).items()
+                    if str(key).strip() and str(value).strip()
+                }
+                prior_roots.update(constructed_payload_roots)
+                plan["constructed_payload_roots"] = prior_roots
         finally:
             conn.close()
 
@@ -1289,15 +1312,22 @@ class DemotionExecutor:
         """Build relocation targets for all torrents in plan."""
         relocations = []
         view_targets = plan.get("view_targets") or []
+        constructed_roots = {
+            str(key).strip().lower(): str(value)
+            for key, value in (plan.get("constructed_payload_roots") or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
 
         if view_targets:
             for target in view_targets:
+                torrent_hash = target["torrent_hash"]
                 if not target.get("source_save_path"):
-                    raise RuntimeError(f"Missing source_save_path for torrent {target['torrent_hash']}")
+                    raise RuntimeError(f"Missing source_save_path for torrent {torrent_hash}")
                 relocations.append({
-                    "torrent_hash": target["torrent_hash"],
+                    "torrent_hash": torrent_hash,
                     "source_save_path": target.get("source_save_path"),
                     "target_save_path": target["target_save_path"],
+                    "target_payload_root": constructed_roots.get(str(torrent_hash).strip().lower()),
                 })
             return relocations
 
@@ -1320,8 +1350,26 @@ class DemotionExecutor:
                 "torrent_hash": torrent_hash,
                 "source_save_path": str(source_save) if source_save else None,
                 "target_save_path": str(target_save_path),
+                "target_payload_root": constructed_roots.get(
+                    str(torrent_hash).strip().lower(),
+                    str(fallback_target),
+                ),
             })
         return relocations
+
+    def _target_payload_roots_for_relocations(self, plan: Dict, relocations: List[Dict]) -> Dict[str, Path]:
+        roots: Dict[str, Path] = {}
+        for relocation in relocations:
+            torrent_hash = str(relocation.get("torrent_hash") or "").strip().lower()
+            if not torrent_hash:
+                continue
+            target_root = str(relocation.get("target_payload_root") or "").strip()
+            if not target_root:
+                target_root = str(plan.get("target_path") or "").strip()
+            if not target_root:
+                continue
+            roots[torrent_hash] = canonicalize_path(Path(target_root).resolve())
+        return roots
 
     @staticmethod
     def _derive_target_save_path_for_torrent(target_path: Path, files: List[object]) -> Path:
@@ -3031,6 +3079,7 @@ class DemotionExecutor:
         conn = self._get_db_connection()
         try:
             relocations = self._build_relocations(conn, plan)
+            target_payload_roots = self._target_payload_roots_for_relocations(plan, relocations)
             payload_has_fs_uuid = any(
                 str(r[1]) == "fs_uuid" for r in conn.execute("PRAGMA table_info(payloads)").fetchall()
             )
@@ -3049,9 +3098,163 @@ class DemotionExecutor:
                 device_id=plan.get("target_device_id"),
                 fs_uuid=target_fs_uuid,
             )
+            source_payload_meta = None
+            if plan.get("payload_id") is not None:
+                source_payload_meta = conn.execute(
+                    """
+                    SELECT payload_hash, file_count, total_bytes, status, last_built_at
+                    FROM payloads
+                    WHERE payload_id = ?
+                    LIMIT 1
+                    """,
+                    (int(plan.get("payload_id")),),
+                ).fetchone()
+
+            def ensure_target_payload_row(
+                *,
+                target_root: Path,
+                reuse_payload_id: Optional[int] = None,
+            ) -> int:
+                target_root_text = str(target_root)
+                if payload_has_fs_uuid and target_fs_uuid:
+                    existing = conn.execute(
+                        """
+                        SELECT payload_id
+                        FROM payloads
+                        WHERE payload_hash = ? AND fs_uuid = ? AND root_path = ? AND status = 'complete'
+                        ORDER BY payload_id
+                        LIMIT 1
+                        """,
+                        (plan.get("payload_hash"), target_fs_uuid, target_root_text),
+                    ).fetchone()
+                else:
+                    existing = conn.execute(
+                        """
+                        SELECT payload_id
+                        FROM payloads
+                        WHERE payload_hash = ? AND device_id = ? AND root_path = ? AND status = 'complete'
+                        ORDER BY payload_id
+                        LIMIT 1
+                        """,
+                        (plan.get("payload_hash"), target_device_id, target_root_text),
+                    ).fetchone()
+                if existing:
+                    return int(existing[0])
+
+                payload_hash_value = str(
+                    (source_payload_meta[0] if source_payload_meta else None)
+                    or plan.get("payload_hash")
+                    or ""
+                )
+                file_count_value = int(
+                    (source_payload_meta[1] if source_payload_meta else None)
+                    or plan.get("file_count")
+                    or 0
+                )
+                total_bytes_value = int(
+                    (source_payload_meta[2] if source_payload_meta else None)
+                    or plan.get("total_bytes")
+                    or 0
+                )
+                status_value = str(
+                    (source_payload_meta[3] if source_payload_meta else None)
+                    or "complete"
+                )
+                last_built_at_value = source_payload_meta[4] if source_payload_meta else None
+
+                if reuse_payload_id is not None:
+                    if payload_has_fs_uuid:
+                        conn.execute(
+                            """
+                            UPDATE payloads
+                            SET payload_hash = ?,
+                                device_id = ?,
+                                fs_uuid = ?,
+                                root_path = ?,
+                                file_count = ?,
+                                total_bytes = ?,
+                                status = ?,
+                                last_built_at = ?,
+                                updated_at = julianday('now')
+                            WHERE payload_id = ?
+                            """,
+                            (
+                                payload_hash_value,
+                                target_device_id,
+                                target_fs_uuid,
+                                target_root_text,
+                                file_count_value,
+                                total_bytes_value,
+                                status_value,
+                                last_built_at_value,
+                                int(reuse_payload_id),
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE payloads
+                            SET payload_hash = ?,
+                                device_id = ?,
+                                root_path = ?,
+                                file_count = ?,
+                                total_bytes = ?,
+                                status = ?,
+                                last_built_at = ?,
+                                updated_at = julianday('now')
+                            WHERE payload_id = ?
+                            """,
+                            (
+                                payload_hash_value,
+                                target_device_id,
+                                target_root_text,
+                                file_count_value,
+                                total_bytes_value,
+                                status_value,
+                                last_built_at_value,
+                                int(reuse_payload_id),
+                            ),
+                        )
+                    return int(reuse_payload_id)
+
+                if payload_has_fs_uuid:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO payloads
+                            (payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status, last_built_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, julianday('now'))
+                        """,
+                        (
+                            payload_hash_value,
+                            target_device_id,
+                            target_fs_uuid,
+                            target_root_text,
+                            file_count_value,
+                            total_bytes_value,
+                            status_value,
+                            last_built_at_value,
+                        ),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO payloads
+                            (payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, julianday('now'))
+                        """,
+                        (
+                            payload_hash_value,
+                            target_device_id,
+                            target_root_text,
+                            file_count_value,
+                            total_bytes_value,
+                            status_value,
+                            last_built_at_value,
+                        ),
+                    )
+                return int(cursor.lastrowid)
 
             if plan.get("decision") == "REUSE":
-                # Reassign torrents to payload on target device
                 target_path = plan.get("target_path")
                 same_device_reuse = (
                     target_path
@@ -3059,166 +3262,35 @@ class DemotionExecutor:
                     and source_device_id is not None
                     and int(target_device_id) == int(source_device_id)
                 )
-                if payload_has_fs_uuid and target_fs_uuid:
-                    target_payload_row = conn.execute(
-                        """
-                        SELECT payload_id
-                        FROM payloads
-                        WHERE payload_hash = ? AND fs_uuid = ? AND status = 'complete'
-                          AND (? IS NULL OR root_path = ?)
-                        ORDER BY CASE WHEN root_path = ? THEN 0 ELSE 1 END, payload_id
-                        LIMIT 1
-                        """,
-                        (
-                            plan.get("payload_hash"),
-                            target_fs_uuid,
-                            target_path,
-                            target_path,
-                            target_path,
-                        ),
-                    ).fetchone()
-                else:
-                    target_payload_row = conn.execute(
-                        """
-                        SELECT payload_id
-                        FROM payloads
-                        WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
-                          AND (? IS NULL OR root_path = ?)
-                        ORDER BY CASE WHEN root_path = ? THEN 0 ELSE 1 END, payload_id
-                        LIMIT 1
-                        """,
-                        (
-                            plan.get("payload_hash"),
-                            target_device_id,
-                            target_path,
-                            target_path,
-                            target_path,
-                        ),
-                    ).fetchone()
-
-                target_payload_id: Optional[int] = None
-                if target_payload_row:
-                    target_payload_id = int(target_payload_row[0])
-                elif same_device_reuse and plan.get("payload_id") is not None:
-                    # Normalization case: target path can already exist on disk while
-                    # catalog still points to source payload row on the same device.
-                    if payload_has_fs_uuid and target_fs_uuid:
-                        source_payload_row = conn.execute(
-                            """
-                            SELECT payload_id
-                            FROM payloads
-                            WHERE payload_id = ? AND payload_hash = ? AND fs_uuid = ? AND status = 'complete'
-                            LIMIT 1
-                            """,
-                            (
-                                int(plan.get("payload_id")),
-                                plan.get("payload_hash"),
-                                target_fs_uuid,
-                            ),
-                        ).fetchone()
-                    else:
-                        source_payload_row = conn.execute(
-                            """
-                            SELECT payload_id
-                            FROM payloads
-                            WHERE payload_id = ? AND payload_hash = ? AND device_id = ? AND status = 'complete'
-                            LIMIT 1
-                            """,
-                            (
-                                int(plan.get("payload_id")),
-                                plan.get("payload_hash"),
-                                int(target_device_id),
-                            ),
-                        ).fetchone()
-                    if source_payload_row:
-                        target_payload_id = int(source_payload_row[0])
-
-                if target_payload_id is None:
-                    if plan.get("payload_id") is None:
-                        raise RuntimeError("Target payload not found for catalog sync")
-
-                    if payload_has_fs_uuid:
-                        source_payload_row = conn.execute(
-                            """
-                            SELECT payload_hash, file_count, total_bytes, status, last_built_at
-                            FROM payloads
-                            WHERE payload_id = ?
-                            LIMIT 1
-                            """,
-                            (int(plan.get("payload_id")),),
-                        ).fetchone()
-                    else:
-                        source_payload_row = conn.execute(
-                            """
-                            SELECT payload_hash, file_count, total_bytes, status, last_built_at
-                            FROM payloads
-                            WHERE payload_id = ?
-                            LIMIT 1
-                            """,
-                            (int(plan.get("payload_id")),),
-                        ).fetchone()
-
-                    if source_payload_row is None:
-                        raise RuntimeError("Target payload not found for catalog sync")
-
-                    source_payload_hash = str(source_payload_row[0] or plan.get("payload_hash") or "")
-                    source_file_count = int(source_payload_row[1] or plan.get("file_count") or 0)
-                    source_total_bytes = int(source_payload_row[2] or plan.get("total_bytes") or 0)
-                    source_status = str(source_payload_row[3] or "complete")
-                    source_last_built_at = source_payload_row[4]
-
-                    if payload_has_fs_uuid:
-                        cursor = conn.execute(
-                            """
-                            INSERT INTO payloads
-                                (payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status, last_built_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, julianday('now'))
-                            """,
-                            (
-                                source_payload_hash,
-                                target_device_id,
-                                target_fs_uuid,
-                                target_path,
-                                source_file_count,
-                                source_total_bytes,
-                                source_status,
-                                source_last_built_at,
-                            ),
-                        )
-                    else:
-                        cursor = conn.execute(
-                            """
-                            INSERT INTO payloads
-                                (payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, julianday('now'))
-                            """,
-                            (
-                                source_payload_hash,
-                                target_device_id,
-                                target_path,
-                                source_file_count,
-                                source_total_bytes,
-                                source_status,
-                                source_last_built_at,
-                            ),
-                        )
-                    target_payload_id = int(cursor.lastrowid)
-
-                plan["target_payload_id"] = target_payload_id
-
-                # Same-device REUSE may intentionally "re-point" the canonical payload
-                # root to an existing target view path (normalization flow).
-                if same_device_reuse:
-                    conn.execute(
-                        """
-                        UPDATE payloads
-                        SET root_path = ?, updated_at = julianday('now')
-                        WHERE payload_id = ?
-                        """,
-                        (target_path, target_payload_id),
+                primary_hash = str(plan.get("torrent_hash") or "").strip().lower()
+                target_payload_ids: Dict[str, int] = {}
+                for r in relocations:
+                    torrent_hash = str(r.get("torrent_hash") or "").strip().lower()
+                    target_root = target_payload_roots.get(torrent_hash)
+                    if target_root is None:
+                        raise RuntimeError(f"Missing target payload root for catalog sync: {torrent_hash}")
+                    reuse_payload_id = None
+                    if (
+                        same_device_reuse
+                        and plan.get("payload_id") is not None
+                        and torrent_hash == primary_hash
+                        and str(target_root) == str(target_path)
+                    ):
+                        reuse_payload_id = int(plan.get("payload_id"))
+                    target_payload_ids[torrent_hash] = ensure_target_payload_row(
+                        target_root=target_root,
+                        reuse_payload_id=reuse_payload_id,
                     )
 
+                plan["target_payload_ids"] = target_payload_ids
+                plan["target_payload_id"] = target_payload_ids.get(primary_hash) or next(
+                    iter(target_payload_ids.values()),
+                    None,
+                )
+
                 for r in relocations:
+                    torrent_hash = str(r.get("torrent_hash") or "").strip().lower()
+                    target_payload_id = target_payload_ids[torrent_hash]
                     if torrent_has_fs_uuid:
                         conn.execute(
                             """
@@ -3231,7 +3303,7 @@ class DemotionExecutor:
                                 target_device_id,
                                 target_fs_uuid,
                                 r.get("target_save_path"),
-                                r.get("torrent_hash"),
+                                torrent_hash,
                             ),
                         )
                     else:
@@ -3245,52 +3317,72 @@ class DemotionExecutor:
                                 target_payload_id,
                                 target_device_id,
                                 r.get("target_save_path"),
-                                r.get("torrent_hash"),
+                                torrent_hash,
                             ),
                         )
 
                 self._sync_files_catalog_for_reuse_cleanup(conn, plan)
 
             elif plan.get("decision") == "MOVE":
-                plan["target_payload_id"] = plan.get("payload_id")
-                # Update payload location
-                if payload_has_fs_uuid:
-                    conn.execute(
-                        """
-                        UPDATE payloads
-                        SET device_id = ?, fs_uuid = ?, root_path = ?, updated_at = julianday('now')
-                        WHERE payload_id = ?
-                        """,
-                        (target_device_id, target_fs_uuid, plan.get("target_path"), plan.get("payload_id")),
-                    )
-                else:
-                    conn.execute(
-                        """
-                        UPDATE payloads
-                        SET device_id = ?, root_path = ?, updated_at = julianday('now')
-                        WHERE payload_id = ?
-                        """,
-                        (target_device_id, plan.get("target_path"), plan.get("payload_id"))
+                primary_hash = str(plan.get("torrent_hash") or "").strip().lower()
+                target_payload_ids: Dict[str, int] = {}
+                primary_target_root = target_payload_roots.get(primary_hash)
+                for r in relocations:
+                    torrent_hash = str(r.get("torrent_hash") or "").strip().lower()
+                    target_root = target_payload_roots.get(torrent_hash)
+                    if target_root is None:
+                        raise RuntimeError(f"Missing target payload root for MOVE catalog sync: {torrent_hash}")
+                    reuse_payload_id = None
+                    if (
+                        plan.get("payload_id") is not None
+                        and (
+                            torrent_hash == primary_hash
+                            or (primary_target_root is not None and target_root == primary_target_root)
+                        )
+                    ):
+                        reuse_payload_id = int(plan.get("payload_id"))
+                    target_payload_ids[torrent_hash] = ensure_target_payload_row(
+                        target_root=target_root,
+                        reuse_payload_id=reuse_payload_id,
                     )
 
+                plan["target_payload_ids"] = target_payload_ids
+                plan["target_payload_id"] = target_payload_ids.get(primary_hash) or next(
+                    iter(target_payload_ids.values()),
+                    None,
+                )
+
                 for r in relocations:
+                    torrent_hash = str(r.get("torrent_hash") or "").strip().lower()
+                    target_payload_id = target_payload_ids[torrent_hash]
                     if torrent_has_fs_uuid:
                         conn.execute(
                             """
                             UPDATE torrent_instances
-                            SET device_id = ?, fs_uuid = ?, save_path = ?
+                            SET payload_id = ?, device_id = ?, fs_uuid = ?, save_path = ?
                             WHERE torrent_hash = ?
                             """,
-                            (target_device_id, target_fs_uuid, r.get("target_save_path"), r.get("torrent_hash")),
+                            (
+                                target_payload_id,
+                                target_device_id,
+                                target_fs_uuid,
+                                r.get("target_save_path"),
+                                torrent_hash,
+                            ),
                         )
                     else:
                         conn.execute(
                             """
                             UPDATE torrent_instances
-                            SET device_id = ?, save_path = ?
+                            SET payload_id = ?, device_id = ?, save_path = ?
                             WHERE torrent_hash = ?
                             """,
-                            (target_device_id, r.get("target_save_path"), r.get("torrent_hash"))
+                            (
+                                target_payload_id,
+                                target_device_id,
+                                r.get("target_save_path"),
+                                torrent_hash,
+                            ),
                         )
 
                 self._sync_files_catalog_for_move(conn, plan)

@@ -480,3 +480,87 @@ def test_build_plan_reality_snapshot_blocks_qbit_only_out_of_plan_siblings(tmp_p
     assert snapshot["summary"]["qbit_out_of_plan_siblings"] == 1
     assert snapshot["out_of_plan_qbit_siblings"][0]["torrent_hash"] == "orphan999"
     assert any("same-name out-of-plan torrent" in warning for warning in snapshot["group_warnings"])
+
+
+def test_build_plan_reality_snapshot_reports_legacy_shared_payload_rows(tmp_path):
+    source_root = tmp_path / "pool-data" / "cross-seed" / "seedpool (API)" / "Movie.mkv"
+    target_root = tmp_path / "pool-media" / "cross-seed" / "seedpool (API)" / "Movie.mkv"
+    source_root.parent.mkdir(parents=True, exist_ok=True)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    source_root.write_bytes(b"old")
+    target_root.write_bytes(b"new")
+
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY,
+                payload_hash TEXT,
+                device_id INTEGER,
+                root_path TEXT,
+                status TEXT
+            );
+            CREATE TABLE torrent_instances (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_id INTEGER,
+                device_id INTEGER,
+                save_path TEXT,
+                tags TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, status)
+            VALUES (1, 'payload-1', 141, ?, 'complete')
+            """,
+            (str(target_root),),
+        )
+        conn.executemany(
+            """
+            INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, tags)
+            VALUES (?, 1, 141, ?, 'rehome')
+            """,
+            [
+                ("abc123", str(target_root.parent)),
+                ("def456", str(target_root.parent)),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(target_root.parent),
+        qbt_save_path=str(target_root.parent),
+    )
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="Movie.mkv",
+                state="stalledUP",
+                progress=1.0,
+                save_path=str(target_root.parent),
+                content_path=str(target_root),
+            )
+        ]
+    )
+
+    snapshot = build_plan_reality_snapshot(
+        plan=_make_plan(source_root, target_root),
+        qb_client=qb,
+        catalog_path=catalog,
+        fastresume_dir=fastresume_dir,
+    )
+
+    assert snapshot["summary"]["shared_payload_rows"] == 1
+    assert snapshot["summary"]["shared_payload_torrents"] == 2
+    assert any("shared payload row(s)" in warning for warning in snapshot["group_warnings"])
+    assert {row["torrent_hash"] for row in snapshot["shared_payload_members"]} == {"abc123", "def456"}

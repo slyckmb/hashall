@@ -178,6 +178,7 @@ def _catalog_payload_group_members(
             SELECT lower(ti.torrent_hash) AS torrent_hash,
                    {save_path_expr} AS ti_save_path,
                    {ti_device_expr} AS ti_device_id,
+                   p.payload_id AS payload_id,
                    p.root_path AS payload_root_path,
                    p.device_id AS payload_device_id
             FROM torrent_instances ti
@@ -192,6 +193,7 @@ def _catalog_payload_group_members(
                 "torrent_hash": str(row["torrent_hash"] or "").strip().lower(),
                 "catalog_ti_save_path": _normalize_path(row["ti_save_path"]),
                 "catalog_ti_device_id": int(row["ti_device_id"] or 0),
+                "catalog_payload_id": int(row["payload_id"] or 0),
                 "catalog_payload_root_path": _normalize_path(row["payload_root_path"]),
                 "catalog_payload_device_id": int(row["payload_device_id"] or 0),
             }
@@ -501,6 +503,18 @@ def build_plan_reality_snapshot(
     summary_counts = Counter(str(row.get("classification") or "") for row in rows)
     affected_set = set(affected)
     sibling_members = [member for member in payload_group_members if member.get("torrent_hash")]
+    payload_id_counts = Counter(
+        int(member.get("catalog_payload_id") or 0)
+        for member in sibling_members
+        if int(member.get("catalog_payload_id") or 0) > 0
+    )
+    shared_payload_members = [
+        member
+        for member in sibling_members
+        if int(member.get("catalog_payload_id") or 0) > 0
+        and payload_id_counts[int(member.get("catalog_payload_id") or 0)] > 1
+    ]
+    shared_payload_rows = sum(1 for count in payload_id_counts.values() if count > 1)
     uncovered_catalog_members = [
         member for member in sibling_members if member["torrent_hash"] not in affected_set
     ]
@@ -544,6 +558,15 @@ def build_plan_reality_snapshot(
             "moving only the selected row could strand those stale sibling refs "
             f"(sample={sample_hashes})."
         )
+    if shared_payload_rows:
+        sample_hashes = ",".join(member["torrent_hash"][:16] for member in shared_payload_members[:5])
+        group_warnings.append(
+            "Catalog still groups "
+            f"{len(shared_payload_members)} torrent(s) for this payload hash into "
+            f"{shared_payload_rows} shared payload row(s); newly constructed migrations should "
+            "de-hitchhike these hashes into unique target payload roots "
+            f"(sample={sample_hashes})."
+        )
     group_state, group_reason = _summarize_group(rows, phase=phase)
     if uncovered_qbit_members and phase == "pre":
         group_state = "blocked_qbit_sibling_gap"
@@ -569,10 +592,13 @@ def build_plan_reality_snapshot(
             "out_of_plan_siblings": len(uncovered_members),
             "catalog_out_of_plan_siblings": len(uncovered_catalog_members),
             "qbit_out_of_plan_siblings": len(uncovered_qbit_members),
+            "shared_payload_rows": shared_payload_rows,
+            "shared_payload_torrents": len(shared_payload_members),
         },
         "group_warnings": group_warnings,
         "out_of_plan_siblings": uncovered_members,
         "out_of_plan_catalog_siblings": uncovered_catalog_members,
         "out_of_plan_qbit_siblings": uncovered_qbit_members,
+        "shared_payload_members": shared_payload_members,
         "rows": rows,
     }
