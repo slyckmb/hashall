@@ -24,7 +24,18 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.5.0`.
+  - `hashall` version now `0.5.1`.
+  - latest planner-expansion hardening:
+    - `relocate-plan` now includes already-targeted same-`payload_hash` siblings instead of silently limiting batches to source-root members
+    - refreshed pool-data -> pool-media remainder is now `31` plans / `189` rows
+    - refreshed drift summary:
+      - `attention_rows=105`
+      - `plans_with_out_of_plan_siblings=11`
+      - `18 ready_repoint_or_reconcile`
+      - `6 ready_catalog_reconcile`
+      - `5 blocked_qbit_sibling_gap`
+      - `2 blocked_target_view_missing`
+    - treat `out/rehome-plan-pool-data-to-media-refresh5-20260313.json` and `...-drift.json` as the active remainder baseline
   - newest migration invariant:
     - `rehome apply` now creates or assigns one target payload row per migrated hash based on the actual built destination root
     - drift snapshots now expose legacy shared-target groups with:

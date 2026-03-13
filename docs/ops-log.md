@@ -5,7 +5,18 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-12):
 
-- `hashall` is now `0.5.0`.
+- `hashall` is now `0.5.1`.
+- New 2026-03-13 planner-expansion note:
+  - `relocate-plan` now pulls already-targeted same-`payload_hash` siblings into root-to-root batches
+  - refreshed pool-data -> pool-media remainder is now represented as `31` plans / `189` rows instead of the older partial `12`-plan view
+  - latest drift summary:
+    - `attention_rows=105`
+    - `plans_with_out_of_plan_siblings=11`
+    - `18 ready_repoint_or_reconcile`
+    - `6 ready_catalog_reconcile`
+    - `5 blocked_qbit_sibling_gap`
+    - `2 blocked_target_view_missing`
+  - this surfaced hidden family members earlier, which is the intended anti-staleness behavior
 - New 2026-03-13 unique-target payload note:
   - `rehome` no longer writes fresh migrations back onto one shared target payload row
   - catalog sync now creates per-hash target payload rows from the actual built destination roots

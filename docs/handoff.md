@@ -2,7 +2,22 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.5.0`.
+- `hashall` semver baseline is now `0.5.1`.
+- New 2026-03-13 planner-expansion hardening:
+  - `relocate-plan` now includes already-targeted siblings for the same `payload_hash` instead of silently planning only the source-root subset
+  - this makes refreshed pool-data -> pool-media plans noisier but more truthful: the current refreshed remainder is `31` plans / `189` rows, not the older misleading `12`-plan subset
+  - current refreshed drift summary from `out/rehome-plan-pool-data-to-media-refresh5-20260313-drift.json`:
+    - `plans=31`
+    - `attention_rows=105`
+    - `plans_with_out_of_plan_siblings=11`
+    - group states:
+      - `18 ready_repoint_or_reconcile`
+      - `6 ready_catalog_reconcile`
+      - `5 blocked_qbit_sibling_gap`
+      - `2 blocked_target_view_missing`
+  - operator meaning:
+    - the planner is no longer hiding family members that already live under `/pool/media`
+    - remaining brittleness is now concentrated in partial sibling coverage and legacy shared-target debt, not silent underplanning
 - New 2026-03-13 unique-payload rehome slice:
   - the main code creator of fresh N->1 hitchhiker groups was `rehome` catalog sync, not rsync/view building
   - `rehome apply` used to assign one target `payload_id` to every migrated hash in a group

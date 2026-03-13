@@ -4,7 +4,22 @@ Last updated: 2026-03-13
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.5.0`.
+- `hashall` is now `0.5.1`.
+- New 2026-03-13 planner-expansion note:
+  - `relocate-plan` now includes already-targeted same-`payload_hash` siblings when building root-to-root batches
+  - this intentionally expanded the refreshed remainder from a misleading `12` plans / `31` rows to the real `31` plans / `189` rows
+  - latest refreshed artifacts:
+    - `out/rehome-plan-pool-data-to-media-refresh5-20260313.json`
+    - `out/rehome-plan-pool-data-to-media-refresh5-20260313-drift.json`
+  - refreshed drift summary:
+    - `attention_rows=105`
+    - `plans_with_out_of_plan_siblings=11`
+    - group states:
+      - `18 ready_repoint_or_reconcile`
+      - `6 ready_catalog_reconcile`
+      - `5 blocked_qbit_sibling_gap`
+      - `2 blocked_target_view_missing`
+  - this is a planning/truthfulness improvement, not a new migration regression
 - New 2026-03-13 unique-target invariant:
   - new `rehome apply` runs no longer collapse every migrated hash back onto one shared target `payload_id`
   - catalog sync now creates or assigns one target payload row per migrated torrent hash based on the actual built destination root

@@ -18,7 +18,18 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.5.0`
+   - `hashall` semver is `0.5.1`
+   - latest planner-expansion hardening:
+     - `relocate-plan` now includes already-targeted same-`payload_hash` siblings instead of silently planning only source-root members
+     - refreshed pool-data -> pool-media remainder is now `31` plans / `189` rows
+     - refreshed drift summary:
+       - `attention_rows=105`
+       - `plans_with_out_of_plan_siblings=11`
+       - `18 ready_repoint_or_reconcile`
+       - `6 ready_catalog_reconcile`
+       - `5 blocked_qbit_sibling_gap`
+       - `2 blocked_target_view_missing`
+     - use this richer `refresh5` view as the new source of truth for the remaining migration lane
    - latest unique-target hardening:
      - new `rehome apply` runs create/assign one target payload row per migrated hash instead of collapsing the whole group onto one target `payload_id`
      - drift snapshots now surface legacy shared-target groups through:
