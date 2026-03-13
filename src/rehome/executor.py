@@ -36,7 +36,12 @@ from hashall.qb_zfs_relocate import (
     row_selection,
     write_json,
 )
-from rehome.view_builder import build_torrent_view
+from rehome.view_builder import (
+    _common_prefix,
+    _ensure_hardlink,
+    _normalize_rel_path,
+    build_torrent_view,
+)
 from rehome.reality import build_plan_reality_snapshot
 
 
@@ -1165,6 +1170,91 @@ class DemotionExecutor:
                 )
                 if not filtered_torrents:
                     raise RuntimeError("No live torrents remain after build_views file checks")
+        finally:
+            conn.close()
+
+    def _preflight_existing_view_conflicts(
+        self,
+        payload_root: Path,
+        view_targets: List[Dict],
+        plan: Dict,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
+        """Read-only check for conflicting preexisting target view paths."""
+        if not view_targets:
+            return
+
+        files_cache: Dict[str, List] = dict(preloaded_files or {})
+        seen_view_targets: set[tuple[str, str]] = set()
+
+        conn = self._get_db_connection()
+        table_name = self._get_device_table_name(conn, plan.get("target_device_id"))
+        mount_point, preferred_mount = self._get_device_mount_info(conn, plan.get("target_device_id"))
+        path_sha_cache: Dict[str, Optional[str]] = {}
+
+        def compare_hint(src: Path, dst: Path) -> Optional[bool]:
+            if not table_name:
+                return None
+            src_sha = self._get_known_sha256_for_abs_path(
+                conn, table_name, src, mount_point, preferred_mount, path_sha_cache
+            )
+            dst_sha = self._get_known_sha256_for_abs_path(
+                conn, table_name, dst, mount_point, preferred_mount, path_sha_cache
+            )
+            if src_sha and dst_sha:
+                return src_sha == dst_sha
+            return None
+
+        try:
+            for target in view_targets:
+                torrent_hash = str(target.get("torrent_hash") or "")
+                target_save_path = Path(str(target.get("target_save_path") or ""))
+                root_name = target.get("root_name")
+                view_key = (str(target_save_path), str(root_name or ""))
+                if view_key in seen_view_targets:
+                    continue
+                seen_view_targets.add(view_key)
+
+                if torrent_hash in files_cache:
+                    files = files_cache[torrent_hash]
+                else:
+                    files = self.qbit_client.get_torrent_files(torrent_hash)
+                    files_cache[torrent_hash] = files
+                if not files:
+                    continue
+
+                common_prefix = _common_prefix(files)
+                single_file = payload_root.is_file()
+                single_file_direct_dst: Optional[Path] = None
+                if single_file:
+                    first_rel = _normalize_rel_path(files[0].name, common_prefix, root_name, payload_root)
+                    if len(first_rel.parts) == 1 and target_save_path.name == first_rel.name:
+                        single_file_direct_dst = target_save_path
+                        view_root = target_save_path.parent
+                    else:
+                        view_root = target_save_path
+                else:
+                    view_root = target_save_path / (root_name or payload_root.name)
+
+                for file_row in files:
+                    rel = _normalize_rel_path(file_row.name, common_prefix, root_name, payload_root)
+                    if single_file:
+                        src = payload_root
+                        dst = single_file_direct_dst if single_file_direct_dst is not None else (view_root / rel)
+                    else:
+                        src = payload_root / rel
+                        dst = view_root / rel
+                        if len(files) == 1 and len(rel.parts) == 1 and view_root.name == rel.name:
+                            dst = view_root
+                    if not (dst.exists() or dst.is_symlink()):
+                        continue
+                    try:
+                        _ensure_hardlink(src, dst, compare_hint=compare_hint)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Target view conflict for {torrent_hash[:16]} at {dst}: {exc}"
+                        ) from exc
         finally:
             conn.close()
 
@@ -3489,6 +3579,13 @@ class DemotionExecutor:
 
         # Build views (if mapping provided)
         t0 = time.monotonic()
+        self._log("step=preflight_target_views")
+        self._preflight_existing_view_conflicts(
+            target_path,
+            plan.get("view_targets") or [],
+            plan,
+            preloaded_files=preloaded_files,
+        )
         self._log("step=build_views")
         self._build_views(
             target_path,
@@ -3650,6 +3747,13 @@ class DemotionExecutor:
         target_path = donor.target_path
 
         t0 = time.monotonic()
+        self._log("step=preflight_target_views")
+        self._preflight_existing_view_conflicts(
+            target_path,
+            plan.get("view_targets") or [],
+            plan,
+            preloaded_files=preloaded_files,
+        )
         self._log("step=build_views")
         self._build_views(
             target_path,

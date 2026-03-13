@@ -4,7 +4,22 @@ Last updated: 2026-03-12
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.4.184`.
+- `hashall` is now `0.4.185`.
+- Latest 2026-03-12 guarded target-view note:
+  - `rehome` now runs `step=preflight_target_views` before `build_views` on guarded `REUSE` / donor-target paths
+  - any preexisting destination view file is compared read-only against the source before new hardlinks are created
+  - if one target-view path already contains different bytes, the whole plan now aborts before any sibling view mutation
+  - this closes the `Novitiate...` partial-view-build risk
+  - live proof:
+    - `The.Long.Walk.2025...` `REUSE` completed cleanly after this change
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
+  - current live pool-data baseline:
+    - `old_path_count=45`
+    - `new_path_count=306`
+    - qB health snapshot:
+      - `stalledup=5147`
+      - `uploading=5`
+      - `stoppeddl=1` (`Alien Romulus`, real repair lane)
 - Latest stale reconnect hardening on 2026-03-12:
   - `qb-missing-remediate` now builds guarded reconnect plans for `root_drift_after_rehome_reuse` rows when the mapped target payload exists under a different catalog `payload_hash`
   - that exact gap was proven live on `Peppermint...`:

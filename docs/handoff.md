@@ -2,7 +2,23 @@
 
 ## Key Facts
 
-- `hashall` package semver is now `0.4.184`.
+- `hashall` package semver is now `0.4.185`.
+- New 2026-03-12 preflight target-view hardening landed after the `Novitiate...` partial-conflict abort:
+  - `rehome` now logs `step=preflight_target_views` before `build_views` on guarded `REUSE` / target-donor paths
+  - it probes any preexisting target-view files read-only and aborts before creating any new hardlinks if one of those destination paths already exists with conflicting bytes
+  - plain-English root cause for that abort:
+    - one `Novitiate...` target view path on `/pool/media/.../Aither (API)` already held different content
+    - old behavior could build an earlier clean sibling view and only then explode on the conflicting path
+    - new behavior blocks before mutation, so the run fails closed instead of leaving a partial view build behind
+  - regression:
+    - `tests/test_rehome_catalog_sync.py::test_preflight_existing_view_conflicts_blocks_before_any_link`
+  - live proof after the hardening:
+    - `The.Long.Walk.2025...` `REUSE` completed successfully with the new `step=preflight_target_views` phase
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
+  - current live migration baseline after that wave:
+    - `old_path_count=45`
+    - `new_path_count=306`
+    - qB health: `stalledup=5147`, `uploading=5`, `stoppeddl=1` (`Alien Romulus`, still repair-lane only)
 - New 2026-03-12 stale-root reconnect hardening landed after the `Peppermint` gap:
   - `hashall rehome qb-missing-remediate` now accepts `root_drift_after_rehome_reuse` rows when the mapped target payload exists under a different catalog `payload_hash`
   - reconnect donor selection now falls back to the exact mapped target payload row instead of requiring same-`payload_hash` sibling donors

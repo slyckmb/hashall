@@ -3,6 +3,7 @@
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -1626,6 +1627,64 @@ def test_build_views_uses_preloaded_files_cache(tmp_path):
     assert built.exists()
     assert built.stat().st_ino == payload_file.stat().st_ino
     assert after_calls == before_calls
+
+
+def test_preflight_existing_view_conflicts_blocks_before_any_link(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            mount_point TEXT,
+            preferred_mount_point TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-44", 44, str(tmp_path), str(tmp_path)),
+    )
+    conn.commit()
+    conn.close()
+
+    payload_file = tmp_path / "canonical" / "Movie.2024.mkv"
+    payload_file.parent.mkdir(parents=True, exist_ok=True)
+    payload_file.write_bytes(b"payload")
+    files = [QBitFile(name=payload_file.name, size=payload_file.stat().st_size)]
+
+    clean_save = tmp_path / "views" / "cross-seed" / "TrackerA"
+    conflict_save = tmp_path / "views" / "cross-seed" / "TrackerB"
+    conflict_save.mkdir(parents=True, exist_ok=True)
+    conflict_target = conflict_save / payload_file.name
+    conflict_target.write_bytes(b"other")
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
+    executor.qbit_client = FakeQbitClientWithFiles(default_path=str(clean_save), files=files)
+
+    plan = {
+        "target_device_id": 44,
+    }
+    view_targets = [
+        {
+            "torrent_hash": "hash_a",
+            "target_save_path": str(clean_save),
+            "root_name": payload_file.name,
+        },
+        {
+            "torrent_hash": "hash_b",
+            "target_save_path": str(conflict_save),
+            "root_name": payload_file.name,
+        },
+    ]
+
+    with pytest.raises(RuntimeError, match="Target view conflict"):
+        executor._preflight_existing_view_conflicts(payload_file, view_targets, plan)
+
+    assert not (clean_save / payload_file.name).exists()
+    assert conflict_target.read_bytes() == b"other"
 
 
 def test_execute_reuse_skips_stale_sibling_hash_with_missing_files(tmp_path, monkeypatch):

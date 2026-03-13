@@ -24,7 +24,20 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.184`.
+  - `hashall` version now `0.4.185`.
+  - latest `rehome` target-view hardening:
+    - `step=preflight_target_views` now runs before `build_views`
+    - conflicting preexisting target-view files are detected read-only and block the plan before any sibling view mutation
+    - this closes the `Novitiate...` partial-view-build risk
+    - live proof:
+      - `The.Long.Walk.2025...` `REUSE` completed cleanly at `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
+  - current live migration baseline:
+    - `old_path_count=45`
+    - `new_path_count=306`
+    - qB health:
+      - `stalledup=5147`
+      - `uploading=5`
+      - `stoppeddl=1` (`Alien Romulus`, repair lane only)
   - latest stale reconnect proof:
     - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated
     - `qb-missing-remediate` now builds guarded reconnect plans for `root_drift_after_rehome_reuse` rows when the surviving mapped target payload exists under a different catalog `payload_hash`

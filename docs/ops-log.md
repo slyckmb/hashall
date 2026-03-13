@@ -5,7 +5,18 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-12):
 
-- `hashall` is now `0.4.184`.
+- `hashall` is now `0.4.185`.
+- New 2026-03-12 target-view preflight note:
+  - `rehome` now probes preexisting target view paths before `build_views`
+  - if an existing destination file differs from the source bytes, the plan aborts before creating any new hardlinks
+  - this closes the `Novitiate...` partial-view-build risk that previously allowed one clean sibling view to be created before a later conflicting path exploded
+  - live proof:
+    - `The.Long.Walk.2025...` `REUSE` completed successfully with the new `step=preflight_target_views` phase
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
+  - current live migration baseline:
+    - `old_path_count=45`
+    - `new_path_count=306`
+    - qB health: `stalledup=5147`, `uploading=5`, `stoppeddl=1`
 - New 2026-03-12 `qb-missing-remediate` note:
   - old `/data -> /pool/data` reuse-drift rows can now reconnect against an exact mapped target payload even when the surviving target catalog row has a different `payload_hash`
   - this fixed the `Peppermint...` gap where dry-run previously showed `selected_plans: 0`

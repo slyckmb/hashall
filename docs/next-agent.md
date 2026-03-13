@@ -18,7 +18,20 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.184`
+   - `hashall` semver is `0.4.185`
+   - latest preflight-view hardening:
+     - `rehome` now runs `step=preflight_target_views` before `build_views`
+     - conflicting preexisting target-view files are detected read-only and block the whole plan before any sibling hardlinks are created
+     - this specifically closes the `Novitiate...` partial-view-build risk
+     - live proof:
+       - `The.Long.Walk.2025...` `REUSE` completed cleanly at `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
+   - current live migration baseline:
+     - `old_path_count=45`
+     - `new_path_count=306`
+     - qB health:
+       - `stalledup=5147`
+       - `uploading=5`
+       - `stoppeddl=1` (`Alien Romulus`, repair lane only)
    - `qb-zfs-relocate` semver is `0.1.13`
    - latest stale reconnect proof:
      - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated
