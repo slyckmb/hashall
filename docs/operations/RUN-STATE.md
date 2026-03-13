@@ -73,6 +73,18 @@ Last updated: 2026-03-13
   - next source-of-truth artifacts:
     - `out/rehome-plan-pool-data-to-media-refresh9-20260313.json`
     - `candidates=29`, `reuse=22`, `move=7`, `skipped=2`
+- New explicit next proving task:
+  - use the `Alien Romulus` payload family as the next focused `rehome` / repair / `~noHL` engineering lane after the current cleanup + planner work
+  - current observed live shape:
+    - `14` sibling candidates
+    - `7` `~noHL` siblings
+    - one known incomplete row (`1376e795...`, `PD`, about `43.72%`) that remains repair-lane only
+    - multiple healthy `/data/...` siblings that should be usable as donor candidates
+  - engineering objective:
+    - prove that `~noHL` siblings can be lifted to `pool-media`
+    - ensure each resulting qB item gets its own correct payload tree there
+    - keep those per-item trees hardlink-backed instead of creating redundant physical byte copies
+  - do not treat this as a plain pool-data remainder batch item; it is a deliberate feature/proving task
 
 - `hashall` is now `0.6.8`.
 - Latest 2026-03-12 preflight feedback note:

@@ -63,6 +63,13 @@ Latest stale-assumption hardening note (2026-03-13):
   - `MOVE`
   - `affected_torrents=9`
   - `unique_view_targets=9`
+- New queued proving task:
+  - `Alien Romulus` sibling family
+  - current observed scope:
+    - `14` sibling candidates
+    - `7` `~noHL` siblings
+    - one known incomplete `PD` row (`1376e795...`)
+  - use this group next to prove that rehome/repair can lift the `~noHL` siblings to `pool-media` as unique per-item payload trees backed by hardlinks where possible
 
 - `hashall` is now `0.6.8`.
 - New 2026-03-12 preflight feedback note:

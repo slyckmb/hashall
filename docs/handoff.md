@@ -79,6 +79,14 @@
       - `reuse=22`
       - `move=7`
       - `skipped=2` (`already_targeted_view_targets`)
+  - explicit next proving task to keep in the active backlog:
+    - `Alien Romulus`
+    - why it matters:
+      - this is a stalled mixed sibling family with `14` candidates and `7` `~noHL` siblings
+      - it is a good next proving lane for rehome/repair logic that needs to lift `~noHL` siblings onto `pool-media`
+      - the target outcome should be one correct per-item payload tree per qB item, backed by hardlinks where possible, not duplicate physical copies
+    - current caution:
+      - keep `1376e795...` in the repair lane until the family is audited as a whole
 
 - `hashall` package semver is now `0.6.8`.
 - New 2026-03-12 preflight feedback hardening landed after the long `Snowfall...` quiet window:

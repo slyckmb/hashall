@@ -101,6 +101,15 @@ Prompt-critical context (2026-03-12):
       - `uploading=5`
       - `stoppeddl=1` (`Alien Romulus`, repair lane only)
       - `stalleddl=2` (outside the pool-data lane under `/data/media/.../radarr`)
+    - explicit next proving task:
+      - use the `Alien Romulus` sibling family next
+      - current observed scope:
+        - `14` sibling candidates
+        - `7` `~noHL` siblings
+        - one known incomplete `PD` row (`1376e795...`)
+      - goal:
+        - prove that rehome/repair can bring the `~noHL` siblings over to `pool-media`
+        - keep the resulting destination as unique per-item payload trees backed by hardlinks where possible
   - latest stale reconnect proof:
     - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated
     - `qb-missing-remediate` now builds guarded reconnect plans for `root_drift_after_rehome_reuse` rows when the surviving mapped target payload exists under a different catalog `payload_hash`

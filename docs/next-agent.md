@@ -84,11 +84,19 @@ If context is compacted, recover with this sequence:
      - active remainder plan:
        - `out/rehome-plan-pool-data-to-media-refresh9-20260313.json`
        - `29` candidates (`22 REUSE`, `7 MOVE`, `2` skipped as already targeted no-ops)
-     - qB health:
-       - `stalledup=5147`
-       - `uploading=5`
-       - `stoppeddl=1` (`Alien Romulus`, repair lane only)
-       - `stalleddl=2` (outside the pool-data lane under `/data/media/.../radarr`)
+    - qB health:
+      - `stalledup=5147`
+      - `uploading=5`
+      - `stoppeddl=1` (`Alien Romulus`, repair lane only)
+      - `stalleddl=2` (outside the pool-data lane under `/data/media/.../radarr`)
+    - explicit next proving task to preserve:
+      - `Alien Romulus` mixed sibling family
+      - current observed scope:
+        - `14` sibling candidates
+        - `7` `~noHL` siblings
+        - one `PD` row (`1376e795...`) already known incomplete
+      - use this family next to prove that rehome/repair can lift the `~noHL` siblings to `pool-media`
+      - the success condition is unique per-item payload trees backed by hardlinks, not redundant physical copies
    - `qb-zfs-relocate` semver is `0.1.13`
    - latest stale reconnect proof:
      - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated
