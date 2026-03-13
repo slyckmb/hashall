@@ -2,6 +2,14 @@
 
 ## Key Facts
 
+- `hashall` semver baseline is now `0.5.0`.
+- New 2026-03-13 unique-payload rehome slice:
+  - the main code creator of fresh N->1 hitchhiker groups was `rehome` catalog sync, not rsync/view building
+  - `rehome apply` used to assign one target `payload_id` to every migrated hash in a group
+  - it now assigns or creates one target payload row per hash using the actual built destination root
+  - drift snapshots now warn when a payload hash is still grouped into shared catalog payload rows
+  - this is the first step toward eliminating shared hitchhiker target groups from new pool-media migrations
+
 - `hashall` package semver is now `0.4.186`.
 - New 2026-03-12 preflight feedback hardening landed after the long `Snowfall...` quiet window:
   - `_preflight_existing_view_conflicts()` now emits:

@@ -18,7 +18,14 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.186`
+   - `hashall` semver is `0.5.0`
+   - latest unique-target hardening:
+     - new `rehome apply` runs create/assign one target payload row per migrated hash instead of collapsing the whole group onto one target `payload_id`
+     - drift snapshots now surface legacy shared-target groups through:
+       - `shared_payload_rows`
+       - `shared_payload_torrents`
+       - `shared_payload_members`
+     - this is the first code slice aimed at eliminating N->1 hitchhiker targets on `/pool/media`
    - latest preflight feedback hardening:
      - `_preflight_existing_view_conflicts()` now emits progress / view-done / complete heartbeat lines
      - this closes the long silent window between `step=verify_target` and `step=build_views` when an existing target tree is large but healthy

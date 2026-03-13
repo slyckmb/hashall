@@ -1,8 +1,25 @@
 # Operational Run State
 
-Last updated: 2026-03-12
+Last updated: 2026-03-13
 
 ## Live Reality / Drift
+
+- `hashall` is now `0.5.0`.
+- New 2026-03-13 unique-target invariant:
+  - new `rehome apply` runs no longer collapse every migrated hash back onto one shared target `payload_id`
+  - catalog sync now creates or assigns one target payload row per migrated torrent hash based on the actual built destination root
+  - this keeps new `/pool/media` rehome results from manufacturing fresh N->1 hitchhiker groups in the catalog
+  - live drift snapshots now also flag legacy shared-target groups explicitly:
+    - `shared_payload_rows`
+    - `shared_payload_torrents`
+    - `shared_payload_members`
+  - operator meaning:
+    - new runs should converge toward one destination payload root per hash
+    - older pool-media groups with many torrents on one payload row are now visible as legacy debt instead of silent “normal” state
+  - targeted validation for this slice:
+    - `pytest tests/test_rehome_catalog_sync.py tests/test_rehome_reality.py -q`
+    - `pytest tests/test_rehome_followup.py tests/test_rehome_qb_missing.py tests/test_qb_libtorrent_verify.py tests/test_rehome_cli_apply.py -q`
+    - result: `53 passed`
 
 - `hashall` is now `0.4.186`.
 - Latest 2026-03-12 preflight feedback note:

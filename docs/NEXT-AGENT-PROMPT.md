@@ -24,7 +24,14 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.186`.
+  - `hashall` version now `0.5.0`.
+  - newest migration invariant:
+    - `rehome apply` now creates or assigns one target payload row per migrated hash based on the actual built destination root
+    - drift snapshots now expose legacy shared-target groups with:
+      - `shared_payload_rows`
+      - `shared_payload_torrents`
+      - `shared_payload_members`
+    - use this to distinguish old hitchhiker debt from new runs, which should now converge toward unique per-hash target payloads
   - latest preflight feedback hardening:
     - `_preflight_existing_view_conflicts()` now emits:
       - `preflight_target_views_progress`

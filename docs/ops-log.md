@@ -5,6 +5,18 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-12):
 
+- `hashall` is now `0.5.0`.
+- New 2026-03-13 unique-target payload note:
+  - `rehome` no longer writes fresh migrations back onto one shared target payload row
+  - catalog sync now creates per-hash target payload rows from the actual built destination roots
+  - drift snapshots now report legacy shared-target groups via:
+    - `shared_payload_rows`
+    - `shared_payload_torrents`
+    - `shared_payload_members`
+  - targeted validation:
+    - `pytest tests/test_rehome_catalog_sync.py tests/test_rehome_reality.py tests/test_rehome_followup.py tests/test_rehome_qb_missing.py tests/test_qb_libtorrent_verify.py tests/test_rehome_cli_apply.py -q`
+    - result: `53 passed`
+
 - `hashall` is now `0.4.186`.
 - New 2026-03-12 preflight feedback note:
   - `_preflight_existing_view_conflicts()` now emits heartbeat / completion lines during long existing-target scans
