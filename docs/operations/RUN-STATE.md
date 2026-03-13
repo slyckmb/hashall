@@ -4,7 +4,7 @@ Last updated: 2026-03-13
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.6.8`.
+- `hashall` is now `0.6.9`.
 - Active docs are now intentionally minimal and stub-free:
   - canonical active docs:
     - `README.md`
@@ -30,6 +30,17 @@ Last updated: 2026-03-13
   - `src/rehome/view_builder.py` now relinks preexisting identical destination files to the donor inode instead of silently accepting copied bytes
   - `bin/qb-repair-fresh.py` now normalizes existing identical targets the same way
   - this closes the known “successful run leaves new jdupes groups behind” leak in both the rehome path and the fresh repair-prep path
+- New 2026-03-13 refresh / jdupes diagnosability hardening:
+  - the previous `refresh --verbose` orchestration did not remain alive as a clear owner of the dedupe backlog after step 3.5
+  - observed failure signature:
+    - `refresh --verbose` run `pid=1386781` reached pool-media dedupe planning
+    - `27` duplicate groups were surfaced
+    - a failing group like `Cinderella.2021...` only appeared deep in jdupes group logs as `jdupes did not link files with matching SHA256`
+  - hardening now added:
+    - `hashall link execute` prints the jdupes log glob for the plan and a failed-action preview when link failures occur
+    - `bin/db-refresh-step4_5-link-dedup.sh` now writes a structured per-device summary JSON and logs the plan status / failed-action preview after dry-run and apply
+  - operator meaning:
+    - a refresh/dedupe run should now end with an explicit step-3.5 summary artifact instead of forcing diagnosis from a raw shared log tail
 - New 2026-03-13 planner stale-no-op hardening:
   - `relocate-plan` now skips groups when all per-hash view targets already have `source_save_path == target_save_path`
   - this removes fully converged families from the live remainder even when source cleanup is still deferred

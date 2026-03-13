@@ -2,7 +2,7 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.6.8`.
+- `hashall` semver baseline is now `0.6.9`.
 - Active docs are now intentionally minimal and stub-free:
   - canonical active set:
     - `README.md`
@@ -31,6 +31,14 @@
   - `bin/qb-repair-fresh.py` now does the same normalization during same-fs repair preparation
   - live implication:
     - if a target file already exists with identical bytes, the code should now convert it into a hardlink-backed per-item payload tree instead of preserving a redundant copy
+- New 2026-03-13 refresh/jdupes diagnosis baseline:
+  - the last `refresh --verbose` was not still running; what remained was a step-3.5 dedupe backlog with weak surfaced status
+  - observed evidence:
+    - pool-media dedupe reported `27` duplicate groups
+    - a failing `Cinderella.2021...` group was only obvious deep in the shared log as `jdupes did not link files with matching SHA256`
+  - new behavior:
+    - `hashall link execute` now prints the jdupes log glob for the plan and a failed-action preview
+    - `bin/db-refresh-step4_5-link-dedup.sh` now writes a structured per-device summary JSON and logs dry-run/apply rc plus failed-action preview
 - New 2026-03-13 planner stale-no-op hardening baseline:
   - `relocate-plan` now skips groups when every per-hash view target is already `source_save_path == target_save_path`
   - this closes the deferred-cleanup stale-planner gap that kept resurfacing fully converged groups like `Brave.New.World.US.S01...`

@@ -5,7 +5,7 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-13):
 
-- `hashall` is now `0.6.8`.
+- `hashall` is now `0.6.9`.
 - Anchor note:
   - the intended invariant is unique per-item qB payload trees, instantiated from donor payloads via hardlinks where possible
   - do not read `unique target` or `de-hitchhike` as “make redundant physical copies”
@@ -23,6 +23,14 @@ Latest stale-assumption hardening note (2026-03-13):
   - live proof:
     - `Brave.New.World.US.S01...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
     - `refresh9` drops from `31` candidates to `29`
+- New 2026-03-13 refresh/jdupes diagnosis note:
+  - the last `refresh --verbose` completed its orchestration and left step 3.5 as backlog, not as a still-running refresh worker
+  - the actionable failure in that run was buried in jdupes group output:
+    - `Cinderella.2021...`
+    - `err=jdupes did not link files with matching SHA256`
+  - new diagnostics landed:
+    - `hashall link execute` now prints the jdupes log glob and a failed-action preview
+    - `bin/db-refresh-step4_5-link-dedup.sh` now writes a structured per-device summary JSON and logs per-plan dry-run/apply rc plus failed-action preview
 - New 2026-03-13 Twisters bridge hardening:
   - planner now prefers surviving target donors for stale already-targeted rows
   - single-file unique targets keep `root_dir/file` layout

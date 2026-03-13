@@ -3252,6 +3252,26 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
             if len(result.errors) > 10:
                 click.echo(f"   ... and {len(result.errors) - 10} more errors")
 
+        if jdupes and jdupes_log_dir:
+            click.echo()
+            click.echo(f"🧾 jdupes logs: {Path(jdupes_log_dir).expanduser()}/plan-{plan_id}_sha256-*.log")
+
+        if result.actions_failed > 0:
+            failed_actions = [
+                action for action in get_plan_actions(conn, plan_id, limit=0)
+                if str(action.status or "") == "failed"
+            ]
+            if failed_actions:
+                click.echo()
+                click.echo(f"🧪 Failed actions ({min(5, len(failed_actions))} shown):")
+                for action in failed_actions[:5]:
+                    click.echo(
+                        f"   action={action.id} keep={action.canonical_path} "
+                        f"replace={action.duplicate_path}"
+                    )
+                    if action.error_message:
+                        click.echo(f"      error={action.error_message}")
+
         click.echo("=" * 60)
         click.echo()
 
