@@ -533,3 +533,109 @@ def test_root_relocation_plan_includes_already_targeted_siblings_in_same_payload
     assert by_hash["thash22b"]["target_save_path"] == str(
         target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22b"
     )
+
+
+def test_root_relocation_plan_prefers_existing_target_root_when_torrents_already_point_there(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding"
+    source_path = source_root / "cross-seed" / "OnlyEncodes (API)" / "Twisters.2024.mkv"
+    target_dir = target_root / "cross-seed" / "seedpool (API)" / "Twisters.2024"
+    target_file = target_dir / "Twisters.2024.mkv"
+
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"abc")
+    target_file.write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (24, 'hash24', 231, ?, 1, 3, 'complete')
+        """,
+        (str(source_path),),
+    )
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags)
+        VALUES (?, 24, 141, ?, ?, 'cross-seed', 'cross-seed')
+        """,
+        [
+            ("thash24a", str(target_root / "cross-seed" / "seedpool (API)"), "Twisters.2024"),
+            ("thash24b", str(target_dir), "Twisters.2024.mkv"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_root_relocation_batch(
+        catalog_path=db_path,
+        source_device=231,
+        target_device=141,
+        source_root=str(source_root),
+        target_root=str(target_root),
+        flat_only=False,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "REUSE"
+    assert plan["target_path"] == str(target_file)
+    assert plan["normalization"]["source_hint"] == "torrent_save_path"
+    assert plan["normalization"]["fallback_used"] is False
+
+
+def test_root_relocation_plan_prefers_surviving_target_payload_when_source_root_is_stale(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding"
+    source_path = source_root / "cross-seed" / "OnlyEncodes (API)" / "Twisters.2024.mkv"
+    target_file = target_root / "cross-seed" / "YUSCENE (API)" / "Twisters.2024.mkv"
+
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (25, 'hash25', 231, ?, 1, 3, 'complete')
+        """,
+        (str(source_path),),
+    )
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (26, 'hash25', 141, ?, 1, 3, 'complete')
+        """,
+        (str(target_file),),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags)
+        VALUES ('thash25', 25, 231, ?, ?, 'cross-seed', 'cross-seed')
+        """,
+        (str(source_root / "cross-seed" / "OnlyEncodes (API)"), "Twisters.2024.mkv"),
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_root_relocation_batch(
+        catalog_path=db_path,
+        source_device=231,
+        target_device=141,
+        source_root=str(source_root),
+        target_root=str(target_root),
+        flat_only=False,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "REUSE"
+    assert plan["source_path"] == str(source_path)
+    assert plan["target_path"] == str(target_file)
+    assert plan["normalization"]["source_hint"] == "target_payload_root"
+    assert plan["normalization"]["fallback_used"] is False

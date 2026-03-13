@@ -90,29 +90,35 @@ def _preferred_expected_target(
 ) -> Tuple[Optional[Path], str]:
     source_name = source_path.name
 
-    def _single_file_matches(path: Path) -> bool:
+    def _single_file_target(path: Path) -> Optional[Path]:
         if not path.exists():
-            return False
+            return None
         if path.is_file():
             try:
-                return int(path.stat().st_size) == int(expected_total_bytes)
+                if int(path.stat().st_size) == int(expected_total_bytes):
+                    return path
             except OSError:
-                return False
+                return None
+            return None
         if not path.is_dir():
-            return False
-        single_size: Optional[int] = None
+            return None
+        single_file: Optional[Path] = None
         for item in path.rglob("*"):
             if not item.is_file():
                 continue
-            if single_size is not None:
-                return False
+            if single_file is not None:
+                return None
             try:
-                single_size = int(item.stat().st_size)
+                size = int(item.stat().st_size)
             except OSError:
-                return False
-        if single_size is None:
-            return False
-        return single_size == int(expected_total_bytes)
+                return None
+            if size != int(expected_total_bytes):
+                return None
+            single_file = item
+        return single_file
+
+    def _single_file_matches(path: Path) -> bool:
+        return _single_file_target(path) is not None
 
     # Prefer original source->target relative path from successful demote runs.
     run_fallback: Optional[Path] = None
@@ -144,11 +150,11 @@ def _preferred_expected_target(
             if expected_file_count != 1:
                 return candidate, "rehome_runs"
             if _single_file_matches(candidate):
-                return candidate, "rehome_runs"
+                return _single_file_target(candidate) or candidate, "rehome_runs"
             if source_name:
                 alt = _canonical(candidate.parent / source_name)
                 if is_under(alt, target_root) and _single_file_matches(alt):
-                    return alt, "rehome_runs_single_file_name"
+                    return _single_file_target(alt) or alt, "rehome_runs_single_file_name"
             if run_fallback is None:
                 run_fallback = candidate
     if run_fallback is not None:
@@ -162,11 +168,16 @@ def _preferred_expected_target(
         if not save_path_raw or not root_name:
             continue
         save_path = _canonical(save_path_raw)
-        target_save_path = _map_target_save_path(
-            source_save_path=save_path,
-            source_root=source_root,
-            target_root=target_root,
-        )
+        if is_under(save_path, source_root):
+            target_save_path = _map_target_save_path(
+                source_save_path=save_path,
+                source_root=source_root,
+                target_root=target_root,
+            )
+        elif is_under(save_path, target_root):
+            target_save_path = save_path
+        else:
+            target_save_path = None
         if target_save_path is None:
             continue
         candidates: List[Tuple[Path, str]] = [(_canonical(target_save_path / root_name), "torrent_save_path")]
@@ -180,9 +191,34 @@ def _preferred_expected_target(
             if expected_file_count != 1:
                 return candidate, "torrent_save_path"
             if _single_file_matches(candidate):
-                return candidate, hint
+                return _single_file_target(candidate) or candidate, hint
             if save_fallback is None:
                 save_fallback = candidate
+
+    target_payload_rows = conn.execute(
+        """
+        SELECT root_path, file_count, total_bytes
+        FROM payloads
+        WHERE payload_hash = ?
+          AND status = 'complete'
+        ORDER BY payload_id DESC
+        """,
+        (payload_hash,),
+    ).fetchall()
+    for payload_row in target_payload_rows:
+        root_path_raw = str(payload_row["root_path"] or "").strip()
+        if not root_path_raw:
+            continue
+        candidate = _canonical(root_path_raw)
+        if not is_under(candidate, target_root):
+            continue
+        if int(payload_row["file_count"] or 0) != int(expected_file_count):
+            continue
+        if int(payload_row["total_bytes"] or 0) != int(expected_total_bytes):
+            continue
+        if not candidate.exists():
+            continue
+        return _single_file_target(candidate) or candidate, "target_payload_root"
     if save_fallback is not None:
         return save_fallback, "torrent_save_path"
 
