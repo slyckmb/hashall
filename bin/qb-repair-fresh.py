@@ -34,6 +34,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from hashall.qbittorrent import QBitFile, QBitTorrent, get_qbittorrent_client
+from hashall.link_executor import create_hardlink_atomic
 
 
 DEFAULT_DB = Path.home() / ".hashall" / "catalog.db"
@@ -598,9 +599,22 @@ def hardlink_build(
 ) -> Tuple[bool, Dict[str, int], str]:
     created = 0
     existed = 0
+    relinked = 0
     source_missing = 0
     conflict = 0
     cross_device = 0
+
+    def _same_content(a: Path, b: Path) -> bool:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        with a.open("rb") as fa, b.open("rb") as fb:
+            while True:
+                left = fa.read(1024 * 1024)
+                right = fb.read(1024 * 1024)
+                if left != right:
+                    return False
+                if not left:
+                    return True
 
     src_base = Path(source_save)
     dst_base = Path(target_save)
@@ -630,8 +644,23 @@ def hardlink_build(
             except OSError:
                 conflict += 1
                 continue
-            if dst.is_file() and int(dst_stat.st_size) == int(m.size):
+            if (
+                dst.is_file()
+                and int(dst_stat.st_size) == int(m.size)
+                and int(dst_stat.st_ino) == int(src_stat.st_ino)
+                and int(dst_stat.st_dev) == int(src_stat.st_dev)
+            ):
                 existed += 1
+                continue
+            if dst.is_file() and int(dst_stat.st_size) == int(m.size) and _same_content(src, dst):
+                if int(dst_stat.st_dev) != int(src_stat.st_dev):
+                    conflict += 1
+                    continue
+                ok, error, _backup_path = create_hardlink_atomic(src, dst, create_backup=False)
+                if not ok:
+                    conflict += 1
+                    continue
+                relinked += 1
                 continue
             conflict += 1
             continue
@@ -648,12 +677,13 @@ def hardlink_build(
 
     ok = source_missing == 0 and conflict == 0 and cross_device == 0
     msg = (
-        f"created={created} existed={existed} source_missing={source_missing} "
+        f"created={created} existed={existed} relinked={relinked} source_missing={source_missing} "
         f"conflict={conflict} cross_device={cross_device}"
     )
     return ok, {
         "created": created,
         "existed": existed,
+        "relinked": relinked,
         "source_missing": source_missing,
         "conflict": conflict,
         "cross_device": cross_device,
