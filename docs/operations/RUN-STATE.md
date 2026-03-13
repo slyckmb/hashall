@@ -4,7 +4,13 @@ Last updated: 2026-03-12
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.4.185`.
+- `hashall` is now `0.4.186`.
+- Latest 2026-03-12 preflight feedback note:
+  - `preflight_target_views` now emits bounded heartbeat lines during long existing-target scans:
+    - `preflight_target_views_progress`
+    - `preflight_target_views_view_done`
+    - `preflight_target_views_complete`
+  - this closes the quiet UX gap where a large healthy target tree could look stalled between `step=verify_target` and `step=build_views`
 - Latest 2026-03-12 guarded target-view note:
   - `rehome` now runs `step=preflight_target_views` before `build_views` on guarded `REUSE` / donor-target paths
   - any preexisting destination view file is compared read-only against the source before new hardlinks are created

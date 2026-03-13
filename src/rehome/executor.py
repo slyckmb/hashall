@@ -1187,6 +1187,11 @@ class DemotionExecutor:
 
         files_cache: Dict[str, List] = dict(preloaded_files or {})
         seen_view_targets: set[tuple[str, str]] = set()
+        total_views = len(view_targets)
+        start_ts = time.monotonic()
+        last_progress_log = start_ts
+        checked_paths = 0
+        existing_paths = 0
 
         conn = self._get_db_connection()
         table_name = self._get_device_table_name(conn, plan.get("target_device_id"))
@@ -1207,7 +1212,7 @@ class DemotionExecutor:
             return None
 
         try:
-            for target in view_targets:
+            for view_idx, target in enumerate(view_targets, 1):
                 torrent_hash = str(target.get("torrent_hash") or "")
                 target_save_path = Path(str(target.get("target_save_path") or ""))
                 root_name = target.get("root_name")
@@ -1237,7 +1242,7 @@ class DemotionExecutor:
                 else:
                     view_root = target_save_path / (root_name or payload_root.name)
 
-                for file_row in files:
+                for file_idx, file_row in enumerate(files, 1):
                     rel = _normalize_rel_path(file_row.name, common_prefix, root_name, payload_root)
                     if single_file:
                         src = payload_root
@@ -1247,16 +1252,38 @@ class DemotionExecutor:
                         dst = view_root / rel
                         if len(files) == 1 and len(rel.parts) == 1 and view_root.name == rel.name:
                             dst = view_root
+                    checked_paths += 1
                     if not (dst.exists() or dst.is_symlink()):
                         continue
+                    existing_paths += 1
+                    now = time.monotonic()
+                    if now - last_progress_log >= 5:
+                        self._log(
+                            "  preflight_target_views_progress "
+                            f"view={view_idx}/{total_views} hash={torrent_hash[:16]} "
+                            f"file={file_idx}/{len(files)} checked_paths={checked_paths} "
+                            f"existing_paths={existing_paths} elapsed_s={now - start_ts:.1f}"
+                        )
+                        last_progress_log = now
                     try:
                         _ensure_hardlink(src, dst, compare_hint=compare_hint)
                     except Exception as exc:
                         raise RuntimeError(
                             f"Target view conflict for {torrent_hash[:16]} at {dst}: {exc}"
                         ) from exc
+                self._log(
+                    "  preflight_target_views_view_done "
+                    f"view={view_idx}/{total_views} hash={torrent_hash[:16]} "
+                    f"checked_paths={checked_paths} existing_paths={existing_paths} "
+                    f"elapsed_s={time.monotonic() - start_ts:.1f}"
+                )
         finally:
             conn.close()
+        self._log(
+            "  preflight_target_views_complete "
+            f"views={len(seen_view_targets)}/{total_views} checked_paths={checked_paths} "
+            f"existing_paths={existing_paths} elapsed_s={time.monotonic() - start_ts:.1f}"
+        )
 
     def _build_relocations(self, conn: sqlite3.Connection, plan: Dict) -> List[Dict]:
         """Build relocation targets for all torrents in plan."""

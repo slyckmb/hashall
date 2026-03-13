@@ -5,7 +5,14 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-12):
 
-- `hashall` is now `0.4.185`.
+- `hashall` is now `0.4.186`.
+- New 2026-03-12 preflight feedback note:
+  - `_preflight_existing_view_conflicts()` now emits heartbeat / completion lines during long existing-target scans
+  - new log keys:
+    - `preflight_target_views_progress`
+    - `preflight_target_views_view_done`
+    - `preflight_target_views_complete`
+  - this closes the quiet `step=preflight_target_views` UX gap exposed during the `Snowfall...` live move
 - New 2026-03-12 target-view preflight note:
   - `rehome` now probes preexisting target view paths before `build_views`
   - if an existing destination file differs from the source bytes, the plan aborts before creating any new hardlinks

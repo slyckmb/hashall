@@ -18,7 +18,10 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.185`
+   - `hashall` semver is `0.4.186`
+   - latest preflight feedback hardening:
+     - `_preflight_existing_view_conflicts()` now emits progress / view-done / complete heartbeat lines
+     - this closes the long silent window between `step=verify_target` and `step=build_views` when an existing target tree is large but healthy
    - latest preflight-view hardening:
      - `rehome` now runs `step=preflight_target_views` before `build_views`
      - conflicting preexisting target-view files are detected read-only and block the whole plan before any sibling hardlinks are created

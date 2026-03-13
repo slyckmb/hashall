@@ -2,7 +2,17 @@
 
 ## Key Facts
 
-- `hashall` package semver is now `0.4.185`.
+- `hashall` package semver is now `0.4.186`.
+- New 2026-03-12 preflight feedback hardening landed after the long `Snowfall...` quiet window:
+  - `_preflight_existing_view_conflicts()` now emits:
+    - `preflight_target_views_progress`
+    - `preflight_target_views_view_done`
+    - `preflight_target_views_complete`
+  - this closes the “step=preflight_target_views and then nothing for a long time” UX gap when an existing target tree is large but still healthy
+  - live proof:
+    - `Snowfall.2017.S05...` now logs an explicit preflight phase before the guarded `MOVE`
+  - regression:
+    - `tests/test_rehome_catalog_sync.py::test_preflight_existing_view_conflicts_logs_progress`
 - New 2026-03-12 preflight target-view hardening landed after the `Novitiate...` partial-conflict abort:
   - `rehome` now logs `step=preflight_target_views` before `build_views` on guarded `REUSE` / target-donor paths
   - it probes any preexisting target-view files read-only and aborts before creating any new hardlinks if one of those destination paths already exists with conflicting bytes

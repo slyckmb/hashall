@@ -24,7 +24,13 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.185`.
+  - `hashall` version now `0.4.186`.
+  - latest preflight feedback hardening:
+    - `_preflight_existing_view_conflicts()` now emits:
+      - `preflight_target_views_progress`
+      - `preflight_target_views_view_done`
+      - `preflight_target_views_complete`
+    - this closes the long quiet window between `step=verify_target` and `step=build_views`
   - latest `rehome` target-view hardening:
     - `step=preflight_target_views` now runs before `build_views`
     - conflicting preexisting target-view files are detected read-only and block the plan before any sibling view mutation
