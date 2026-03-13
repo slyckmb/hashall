@@ -44,3 +44,27 @@ def test_acquire_rehome_lock_reports_existing_holder_metadata(tmp_path, monkeypa
     assert "Another rehome apply is already running" in err
     assert "pid=4242" in err
     assert "host=testbox" in err
+
+
+def test_acquire_refresh_lock_reports_existing_holder_metadata(tmp_path, monkeypatch, capsys):
+    lock_dir = tmp_path / ".hashall"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "refresh.lock"
+    lock_path.write_text(
+        "pid=5150\nhost=testbox\nstarted_at=2026-03-13T13:00:00-04:00\ncwd=/tmp/run\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_flock(*_args, **_kwargs):
+        raise OSError("busy")
+
+    monkeypatch.setattr("rehome.cli.fcntl.flock", fake_flock)
+
+    with pytest.raises(SystemExit):
+        cli_mod._acquire_refresh_lock()
+
+    err = capsys.readouterr().err
+    assert "Another hashall refresh is already running" in err
+    assert "pid=5150" in err

@@ -486,6 +486,7 @@ def run_refresh(
         published_seed_state_path = None
 
     from rehome.runlog import RunLogger
+    from rehome.cli import _acquire_refresh_lock
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     python = sys.executable
@@ -496,65 +497,66 @@ def run_refresh(
     log_path = log_dir / f"{timestamp}.log"
     json_path = log_dir / f"{timestamp}.json"
 
-    with RunLogger(log_path, verbose=verbose, debug=debug) as logger:
+    lock_fh = _acquire_refresh_lock()
+    try:
+        with RunLogger(log_path, verbose=verbose, debug=debug) as logger:
+            def _run_step(label: str, cmd: list[str], *, capture: bool = False) -> tuple[bool, str]:
+                """Run a subprocess step, print header + elapsed, return (ok, stdout)."""
+                t0 = datetime.now()
+                print(f"\n[refresh] {label}")
+                print(f"  $ {' '.join(cmd)}")
+                should_capture = capture or logger.verbose
+                if should_capture:
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.stdout:
+                        print(result.stdout, end="")
+                    if result.stderr:
+                        # stderr goes to stderr; write_raw ensures it lands in the log too
+                        print(result.stderr, end="", file=sys.stderr)
+                        logger.write_raw(result.stderr)
+                    stdout = result.stdout or ""
+                else:
+                    try:
+                        heartbeat_s = max(5, int(os.environ.get("REHOME_REFRESH_HEARTBEAT_S", "30")))
+                    except ValueError:
+                        heartbeat_s = 30
+                    started_monotonic = time.monotonic()
+                    next_heartbeat = started_monotonic + heartbeat_s
+                    proc = subprocess.Popen(cmd)
+                    while True:
+                        rc = proc.poll()
+                        if rc is not None:
+                            result = subprocess.CompletedProcess(cmd, rc)
+                            break
+                        now_monotonic = time.monotonic()
+                        if now_monotonic >= next_heartbeat:
+                            elapsed_hb = int(now_monotonic - started_monotonic)
+                            print(
+                                "  [refresh] still running "
+                                f"label={label} elapsed={elapsed_hb}s "
+                                "watch='tail -n0 -F ~/.logs/hashall/hashall.log'"
+                            )
+                            next_heartbeat = now_monotonic + heartbeat_s
+                        time.sleep(1.0)
+                    stdout = ""
+                elapsed = (datetime.now() - t0).total_seconds()
+                ok = result.returncode == 0
+                status = "OK" if ok else f"FAILED (exit={result.returncode})"
+                print(f"  elapsed {_fmt_elapsed(elapsed)}  {status}")
+                logger.record_step(label, cmd, ok, elapsed, stdout=stdout)
+                return ok, stdout
 
-        def _run_step(label: str, cmd: list[str], *, capture: bool = False) -> tuple[bool, str]:
-            """Run a subprocess step, print header + elapsed, return (ok, stdout)."""
-            t0 = datetime.now()
-            print(f"\n[refresh] {label}")
-            print(f"  $ {' '.join(cmd)}")
-            should_capture = capture or logger.verbose
-            if should_capture:
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.stdout:
-                    print(result.stdout, end="")
-                if result.stderr:
-                    # stderr goes to stderr; write_raw ensures it lands in the log too
-                    print(result.stderr, end="", file=sys.stderr)
-                    logger.write_raw(result.stderr)
-                stdout = result.stdout or ""
-            else:
-                try:
-                    heartbeat_s = max(5, int(os.environ.get("REHOME_REFRESH_HEARTBEAT_S", "30")))
-                except ValueError:
-                    heartbeat_s = 30
-                started_monotonic = time.monotonic()
-                next_heartbeat = started_monotonic + heartbeat_s
-                proc = subprocess.Popen(cmd)
-                while True:
-                    rc = proc.poll()
-                    if rc is not None:
-                        result = subprocess.CompletedProcess(cmd, rc)
-                        break
-                    now_monotonic = time.monotonic()
-                    if now_monotonic >= next_heartbeat:
-                        elapsed_hb = int(now_monotonic - started_monotonic)
-                        print(
-                            "  [refresh] still running "
-                            f"label={label} elapsed={elapsed_hb}s "
-                            "watch='tail -n0 -F ~/.logs/hashall/hashall.log'"
-                        )
-                        next_heartbeat = now_monotonic + heartbeat_s
-                    time.sleep(1.0)
-                stdout = ""
-            elapsed = (datetime.now() - t0).total_seconds()
-            ok = result.returncode == 0
-            status = "OK" if ok else f"FAILED (exit={result.returncode})"
-            print(f"  elapsed {_fmt_elapsed(elapsed)}  {status}")
-            logger.record_step(label, cmd, ok, elapsed, stdout=stdout)
-            return ok, stdout
+            # Build the full ordered root list for display + preflight validation
+            all_roots: list[tuple[str, str, str]] = [
+                (active_root, active_device, "active"),
+                (dest_root, dest_device, "dest"),
+            ]
+            if active_root == dest_root:
+                all_roots = all_roots[:1]
+            for p, a in (managed_roots or []):
+                all_roots.append((p, a, "managed"))
 
-        # Build the full ordered root list for display + preflight validation
-        all_roots: list[tuple[str, str, str]] = [
-            (active_root, active_device, "active"),
-            (dest_root, dest_device, "dest"),
-        ]
-        if active_root == dest_root:
-            all_roots = all_roots[:1]
-        for p, a in (managed_roots or []):
-            all_roots.append((p, a, "managed"))
-
-        dedup_mode = "execute" if not skip_dedup else "off"
+            dedup_mode = "execute" if not skip_dedup else "off"
 
         with logger.patch_stdout():
             print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -764,7 +766,9 @@ def run_refresh(
                 print("refresh  PARTIAL — one or more steps failed (see above)")
             print(f"log  {log_path}")
 
-        logger.dump_json(json_path)
+            logger.dump_json(json_path)
+    finally:
+        lock_fh.close()
 
     return 0 if overall_ok else 1
 

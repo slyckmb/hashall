@@ -238,18 +238,10 @@ def _print_post_apply_summary(executor: "DemotionExecutor", plans: list) -> bool
     return alarm_total == 0
 
 
-def _acquire_rehome_lock() -> "file":
-    """
-    Acquire an exclusive process-level lock for rehome apply operations.
-
-    Returns an open file handle that holds the lock.  The caller MUST close
-    it (or use try/finally) to release the lock on exit.
-
-    Raises SystemExit if the lock is held by another process.
-    """
+def _acquire_named_lock(lock_filename: str, description: str) -> "file":
     lock_dir = Path.home() / ".hashall"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / "rehome.lock"
+    lock_path = lock_dir / lock_filename
     lock_fh = open(lock_path, "a+")
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -262,7 +254,7 @@ def _acquire_rehome_lock() -> "file":
             holder = ""
         holder_suffix = f" holder={holder}" if holder else ""
         click.echo(
-            "❌ Another rehome apply is already running "
+            f"❌ Another {description} is already running "
             f"(lock held: {lock_path}{holder_suffix}). Aborting.",
             err=True,
         )
@@ -278,6 +270,23 @@ def _acquire_rehome_lock() -> "file":
     lock_fh.write("\n".join(f"{key}={value}" for key, value in metadata.items()) + "\n")
     lock_fh.flush()
     return lock_fh
+
+
+def _acquire_rehome_lock() -> "file":
+    """
+    Acquire an exclusive process-level lock for rehome apply operations.
+
+    Returns an open file handle that holds the lock.  The caller MUST close
+    it (or use try/finally) to release the lock on exit.
+
+    Raises SystemExit if the lock is held by another process.
+    """
+    return _acquire_named_lock("rehome.lock", "rehome apply")
+
+
+def _acquire_refresh_lock() -> "file":
+    """Acquire an exclusive process-level lock for refresh operations."""
+    return _acquire_named_lock("refresh.lock", "hashall refresh")
 
 
 def _emit_banner() -> None:
