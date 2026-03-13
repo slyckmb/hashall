@@ -138,6 +138,7 @@ def test_build_view_accepts_existing_identical_file(tmp_path):
     assert result.view_root == target_save
     assert preexisting.exists()
     assert preexisting.read_bytes() == payload_root.read_bytes()
+    assert os.stat(preexisting).st_ino == os.stat(payload_root).st_ino
 
 
 def test_build_view_compare_hint_accepts_existing(tmp_path):
@@ -161,6 +162,8 @@ def test_build_view_compare_hint_accepts_existing(tmp_path):
 
     assert result.view_root == target_save
     assert preexisting.exists()
+    assert preexisting.read_bytes() == payload_root.read_bytes()
+    assert os.stat(preexisting).st_ino == os.stat(payload_root).st_ino
 
 
 def test_build_view_compare_hint_rejects_existing(tmp_path):

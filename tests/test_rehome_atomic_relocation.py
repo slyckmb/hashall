@@ -759,7 +759,7 @@ def test_execute_move_cross_filesystem_uses_rsync_and_defers_source_cleanup(tmp_
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
 
-    rsync_calls = {}
+    popen_calls = []
 
     class FakeProc:
         def __init__(self):
@@ -769,9 +769,10 @@ def test_execute_move_cross_filesystem_uses_rsync_and_defers_source_cleanup(tmp_
             return 0
 
     def fake_popen(cmd, **kwargs):
-        rsync_calls["cmd"] = cmd
-        target_path.mkdir(parents=True, exist_ok=True)
-        (target_path / "video.mkv").write_bytes(b"x")
+        popen_calls.append(cmd)
+        if "rsync" in cmd:
+            target_path.mkdir(parents=True, exist_ok=True)
+            (target_path / "video.mkv").write_bytes(b"x")
         return FakeProc()
 
     monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
@@ -793,7 +794,7 @@ def test_execute_move_cross_filesystem_uses_rsync_and_defers_source_cleanup(tmp_
 
     executor._execute_move(plan, spot_check=0)
 
-    assert "rsync" in rsync_calls["cmd"]
+    assert any("rsync" in cmd for cmd in popen_calls)
     assert target_path.exists()
     assert source_path.exists()
     assert plan["cleanup_source_deferred"] is True

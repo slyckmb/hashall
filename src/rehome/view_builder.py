@@ -14,6 +14,7 @@ import os
 import time
 
 from hashall.qbittorrent import QBitFile
+from hashall.link_executor import create_hardlink_atomic
 
 _CONTENT_EQ_CACHE: dict[tuple[int, int, int, int, int, int], bool] = {}
 
@@ -102,6 +103,15 @@ def _ensure_hardlink(
     compare_hint: Optional[Callable[[Path, Path], Optional[bool]]] = None,
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> None:
+    def _relink_existing_identical(a: Path, b: Path) -> None:
+        a_stat = os.stat(a)
+        b_stat = os.stat(b)
+        if a_stat.st_dev != b_stat.st_dev:
+            raise RuntimeError(f"Existing identical destination is on different filesystem: {b}")
+        ok, error, _backup_path = create_hardlink_atomic(a, b, create_backup=False)
+        if not ok:
+            raise RuntimeError(f"Failed to relink identical destination to donor: {b} ({error})")
+
     def _same_content(a: Path, b: Path) -> bool:
         a_stat = os.stat(a)
         b_stat = os.stat(b)
@@ -158,11 +168,14 @@ def _ensure_hardlink(
         if compare_hint is not None:
             hinted = compare_hint(a, b)
             if hinted is True:
+                _relink_existing_identical(a, b)
                 return True
             if hinted is False:
                 raise RuntimeError(f"Destination exists and differs: {b}")
         if _same_content(a, b):
-            # Accept an existing identical file (already materialized by previous runs/manual copy).
+            # Existing identical files should be relinked to the donor so successful
+            # rehome/reconnect runs do not leave duplicate bytes behind.
+            _relink_existing_identical(a, b)
             return True
         raise RuntimeError(f"Destination exists and differs: {b}")
 
