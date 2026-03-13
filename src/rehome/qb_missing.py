@@ -253,6 +253,91 @@ def _select_sibling_target(
     return sorted(candidates, key=_sort_key)[0]
 
 
+def _select_mapped_target_payload(
+    conn: sqlite3.Connection,
+    *,
+    target_root: str,
+    mapped_content_paths: Iterable[str],
+) -> Optional[Dict[str, Any]]:
+    normalized_target = normalize_save_path(target_root)
+    candidates: List[Dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for mapped_path in mapped_content_paths:
+        root_path = _safe_normalize_save_path(str(mapped_path or ""))
+        if not root_path or root_path in seen_paths:
+            continue
+        seen_paths.add(root_path)
+        if not root_path.startswith(normalized_target + "/"):
+            continue
+        row = conn.execute(
+            """
+            SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
+            FROM payloads
+            WHERE root_path = ? AND status = 'complete'
+            ORDER BY payload_id
+            LIMIT 1
+            """,
+            (root_path,),
+        ).fetchone()
+        if row is None:
+            continue
+        payload_root = str(row["root_path"] or "")
+        candidates.append(
+            {
+                "payload_id": int(row["payload_id"] or 0),
+                "payload_hash": str(row["payload_hash"] or ""),
+                "device_id": int(row["device_id"] or 0),
+                "root_path": payload_root,
+                "file_count": int(row["file_count"] or 0),
+                "total_bytes": int(row["total_bytes"] or 0),
+                "status": str(row["status"] or ""),
+                "save_path": str(Path(payload_root).parent),
+                "torrent_hash": "",
+            }
+        )
+    if not candidates:
+        return None
+
+    def _sort_key(item: Dict[str, Any]) -> tuple[int, int, str]:
+        root_path = str(item.get("root_path") or "")
+        return (
+            1 if "/_rehome-unique/" in root_path else 0,
+            int(item.get("payload_id") or 0),
+            root_path,
+        )
+
+    return sorted(candidates, key=_sort_key)[0]
+
+
+def _select_reconnect_target(
+    conn: sqlite3.Connection,
+    *,
+    payload_hash: str,
+    target_root: str,
+    payload_rows: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    donor = _select_sibling_target(
+        conn,
+        payload_hash=payload_hash,
+        target_root=target_root,
+        sibling_targets=[
+            sibling
+            for row in payload_rows
+            for sibling in (row.get("sibling_targets") or [])
+        ],
+    )
+    if donor is not None:
+        return donor
+    return _select_mapped_target_payload(
+        conn,
+        target_root=target_root,
+        mapped_content_paths=[
+            str(row.get("mapped_content_path") or "")
+            for row in payload_rows
+        ],
+    )
+
+
 def _fetch_stale_torrent_rows(
     conn: sqlite3.Connection,
     *,
@@ -359,12 +444,13 @@ def build_missing_sibling_reconnect_batch(
     reconnect_root_causes = {
         "root_drift_to_surviving_sibling_target",
         "root_drift_fastresume_stale",
+        "root_drift_after_rehome_reuse",
     }
     rows = [
         row
         for row in (audit.get("rows") or [])
         if str(row.get("root_cause") or "") in reconnect_root_causes
-        and bool(row.get("sibling_targets"))
+        and (bool(row.get("sibling_targets")) or bool(row.get("mapped_target_exists")))
         and (not requested or str(row.get("hash") or "").strip().lower() in requested)
     ]
 
@@ -381,15 +467,11 @@ def build_missing_sibling_reconnect_batch(
         for payload_hash, payload_rows in rows_by_payload.items():
             if not payload_hash:
                 continue
-            donor = _select_sibling_target(
+            donor = _select_reconnect_target(
                 conn,
                 payload_hash=payload_hash,
                 target_root=target_root,
-                sibling_targets=[
-                    sibling
-                    for row in payload_rows
-                    for sibling in (row.get("sibling_targets") or [])
-                ],
+                payload_rows=payload_rows,
             )
             if donor is None:
                 skipped.append(
@@ -463,7 +545,7 @@ def build_missing_sibling_reconnect_batch(
                     "decision": "REUSE",
                     "torrent_hash": affected_torrents[0],
                     "payload_id": int(primary_source["payload_id"] or 0),
-                    "payload_hash": payload_hash,
+                    "payload_hash": str(donor.get("payload_hash") or payload_hash),
                     "reasons": [
                         "Reconnect stale missingFiles siblings to surviving target payload without copy"
                     ],
@@ -490,7 +572,13 @@ def build_missing_sibling_reconnect_batch(
                         "unique_view_subdir": str(unique_view_subdir),
                         "donor_torrent_hash": str(donor["torrent_hash"] or ""),
                         "donor_root_path": str(donor["root_path"] or ""),
-                        "audit_root_cause": "root_drift_to_surviving_sibling_target",
+                        "audit_root_causes": sorted(
+                            {
+                                str(row.get("root_cause") or "")
+                                for row in payload_rows
+                                if str(row.get("root_cause") or "").strip()
+                            }
+                        ),
                         "missing_hashes": [str(row.get("hash") or "") for row in payload_rows],
                     },
                 }

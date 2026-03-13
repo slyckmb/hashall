@@ -543,6 +543,132 @@ def test_build_missing_sibling_reconnect_batch_includes_fastresume_stale_rows_wi
     assert report["plans"][0]["payload_hash"] == "payload-reconnect"
 
 
+def test_build_missing_sibling_reconnect_batch_reuses_mapped_target_after_rehome_reuse(tmp_path):
+    target_root = str(tmp_path / "pool" / "data" / "media" / "torrents" / "seeding")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY,
+                payload_hash TEXT,
+                device_id INTEGER,
+                root_path TEXT,
+                file_count INTEGER,
+                total_bytes INTEGER,
+                status TEXT
+            );
+            CREATE TABLE torrent_instances (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_id INTEGER,
+                device_id INTEGER,
+                save_path TEXT,
+                root_name TEXT
+            );
+            CREATE TABLE rehome_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                direction TEXT,
+                decision TEXT,
+                payload_hash TEXT,
+                status TEXT,
+                source_path TEXT,
+                target_path TEXT,
+                cleanup_source_required INTEGER DEFAULT 0,
+                cleanup_source_path TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status) VALUES (1, ?, 44, ?, 1, 123, 'complete')",
+            (
+                "payload-old",
+                "/stash/media/torrents/seeding/cross-seed/seedpool (API)/Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status) VALUES (2, ?, 49, ?, 1, 123, 'complete')",
+            (
+                "payload-new",
+                f"{target_root}/cross-seed/seedpool (API)/Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name) VALUES (?, 1, 44, ?, ?)",
+            (
+                "deadbeef",
+                "/data/media/torrents/seeding/cross-seed/seedpool (API)",
+                "Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO rehome_runs (
+                started_at, finished_at, direction, decision, payload_hash, status, source_path, target_path
+            ) VALUES (
+                '2026-02-21 00:00:00', '2026-02-21 00:00:01', 'demote', 'REUSE', ?, 'success', ?, ?
+            )
+            """,
+            (
+                "payload-old",
+                "/data/media/torrents/seeding/cross-seed/seedpool (API)/Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+                f"{target_root}/cross-seed/seedpool (API)/Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    mapped_target = Path(target_root) / "cross-seed" / "seedpool (API)" / "Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv"
+    mapped_target.parent.mkdir(parents=True, exist_ok=True)
+    mapped_target.write_bytes(b"x")
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "deadbeef.fastresume",
+        save_path="/data/media/torrents/seeding/cross-seed/seedpool (API)",
+        qbt_save_path="/data/media/torrents/seeding/cross-seed/seedpool (API)",
+    )
+
+    torrents = [
+        SimpleNamespace(
+            hash="deadbeef",
+            name="Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+            state="missingFiles",
+            progress=0.0,
+            save_path="/data/media/torrents/seeding/cross-seed/seedpool (API)",
+            content_path="/data/media/torrents/seeding/cross-seed/seedpool (API)/Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+        ),
+    ]
+
+    report = build_missing_sibling_reconnect_batch(
+        qb_client=FakeQBClient(torrents),
+        source_root="/data/media/torrents/seeding",
+        target_root=target_root,
+        fastresume_dir=fastresume_dir,
+        catalog_path=catalog,
+    )
+
+    assert report["summary"]["plans"] == 1
+    plan = report["plans"][0]
+    assert plan["payload_hash"] == "payload-new"
+    assert plan["target_path"] == str(mapped_target)
+    assert plan["affected_torrents"] == ["deadbeef"]
+    assert plan["normalization"]["audit_root_causes"] == ["root_drift_after_rehome_reuse"]
+    assert plan["normalization"]["donor_root_path"] == str(mapped_target)
+    assert plan["view_targets"] == [
+        {
+            "torrent_hash": "deadbeef",
+            "source_save_path": "/data/media/torrents/seeding/cross-seed/seedpool (API)",
+            "target_save_path": f"{target_root}/cross-seed/seedpool (API)",
+            "root_name": "Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+        }
+    ]
+
+
 def test_missing_reconnect_preflight_allows_missingfiles_state(tmp_path):
     executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
     executor.qbit_client = FakeQBClient(

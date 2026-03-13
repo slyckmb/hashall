@@ -4,6 +4,19 @@ Last updated: 2026-03-12
 
 ## Live Reality / Drift
 
+- `hashall` is now `0.4.184`.
+- Latest stale reconnect hardening on 2026-03-12:
+  - `qb-missing-remediate` now builds guarded reconnect plans for `root_drift_after_rehome_reuse` rows when the mapped target payload exists under a different catalog `payload_hash`
+  - that exact gap was proven live on `Peppermint...`:
+    - `4` stale `/data/...` `missingFiles` rows
+    - surviving payload already alive at `/pool/data/...`
+    - previous behavior: `selected_plans=0`
+    - current behavior: `selected_plans=1`, `verified=4`, `patched=4`
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-212329-4f2ac41db39d760f/`
+  - resulting qB state:
+    - `missingFiles=0`
+    - `stoppedDL=1` (`Alien Romulus`, real repair lane)
+    - `stoppedUP=4` (the reattached `Peppermint` rows left paused)
 - `hashall` is now `0.4.181`.
 - `rehome` now has a shared live-reality snapshot layer in `src/rehome/reality.py`.
 - New proactive audit command:

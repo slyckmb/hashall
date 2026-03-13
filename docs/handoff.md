@@ -2,6 +2,21 @@
 
 ## Key Facts
 
+- `hashall` package semver is now `0.4.184`.
+- New 2026-03-12 stale-root reconnect hardening landed after the `Peppermint` gap:
+  - `hashall rehome qb-missing-remediate` now accepts `root_drift_after_rehome_reuse` rows when the mapped target payload exists under a different catalog `payload_hash`
+  - reconnect donor selection now falls back to the exact mapped target payload row instead of requiring same-`payload_hash` sibling donors
+  - this closes the old `/data -> /pool/data` reuse-drift gap where the surviving target payload existed but the stale rows were split onto an older payload hash
+  - live proof:
+    - `Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv`
+    - four stale `missingFiles` hashes were reattached successfully via guarded `REUSE`
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-212329-4f2ac41db39d760f/`
+  - post-run qB snapshot for that lane:
+    - `missingFiles=0`
+    - `stoppedDL=1` (`Alien Romulus`, still a real repair-lane item)
+    - the four reattached `Peppermint` hashes are intentionally left `stoppedUP 100%`
+- The stale `/data -> /pool/data` `qb-missing-audit` lane now returns `0`:
+  - `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/data/media/torrents/seeding`
 - `hashall` package semver is now `0.4.181`.
 - New 2026-03-12 batch/staleness hardening landed after restarting the next live pool-data batch:
   - `rehome apply` now accepts any JSON with a top-level `plans` list as a batch plan, even without the older explicit `batch=true` marker

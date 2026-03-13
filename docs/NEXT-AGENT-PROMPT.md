@@ -24,7 +24,14 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.181`.
+  - `hashall` version now `0.4.184`.
+  - latest stale reconnect proof:
+    - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated
+    - `qb-missing-remediate` now builds guarded reconnect plans for `root_drift_after_rehome_reuse` rows when the surviving mapped target payload exists under a different catalog `payload_hash`
+    - live report dir:
+      - `~/.logs/hashall/reports/rehome-relocate/20260312-212329-4f2ac41db39d760f/`
+    - source audit now returns `0` rows for:
+      - `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/data/media/torrents/seeding`
   - `rehome` now has a shared stale-assumption / reality layer:
     - module: `src/rehome/reality.py`
     - CLI: `hashall rehome drift-audit --plan <plan.json>`

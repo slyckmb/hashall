@@ -5,6 +5,14 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-12):
 
+- `hashall` is now `0.4.184`.
+- New 2026-03-12 `qb-missing-remediate` note:
+  - old `/data -> /pool/data` reuse-drift rows can now reconnect against an exact mapped target payload even when the surviving target catalog row has a different `payload_hash`
+  - this fixed the `Peppermint...` gap where dry-run previously showed `selected_plans: 0`
+  - live result:
+    - `4` stale `missingFiles` rows reattached successfully
+    - report dir: `~/.logs/hashall/reports/rehome-relocate/20260312-212329-4f2ac41db39d760f/`
+    - source audit now returns `rows: 0` for `/data -> /pool/data`
 - `hashall` is now `0.4.181`.
 - New 2026-03-12 verifier/reality note:
   - the `Wakanda` ebook false-negative was code, not bad content

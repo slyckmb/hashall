@@ -18,8 +18,14 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.4.181`
+   - `hashall` semver is `0.4.184`
    - `qb-zfs-relocate` semver is `0.1.13`
+   - latest stale reconnect proof:
+     - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated
+     - `qb-missing-remediate` now accepts `root_drift_after_rehome_reuse` rows when the mapped target payload lives under a different catalog `payload_hash`
+     - live report dir:
+       - `~/.logs/hashall/reports/rehome-relocate/20260312-212329-4f2ac41db39d760f/`
+     - `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/data/media/torrents/seeding` now returns `0`
    - `rehome` now has a shared reality snapshot / drift-audit layer:
      - module: `src/rehome/reality.py`
      - CLI: `hashall rehome drift-audit --plan <plan.json>`
