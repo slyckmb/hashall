@@ -5,7 +5,10 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-13):
 
-- `hashall` is now `0.6.3`.
+- `hashall` is now `0.6.6`.
+- Anchor note:
+  - the intended invariant is unique per-item qB payload trees, instantiated from donor payloads via hardlinks where possible
+  - do not read `unique target` or `de-hitchhike` as “make redundant physical copies”
 - New 2026-03-13 planner stale-no-op hardening:
   - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
   - this closes the deferred-cleanup planner gap that kept resurfacing fully converged families like `Brave.New.World.US.S01...`
@@ -27,6 +30,7 @@ Latest stale-assumption hardening note (2026-03-13):
   - missing-file reconnect plans now follow the same rule
   - stash->pool `rehome` view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
   - successful attaches now remove an unused intermediate donor root when the full sibling group is covered in-plan
+  - the goal is one correct payload tree per torrent item, with shared physical bytes via hardlinks when allowed
   - targeted validation:
     - `pytest tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py tests/test_rehome_mapping.py tests/test_rehome_catalog_sync.py -q -k 'unique or payload_rows or preflight_existing_view_conflicts_logs_progress_for_missing_targets'`
     - `pytest tests/test_rehome_atomic_relocation.py -q -k cleanup_unused_target_donor_removes_intermediate_root`

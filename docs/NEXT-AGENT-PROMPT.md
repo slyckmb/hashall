@@ -24,7 +24,11 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.6.3`.
+  - `hashall` version now `0.6.6`.
+  - anchor invariant for all migration/rehome work:
+    - a qB item needs its own correct payload tree / file-structure instantiation on disk
+    - that tree should normally be instantiated from donor payloads via hardlinks
+    - `unique target` means unique per-item payload structure, not duplicate physical byte copies
   - latest planner stale-no-op hardening:
     - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
     - this removes fully converged families from the active remainder even when source cleanup is still deferred
@@ -48,7 +52,7 @@ Prompt-critical context (2026-03-12):
     - `qb-missing-remediate` reconnect plans now follow the same rule
     - stash->pool `rehome` view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
     - successful attaches now remove an unused intermediate donor root when the full sibling group is covered in-plan
-    - use this to distinguish old hitchhiker debt from new runs, which should now converge toward unique per-hash target payloads
+    - use this to distinguish old hitchhiker debt from new runs, which should now converge toward unique per-hash payload trees backed by hardlinks
   - active remainder baseline is now:
     - `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
     - `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`

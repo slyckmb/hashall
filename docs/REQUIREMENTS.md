@@ -62,6 +62,17 @@ The system must intelligently manage torrent seed data across two ZFS pools in a
 
 **Hardlinks only work within the same filesystem/device.** Data that must be hardlinked to media libraries must remain on the same ZFS pool as those libraries.
 
+### 1.4 qB Payload-Tree Invariant
+
+For qBittorrent operations, the required uniqueness is a **torrent-specific payload tree / file-structure instantiation**, not a unique physical byte copy per torrent.
+
+That means:
+- each qB item needs its own save-path-correct on-disk payload tree
+- that tree should normally be instantiated from a verified donor payload using **hardlinks**
+- the system should avoid making redundant physical file copies just to satisfy per-item path semantics
+
+In short: **unique per-item payload tree, shared physical bytes via hardlinks when possible**
+
 ---
 
 ## 2. Storage Architecture
@@ -482,18 +493,18 @@ Does identical payload exist on stash?
 
 ### 6.3 Sibling Torrent Deduplication
 
-**Challenge:** Multiple torrents (siblings) pointing to same content consume disk space if each has separate copy.
+**Challenge:** Multiple torrents (siblings) pointing to same content still need their own qB-compatible payload trees, but should not consume extra disk space through unnecessary physical copies.
 
-**Solution:** Payload-based hardlink views
+**Solution:** Payload-based hardlink-instantiated views
 
 **Approach:**
 1. Identify payload siblings (same payload_hash)
 2. Keep one canonical payload location
-3. Build hardlink "views" for each torrent:
-   - Torrent directory structure recreated
-   - Files are hardlinks to canonical payload
-   - Each torrent sees expected layout
-   - Zero additional disk usage
+3. Build hardlink-instantiated "views" for each torrent:
+   - Each torrent gets its own expected on-disk directory/file layout
+   - Files are hardlinks to canonical donor content
+   - Each torrent sees the save-path semantics it expects
+   - Zero additional disk usage when hardlinking is possible
 
 **Example:**
 ```
@@ -503,7 +514,7 @@ Torrent A view:    /pool/data/cross-seed/Aither (API)/Movie.2024/
 Torrent B view:    /pool/data/cross-seed/Darkpeers (API)/Movie.2024/
                    └── (hardlinks to canonical payload)
 
-Result: Single copy on disk, multiple torrents seeding
+Result: Distinct per-torrent payload trees on disk, with shared physical bytes when hardlinks are possible
 ```
 
 ---
@@ -865,7 +876,7 @@ The system must be:
 
 **Unified Catalog:** Single database (`~/.hashall/catalog.db`) that tracks all files across all storage devices using stable fs_uuid-bound files tables plus `files_<device_id>` compatibility views.
 
-**View (Torrent View):** A directory structure for a torrent composed of hardlinks to a canonical payload. Multiple views can point to same payload with zero additional disk usage.
+**View (Torrent View):** A torrent-specific payload tree composed from a canonical donor payload, normally via hardlinks. Multiple views can preserve distinct qB item layout semantics while reusing the same physical bytes with zero additional disk usage.
 
 ---
 

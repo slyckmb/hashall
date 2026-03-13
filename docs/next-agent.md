@@ -18,7 +18,11 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.6.3`
+   - `hashall` semver is `0.6.6`
+   - anchor invariant:
+     - each qB item needs its own correct payload tree on disk
+     - that tree should normally be instantiated from donor bytes via hardlinks, not redundant physical copies
+     - `unique target root` means unique per-item payload structure
    - latest planner stale-no-op hardening:
      - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
      - this removes fully converged families from the active remainder even when source cleanup is still deferred
@@ -42,6 +46,7 @@ If context is compacted, recover with this sequence:
      - `qb-missing-remediate` reconnect plans now do the same
      - stash->pool `rehome` view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
      - successful attaches now remove an unused intermediate donor root when the full sibling group is covered in-plan
+     - this is about unique per-item trees backed by hardlinks, not forced duplicate byte copies
    - `refresh6` is now the source of truth for the remaining pool-data -> pool-media lane:
      - `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
      - `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`

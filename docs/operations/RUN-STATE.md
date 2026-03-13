@@ -4,7 +4,11 @@ Last updated: 2026-03-13
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.6.3`.
+- `hashall` is now `0.6.6`.
+- Anchor the current migration/rehome model on this invariant:
+  - each qB item needs its own correct payload tree on disk
+  - that tree should normally be instantiated from donor content via hardlinks
+  - `unique target` means unique per-item file structure, not mandatory duplicate physical copies
 - New 2026-03-13 planner stale-no-op hardening:
   - `relocate-plan` now skips groups when all per-hash view targets already have `source_save_path == target_save_path`
   - this removes fully converged families from the live remainder even when source cleanup is still deferred
@@ -29,6 +33,7 @@ Last updated: 2026-03-13
   - operator meaning:
     - newly constructed migrations/reconnects should stop manufacturing fresh N->1 hitchhiker targets
     - older shared-target groups remain visible as legacy debt until explicitly de-hitchhiked
+    - the replacement form is a unique per-item payload tree backed by hardlinks, not a separate byte copy per item
   - targeted validation for this slice:
     - `pytest tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py tests/test_rehome_mapping.py tests/test_rehome_catalog_sync.py -q -k 'unique or payload_rows or preflight_existing_view_conflicts_logs_progress_for_missing_targets'`
     - `pytest tests/test_rehome_atomic_relocation.py -q -k cleanup_unused_target_donor_removes_intermediate_root`

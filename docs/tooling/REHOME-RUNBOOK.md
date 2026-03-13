@@ -13,6 +13,7 @@ Single operational runbook for rehome planning, apply flow, and safety gates.
 - Prefer reuse over risky movement.
 - Apply only from fresh scan + payload sync state.
 - Treat `/data/media` and `/stash/media` as equivalent aliases.
+- Preserve the qB item invariant: every torrent should end up with its own correct payload tree on disk, normally instantiated from donor bytes via hardlinks instead of redundant physical copies.
 
 ## Baseline Workflow
 
@@ -125,6 +126,8 @@ hashall rehome qb-missing-audit \
 
 5. Migrate validated healthy payloads from source dataset to target dataset
    - batch by payload class
+   - construct destination payload trees per qB item, not duplicate byte copies per qB item
+   - prefer donor + hardlink-instantiated destination trees when filesystem boundaries allow it
    - verify qB save_path/content_path and seeding-safe state after each batch
    - keep old root as explicit migration source until batch follow-up is complete
 

@@ -14,6 +14,8 @@ Hashall is a unified file-catalog and payload-identity system for safe deduplica
 - Catalog truth comes from scans of real filesystems.
 - Payload identity maps torrent instances to on-disk content.
 - Rehome uses this catalog to move or reuse payloads safely.
+- For qB workflows, the key invariant is a unique per-item payload tree, not a unique physical byte copy.
+- Those per-item trees should normally be instantiated from donor bytes via hardlinks when filesystem boundaries allow it.
 
 ## Storage and Pathing Model
 
@@ -37,7 +39,7 @@ Legacy standalone schema file is archived at `docs/archive/legacy/schema.sql`.
 1. Scan lane: maintain filesystem truth.
 2. Payload sync lane: map qB torrents to payload state.
 3. Link lane: same-device hardlink dedup planning + execution.
-4. Rehome lane: guarded stash/pool relocation with verification.
+4. Rehome lane: guarded stash/pool relocation with verification and per-item payload-tree instantiation.
 5. Recovery lane: classify and prune recovered non-seeding data.
 
 ## Safety Guarantees

@@ -20,6 +20,7 @@ A unified catalog system for file deduplication and management. Hashall maintain
 - 📦 **ZFS Ready** - Built for ZFS + jdupes + qBittorrent workflows
 - 📊 **Progress Bars** - tqdm-powered feedback for all operations
 - 🎯 **Payload Identity** - Track multiple torrents pointing to same content
+- 🧱 **Per-Item Payload Trees** - Materialize unique qB item layouts from donor payloads via hardlinks instead of unnecessary byte-copy duplication
 
 ---
 
@@ -160,6 +161,8 @@ hashall payload siblings <torrent_hash>
 ```
 
 **Payload identity** tracks the on-disk content independently of torrent metadata. Different torrents (v1/v2, different piece sizes, different sources) that point to identical content map to the same payload.
+
+For qB workflows, the goal is not “one physical copy per torrent.” The goal is “one correct on-disk payload tree per torrent item,” normally instantiated from donor content via hardlinks when the filesystem allows it.
 
 ---
 

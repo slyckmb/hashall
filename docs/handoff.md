@@ -2,7 +2,11 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.6.3`.
+- `hashall` semver baseline is now `0.6.6`.
+- Anchor the current model on this invariant:
+  - a qB item needs its own unique payload tree / file-structure instantiation on disk
+  - that tree should normally be built from donor bytes via hardlinks, not by creating redundant physical copies
+  - when these notes say `unique target`, `de-hitchhike`, or `_rehome-unique/<hash>`, read that as “unique per-item payload tree,” not “force duplicate bytes”
 - New 2026-03-13 planner stale-no-op hardening baseline:
   - `relocate-plan` now skips groups when every per-hash view target is already `source_save_path == target_save_path`
   - this closes the deferred-cleanup stale-planner gap that kept resurfacing fully converged groups like `Brave.New.World.US.S01...`
@@ -26,6 +30,7 @@
   - `qb-missing-remediate` reconnect plans now follow the same rule, so reconnects stop recreating shared hitchhiker targets
   - `rehome` stash->pool view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
   - successful attaches now remove an unused intermediate donor root when the entire sibling group is in-plan, so the run does not leave a hidden extra canonical target tree behind
+  - this is about unique per-item payload trees backed by hardlinks where possible, not about forcing separate physical file copies
   - targeted validation for this slice:
     - `pytest tests/test_rehome_normalize.py tests/test_rehome_qb_missing.py tests/test_rehome_mapping.py tests/test_rehome_catalog_sync.py -q -k 'unique or payload_rows or preflight_existing_view_conflicts_logs_progress_for_missing_targets'`
     - `pytest tests/test_rehome_atomic_relocation.py -q -k cleanup_unused_target_donor_removes_intermediate_root`
