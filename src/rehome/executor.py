@@ -1247,6 +1247,10 @@ class DemotionExecutor:
                 if torrent_hash in files_cache:
                     files = files_cache[torrent_hash]
                 else:
+                    self._log(
+                        "  preflight_target_views_fetch "
+                        f"view={view_idx}/{total_views} hash={torrent_hash[:16]}"
+                    )
                     files = self.qbit_client.get_torrent_files(torrent_hash)
                     files_cache[torrent_hash] = files
                 if not files:
@@ -1276,9 +1280,6 @@ class DemotionExecutor:
                         if len(files) == 1 and len(rel.parts) == 1 and view_root.name == rel.name:
                             dst = view_root
                     checked_paths += 1
-                    if not (dst.exists() or dst.is_symlink()):
-                        continue
-                    existing_paths += 1
                     now = time.monotonic()
                     if now - last_progress_log >= 5:
                         self._log(
@@ -1288,6 +1289,9 @@ class DemotionExecutor:
                             f"existing_paths={existing_paths} elapsed_s={now - start_ts:.1f}"
                         )
                         last_progress_log = now
+                    if not (dst.exists() or dst.is_symlink()):
+                        continue
+                    existing_paths += 1
                     try:
                         _ensure_hardlink(src, dst, compare_hint=compare_hint)
                     except Exception as exc:

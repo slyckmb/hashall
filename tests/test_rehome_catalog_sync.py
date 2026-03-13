@@ -2008,6 +2008,62 @@ def test_preflight_existing_view_conflicts_logs_progress(tmp_path):
     assert any("preflight_target_views_complete" in entry for entry in logs)
 
 
+def test_preflight_existing_view_conflicts_logs_progress_for_missing_targets(tmp_path, monkeypatch):
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER UNIQUE,
+            mount_point TEXT,
+            preferred_mount_point TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        ("dev-44", 44, str(tmp_path), str(tmp_path)),
+    )
+    conn.commit()
+    conn.close()
+
+    payload_file = tmp_path / "canonical" / "Movie.2024.mkv"
+    payload_file.parent.mkdir(parents=True, exist_ok=True)
+    payload_file.write_bytes(b"payload")
+    files = [QBitFile(name=payload_file.name, size=payload_file.stat().st_size)]
+
+    missing_save = tmp_path / "views" / "cross-seed" / "TrackerB"
+    missing_save.mkdir(parents=True, exist_ok=True)
+
+    executor = DemotionExecutor(catalog_path=db_path)
+    executor.reuse_transport = "set_location"
+    executor.qbit_client = FakeQbitClientWithFiles(default_path=str(missing_save), files=files)
+
+    logs: list[str] = []
+    executor._log = logs.append
+
+    monotonic_values = iter([0.0, 6.0, 6.0, 6.0])
+    monkeypatch.setattr("rehome.executor.time.monotonic", lambda: next(monotonic_values))
+
+    plan = {
+        "target_device_id": 44,
+    }
+    view_targets = [
+        {
+            "torrent_hash": "hash_a",
+            "target_save_path": str(missing_save),
+            "root_name": payload_file.name,
+        },
+    ]
+
+    executor._preflight_existing_view_conflicts(payload_file, view_targets, plan)
+
+    assert any("preflight_target_views_fetch" in entry for entry in logs)
+    assert any("preflight_target_views_progress" in entry for entry in logs)
+    assert any("preflight_target_views_complete" in entry for entry in logs)
+
+
 def test_execute_reuse_skips_stale_sibling_hash_with_missing_files(tmp_path, monkeypatch):
     db_path = tmp_path / "catalog.db"
     conn = sqlite3.connect(db_path)
