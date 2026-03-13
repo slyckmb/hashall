@@ -18,7 +18,13 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.6.2`
+   - `hashall` semver is `0.6.3`
+   - latest planner stale-no-op hardening:
+     - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
+     - this removes fully converged families from the active remainder even when source cleanup is still deferred
+   - live Brave proof:
+     - `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
+     - fresh remainder plan drops from `31` to `29` candidates
    - latest bridge hardening after the first Twisters failures:
      - planner prefers surviving target donors for stale already-targeted rows
      - single-file unique views keep `root_dir/file` layout
@@ -65,6 +71,9 @@ If context is compacted, recover with this sequence:
    - current live migration baseline:
      - `old_path_count=34`
      - `new_path_count=317`
+     - active remainder plan:
+       - `out/rehome-plan-pool-data-to-media-refresh9-20260313.json`
+       - `29` candidates (`22 REUSE`, `7 MOVE`, `2` skipped as already targeted no-ops)
      - qB health:
        - `stalledup=5147`
        - `uploading=5`

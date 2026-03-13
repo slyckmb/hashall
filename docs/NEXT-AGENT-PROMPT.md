@@ -24,7 +24,13 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.6.2`.
+  - `hashall` version now `0.6.3`.
+  - latest planner stale-no-op hardening:
+    - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
+    - this removes fully converged families from the active remainder even when source cleanup is still deferred
+  - latest live Brave proof:
+    - `Brave.New.World.US.S01...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
+    - fresh remainder plan drops from `31` to `29` candidates
   - latest Twisters bridge hardening:
     - planner prefers surviving target donors for stale already-targeted rows
     - unique single-file targets now keep `root_dir/file` layout
@@ -78,6 +84,9 @@ Prompt-critical context (2026-03-12):
   - current live migration baseline:
     - `old_path_count=34`
     - `new_path_count=317`
+    - next source-of-truth remainder plan:
+      - `out/rehome-plan-pool-data-to-media-refresh9-20260313.json`
+      - `29` candidates (`22 REUSE`, `7 MOVE`, `2` skipped already-targeted no-ops)
     - qB health:
       - `stalledup=5147`
       - `uploading=5`

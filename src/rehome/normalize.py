@@ -688,6 +688,21 @@ def build_root_relocation_batch(
                 )
                 continue
 
+            if all(
+                _canonical(str(view.get("source_save_path") or ""))
+                == _canonical(str(view.get("target_save_path") or ""))
+                for view in view_targets
+            ):
+                skipped.append(
+                    NormalizationSkip(
+                        payload_id=payload_id,
+                        payload_hash=payload_hash,
+                        source_path=str(source_path),
+                        reason="already_targeted_view_targets",
+                    )
+                )
+                continue
+
             if payload_hash not in payload_group_cache:
                 device_filter: Tuple[int, ...]
                 if int(source_device) == int(target_device):

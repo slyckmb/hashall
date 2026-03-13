@@ -5,7 +5,13 @@ Canonical living state:
 
 Latest stale-assumption hardening note (2026-03-13):
 
-- `hashall` is now `0.6.2`.
+- `hashall` is now `0.6.3`.
+- New 2026-03-13 planner stale-no-op hardening:
+  - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
+  - this closes the deferred-cleanup planner gap that kept resurfacing fully converged families like `Brave.New.World.US.S01...`
+  - live proof:
+    - `Brave.New.World.US.S01...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
+    - `refresh9` drops from `31` candidates to `29`
 - New 2026-03-13 Twisters bridge hardening:
   - planner now prefers surviving target donors for stale already-targeted rows
   - single-file unique targets keep `root_dir/file` layout
@@ -46,7 +52,7 @@ Latest stale-assumption hardening note (2026-03-13):
   - `affected_torrents=9`
   - `unique_view_targets=9`
 
-- `hashall` is now `0.6.2`.
+- `hashall` is now `0.6.3`.
 - New 2026-03-12 preflight feedback note:
   - `_preflight_existing_view_conflicts()` now emits heartbeat / completion lines during long existing-target scans
   - new log keys:

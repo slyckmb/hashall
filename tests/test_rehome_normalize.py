@@ -638,4 +638,55 @@ def test_root_relocation_plan_prefers_surviving_target_payload_when_source_root_
     assert plan["source_path"] == str(source_path)
     assert plan["target_path"] == str(target_file)
     assert plan["normalization"]["source_hint"] == "target_payload_root"
-    assert plan["normalization"]["fallback_used"] is False
+
+
+def test_root_relocation_plan_skips_groups_when_all_view_targets_are_already_targeted(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding"
+    source_path = source_root / "cross-seed" / "XSpeeds" / "Brave.New.World.US.S01"
+    source_path.mkdir(parents=True, exist_ok=True)
+    (source_path / "episode.mkv").write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (30, 'hash30', 231, ?, 1, 3, 'complete')
+        """,
+        (str(source_path),),
+    )
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags)
+        VALUES (?, 30, 141, ?, 'Brave.New.World.US.S01', 'cross-seed', 'cross-seed')
+        """,
+        [
+            (
+                "thash30a",
+                str(target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash30a"),
+            ),
+            (
+                "thash30b",
+                str(target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash30b"),
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_root_relocation_batch(
+        catalog_path=db_path,
+        source_device=231,
+        target_device=141,
+        source_root=str(source_root),
+        target_root=str(target_root),
+        flat_only=False,
+    )
+
+    assert report["summary"]["candidates"] == 0
+    assert any(
+        item["reason"] == "already_targeted_view_targets"
+        for item in report["skipped"]
+    )

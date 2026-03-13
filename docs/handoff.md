@@ -2,7 +2,14 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.6.2`.
+- `hashall` semver baseline is now `0.6.3`.
+- New 2026-03-13 planner stale-no-op hardening baseline:
+  - `relocate-plan` now skips groups when every per-hash view target is already `source_save_path == target_save_path`
+  - this closes the deferred-cleanup stale-planner gap that kept resurfacing fully converged groups like `Brave.New.World.US.S01...`
+  - live proof:
+    - `Brave.New.World.US.S01...` completed successfully at `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
+    - a fresh remainder plan now drops from `31` candidates to `29`
+    - refreshed source of truth is now `refresh9`, not `refresh8`
 - New 2026-03-13 Twisters bridge hardening baseline:
   - planner now prefers surviving target donors when stale rows already point at target-side payloads
   - unique single-file directory-root target views now preserve the expected `root_dir/file` shape instead of flattening to a bare filename
@@ -29,7 +36,7 @@
   - qB ended healthy on `/pool/media/...`
   - the post snapshot still warned that the catalog grouped the 4 hashes into `1` shared payload row
   - that warning is the exact structural gap the new de-hitchhike planner/executor slice is meant to close
-- Current live migration remainder after the Twisters success:
+- Current live migration remainder after the Twisters + Brave success:
   - `old_path_count=34`
   - `new_path_count=317`
   - qB health snapshot:
@@ -37,9 +44,14 @@
     - `stoppeddl=1` (`Alien Romulus`, still repair-lane only)
     - `stalleddl=2` (non-pool-data outliers under `/data/media/torrents/seeding/radarr`)
   - next operator step:
-    - refresh/cut the next conservative slice from the remaining `34` old-path rows instead of reusing the older `refresh6` summary verbatim
+    - use `out/rehome-plan-pool-data-to-media-refresh9-20260313.json` for the next conservative slice
+    - refreshed summary:
+      - `candidates=29`
+      - `reuse=22`
+      - `move=7`
+      - `skipped=2` (`already_targeted_view_targets`)
 
-- `hashall` package semver is now `0.6.2`.
+- `hashall` package semver is now `0.6.3`.
 - New 2026-03-12 preflight feedback hardening landed after the long `Snowfall...` quiet window:
   - `_preflight_existing_view_conflicts()` now emits:
     - `preflight_target_views_progress`
