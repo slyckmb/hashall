@@ -23,9 +23,12 @@ if str(SRC_ROOT) not in sys.path:
 from hashall.qbittorrent import QBittorrentClient, QBitTorrent  # noqa: E402
 
 
-SCRIPT_VERSION = "0.1.1"
+SCRIPT_VERSION = "0.1.2"
 SCRIPT_NAME = Path(__file__).name
 VERIFY_SCRIPT = REPO_ROOT / "bin" / "qb-libtorrent-verify.py"
+AUTO_PATH_MAPS: tuple[tuple[str, str], ...] = (
+    ("/incomplete_torrents", "/dump/torrents/incomplete_vpn"),
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="path_maps",
         default=[],
         help="Translate qB-derived paths from FROM=TO prefixes before verify (repeatable)",
+    )
+    p.add_argument(
+        "--no-auto-path-maps",
+        action="store_true",
+        help="Disable built-in common qB container-path to host-path translations",
     )
     p.add_argument(
         "--no-qb-paths",
@@ -168,6 +176,22 @@ def apply_path_maps(path: str, path_maps: Sequence[tuple[str, str]]) -> str:
     return current
 
 
+def effective_path_maps(
+    user_maps: Sequence[tuple[str, str]],
+    *,
+    include_auto: bool,
+) -> List[tuple[str, str]]:
+    merged: List[tuple[str, str]] = []
+    seen = set()
+    for src, dst in ([*AUTO_PATH_MAPS] if include_auto else []) + list(user_maps):
+        key = (src, dst)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append((src, dst))
+    return merged
+
+
 def collect_candidate_paths(
     qb: QBittorrentClient,
     torrent: QBitTorrent,
@@ -177,23 +201,48 @@ def collect_candidate_paths(
     save_path_only: bool,
     extra_paths: Sequence[str],
     path_maps: Sequence[tuple[str, str]],
-) -> List[str]:
-    candidates: List[str] = []
+) -> List[dict]:
+    candidates: List[dict] = []
+
+    def add(path: str, source: str) -> None:
+        raw = str(path or "").strip()
+        if not raw:
+            return
+        mapped = apply_path_maps(raw, path_maps)
+        candidates.append(
+            {
+                "path": str(Path(mapped)),
+                "source": source,
+                "raw_path": raw,
+                "mapped": mapped != raw,
+            }
+        )
+
     if include_qb_paths:
         root_path = qb.get_torrent_root_path(torrent)
         multi_file_root = ""
         if torrent.save_path and torrent.name:
             multi_file_root = str(Path(torrent.save_path) / torrent.name)
         if torrent.content_path and not save_path_only:
-            candidates.append(apply_path_maps(str(Path(torrent.content_path)), path_maps))
+            add(str(Path(torrent.content_path)), "qb_content_path")
         if torrent.save_path and not content_path_only:
-            candidates.append(apply_path_maps(str(Path(torrent.save_path)), path_maps))
+            add(str(Path(torrent.save_path)), "qb_save_path")
             if multi_file_root:
-                candidates.append(apply_path_maps(multi_file_root, path_maps))
+                add(multi_file_root, "qb_save_path_plus_name")
         if root_path and not content_path_only:
-            candidates.append(apply_path_maps(str(Path(root_path)), path_maps))
-    candidates.extend(str(Path(apply_path_maps(str(Path(p).expanduser()), path_maps))) for p in extra_paths)
-    return dedupe_keep_order(candidates)
+            add(str(Path(root_path)), "qb_root_path")
+    for p in extra_paths:
+        add(str(Path(p).expanduser()), "user_path")
+
+    deduped: List[dict] = []
+    seen = set()
+    for item in candidates:
+        key = str(Path(item["path"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def export_torrent_file(
@@ -252,9 +301,11 @@ def build_report(
     torrent_hash: str,
     torrent: QBitTorrent,
     candidate_paths: Sequence[str],
+    candidate_details: Sequence[dict],
     verifier_report: dict,
     *,
     torrent_file: Path,
+    path_maps: Sequence[tuple[str, str]],
 ) -> dict:
     summary = verifier_report.get("summary", {}) if isinstance(verifier_report, dict) else {}
     torrent_payload = asdict(torrent) if is_dataclass(torrent) else dict(vars(torrent))
@@ -264,6 +315,8 @@ def build_report(
         "hash": torrent_hash,
         "torrent": torrent_payload,
         "candidate_paths": list(candidate_paths),
+        "candidate_details": list(candidate_details),
+        "path_maps": [{"from": src, "to": dst} for src, dst in path_maps],
         "torrent_file": str(torrent_file),
         "summary": {
             "candidate_count": len(candidate_paths),
@@ -322,6 +375,10 @@ def main() -> int:
     except ValueError as exc:
         print(f"error={exc}", file=sys.stderr)
         return 2
+    path_maps = effective_path_maps(
+        path_maps,
+        include_auto=not bool(args.no_auto_path_maps),
+    )
 
     qb = QBittorrentClient(
         base_url=str(args.base_url),
@@ -333,7 +390,7 @@ def main() -> int:
         print(f"error=torrent_not_found hash={torrent_hash}", file=sys.stderr)
         return 2
 
-    candidate_paths = collect_candidate_paths(
+    candidate_items = collect_candidate_paths(
         qb,
         torrent,
         include_qb_paths=not bool(args.no_qb_paths),
@@ -342,6 +399,7 @@ def main() -> int:
         extra_paths=args.paths,
         path_maps=path_maps,
     )
+    candidate_paths = [str(item["path"]) for item in candidate_items]
     if not candidate_paths:
         print(f"error=no_candidate_paths hash={torrent_hash}", file=sys.stderr)
         return 2
@@ -359,8 +417,10 @@ def main() -> int:
             torrent_hash,
             torrent,
             candidate_paths,
+            candidate_items,
             verifier_report,
             torrent_file=torrent_file,
+            path_maps=path_maps,
         )
         print_summary(report)
         if args.json_out:

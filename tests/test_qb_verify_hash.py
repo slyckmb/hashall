@@ -30,11 +30,17 @@ def test_collect_candidate_paths_prefers_distinct_qb_hints() -> None:
         path_maps=[],
     )
 
-    assert out == [
+    assert [item["path"] for item in out] == [
         "/pool/media/root/file.mkv",
         "/pool/media/root",
         "/pool/media/root/Example.mkv",
         "/alt/path",
+    ]
+    assert [item["source"] for item in out] == [
+        "qb_content_path",
+        "qb_save_path",
+        "qb_save_path_plus_name",
+        "user_path",
     ]
 
 
@@ -56,7 +62,7 @@ def test_collect_candidate_paths_honors_content_path_only() -> None:
         path_maps=[],
     )
 
-    assert out == ["/pool/media/root/file.mkv"]
+    assert [item["path"] for item in out] == ["/pool/media/root/file.mkv"]
 
 
 def test_collect_candidate_paths_applies_path_maps() -> None:
@@ -77,11 +83,18 @@ def test_collect_candidate_paths_applies_path_maps() -> None:
         path_maps=[("/incomplete_torrents", "/dump/torrents/incomplete_vpn")],
     )
 
-    assert out == [
+    assert [item["path"] for item in out] == [
         "/dump/torrents/incomplete_vpn/NOAH_HDCLUB",
         "/data/media/torrents/seeding/privatehd",
         "/data/media/torrents/seeding/privatehd/NOAH_HDCLUB",
     ]
+    assert out[0]["mapped"] is True
+    assert out[0]["source"] == "qb_content_path"
+
+
+def test_effective_path_maps_adds_auto_defaults() -> None:
+    out = MODULE.effective_path_maps([], include_auto=True)
+    assert ("/incomplete_torrents", "/dump/torrents/incomplete_vpn") in out
 
 
 def test_determine_exit_code_compare_all_requires_every_candidate_verified() -> None:
@@ -173,3 +186,5 @@ def test_main_writes_wrapper_json_and_uses_verifier_report(monkeypatch, tmp_path
         "/pool/media/root/Example.mkv",
         "/pool/media/root",
     ]
+    assert payload["candidate_details"][0]["source"] == "qb_content_path"
+    assert payload["path_maps"] == [{"from": "/incomplete_torrents", "to": "/dump/torrents/incomplete_vpn"}]
