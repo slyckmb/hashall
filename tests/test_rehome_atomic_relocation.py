@@ -313,6 +313,36 @@ def test_cleanup_unused_target_donor_removes_intermediate_root(tmp_path):
     assert plan["cleanup_unused_target_donor"] == str(donor_root.resolve())
 
 
+def test_cleanup_unused_target_donor_keeps_single_file_direct_target(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    donor_file = tmp_path / "pool-media" / "abtorrents" / "book.epub"
+    donor_file.parent.mkdir(parents=True, exist_ok=True)
+    donor_file.write_bytes(b"book")
+
+    plan = {
+        "_reality_snapshot_pre": {"summary": {"out_of_plan_siblings": 0}},
+        # Single-file direct-target runs currently record the constructed root
+        # as the parent directory, not the file path itself.
+        "constructed_payload_roots": {"hash-a": str(donor_file.parent)},
+        "payload_group": [
+            {
+                "hash": "hash-a",
+                "dest_content_path": str(donor_file),
+            }
+        ],
+    }
+
+    removed = executor._cleanup_unused_target_donor(
+        plan,
+        SimpleNamespace(target_path=donor_file),
+    )
+
+    assert removed is False
+    assert donor_file.exists()
+    assert "cleanup_unused_target_donor" not in plan
+
+
 def test_atomic_relocation_rollback_uses_qb_runtime_source_path(tmp_path, monkeypatch):
     class AliasQbitClient(FakeQbitClient):
         def __init__(self):

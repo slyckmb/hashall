@@ -4037,8 +4037,15 @@ class DemotionExecutor:
             for value in (plan.get("constructed_payload_roots") or {}).values()
             if str(value).strip()
         }
+        protected_targets = set(constructed_roots)
+        for entry in (plan.get("payload_group") or []):
+            for key in ("dest_content_path", "target_path", "target_payload_root"):
+                raw = str(entry.get(key) or "").strip()
+                if not raw:
+                    continue
+                protected_targets.add(canonicalize_path(Path(raw).resolve()))
         donor_root = canonicalize_path(donor.target_path.resolve())
-        if donor_root in constructed_roots or not constructed_roots:
+        if donor_root in protected_targets or not constructed_roots:
             return False
         if not donor_root.exists():
             return False
