@@ -816,6 +816,98 @@ def test_build_missing_sibling_reconnect_batch_uses_same_name_unique_targets_wit
     ]
 
 
+def test_build_missing_sibling_reconnect_batch_does_not_merge_same_name_different_size(tmp_path):
+    target_root = tmp_path / "pool" / "media" / "torrents" / "seeding"
+    unique_root = target_root / "_rehome-unique" / "goodcafe"
+    unique_root.mkdir(parents=True, exist_ok=True)
+    donor_file = unique_root / "Alien.Romulus.2024.mkv"
+    donor_file.write_bytes(b"x")
+
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY,
+                payload_hash TEXT,
+                device_id INTEGER,
+                root_path TEXT,
+                file_count INTEGER,
+                total_bytes INTEGER,
+                status TEXT
+            );
+            CREATE TABLE torrent_instances (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_id INTEGER,
+                device_id INTEGER,
+                save_path TEXT,
+                root_name TEXT
+            );
+            CREATE TABLE rehome_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                direction TEXT,
+                decision TEXT,
+                payload_hash TEXT,
+                status TEXT,
+                source_path TEXT,
+                target_path TEXT,
+                cleanup_source_required INTEGER DEFAULT 0,
+                cleanup_source_path TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status) VALUES (1, ?, 141, ?, 1, 1, 'complete')",
+            ("payload-v", str(donor_file)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "deadbeef.fastresume",
+        save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+        qbt_save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+    )
+
+    torrents = [
+        SimpleNamespace(
+            hash="deadbeef",
+            name="Alien.Romulus.2024.mkv",
+            state="missingFiles",
+            progress=0.0,
+            save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+            content_path="/pool/media/torrents/seeding/cross-seed/hawke-uno/Alien.Romulus.2024.mkv",
+            size=2,
+        ),
+        SimpleNamespace(
+            hash="goodcafe",
+            name="Alien.Romulus.2024.mkv",
+            state="stalledUP",
+            progress=1.0,
+            save_path=str(unique_root),
+            content_path=str(donor_file),
+            size=1,
+        ),
+    ]
+
+    report = build_missing_sibling_reconnect_batch(
+        qb_client=FakeQBClient(torrents),
+        source_root="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+        target_root=str(target_root),
+        fastresume_dir=fastresume_dir,
+        catalog_path=catalog,
+        torrent_hashes=["deadbeef"],
+    )
+
+    assert report["summary"]["plans"] == 0
+
+
 def test_missing_reconnect_preflight_allows_missingfiles_state(tmp_path):
     executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
     executor.qbit_client = FakeQBClient(

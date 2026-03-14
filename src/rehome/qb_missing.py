@@ -576,7 +576,10 @@ def build_missing_sibling_reconnect_batch(
         for row in rows:
             payload_key = str(row.get("payload_hash") or "").strip()
             if not payload_key:
-                payload_key = f"name:{str(row.get('name') or '').strip().lower()}"
+                payload_key = (
+                    f"name:{str(row.get('name') or '').strip().lower()}"
+                    f"|size:{int(row.get('size') or 0)}"
+                )
             rows_by_payload[payload_key].append(row)
 
         for payload_hash, payload_rows in rows_by_payload.items():
@@ -870,6 +873,7 @@ def audit_missing_root_drift(
                 "hash": torrent_hash,
                 "payload_hash": str(payload_context["payload_hash"] or ""),
                 "name": str(getattr(torrent, "name", "") or ""),
+                "size": int(getattr(torrent, "size", 0) or 0),
                 "state": str(getattr(torrent, "state", "") or ""),
                 "progress": float(getattr(torrent, "progress", 0.0) or 0.0),
                 "save_path": str(getattr(torrent, "save_path", "") or ""),

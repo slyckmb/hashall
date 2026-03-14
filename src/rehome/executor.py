@@ -806,6 +806,15 @@ class DemotionExecutor:
                             f"save_path verification failed after patch hash={row['hash'][:16]} "
                             f"expected={row.get('new_save_path')} actual={getattr(info, 'save_path', '')}"
                         )
+                    if not self._post_patch_qb_accounting_healthy(info):
+                        raise RuntimeError(
+                            "post-patch qB accounting incomplete "
+                            f"hash={row['hash'][:16]} state={getattr(info, 'state', '')} "
+                            f"progress={getattr(info, 'progress', '')} "
+                            f"completed={getattr(info, 'completed', '')} "
+                            f"amount_left={getattr(info, 'amount_left', '')} "
+                            f"size={getattr(info, 'size', '')}"
+                        )
                     row["resume_status"] = "kept_paused"
                 tool._checkpoint_manifest(manifest_path, manifest)
             phase_times["post_patch"] = time.monotonic() - t0
@@ -864,6 +873,35 @@ class DemotionExecutor:
             copy_status = str(row.get("copy_status") or "").strip()
             if copy_status in {"", "pending"}:
                 row["copy_status"] = "reused_existing_dest"
+
+    @staticmethod
+    def _post_patch_qb_accounting_healthy(info: object) -> bool:
+        try:
+            progress = float(getattr(info, "progress", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        try:
+            amount_left = int(getattr(info, "amount_left", 0) or 0)
+        except (TypeError, ValueError):
+            amount_left = 0
+        try:
+            completed = int(getattr(info, "completed", 0) or 0)
+        except (TypeError, ValueError):
+            completed = 0
+        try:
+            size = int(getattr(info, "size", 0) or 0)
+        except (TypeError, ValueError):
+            size = 0
+
+        if progress < 1.0:
+            return False
+        if amount_left > 0:
+            return False
+        if size > 0 and completed == 0:
+            return False
+        if size > 0 and 0 < completed < size:
+            return False
+        return True
 
     @staticmethod
     def _filter_plan_to_hashes(plan: Dict[str, object], allowed_hashes: set[str]) -> None:

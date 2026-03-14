@@ -84,6 +84,25 @@ class FakeQbitClientSelective(FakeQbitClient):
         return list(self._files_by_hash.get(torrent_hash, []))
 
 
+class FakeQbitClientIncompleteAfterPatch(FakeQbitClient):
+    def __init__(self, default_path: str, *, bad_hash: str):
+        super().__init__(default_path=default_path)
+        self.bad_hash = bad_hash
+
+    def get_torrent_info(self, torrent_hash: str):
+        if torrent_hash == self.bad_hash:
+            return SimpleNamespace(
+                save_path=self.save_paths.get(torrent_hash, self.default_path),
+                state="pausedDL",
+                progress=0.0,
+                amount_left=12345,
+                completed=0,
+                size=12345,
+                auto_tmm=False,
+            )
+        return super().get_torrent_info(torrent_hash)
+
+
 def test_hardened_fastresume_reconcile_only_skips_validate_and_patch(tmp_path, monkeypatch):
     manifest_path = tmp_path / "manifest.json"
     manifest = {
@@ -736,6 +755,110 @@ def test_hardened_fastresume_reconcile_subset_excludes_reconciled_rows_from_patc
     assert rows["hash-reconcile"]["selected"] is False
     assert rows["hash-reconcile"]["resume_status"] == "already_repointed"
     assert rows["hash-patch"]["patch_status"] == "patched"
+
+
+def test_hardened_fastresume_keep_paused_rejects_incomplete_qb_accounting(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "rows": [
+            {
+                "hash": "hash-bad",
+                "selected": True,
+                "state": "stoppedUP",
+                "verified": False,
+                "old_save_path": "/pool/data/media/torrents/seeding/abtorrents",
+                "new_save_path": "/pool/media/torrents/seeding/abtorrents",
+                "content_path": "/pool/data/media/torrents/seeding/abtorrents/Book.epub",
+                "dest_content_path": "/pool/media/torrents/seeding/abtorrents/Book.epub",
+            }
+        ]
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest))
+
+    class FakeController:
+        def __init__(self):
+            self.running = False
+
+        def is_stopped(self):
+            return not self.running
+
+        def stop(self):
+            self.running = False
+
+        def start(self):
+            self.running = True
+
+    class FakeRelocationTool:
+        def __init__(self, path: Path):
+            self.path = path
+            self.controller = FakeController()
+
+        def _ensure_controller(self):
+            return self.controller
+
+        def _wait_for_qb_online(self):
+            return None
+
+        def _load_manifest(self, path: Path):
+            return __import__("json").loads(Path(path).read_text())
+
+        def _checkpoint_manifest(self, path: Path, manifest):
+            Path(path).write_text(__import__("json").dumps(manifest))
+
+        def _pause_selected(self, rows):
+            for row in rows:
+                row["state"] = "stoppedUP"
+
+        def _refresh_rows_from_qb(self, rows):
+            return None
+
+        def verify(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["verified"] = True
+                row["verify_status"] = "verified"
+                row["verify_classification"] = "exact_tree"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def validate(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["actionable"] = True
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def patch(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["patch_status"] = "patched"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClientIncompleteAfterPatch(
+        default_path="/pool/data/media/torrents/seeding/abtorrents",
+        bad_hash="hash-bad",
+    )
+    executor.qbit_client.save_paths["hash-bad"] = "/pool/media/torrents/seeding/abtorrents"
+    executor.resume_after_relocate = False
+    relocation_tool = FakeRelocationTool(manifest_path)
+
+    monkeypatch.setattr(executor, "_relocation_artifact_dir", lambda plan: tmp_path)
+    monkeypatch.setattr(executor, "_build_hardened_relocation_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr(executor, "_build_qb_zfs_relocation_tool", lambda: relocation_tool)
+
+    with pytest.raises(RuntimeError, match="post-patch qB accounting incomplete"):
+        executor._attach_torrents_via_hardened_fastresume(
+            {"payload_hash": "payload-hash"},
+            TargetDonor(
+                source_path=tmp_path / "src",
+                target_path=tmp_path / "dst",
+                target_device_id=141,
+                acquisition_mode="move",
+            ),
+            relocations=[],
+        )
 
 
 def test_hardened_fastresume_restarts_qb_after_validate_failure(tmp_path, monkeypatch):
