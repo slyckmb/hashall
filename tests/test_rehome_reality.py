@@ -546,6 +546,60 @@ def test_build_plan_reality_snapshot_blocks_qbit_only_out_of_plan_siblings(tmp_p
     assert any("same-name out-of-plan torrent" in warning for warning in snapshot["group_warnings"])
 
 
+def test_build_plan_reality_snapshot_treats_same_batch_hashes_as_in_plan(tmp_path):
+    source_root = tmp_path / "pool-data" / "cross-seed" / "Aither" / "EpisodeSet"
+    target_root = tmp_path / "pool-media" / "cross-seed" / "Aither" / "EpisodeSet"
+    source_root.mkdir(parents=True, exist_ok=True)
+    target_root.mkdir(parents=True, exist_ok=True)
+    (source_root / "ep1.mkv").write_bytes(b"a" * 8)
+
+    catalog = tmp_path / "catalog.db"
+    _make_catalog(catalog, payload_root=str(source_root), save_path=str(source_root.parent))
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(source_root.parent),
+        qbt_save_path=str(source_root.parent),
+    )
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="EpisodeSet",
+                state="stalledUP",
+                progress=1.0,
+                save_path=str(source_root.parent),
+                content_path=str(source_root),
+                size=8,
+            ),
+            SimpleNamespace(
+                hash="sibling999",
+                name="EpisodeSet",
+                state="stalledUP",
+                progress=1.0,
+                save_path=str(source_root.parent),
+                content_path=str(source_root),
+                size=8,
+            ),
+        ]
+    )
+
+    snapshot = build_plan_reality_snapshot(
+        plan=_make_plan(source_root, target_root) | {"total_bytes": 8},
+        qb_client=qb,
+        catalog_path=catalog,
+        fastresume_dir=fastresume_dir,
+        batch_torrent_hashes=["abc123", "sibling999"],
+    )
+
+    assert snapshot["group_state"] != "blocked_qbit_sibling_gap"
+    assert snapshot["summary"]["out_of_plan_siblings"] == 0
+    assert snapshot["summary"]["qbit_out_of_plan_siblings"] == 0
+
+
 def test_build_plan_reality_snapshot_reports_legacy_shared_payload_rows(tmp_path):
     source_root = tmp_path / "pool-data" / "cross-seed" / "seedpool (API)" / "Movie.mkv"
     target_root = tmp_path / "pool-media" / "cross-seed" / "seedpool (API)" / "Movie.mkv"

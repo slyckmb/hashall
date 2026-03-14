@@ -593,6 +593,7 @@ class DemotionExecutor:
                 catalog_path=self.catalog_path,
                 fastresume_dir=self.fastresume_dir,
                 phase=phase,
+                batch_torrent_hashes=plan.get("_batch_torrent_hashes") or [],
             )
         except Exception as exc:
             self._log(

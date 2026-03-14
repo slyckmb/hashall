@@ -1089,6 +1089,17 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
                 click.echo(f"   {reason}")
             raise click.Abort()
 
+    batch_torrent_hashes = sorted(
+        {
+            str(torrent_hash or "").strip().lower()
+            for plan in plans_to_apply
+            for torrent_hash in (plan.get('affected_torrents') or [])
+            if str(torrent_hash or "").strip()
+        }
+    )
+    for plan in plans_to_apply:
+        plan["_batch_torrent_hashes"] = batch_torrent_hashes
+
     # Create executor
     executor = DemotionExecutor(catalog_path=catalog_path)
 
@@ -1943,12 +1954,22 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
     qbit = get_qbittorrent_client()
     _wait_for_qb_ready(qbit)
 
+    batch_torrent_hashes = sorted(
+        {
+            str(torrent_hash or "").strip().lower()
+            for plan in plans
+            for torrent_hash in (plan.get("affected_torrents") or [])
+            if str(torrent_hash or "").strip()
+        }
+    )
+
     snapshots = [
         build_plan_reality_snapshot(
             plan=plan,
             qb_client=qbit,
             catalog_path=Path(catalog),
             fastresume_dir=Path(fastresume_dir),
+            batch_torrent_hashes=batch_torrent_hashes,
         )
         for plan in plans
     ]

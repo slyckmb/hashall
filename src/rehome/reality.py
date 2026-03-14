@@ -442,6 +442,7 @@ def build_plan_reality_snapshot(
     catalog_path: Optional[Path] = None,
     fastresume_dir: Optional[Path] = None,
     phase: str = "pre",
+    batch_torrent_hashes: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     affected = [
         str(torrent_hash or "").strip().lower()
@@ -516,6 +517,12 @@ def build_plan_reality_snapshot(
 
     summary_counts = Counter(str(row.get("classification") or "") for row in rows)
     affected_set = set(affected)
+    batch_hash_set = {
+        str(torrent_hash or "").strip().lower()
+        for torrent_hash in (batch_torrent_hashes or [])
+        if str(torrent_hash or "").strip()
+    }
+    in_plan_hashes = affected_set | batch_hash_set
     sibling_members = [member for member in payload_group_members if member.get("torrent_hash")]
     payload_id_counts = Counter(
         int(member.get("catalog_payload_id") or 0)
@@ -530,7 +537,7 @@ def build_plan_reality_snapshot(
     ]
     shared_payload_rows = sum(1 for count in payload_id_counts.values() if count > 1)
     uncovered_catalog_members = [
-        member for member in sibling_members if member["torrent_hash"] not in affected_set
+        member for member in sibling_members if member["torrent_hash"] not in in_plan_hashes
     ]
     catalog_sibling_hashes = {
         str(member.get("torrent_hash") or "").strip().lower()
@@ -550,7 +557,7 @@ def build_plan_reality_snapshot(
     uncovered_qbit_members = _qb_out_of_plan_siblings(
         plan=plan,
         qb_client=qb_client,
-        affected_hashes=affected_set,
+        affected_hashes=in_plan_hashes,
         catalog_sibling_hashes=catalog_sibling_hashes,
         matched_names=matched_names,
     )
@@ -603,6 +610,7 @@ def build_plan_reality_snapshot(
             "classifications": dict(summary_counts),
             "payload_group_siblings": len(sibling_members),
             "plan_rows": len(affected),
+            "batch_plan_rows": len(in_plan_hashes),
             "out_of_plan_siblings": len(uncovered_members),
             "catalog_out_of_plan_siblings": len(uncovered_catalog_members),
             "qbit_out_of_plan_siblings": len(uncovered_qbit_members),
