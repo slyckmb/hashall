@@ -15,6 +15,7 @@ SPEC.loader.exec_module(MODULE)
 def test_collect_candidate_paths_prefers_distinct_qb_hints() -> None:
     qb = SimpleNamespace(get_torrent_root_path=lambda torrent: "/pool/media/root/file.mkv")
     torrent = SimpleNamespace(
+        name="Example.mkv",
         content_path="/pool/media/root/file.mkv",
         save_path="/pool/media/root",
     )
@@ -26,11 +27,13 @@ def test_collect_candidate_paths_prefers_distinct_qb_hints() -> None:
         content_path_only=False,
         save_path_only=False,
         extra_paths=["/pool/media/root/file.mkv", "/alt/path"],
+        path_maps=[],
     )
 
     assert out == [
         "/pool/media/root/file.mkv",
         "/pool/media/root",
+        "/pool/media/root/Example.mkv",
         "/alt/path",
     ]
 
@@ -38,6 +41,7 @@ def test_collect_candidate_paths_prefers_distinct_qb_hints() -> None:
 def test_collect_candidate_paths_honors_content_path_only() -> None:
     qb = SimpleNamespace(get_torrent_root_path=lambda torrent: "/pool/media/root/file.mkv")
     torrent = SimpleNamespace(
+        name="Example.mkv",
         content_path="/pool/media/root/file.mkv",
         save_path="/pool/media/root",
     )
@@ -49,9 +53,35 @@ def test_collect_candidate_paths_honors_content_path_only() -> None:
         content_path_only=True,
         save_path_only=False,
         extra_paths=[],
+        path_maps=[],
     )
 
     assert out == ["/pool/media/root/file.mkv"]
+
+
+def test_collect_candidate_paths_applies_path_maps() -> None:
+    qb = SimpleNamespace(get_torrent_root_path=lambda torrent: "/incomplete_torrents/NOAH_HDCLUB")
+    torrent = SimpleNamespace(
+        name="NOAH_HDCLUB",
+        content_path="/incomplete_torrents/NOAH_HDCLUB",
+        save_path="/data/media/torrents/seeding/privatehd",
+    )
+
+    out = MODULE.collect_candidate_paths(
+        qb,
+        torrent,
+        include_qb_paths=True,
+        content_path_only=False,
+        save_path_only=False,
+        extra_paths=[],
+        path_maps=[("/incomplete_torrents", "/dump/torrents/incomplete_vpn")],
+    )
+
+    assert out == [
+        "/dump/torrents/incomplete_vpn/NOAH_HDCLUB",
+        "/data/media/torrents/seeding/privatehd",
+        "/data/media/torrents/seeding/privatehd/NOAH_HDCLUB",
+    ]
 
 
 def test_determine_exit_code_compare_all_requires_every_candidate_verified() -> None:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import shutil
 import subprocess
@@ -22,7 +23,8 @@ if str(SRC_ROOT) not in sys.path:
 from hashall.qbittorrent import QBittorrentClient, QBitTorrent  # noqa: E402
 
 
-SCRIPT_VERSION = "0.1.0"
+SCRIPT_VERSION = "0.1.1"
+SCRIPT_NAME = Path(__file__).name
 VERIFY_SCRIPT = REPO_ROOT / "bin" / "qb-libtorrent-verify.py"
 
 
@@ -33,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
             "payload paths, and run qb-libtorrent-verify against them."
         )
     )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {SCRIPT_VERSION}",
+    )
     p.add_argument("hash", help="Torrent infohash to verify")
     p.add_argument(
         "--path",
@@ -40,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="paths",
         default=[],
         help="Extra candidate payload path to verify (repeatable)",
+    )
+    p.add_argument(
+        "--path-map",
+        action="append",
+        dest="path_maps",
+        default=[],
+        help="Translate qB-derived paths from FROM=TO prefixes before verify (repeatable)",
     )
     p.add_argument(
         "--no-qb-paths",
@@ -109,6 +123,10 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def ts_now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def dedupe_keep_order(values: Iterable[str]) -> List[str]:
     out: List[str] = []
     seen = set()
@@ -124,6 +142,32 @@ def dedupe_keep_order(values: Iterable[str]) -> List[str]:
     return out
 
 
+def parse_path_maps(values: Sequence[str]) -> List[tuple[str, str]]:
+    out: List[tuple[str, str]] = []
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"invalid_path_map={text!r}")
+        src, dst = text.split("=", 1)
+        src = src.strip()
+        dst = dst.strip()
+        if not src or not dst:
+            raise ValueError(f"invalid_path_map={text!r}")
+        out.append((src.rstrip("/"), dst.rstrip("/")))
+    return out
+
+
+def apply_path_maps(path: str, path_maps: Sequence[tuple[str, str]]) -> str:
+    current = str(path or "")
+    for src, dst in path_maps:
+        if current == src or current.startswith(src + "/"):
+            suffix = current[len(src):]
+            return dst + suffix
+    return current
+
+
 def collect_candidate_paths(
     qb: QBittorrentClient,
     torrent: QBitTorrent,
@@ -132,17 +176,23 @@ def collect_candidate_paths(
     content_path_only: bool,
     save_path_only: bool,
     extra_paths: Sequence[str],
+    path_maps: Sequence[tuple[str, str]],
 ) -> List[str]:
     candidates: List[str] = []
     if include_qb_paths:
         root_path = qb.get_torrent_root_path(torrent)
+        multi_file_root = ""
+        if torrent.save_path and torrent.name:
+            multi_file_root = str(Path(torrent.save_path) / torrent.name)
         if torrent.content_path and not save_path_only:
-            candidates.append(str(Path(torrent.content_path)))
+            candidates.append(apply_path_maps(str(Path(torrent.content_path)), path_maps))
         if torrent.save_path and not content_path_only:
-            candidates.append(str(Path(torrent.save_path)))
+            candidates.append(apply_path_maps(str(Path(torrent.save_path)), path_maps))
+            if multi_file_root:
+                candidates.append(apply_path_maps(multi_file_root, path_maps))
         if root_path and not content_path_only:
-            candidates.append(str(Path(root_path)))
-    candidates.extend(str(Path(p).expanduser()) for p in extra_paths)
+            candidates.append(apply_path_maps(str(Path(root_path)), path_maps))
+    candidates.extend(str(Path(apply_path_maps(str(Path(p).expanduser()), path_maps))) for p in extra_paths)
     return dedupe_keep_order(candidates)
 
 
@@ -259,12 +309,18 @@ def determine_exit_code(verifier_rc: int, report: dict, *, compare_all: bool) ->
 
 def main() -> int:
     args = build_parser().parse_args()
+    print(f"script={SCRIPT_NAME} version={SCRIPT_VERSION} ts={ts_now()}")
     torrent_hash = str(args.hash or "").strip().lower()
     if not torrent_hash:
         print("error=empty_hash", file=sys.stderr)
         return 2
     if args.content_path_only and args.save_path_only:
         print("error=content_path_only_conflicts_with_save_path_only", file=sys.stderr)
+        return 2
+    try:
+        path_maps = parse_path_maps(args.path_maps)
+    except ValueError as exc:
+        print(f"error={exc}", file=sys.stderr)
         return 2
 
     qb = QBittorrentClient(
@@ -284,6 +340,7 @@ def main() -> int:
         content_path_only=bool(args.content_path_only),
         save_path_only=bool(args.save_path_only),
         extra_paths=args.paths,
+        path_maps=path_maps,
     )
     if not candidate_paths:
         print(f"error=no_candidate_paths hash={torrent_hash}", file=sys.stderr)
