@@ -62,6 +62,60 @@ def _safe_normalize_save_path(path: str) -> str:
         return raw
 
 
+def _infer_content_root(info: QBitTorrent) -> str:
+    content_path = _safe_normalize_save_path(str(getattr(info, "content_path", "") or ""))
+    if not content_path:
+        return ""
+    return content_path
+
+
+def _same_name_target_siblings(
+    *,
+    torrent: QBitTorrent,
+    qb_snapshot: Dict[str, QBitTorrent],
+    source_root: str,
+    target_root: str,
+) -> List[Dict[str, Any]]:
+    torrent_hash = str(getattr(torrent, "hash", "") or "").strip().lower()
+    torrent_name = str(getattr(torrent, "name", "") or "").strip()
+    if not torrent_name:
+        return []
+    source_prefix = normalize_save_path(source_root) + "/"
+    target_prefix = normalize_save_path(target_root) + "/"
+    torrent_size = int(getattr(torrent, "size", 0) or 0)
+    candidates: List[Dict[str, Any]] = []
+    for sibling_hash, info in qb_snapshot.items():
+        if sibling_hash == torrent_hash:
+            continue
+        if str(getattr(info, "name", "") or "").strip() != torrent_name:
+            continue
+        save_path = _safe_normalize_save_path(str(getattr(info, "save_path", "") or ""))
+        if not save_path.startswith(target_prefix) or save_path.startswith(source_prefix):
+            continue
+        progress = float(getattr(info, "progress", 0.0) or 0.0)
+        state = str(getattr(info, "state", "") or "")
+        healthy = progress >= 0.9999 and state.strip().lower() not in {"missingfiles", "stoppeddl", "pauseddl", "error"}
+        if not healthy:
+            continue
+        sibling_size = int(getattr(info, "size", 0) or 0)
+        if torrent_size > 0 and sibling_size > 0 and torrent_size != sibling_size:
+            continue
+        candidates.append(
+            {
+                "torrent_hash": sibling_hash,
+                "save_path": save_path,
+                "root_path": _infer_content_root(info),
+                "ti_device_id": 0,
+                "payload_device_id": 0,
+                "status": "complete",
+                "qb_state": state,
+                "qb_progress": progress,
+                "healthy": healthy,
+            }
+        )
+    return candidates
+
+
 def _read_fastresume_fields(path: Path) -> Dict[str, str]:
     if not path.exists():
         return {
@@ -214,16 +268,28 @@ def _select_sibling_target(
         root_path = _safe_normalize_save_path(str(target.get("root_path") or ""))
         if not root_path.startswith(normalized_target + "/"):
             continue
-        row = conn.execute(
-            """
-            SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
-            FROM payloads
-            WHERE payload_hash = ? AND root_path = ? AND status = 'complete'
-            ORDER BY payload_id
-            LIMIT 1
-            """,
-            (payload_hash, root_path),
-        ).fetchone()
+        if payload_hash:
+            row = conn.execute(
+                """
+                SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
+                FROM payloads
+                WHERE payload_hash = ? AND root_path = ? AND status = 'complete'
+                ORDER BY payload_id
+                LIMIT 1
+                """,
+                (payload_hash, root_path),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
+                FROM payloads
+                WHERE root_path = ? AND status = 'complete'
+                ORDER BY payload_id
+                LIMIT 1
+                """,
+                (root_path,),
+            ).fetchone()
         if row is None:
             continue
         candidates.append(
@@ -375,6 +441,7 @@ def _build_missing_view_targets(
     source_root: str,
     target_root: str,
     unique_view_subdir: str,
+    force_unique_targets: bool = False,
 ) -> tuple[List[str], List[Dict[str, str]], int, int]:
     normalized_source = normalize_save_path(source_root)
     normalized_target = normalize_save_path(target_root)
@@ -400,7 +467,7 @@ def _build_missing_view_targets(
         candidates.append((torrent_hash, save_path, root_name, target_save_path))
 
     affected_torrents = [torrent_hash for torrent_hash, _, _, _ in candidates]
-    force_unique_targets = len(candidates) > 1
+    force_unique_targets = force_unique_targets or len(candidates) > 1
     seen_view_keys: set[tuple[str, str]] = set()
     view_targets: List[Dict[str, str]] = []
     unique_views = 0
@@ -430,6 +497,30 @@ def _build_missing_view_targets(
         )
 
     return affected_torrents, view_targets, collisions, unique_views
+
+
+def _synthesize_stale_rows(payload_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for row in payload_rows:
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        if not torrent_hash:
+            continue
+        content_path = str(row.get("content_path") or "").strip()
+        root_name = Path(content_path).name if content_path else str(row.get("name") or "").strip()
+        rows.append(
+            {
+                "torrent_hash": torrent_hash,
+                "payload_id": 0,
+                "payload_device_id": 0,
+                "save_path": str(row.get("save_path") or "").strip(),
+                "root_name": root_name,
+                "root_path": content_path,
+                "file_count": 0,
+                "total_bytes": 0,
+                "status": "missing",
+            }
+        )
+    return rows
 
 
 def build_missing_sibling_reconnect_batch(
@@ -464,7 +555,13 @@ def build_missing_sibling_reconnect_batch(
     rows = [
         row
         for row in (audit.get("rows") or [])
-        if str(row.get("root_cause") or "") in reconnect_root_causes
+        if (
+            str(row.get("root_cause") or "") in reconnect_root_causes
+            or (
+                str(row.get("root_cause") or "") == "missing_payload_no_mapped_target"
+                and bool(row.get("sibling_targets"))
+            )
+        )
         and (bool(row.get("sibling_targets")) or bool(row.get("mapped_target_exists")))
         and (not requested or str(row.get("hash") or "").strip().lower() in requested)
     ]
@@ -477,14 +574,15 @@ def build_missing_sibling_reconnect_batch(
     try:
         rows_by_payload: dict[str, list[Dict[str, Any]]] = defaultdict(list)
         for row in rows:
-            rows_by_payload[str(row.get("payload_hash") or "")].append(row)
+            payload_key = str(row.get("payload_hash") or "").strip()
+            if not payload_key:
+                payload_key = f"name:{str(row.get('name') or '').strip().lower()}"
+            rows_by_payload[payload_key].append(row)
 
         for payload_hash, payload_rows in rows_by_payload.items():
-            if not payload_hash:
-                continue
             donor = _select_reconnect_target(
                 conn,
-                payload_hash=payload_hash,
+                payload_hash="" if payload_hash.startswith("name:") else payload_hash,
                 target_root=target_root,
                 payload_rows=payload_rows,
             )
@@ -502,11 +600,21 @@ def build_missing_sibling_reconnect_batch(
                 conn,
                 torrent_hashes=[str(row.get("hash") or "") for row in payload_rows],
             )
+            if not stale_rows:
+                stale_rows = _synthesize_stale_rows(payload_rows)
             affected_torrents, view_targets, collisions, unique_views = _build_missing_view_targets(
                 stale_rows=stale_rows,
                 source_root=source_root,
                 target_root=target_root,
                 unique_view_subdir=unique_view_subdir,
+                force_unique_targets=(
+                    "/_rehome-unique/" in str(donor.get("root_path") or "")
+                    or any(
+                        "/_rehome-unique/" in str(target.get("root_path") or "")
+                        for row in payload_rows
+                        for target in (row.get("sibling_targets") or [])
+                    )
+                ),
             )
             if not affected_torrents or not view_targets:
                 skipped.append(
@@ -552,7 +660,14 @@ def build_missing_sibling_reconnect_batch(
                 seen_payload_ids.add(payload_id)
                 unique_payload_group.append(item)
 
-            primary_source = min(source_rows, key=lambda item: int(item.get("payload_id") or 0))
+            primary_source = min(
+                source_rows,
+                key=lambda item: (
+                    1 if int(item.get("payload_id") or 0) == 0 else 0,
+                    int(item.get("payload_id") or 0),
+                    str(item.get("root_path") or ""),
+                ),
+            )
             plans.append(
                 {
                     "version": "1.0",
@@ -734,6 +849,13 @@ def audit_missing_root_drift(
                 source_root=normalized_source,
                 qb_snapshot=qb_snapshot,
             )
+            if not payload_context.get("sibling_targets"):
+                payload_context["sibling_targets"] = _same_name_target_siblings(
+                    torrent=torrent,
+                    qb_snapshot=qb_snapshot,
+                    source_root=normalized_source,
+                    target_root=normalized_target,
+                )
             cause = _classify_root_cause(
                 torrent,
                 source_root=normalized_source,

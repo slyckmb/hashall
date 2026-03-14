@@ -161,6 +161,49 @@ def test_audit_missing_root_drift_leaves_unclassified_without_mapped_target(tmp_
     assert report["root_causes"] == {"missing_payload_no_mapped_target": 1}
 
 
+def test_audit_missing_root_drift_falls_back_to_same_name_target_siblings(tmp_path):
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "deadbeef.fastresume",
+        save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+        qbt_save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+    )
+    torrents = [
+        SimpleNamespace(
+            hash="deadbeef",
+            name="V.for.Vendetta.mkv",
+            state="missingFiles",
+            progress=0.0,
+            save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+            content_path="/pool/media/torrents/seeding/cross-seed/hawke-uno/V.for.Vendetta.mkv",
+            size=100,
+        ),
+        SimpleNamespace(
+            hash="goodcafe",
+            name="V.for.Vendetta.mkv",
+            state="stalledUP",
+            progress=1.0,
+            save_path="/pool/media/torrents/seeding/_rehome-unique/goodcafe",
+            content_path="/pool/media/torrents/seeding/_rehome-unique/goodcafe/V.for.Vendetta.mkv",
+            size=100,
+        ),
+    ]
+
+    report = audit_missing_root_drift(
+        qb_client=FakeQBClient(torrents),
+        source_root="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+        target_root="/pool/media/torrents/seeding",
+        fastresume_dir=fastresume_dir,
+        catalog_path=None,
+    )
+
+    assert report["root_causes"] == {"root_drift_to_surviving_sibling_target": 1}
+    row = report["rows"][0]
+    assert row["sibling_target_count"] == 1
+    assert row["sibling_targets"][0]["torrent_hash"] == "goodcafe"
+
+
 def test_audit_missing_root_drift_classifies_surviving_sibling_target(tmp_path):
     catalog = tmp_path / "catalog.db"
     conn = sqlite3.connect(catalog)
@@ -665,6 +708,110 @@ def test_build_missing_sibling_reconnect_batch_reuses_mapped_target_after_rehome
             "source_save_path": "/data/media/torrents/seeding/cross-seed/seedpool (API)",
             "target_save_path": f"{target_root}/cross-seed/seedpool (API)",
             "root_name": "Peppermint.2018.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-EPSiLON.mkv",
+        }
+    ]
+
+
+def test_build_missing_sibling_reconnect_batch_uses_same_name_unique_targets_without_catalog_payload(tmp_path):
+    target_root = tmp_path / "pool" / "media" / "torrents" / "seeding"
+    unique_root = target_root / "_rehome-unique" / "goodcafe"
+    unique_root.mkdir(parents=True, exist_ok=True)
+    donor_file = unique_root / "V.for.Vendetta.mkv"
+    donor_file.write_bytes(b"x")
+
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY,
+                payload_hash TEXT,
+                device_id INTEGER,
+                root_path TEXT,
+                file_count INTEGER,
+                total_bytes INTEGER,
+                status TEXT
+            );
+            CREATE TABLE torrent_instances (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_id INTEGER,
+                device_id INTEGER,
+                save_path TEXT,
+                root_name TEXT
+            );
+            CREATE TABLE rehome_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                direction TEXT,
+                decision TEXT,
+                payload_hash TEXT,
+                status TEXT,
+                source_path TEXT,
+                target_path TEXT,
+                cleanup_source_required INTEGER DEFAULT 0,
+                cleanup_source_path TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status) VALUES (1, ?, 141, ?, 1, 1, 'complete')",
+            ("payload-v", str(donor_file)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "deadbeef.fastresume",
+        save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+        qbt_save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+    )
+
+    torrents = [
+        SimpleNamespace(
+            hash="deadbeef",
+            name="V.for.Vendetta.mkv",
+            state="missingFiles",
+            progress=0.0,
+            save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+            content_path="/pool/media/torrents/seeding/cross-seed/hawke-uno/V.for.Vendetta.mkv",
+            size=1,
+        ),
+        SimpleNamespace(
+            hash="goodcafe",
+            name="V.for.Vendetta.mkv",
+            state="stalledUP",
+            progress=1.0,
+            save_path=str(unique_root),
+            content_path=str(donor_file),
+            size=1,
+        ),
+    ]
+
+    report = build_missing_sibling_reconnect_batch(
+        qb_client=FakeQBClient(torrents),
+        source_root="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+        target_root=str(target_root),
+        fastresume_dir=fastresume_dir,
+        catalog_path=catalog,
+        torrent_hashes=["deadbeef"],
+    )
+
+    assert report["summary"]["plans"] == 1
+    plan = report["plans"][0]
+    assert plan["payload_hash"] == "payload-v"
+    assert plan["target_path"] == str(donor_file)
+    assert plan["affected_torrents"] == ["deadbeef"]
+    assert plan["view_targets"] == [
+        {
+            "torrent_hash": "deadbeef",
+            "source_save_path": "/pool/media/torrents/seeding/cross-seed/hawke-uno",
+            "target_save_path": f"{target_root}/_rehome-unique/deadbeef",
+            "root_name": "V.for.Vendetta.mkv",
         }
     ]
 
