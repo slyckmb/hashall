@@ -1,5 +1,6 @@
 """Tests for rehome follow-up verification and cleanup."""
 
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 import sqlite3
@@ -184,6 +185,63 @@ def test_followup_cleanup_retries_and_clears_cleanup_required(monkeypatch, tmp_p
     removed_tags = [call for call in fake.remove_calls if call[0] == "torrent-clean"]
     assert removed_tags
     assert any("rehome_cleanup_source_required" in call[1] for call in removed_tags)
+
+
+def test_followup_cleanup_prunes_empty_wrapper_for_single_file_sources(monkeypatch, tmp_path: Path):
+    db_path = _make_db(tmp_path)
+    payload_dir = tmp_path / "single-file-wrapper"
+    payload_dir.mkdir()
+    source_file = payload_dir / "file.mkv"
+    source_file.write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        f"""
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES
+          (1, 'hash-file-clean', 44, '/pool/media/seeds/file.mkv', 1, 3, 'complete'),
+          (2, 'hash-file-clean', 49, '{source_file}', 1, 3, 'complete');
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, tags)
+        VALUES ('torrent-file-clean', 1, 44, '/pool/media/seeds/cross-seed/seedpool (API)',
+                'rehome,rehome_from_stash,rehome_to_pool,rehome_at_20260219,rehome_verify_pending,rehome_cleanup_source_required');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fake = FakeQbitClient()
+    fake.torrents_by_tag["rehome_verify_pending"] = [
+        SimpleNamespace(
+            hash="torrent-file-clean",
+            tags="rehome,rehome_from_stash,rehome_to_pool,rehome_at_20260219,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrents_by_tag["rehome_cleanup_source_required"] = [
+        SimpleNamespace(
+            hash="torrent-file-clean",
+            tags="rehome,rehome_from_stash,rehome_to_pool,rehome_at_20260219,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrent_info["torrent-file-clean"] = SimpleNamespace(
+        hash="torrent-file-clean",
+        tags="rehome,rehome_from_stash,rehome_to_pool,rehome_at_20260219,rehome_verify_pending,rehome_cleanup_source_required",
+        progress=1.0,
+        state="stalledUP",
+        auto_tmm=False,
+        save_path="/pool/media/seeds/cross-seed/seedpool (API)",
+    )
+
+    monkeypatch.setattr("rehome.followup.get_qbittorrent_client", lambda: fake)
+
+    report = run_followup(catalog_path=db_path, cleanup=True)
+
+    assert report["summary"]["cleanup_attempted"] == 1
+    assert report["summary"]["cleanup_done"] == 1
+    entry = report["entries"][0]
+    assert entry["cleanup_result"] == "done"
+    assert str(source_file) in entry["cleanup_deleted_paths"]
+    assert str(payload_dir) in entry["cleanup_pruned_paths"]
+    assert payload_dir.exists() is False
 
 
 def test_followup_cleanup_restores_source_when_observe_fails(monkeypatch, tmp_path: Path):
@@ -585,7 +643,7 @@ def test_followup_retains_recent_cleanup_for_rollback_window(monkeypatch, tmp_pa
     source_dir.mkdir()
     (source_dir / "file.mkv").write_bytes(b"abc")
 
-    today_tag = "rehome_at_20260313"
+    today_tag = f"rehome_at_{datetime.now().strftime('%Y%m%d')}"
 
     conn = sqlite3.connect(db_path)
     conn.executescript(

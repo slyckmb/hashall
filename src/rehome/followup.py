@@ -226,6 +226,27 @@ def _delete_path(path: Path) -> None:
         path.unlink()
 
 
+def _prune_empty_cleanup_paths(source: CleanupSource, *, source_was_file: bool) -> list[str]:
+    pruned_paths: list[str] = []
+    candidates = [source.stage_path.parent, source.stage_path.parent.parent]
+    if source_was_file:
+        candidates.append(source.root_path.parent)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            candidate.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+        pruned_paths.append(str(candidate))
+    return pruned_paths
+
+
 def _repair_permissions_for_cleanup(path: Path) -> bool:
     if not path.exists():
         return True
@@ -474,16 +495,19 @@ def _cleanup_sources_with_staging(
     source_rows: list[CleanupSource],
     observe_seconds: float,
     poll_seconds: float,
-) -> tuple[str, list[str], list[str], list[str], list[dict[str, Any]]]:
+) -> tuple[str, list[str], list[str], list[str], list[str], list[dict[str, Any]]]:
     cleanup_errors: list[str] = []
     deleted_paths: list[str] = []
     staged_paths: list[str] = []
+    pruned_paths: list[str] = []
     cleanup_checks: list[dict[str, Any]] = []
+    source_is_file: dict[int, bool] = {}
 
     for source in source_rows:
         stats = _path_stats(source.root_path)
         if not bool(stats["exists"]):
             continue
+        source_is_file[source.payload_id] = bool(stats["is_file"])
         if int(stats["file_count"]) != source.file_count or int(stats["total_bytes"]) != source.total_bytes:
             cleanup_errors.append(
                 "source_stats_mismatch "
@@ -497,7 +521,7 @@ def _cleanup_sources_with_staging(
         if source.stage_path.exists():
             cleanup_errors.append(f"cleanup_stage_path_exists path={source.stage_path}")
     if cleanup_errors:
-        return "failed", deleted_paths, cleanup_errors, staged_paths, cleanup_checks
+        return "failed", deleted_paths, cleanup_errors, staged_paths, pruned_paths, cleanup_checks
 
     renamed: list[CleanupSource] = []
     permission_repaired = False
@@ -536,13 +560,19 @@ def _cleanup_sources_with_staging(
                 continue
             _delete_path(source.stage_path)
             deleted_paths.append(str(source.root_path))
-        return "done", deleted_paths, cleanup_errors, staged_paths, cleanup_checks
+            pruned_paths.extend(
+                _prune_empty_cleanup_paths(
+                    source,
+                    source_was_file=source_is_file.get(source.payload_id, False),
+                )
+            )
+        return "done", deleted_paths, cleanup_errors, staged_paths, pruned_paths, cleanup_checks
     except Exception as exc:
         cleanup_errors.append(str(exc))
         for source in reversed(renamed):
             if source.stage_path.exists() and not source.root_path.exists():
                 source.stage_path.rename(source.root_path)
-        return "restored", deleted_paths, cleanup_errors, staged_paths, cleanup_checks
+        return "restored", deleted_paths, cleanup_errors, staged_paths, pruned_paths, cleanup_checks
 
 
 def _update_verify_tags(qbit_client, torrent_hash: str, outcome: str, cleanup_done: bool) -> None:
@@ -864,10 +894,18 @@ def run_followup(
             cleanup_errors: list[str] = []
             deleted_paths: list[str] = []
             staged_paths: list[str] = []
+            pruned_paths: list[str] = []
             cleanup_checks: list[dict[str, Any]] = []
             if cleanup and cleanup_disposition == "cleanup_safe_now":
                 cleanup_attempted += 1
-                cleanup_result, deleted_paths, cleanup_errors, staged_paths, cleanup_checks = _cleanup_sources_with_staging(
+                (
+                    cleanup_result,
+                    deleted_paths,
+                    cleanup_errors,
+                    staged_paths,
+                    pruned_paths,
+                    cleanup_checks,
+                ) = _cleanup_sources_with_staging(
                     qbit_client=qbit,
                     payload_hash=payload_hash,
                     candidate_hashes=candidate_hashes,
@@ -908,6 +946,7 @@ def run_followup(
                     "cleanup_result": cleanup_result,
                     "cleanup_deleted_paths": deleted_paths,
                     "cleanup_staged_paths": staged_paths,
+                    "cleanup_pruned_paths": pruned_paths,
                     "cleanup_errors": cleanup_errors,
                     "cleanup_checks": cleanup_checks,
                     "cleanup_observe_seconds": float(cleanup_observe_seconds),
