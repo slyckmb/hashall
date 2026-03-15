@@ -18,12 +18,18 @@ If context is compacted, recover with this sequence:
    - run `qb-stoppeddl-bucket` and verify `active=0` or current live count.
    - note: drain no-op fix is commit `657eccc` (`v0.1.23`).
 3. Current active rehome state:
-   - `hashall` semver is `0.6.8`
+   - `hashall` semver is `0.7.0`
    - active docs are now reduced to the canonical set in `docs/README.md`; do not recreate active-tree stubs, use `docs/archive/2026-doc-consolidation/` for superseded material
    - anchor invariant:
      - each qB item needs its own correct payload tree on disk
      - that tree should normally be instantiated from donor bytes via hardlinks, not redundant physical copies
      - `unique target root` means unique per-item payload structure
+   - newest scan/refresh drift hardening:
+     - `hashall scan` now supports `--drift-policy metadata|quick|full`
+     - `hashall refresh --verbose` now accepts:
+       - `--scan-hash-mode fast|full|upgrade`
+       - `--drift-policy metadata|quick|full`
+     - use `--drift-policy quick` for routine confidence scans and `--drift-policy full` for true drift-audit passes
    - latest hardlink-normalization fixes:
      - `src/rehome/view_builder.py` now relinks identical preexisting destination files to donor inodes
      - `bin/qb-repair-fresh.py` now does the same during fresh repair prep

@@ -4,7 +4,7 @@ Last updated: 2026-03-13
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.6.11`.
+- `hashall` is now `0.7.0`.
 - Active docs are now intentionally minimal and stub-free:
   - canonical active docs:
     - `README.md`
@@ -26,6 +26,18 @@ Last updated: 2026-03-13
   - each qB item needs its own correct payload tree on disk
   - that tree should normally be instantiated from donor content via hardlinks
   - `unique target` means unique per-item file structure, not mandatory duplicate physical copies
+- New 2026-03-14 content-drift hardening:
+  - `hashall scan` now has `--drift-policy metadata|quick|full`
+  - `hashall refresh` / `rehome refresh` now thread through:
+    - `--scan-hash-mode fast|full|upgrade`
+    - `--drift-policy metadata|quick|full`
+  - unchanged-file behavior is now explicit:
+    - `metadata` trusts unchanged size+mtime
+    - `quick` recomputes quick hashes on unchanged files and escalates to full hashing if drift is detected
+    - `full` recomputes full hashes for unchanged files in scope
+  - targeted validation:
+    - `pytest tests/test_scan_hardlinks.py tests/test_scan_incremental.py tests/test_rehome_refresh_safety.py -q`
+    - result: `36 passed`
 - New 2026-03-13 duplicate-byte hardening:
   - `src/rehome/view_builder.py` now relinks preexisting identical destination files to the donor inode instead of silently accepting copied bytes
   - `bin/qb-repair-fresh.py` now normalizes existing identical targets the same way

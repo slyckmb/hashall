@@ -105,6 +105,9 @@ Reason:
    - watch both:
      - `~/.logs/hashall/rehome/refresh/*.log`
      - `~/.logs/hashall/hashall.log`
+   - choose scan/drift mode deliberately:
+     - routine confidence pass: `hashall refresh --verbose --scan-hash-mode fast --drift-policy quick`
+     - drift-audit pass: `hashall refresh --verbose --scan-hash-mode full --drift-policy full`
 
 3. Audit qB risk set before mutation
    - stoppedDL / missingFiles / pausedDL / error

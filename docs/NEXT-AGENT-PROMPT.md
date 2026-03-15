@@ -24,12 +24,18 @@ Prompt-critical context (2026-03-12):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.6.8`.
+  - `hashall` version now `0.7.0`.
   - active docs are now intentionally minimal and stub-free; use the canonical set in `docs/README.md` and archive superseded material instead of leaving active-tree pointers.
   - anchor invariant for all migration/rehome work:
     - a qB item needs its own correct payload tree / file-structure instantiation on disk
     - that tree should normally be instantiated from donor payloads via hardlinks
     - `unique target` means unique per-item payload structure, not duplicate physical byte copies
+  - newest scan/refresh drift hardening:
+    - `hashall scan` now supports `--drift-policy metadata|quick|full`
+    - `hashall refresh --verbose` now accepts:
+      - `--scan-hash-mode fast|full|upgrade`
+      - `--drift-policy metadata|quick|full`
+    - use `--drift-policy quick` for routine confidence scans and `--drift-policy full` for true drift-audit passes
   - latest hardlink-normalization fixes:
     - `src/rehome/view_builder.py` now relinks identical existing destination files to donor inodes
     - `bin/qb-repair-fresh.py` now relinks identical existing repair targets the same way

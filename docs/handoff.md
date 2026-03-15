@@ -2,7 +2,7 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.6.11`.
+- `hashall` semver baseline is now `0.7.0`.
 - Active docs are now intentionally minimal and stub-free:
   - canonical active set:
     - `README.md`
@@ -25,6 +25,16 @@
   - a qB item needs its own unique payload tree / file-structure instantiation on disk
   - that tree should normally be built from donor bytes via hardlinks, not by creating redundant physical copies
   - when these notes say `unique target`, `de-hitchhike`, or `_rehome-unique/<hash>`, read that as “unique per-item payload tree,” not “force duplicate bytes”
+- New 2026-03-14 content-drift hardening baseline:
+  - `hashall scan` now supports `--drift-policy metadata|quick|full`
+  - `hashall refresh` / `rehome refresh` now expose:
+    - `--scan-hash-mode fast|full|upgrade`
+    - `--drift-policy metadata|quick|full`
+  - operator meaning:
+    - `metadata` keeps the old size+mtime trust model
+    - `quick` rechecks unchanged files with the quick hash and escalates to full hashing on mismatch
+    - `full` fully rehashes unchanged files in the requested scan scope
+  - this closes the known gap where same-size / same-mtime content drift could survive a routine incremental scan
 - New 2026-03-13 hardlink-normalization baseline:
   - `rehome` view construction no longer accepts a preexisting identical destination copy as “good enough”
   - `src/rehome/view_builder.py` now atomically relinks identical destination files back to the donor inode, so successful rehome/reconnect runs do not leave duplicate bytes behind
