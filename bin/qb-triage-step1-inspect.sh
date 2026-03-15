@@ -4,6 +4,8 @@
 set -euo pipefail
 
 set +x
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/qb-cache.sh"
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
 QB_USER="$QBITTORRENTAPI_USERNAME"
@@ -13,14 +15,7 @@ LOGDIR="$HOME/.logs/hashall/reports/qbit-triage"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/inspect-$(date +%Y%m%d-%H%M%S).log"
 
-COOKIE=$(mktemp /tmp/qb.XXXXXX)
-trap 'rm -f "$COOKIE"' EXIT
-
-curl -fsS -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
-  --data-urlencode "username=$QB_USER" \
-  --data-urlencode "password=$QB_PASS" >/dev/null
-
-ALL_JSON=$(curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info")
+ALL_JSON="$(qb_cache_fetch_torrents_info "" 15 5 15)"
 
 echo "================================================================" | tee -a "$LOG"
 echo "QBIT TRIAGE INSPECTION — $(date '+%F %T')" | tee -a "$LOG"

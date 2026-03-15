@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qb-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.3.11
-# Date:    2026-03-06
+# Version: 1.4.0
+# Date:    2026-03-15
 #
 # After each batch waits for state to settle, then checks the protected watch
 # scope (all torrents added before today) for downloading/broken flips. On any
@@ -10,14 +10,15 @@
 # Idempotent: only targets stoppedUP (100%) torrents; already-started ones
 # are stalledUP/uploading and are skipped automatically.
 #
-# Usage: bin/qb-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--guard-include-checkingdl] [--guard-recheck-allowlist-file PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
+# Usage: bin/qb-start-seeding-gradual.sh [--apply] [--resume] [--daemon] [--guard-only] [--min-batch N] [--poll N] [--cache] [--no-cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--guard-include-checkingdl] [--guard-recheck-allowlist-file PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH]
 #   --apply        Execute changes (dry-run if omitted)
 #   --resume       Skip torrents already in stalledUP/uploading/queuedUP
 #   --daemon       Continuous watch loop: poll QB, run ramp when stoppedUP >= --min-batch
 #   --guard-only   Do not start anything; only detect/stop downloading-like flips in protected scope
 #   --min-batch N  Daemon threshold: wait until stoppedUP count >= N before ramp (default: 10)
 #   --poll N       Daemon poll interval in seconds (default: 60)
-#   --cache        Use shared qB cache agent for torrents/info reads
+#   --cache        Use shared qB cache agent for torrents/info reads (default)
+#   --no-cache     Bypass shared qB cache agent for torrents/info reads
 #   --cache-max-age N  Max cache age seconds when --cache is enabled (default: 15)
 #   --guard-stop-cooldown N  Suppress repeated stop requests per hash for N seconds in guard-only mode (default: 120)
 #   --guard-cooldown-state PATH  JSON state file for guard cooldown tracking
@@ -28,8 +29,8 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.3.11"
-SCRIPT_DATE="2026-03-06"
+SCRIPT_VERSION="1.4.0"
+SCRIPT_DATE="2026-03-15"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -46,7 +47,7 @@ DAEMON=false
 GUARD_ONLY=false
 MIN_BATCH=10
 POLL=60
-USE_CACHE=false
+USE_CACHE=true
 CACHE_MAX_AGE=15
 GUARD_STOP_COOLDOWN=120
 GUARD_INCLUDE_CHECKINGDL=false
@@ -59,7 +60,7 @@ GUARD_RECHECK_ALLOWLIST_FILE="${QBIT_GUARD_RECHECK_ALLOWLIST_FILE:-/tmp/qb-stopp
 
 usage_short() {
   cat <<EOF
-Usage: $SCRIPT_NAME [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--guard-include-checkingdl] [--guard-recheck-allowlist-file PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH] [-h|--help]
+Usage: $SCRIPT_NAME [--apply] [--resume] [--daemon] [--min-batch N] [--poll N] [--cache] [--no-cache] [--cache-max-age N] [--guard-stop-cooldown N] [--guard-cooldown-state PATH] [--guard-include-checkingdl] [--guard-recheck-allowlist-file PATH] [--ignore-hashes CSV] [--ignore-hashes-file PATH] [-h|--help]
 Try '$SCRIPT_NAME --help' for details.
 EOF
 }
@@ -109,7 +110,10 @@ Options:
 
   --cache
       Read qB torrents/info via shared cache agent instead of polling qB API
-      directly on every read.
+      directly on every read. Default: enabled.
+
+  --no-cache
+      Bypass shared cache and query qB API directly for torrents/info reads.
 
   --cache-max-age N
       Maximum cache age in seconds when --cache is enabled.
@@ -184,6 +188,7 @@ while [[ $# -gt 0 ]]; do
     --min-batch)  MIN_BATCH="$2"; shift 2 ;;
     --poll)       POLL="$2"; shift 2 ;;
     --cache)      USE_CACHE=true; shift ;;
+    --no-cache)   USE_CACHE=false; shift ;;
     --cache-max-age) CACHE_MAX_AGE="$2"; shift 2 ;;
     --guard-stop-cooldown) GUARD_STOP_COOLDOWN="$2"; shift 2 ;;
     --guard-cooldown-state) GUARD_COOLDOWN_STATE="$2"; shift 2 ;;

@@ -40,7 +40,9 @@ set -euo pipefail
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_VERSION="1.6.1"
 SCRIPT_DATE="2026-02-25"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+source "$SCRIPT_DIR/lib/qb-cache.sh"
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
 QB_USER="$QBITTORRENTAPI_USERNAME"
@@ -115,8 +117,7 @@ echo "════════════════════════�
 # ── --no-ramp: drain stoppedUP bucket ─────────────────────────────────────────
 if [[ "$NO_RAMP" == true ]]; then
   echo "▸ --no-ramp: drain stoppedUP"
-  qb_login
-  curl -fsS --max-time 30 -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
+  qb_cache_fetch_torrents_info "$TMPD/all_torrents.json" 15 5 15
   python3 - "$TMPD" << 'PYEOF'
 import json, sys
 tmpdir = sys.argv[1]
@@ -149,8 +150,7 @@ fi
 
 # ── P0: Discovery ─────────────────────────────────────────────────────────────
 echo "▸ P0 discovery"
-qb_login
-curl -fsS --max-time 30 -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
+qb_cache_fetch_torrents_info "$TMPD/all_torrents.json" 15 5 15
 
 python3 - "$DB" "$TMPD" "$LIMIT" "$BLACKLIST_FILE" "$SAME_SAVE" << 'PYEOF'
 import json, re, sqlite3, os, sys
