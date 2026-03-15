@@ -64,6 +64,22 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
         def poll(self):
             return self.returncode
 
+    class _FakePopen:
+        def __init__(self, cmd):
+            commands.append(list(cmd))
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    class _FakePopen:
+        def __init__(self, cmd):
+            commands.append(list(cmd))
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
     def _fake_run(cmd, capture_output=False, text=False):
         commands.append(list(cmd))
         label = " ".join(cmd)
@@ -139,6 +155,106 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
     assert any("link execute 56 --yes" in line for line in command_lines)
     assert published["cfg"]["default_dest_root"] == "/pool/media/torrents/seeding"
     assert published["cfg"]["managed_roots"] == []
+
+
+def test_run_refresh_passes_scan_hash_mode_and_drift_policy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "catalog.db"
+    db_path.write_text("")
+
+    commands: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, stdout: str = "", returncode: int = 0):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = returncode
+
+    class _FakePopen:
+        def __init__(self, cmd):
+            commands.append(list(cmd))
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    class _FakeRunLogger:
+        def __init__(self, *args, **kwargs):
+            self.verbose = False
+            self.debug = False
+
+        @contextmanager
+        def patch_stdout(self):
+            yield
+
+        def write_raw(self, text: str) -> None:
+            return None
+
+        def record_step(self, *args, **kwargs) -> None:
+            return None
+
+        def dump_json(self, *args, **kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def _fake_run(cmd, capture_output=False, text=False):
+        commands.append(list(cmd))
+        label = " ".join(cmd)
+        if " payload sync " in f" {label} ":
+            return _Result(stdout="upgrade_summary queued=0 started=0 completed=0 failed=0 elapsed_s=0\n")
+        return _Result(stdout="")
+
+    monkeypatch.setattr(auto_mod, "_validate_refresh_roots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        auto_mod,
+        "_run_catalog_preflight",
+        lambda *args, **kwargs: (
+            True,
+            {"ok": True, "checks": [], "summary": {"failed_error": 0, "failed_warning": 0, "total_checks": 1}},
+        ),
+    )
+    monkeypatch.setattr(auto_mod.subprocess, "run", _fake_run)
+    monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr("rehome.runlog.RunLogger", _FakeRunLogger)
+    monkeypatch.setattr(
+        "rehome.seed_state.publish_seed_root_state",
+        lambda cfg=None, path=None: (Path("/tmp/seed-root-state.json"), {"writer": "hashall"}),
+    )
+    monkeypatch.setattr("rehome.cli._acquire_refresh_lock", lambda: _DummyLock())
+
+    exit_code = auto_mod.run_refresh(
+        catalog_path=db_path,
+        active_root="/stash/media",
+        dest_root="/pool/media/torrents/seeding",
+        active_device="stash",
+        dest_device="pool-media",
+        workers=3,
+        scan_hash_mode="full",
+        drift_policy="quick",
+        skip_dedup=True,
+        managed_roots=[("/pool/data", "pool-data")],
+        verbose=False,
+        debug=False,
+    )
+
+    assert exit_code == 0
+
+    scan_commands = [
+        cmd for cmd in commands
+        if len(cmd) >= 4 and cmd[:4] == [auto_mod.sys.executable, "-m", "hashall.cli", "scan"]
+    ]
+    assert scan_commands
+    for cmd in scan_commands:
+        assert "--hash-mode" in cmd
+        assert cmd[cmd.index("--hash-mode") + 1] == "full"
+        assert "--drift-policy" in cmd
+        assert cmd[cmd.index("--drift-policy") + 1] == "quick"
 
 
 def test_run_refresh_keeps_logger_open_while_patch_stdout_is_active(

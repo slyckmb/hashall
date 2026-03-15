@@ -198,6 +198,13 @@ def cli():
 @click.option("--scan-nested-datasets", is_flag=True,
               help="Detect nested mountpoints/datasets and scan them separately.")
 @click.option(
+    "--drift-policy",
+    type=click.Choice(["metadata", "quick", "full"], case_sensitive=False),
+    default="metadata",
+    show_default=True,
+    help="How aggressively to rehash files whose size+mtime appear unchanged.",
+)
+@click.option(
     "--hash-progress",
     type=click.Choice(["auto", "minimal", "full"], case_sensitive=False),
     default="auto",
@@ -205,7 +212,7 @@ def cli():
     help="Hash progress detail level for full/upgrade hashing.",
 )
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, hash_progress, low_priority):
+def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, drift_policy, hash_progress, low_priority):
     """Scan a directory and store file metadata in SQLite."""
     if low_priority:
         _apply_low_priority()
@@ -214,6 +221,7 @@ def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag,
     stats = scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
                       workers=workers, batch_size=batch_size, hash_mode=mode,
                       show_current_path=show_path, scan_nested_datasets=scan_nested_datasets,
+                      drift_policy=drift_policy.lower(),
                       hash_progress=hash_progress.lower())
     if getattr(stats, "safety_guard_triggered", False):
         raise click.ClickException(

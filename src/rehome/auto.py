@@ -438,6 +438,8 @@ def run_refresh(
     active_device: str = "",
     dest_device: str = "",
     workers: int = 8,
+    scan_hash_mode: str = "fast",
+    drift_policy: str = "quick",
     skip_dedup: bool = False,
     managed_roots: "list[tuple[str, str]]" = [],
     verbose: bool = False,
@@ -562,6 +564,8 @@ def run_refresh(
                 print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
                 print(f"  catalog  {catalog_path}")
                 print(f"  workers  {workers}")
+                print(f"  scan-hash-mode  {scan_hash_mode}")
+                print(f"  drift-policy  {drift_policy}")
                 print(f"  dedup    {dedup_mode}")
                 if logger.verbose:
                     print(f"  log      {log_path}")
@@ -629,7 +633,9 @@ def run_refresh(
                     ok, _ = _run_step(
                         f"scan active_root ({active_root})",
                         [python, "-m", "hashall.cli", "scan", active_root,
-                         "--parallel", "--workers", str(workers)] + db_args,
+                         "--parallel", "--workers", str(workers),
+                         "--hash-mode", str(scan_hash_mode),
+                         "--drift-policy", str(drift_policy)] + db_args,
                     )
                     overall_ok = overall_ok and ok
 
@@ -638,7 +644,9 @@ def run_refresh(
                         ok, _ = _run_step(
                             f"scan dest_root ({dest_root})",
                             [python, "-m", "hashall.cli", "scan", dest_root,
-                             "--parallel", "--workers", str(workers)] + db_args,
+                             "--parallel", "--workers", str(workers),
+                             "--hash-mode", str(scan_hash_mode),
+                             "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
 
@@ -663,7 +671,9 @@ def run_refresh(
                         ok, _ = _run_step(
                             f"scan managed root ({managed_path})",
                             [python, "-m", "hashall.cli", "scan", managed_path,
-                             "--parallel", "--workers", str(workers)] + db_args,
+                             "--parallel", "--workers", str(workers),
+                             "--hash-mode", str(scan_hash_mode),
+                             "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
 

@@ -1685,6 +1685,20 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 
 @cli.command("refresh")
 @click.option("--workers", default=8, show_default=True, help="Scan worker threads")
+@click.option(
+    "--scan-hash-mode",
+    type=click.Choice(["fast", "full", "upgrade"], case_sensitive=False),
+    default="fast",
+    show_default=True,
+    help="Hash mode to use for refresh scans.",
+)
+@click.option(
+    "--drift-policy",
+    type=click.Choice(["metadata", "quick", "full"], case_sensitive=False),
+    default="quick",
+    show_default=True,
+    help="How aggressively refresh scans should rehash unchanged files.",
+)
 @click.option("--no-dedup", "skip_dedup", is_flag=True,
               help="Skip dedup (dedup executes by default)")
 @click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
@@ -1699,7 +1713,7 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 @click.option("--seeding-root", default=None, hidden=True)
 @click.option("--pool-payload-root", default=None, hidden=True)
 @click.option("--catalog", default=None, help="Override config catalog path")
-def refresh_cmd(workers, skip_dedup, verbose, debug,
+def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debug,
                 active_device, dest_device, active_root, dest_root,
                 stash_device, pool_device, seeding_root, pool_payload_root,
                 catalog):
@@ -1731,6 +1745,8 @@ def refresh_cmd(workers, skip_dedup, verbose, debug,
         active_device=active_alias,
         dest_device=dest_alias,
         workers=workers,
+        scan_hash_mode=scan_hash_mode.lower(),
+        drift_policy=drift_policy.lower(),
         skip_dedup=skip_dedup,
         managed_roots=managed,
         verbose=verbose,
