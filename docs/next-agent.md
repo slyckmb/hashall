@@ -1,5 +1,15 @@
 # Next Agent Entry (Compact-Safe)
 
+- `hashall` is now `0.8.0`.
+- qB cache compatibility is now partially internalized:
+  - use `bin/qb-cache-agent.py --status` to inspect the local cache
+  - local cache path is `~/.cache/hashall-qb/`
+  - qB profile detection and state alias normalization now live in `src/hashall/qbittorrent.py`
+  - read-heavy hashall qB scripts should prefer the local cache by default
+- Remaining follow-up:
+  - qbitui’s external dashboard/cache path was not modified from this worktree
+  - if you need the same cache/profile behavior there, that is a separate cross-repo task
+
 Primary run-state source:
 `docs/operations/RUN-STATE.md`
 

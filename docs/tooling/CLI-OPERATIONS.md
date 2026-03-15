@@ -59,6 +59,23 @@ hashall sha256-backfill --device pool
 hashall sha256-verify --device pool
 ```
 
+### qB Cache / Compatibility
+
+```bash
+bin/qb-cache-agent.py --status
+bin/qb-checking-watch.sh --dashboard
+bin/qb-start-seeding-gradual.sh --daemon --apply --min-batch 1
+```
+
+Guidance:
+
+- `hashall` now owns a local qB shared-cache implementation in `src/hashall/qb_cache.py`.
+- The local cache uses the shared Python qB client in `src/hashall/qbittorrent.py`, so qB app/API version detection and state alias normalization happen in one place.
+- The local cache lives under `~/.cache/hashall-qb/`.
+- `bin/qb-checking-watch.sh` now defaults to cached reads; use `--no-cache` only for direct-mode debugging.
+- `bin/qb-start-seeding-gradual.sh` now defaults to cached `torrents/info` reads; use `--no-cache` only when debugging cache behavior.
+- Read-heavy list/status tooling should prefer cached reads; write/mutation endpoints can remain direct when immediate freshness matters.
+
 ## Standard Operator Loop
 
 1. Run scans for active roots.

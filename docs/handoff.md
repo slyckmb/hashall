@@ -2,7 +2,38 @@
 
 ## Key Facts
 
-- `hashall` semver baseline is now `0.7.0`.
+- `hashall` semver baseline is now `0.8.0`.
+- New 2026-03-15 qB compatibility/cache baseline:
+  - `hashall` now owns a local qB shared-cache implementation:
+    - `src/hashall/qb_cache.py`
+    - `bin/qb-cache-agent.py`
+    - `bin/qb-cache-daemon.py`
+  - the local cache no longer depends on qbitui’s external raw-API cache scripts
+  - qB server/profile detection now lives in `src/hashall/qbittorrent.py`
+  - current normalized compatibility contract:
+    - probe `app/version`
+    - probe `app/webapiVersion` when available
+    - probe `app/buildInfo` when available
+    - normalize pause-state aliases:
+      - `pausedDL` / `stoppedDL` -> canonical `stoppedDL`
+      - `pausedUP` / `stoppedUP` -> canonical `stoppedUP`
+  - local cache metadata now records `qb_profile`
+  - local cache path:
+    - `~/.cache/hashall-qb/`
+  - live read-heavy scripts now routing list/status reads through the local cache:
+    - `bin/qb-checking-watch.sh`
+    - `bin/qb-start-seeding-gradual.sh`
+    - `bin/qb-path-watch.py`
+    - `bin/pd-score.sh`
+    - `bin/pd-triage.sh`
+    - `bin/qb-find-repair-candidates.sh`
+    - `bin/qb-triage-step1-inspect.sh`
+    - `bin/qb-triage-step2-start-stopped-up.sh`
+    - `bin/qb-triage-step3-relink-partials.sh`
+    - `bin/qb-repair-batch.sh` discovery/no-ramp list reads
+  - operator implication:
+    - multiple list/status views should now share one cache daemon instead of each polling qB directly
+    - qbitui dashboard remains an external follow-up if you want the same compatibility/cache contract there
 - Active docs are now intentionally minimal and stub-free:
   - canonical active set:
     - `README.md`

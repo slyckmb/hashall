@@ -4,7 +4,32 @@ Last updated: 2026-03-13
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.7.0`.
+- `hashall` is now `0.8.0`.
+- New 2026-03-15 qB compatibility/cache hardening:
+  - local cache implementation now lives in this repo:
+    - `src/hashall/qb_cache.py`
+    - `bin/qb-cache-agent.py`
+    - `bin/qb-cache-daemon.py`
+  - the cache now uses the shared qB client, not qbitui’s separate raw-API implementation
+  - `src/hashall/qbittorrent.py` now detects and caches a qB server profile:
+    - `app_version`
+    - `webapi_version`
+    - `qt_version`
+    - `libtorrent_version`
+  - state alias normalization is now centralized:
+    - `pausedDL` / `stoppedDL` => `stoppedDL`
+    - `pausedUP` / `stoppedUP` => `stoppedUP`
+  - current cache root:
+    - `~/.cache/hashall-qb/`
+  - current read-heavy scripts using that cache:
+    - `qb-checking-watch`
+    - `qb-start-seeding-gradual`
+    - `qb-path-watch`
+    - PD triage/score/finder scripts
+    - triage step scripts
+    - `qb-repair-batch` list discovery reads
+  - important limit:
+    - qbitui’s external dashboard/cache path has not been updated in this repo; treat that as separate follow-up work if cross-repo alignment is still wanted
 - Active docs are now intentionally minimal and stub-free:
   - canonical active docs:
     - `README.md`

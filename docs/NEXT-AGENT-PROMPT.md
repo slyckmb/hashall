@@ -5,6 +5,22 @@ Canonical state document:
 
 Prompt-critical context (2026-03-12):
 
+- `hashall` is now `0.8.0`.
+- qB cache/profile hardening landed in this repo:
+  - local cache:
+    - `src/hashall/qb_cache.py`
+    - `bin/qb-cache-agent.py`
+    - `bin/qb-cache-daemon.py`
+  - local cache root:
+    - `~/.cache/hashall-qb/`
+  - qB compatibility/profile detection now lives in:
+    - `src/hashall/qbittorrent.py`
+  - normalized pause-state aliases:
+    - `pausedDL` / `stoppedDL` -> `stoppedDL`
+    - `pausedUP` / `stoppedUP` -> `stoppedUP`
+  - read-heavy hashall qB scripts now prefer the local cache by default
+  - external qbitui dashboard/cache alignment remains separate follow-up work
+
 - New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
   - `bin/qb-zfs-relocate.py` (`v0.1.8`)
   - `src/hashall/qb_zfs_relocate.py`
