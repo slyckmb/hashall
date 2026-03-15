@@ -7,8 +7,8 @@ Connects to qBittorrent to retrieve torrent information for payload mapping.
 import os
 import requests
 import time
-from typing import List, Dict, Optional
-from dataclasses import dataclass
+from typing import Any, List, Dict, Optional
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 
@@ -29,6 +29,26 @@ class QBitTorrent:
     completed: int = 0
     downloaded: int = 0
     completion_on: int = 0
+    added_on: int = 0
+    state_raw: str = ""
+
+
+@dataclass
+class QBitServerProfile:
+    """Compatibility profile for the connected qB server."""
+
+    app_version: str = ""
+    webapi_version: str = ""
+    qt_version: str = ""
+    libtorrent_version: str = ""
+    state_alias_mode: str = "stop_aliases"
+    pause_endpoint: str = "/api/v2/torrents/pause"
+    pause_fallback_endpoint: str = "/api/v2/torrents/stop"
+    resume_endpoint: str = "/api/v2/torrents/resume"
+    resume_fallback_endpoint: str = "/api/v2/torrents/start"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
@@ -91,6 +111,69 @@ class QBittorrentClient:
             "1", "true", "yes", "on"
         }
         self.retryable_http_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
+        self._server_profile: Optional[QBitServerProfile] = None
+
+    @staticmethod
+    def normalize_state_alias(state: str) -> str:
+        """Normalize old/new qB pause-state aliases to one canonical form."""
+        raw = str(state or "").strip()
+        lowered = raw.lower()
+        aliases = {
+            "pauseddl": "stoppedDL",
+            "stoppeddl": "stoppedDL",
+            "pausedup": "stoppedUP",
+            "stoppedup": "stoppedUP",
+        }
+        normalized = aliases.get(lowered)
+        if normalized:
+            return normalized
+        return raw
+
+    def _normalize_torrent_payload(self, torrent_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a compatibility-normalized torrent payload dict."""
+        payload = dict(torrent_data or {})
+        raw_state = str(payload.get("state_raw", payload.get("state", "")) or "").strip()
+        payload["state_raw"] = raw_state
+        payload["state"] = self.normalize_state_alias(raw_state)
+        payload["hash"] = str(payload.get("hash", "") or "")
+        payload["name"] = str(payload.get("name", "") or "")
+        payload["save_path"] = str(payload.get("save_path", "") or "")
+        content_path = str(payload.get("content_path", "") or "")
+        if not content_path and payload["save_path"] and payload["name"]:
+            content_path = str(Path(payload["save_path"]) / payload["name"])
+        payload["content_path"] = content_path
+        payload["category"] = str(payload.get("category", "") or "")
+        payload["tags"] = str(payload.get("tags", "") or "")
+        payload["size"] = int(payload.get("size", 0) or 0)
+        payload["progress"] = float(payload.get("progress", 0.0) or 0.0)
+        payload["auto_tmm"] = bool(payload.get("auto_tmm", False))
+        payload["amount_left"] = int(payload.get("amount_left", 0) or 0)
+        payload["completed"] = int(payload.get("completed", 0) or 0)
+        payload["downloaded"] = int(payload.get("downloaded", 0) or 0)
+        payload["completion_on"] = int(payload.get("completion_on", 0) or 0)
+        payload["added_on"] = int(payload.get("added_on", 0) or 0)
+        return payload
+
+    def _torrent_from_payload(self, torrent_data: Dict[str, Any]) -> QBitTorrent:
+        payload = self._normalize_torrent_payload(torrent_data)
+        return QBitTorrent(
+            hash=payload.get("hash", ""),
+            name=payload.get("name", ""),
+            save_path=payload.get("save_path", ""),
+            content_path=payload.get("content_path", ""),
+            category=payload.get("category", ""),
+            tags=payload.get("tags", ""),
+            state=payload.get("state", ""),
+            size=payload.get("size", 0),
+            progress=payload.get("progress", 0.0),
+            auto_tmm=bool(payload.get("auto_tmm", False)),
+            amount_left=payload.get("amount_left", 0),
+            completed=payload.get("completed", 0),
+            downloaded=payload.get("downloaded", 0),
+            completion_on=payload.get("completion_on", 0),
+            added_on=payload.get("added_on", 0),
+            state_raw=payload.get("state_raw", ""),
+        )
 
     def _retry_delay_seconds(self, attempt: int) -> float:
         """Exponential backoff delay for retry attempts."""
@@ -166,9 +249,81 @@ class QBittorrentClient:
                 return self.login()
             self.last_error = f"HTTP {status}" if status is not None else str(e)
             return False
-        except requests.RequestException as e:
+        except (requests.RequestException, RuntimeError) as e:
             self.last_error = str(e)
             return False
+
+    def _get_optional_json(self, endpoint: str) -> Optional[Dict[str, Any]]:
+        """Fetch an optional JSON endpoint, returning None on 404/auth-neutral absence."""
+        response: Optional[requests.Response] = None
+        try:
+            self._ensure_authenticated()
+            response = self.session.get(
+                f"{self.base_url}{endpoint}",
+                timeout=self.request_timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            return None
+        except requests.HTTPError as e:
+            status = self._status_from_error(e, response)
+            if status in {401, 403}:
+                self._authenticated = False
+                self._ensure_authenticated()
+                return self._get_optional_json(endpoint)
+            if status == 404:
+                return None
+            return None
+        except requests.RequestException:
+            return None
+
+    def _get_optional_text(self, endpoint: str) -> Optional[str]:
+        """Fetch an optional text endpoint, returning None on 404/auth-neutral absence."""
+        response: Optional[requests.Response] = None
+        try:
+            self._ensure_authenticated()
+            response = self.session.get(
+                f"{self.base_url}{endpoint}",
+                timeout=self.request_timeout,
+            )
+            response.raise_for_status()
+            text = (response.text or "").strip()
+            return text or None
+        except requests.HTTPError as e:
+            status = self._status_from_error(e, response)
+            if status in {401, 403}:
+                self._authenticated = False
+                self._ensure_authenticated()
+                return self._get_optional_text(endpoint)
+            if status == 404:
+                return None
+            return None
+        except requests.RequestException:
+            return None
+
+    def get_server_profile(self, force_refresh: bool = False) -> QBitServerProfile:
+        """Return a cached qB server/API compatibility profile."""
+        if self._server_profile is not None and not force_refresh:
+            return self._server_profile
+
+        app_version = self._get_optional_text("/api/v2/app/version") or ""
+        webapi_version = self._get_optional_text("/api/v2/app/webapiVersion") or ""
+        build_info = self._get_optional_json("/api/v2/app/buildInfo") or {}
+
+        profile = QBitServerProfile(
+            app_version=app_version,
+            webapi_version=webapi_version,
+            qt_version=str(build_info.get("qt", "") or build_info.get("qt_version", "") or ""),
+            libtorrent_version=str(
+                build_info.get("libtorrent")
+                or build_info.get("libtorrent_version")
+                or ""
+            ),
+        )
+        self._server_profile = profile
+        return profile
 
     def _ensure_authenticated(self):
         """Ensure we're authenticated before making requests."""
@@ -176,25 +331,19 @@ class QBittorrentClient:
             if not self.login():
                 raise RuntimeError("Failed to authenticate with qBittorrent")
 
-    def get_torrents(self, category: Optional[str] = None,
-                    tag: Optional[str] = None) -> List[QBitTorrent]:
-        """
-        Get list of torrents from qBittorrent.
-
-        Args:
-            category: Filter by category (optional)
-            tag: Filter by tag (optional)
-
-        Returns:
-            List of QBitTorrent objects
-        """
+    def get_torrents_payload(
+        self,
+        category: Optional[str] = None,
+        tag: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch normalized raw torrent payloads from qB."""
         self._ensure_authenticated()
 
         params = {}
         if category:
-            params['category'] = category
+            params["category"] = category
         if tag:
-            params['tag'] = tag
+            params["tag"] = tag
 
         response: Optional[requests.Response] = None
         for attempt in range(1, self.request_retries + 1):
@@ -206,27 +355,12 @@ class QBittorrentClient:
                 )
                 response.raise_for_status()
                 torrents_data = response.json()
-
-                torrents = []
-                for t in torrents_data:
-                    torrents.append(QBitTorrent(
-                        hash=t.get('hash', ''),
-                        name=t.get('name', ''),
-                        save_path=t.get('save_path', ''),
-                        content_path=t.get('content_path', ''),
-                        category=t.get('category', ''),
-                        tags=t.get('tags', ''),
-                        state=t.get('state', ''),
-                        size=t.get('size', 0),
-                        progress=t.get('progress', 0.0),
-                        auto_tmm=bool(t.get('auto_tmm', False)),
-                        amount_left=t.get('amount_left', 0),
-                        completed=t.get('completed', 0),
-                        downloaded=t.get('downloaded', 0),
-                        completion_on=t.get('completion_on', 0),
-                    ))
+                normalized = [
+                    self._normalize_torrent_payload(torrent_data)
+                    for torrent_data in torrents_data
+                ]
                 self.last_error = None
-                return torrents
+                return normalized
             except requests.Timeout as e:
                 self.last_error = str(e)
                 if attempt < self.request_retries:
@@ -269,6 +403,21 @@ class QBittorrentClient:
                 print(f"⚠️ Failed to get torrents: {e}")
                 return []
         return []
+
+    def get_torrents(self, category: Optional[str] = None,
+                    tag: Optional[str] = None) -> List[QBitTorrent]:
+        """
+        Get list of torrents from qBittorrent.
+
+        Args:
+            category: Filter by category (optional)
+            tag: Filter by tag (optional)
+
+        Returns:
+            List of QBitTorrent objects
+        """
+        payloads = self.get_torrents_payload(category=category, tag=tag)
+        return [self._torrent_from_payload(torrent_data) for torrent_data in payloads]
 
     def get_torrent_files(self, torrent_hash: str) -> List[QBitFile]:
         """
@@ -458,25 +607,11 @@ class QBittorrentClient:
                 torrents_data = response.json()
                 out: Dict[str, QBitTorrent] = {}
                 for t in torrents_data:
-                    h = str(t.get("hash", "") or "").lower().strip()
+                    payload = self._normalize_torrent_payload(t)
+                    h = str(payload.get("hash", "") or "").lower().strip()
                     if not h:
                         continue
-                    out[h] = QBitTorrent(
-                        hash=t.get('hash', ''),
-                        name=t.get('name', ''),
-                        save_path=t.get('save_path', ''),
-                        content_path=t.get('content_path', ''),
-                        category=t.get('category', ''),
-                        tags=t.get('tags', ''),
-                        state=t.get('state', ''),
-                        size=t.get('size', 0),
-                        progress=t.get('progress', 0.0),
-                        auto_tmm=bool(t.get('auto_tmm', False)),
-                        amount_left=t.get('amount_left', 0),
-                        completed=t.get('completed', 0),
-                        downloaded=t.get('downloaded', 0),
-                        completion_on=t.get('completion_on', 0),
-                    )
+                    out[h] = self._torrent_from_payload(payload)
                 self.last_error = None
                 return out
             except requests.Timeout as e:
@@ -676,11 +811,12 @@ class QBittorrentClient:
         Uses qBittorrent API: POST /api/v2/torrents/pause
         Falls back to /api/v2/torrents/stop on 404.
         """
+        profile = self.get_server_profile()
         return self._post_hashes_action(
-            endpoint="/api/v2/torrents/pause",
+            endpoint=profile.pause_endpoint,
             torrent_hashes=torrent_hashes,
             action_name="pause",
-            fallback_endpoint="/api/v2/torrents/stop",
+            fallback_endpoint=profile.pause_fallback_endpoint,
         )
 
     def pause_torrent(self, torrent_hash: str) -> bool:
@@ -694,11 +830,12 @@ class QBittorrentClient:
         Uses qBittorrent API: POST /api/v2/torrents/resume
         Falls back to /api/v2/torrents/start on 404.
         """
+        profile = self.get_server_profile()
         return self._post_hashes_action(
-            endpoint="/api/v2/torrents/resume",
+            endpoint=profile.resume_endpoint,
             torrent_hashes=torrent_hashes,
             action_name="resume",
-            fallback_endpoint="/api/v2/torrents/start",
+            fallback_endpoint=profile.resume_fallback_endpoint,
         )
 
     def resume_torrent(self, torrent_hash: str) -> bool:
@@ -983,24 +1120,9 @@ class QBittorrentClient:
                     self.last_error = f"not_found:{torrent_hash.lower()}"
                     return None
 
-                t = torrents_data[0]
+                t = self._normalize_torrent_payload(torrents_data[0])
                 self.last_error = None
-                return QBitTorrent(
-                    hash=t.get('hash', ''),
-                    name=t.get('name', ''),
-                    save_path=t.get('save_path', ''),
-                    content_path=t.get('content_path', ''),
-                    category=t.get('category', ''),
-                    tags=t.get('tags', ''),
-                    state=t.get('state', ''),
-                    size=t.get('size', 0),
-                    progress=t.get('progress', 0.0),
-                    auto_tmm=bool(t.get('auto_tmm', False)),
-                    amount_left=t.get('amount_left', 0),
-                    completed=t.get('completed', 0),
-                    downloaded=t.get('downloaded', 0),
-                    completion_on=t.get('completion_on', 0),
-                )
+                return self._torrent_from_payload(t)
 
             except requests.Timeout as e:
                 self.last_error = str(e)
@@ -1054,11 +1176,7 @@ class QBittorrentClient:
             True if connection successful, False otherwise
         """
         try:
-            response = self.session.get(
-                f"{self.base_url}/api/v2/app/version",
-                timeout=5
-            )
-            response.raise_for_status()
+            self.get_server_profile(force_refresh=True)
             self.last_error = None
             return True
         except requests.RequestException as e:

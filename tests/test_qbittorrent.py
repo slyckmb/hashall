@@ -1,8 +1,14 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import requests
 
-from hashall.qbittorrent import QBittorrentClient, QBitFile, QBitTorrent
+from hashall.qbittorrent import (
+    QBittorrentClient,
+    QBitFile,
+    QBitServerProfile,
+    QBitTorrent,
+)
 
 
 def test_get_torrent_root_path_prefers_content_path_without_files_api(monkeypatch):
@@ -187,3 +193,74 @@ def test_is_reachable_reauthenticates_on_forbidden(monkeypatch):
 
     assert client.is_reachable() is True
     assert calls["count"] == 1
+
+
+def test_get_server_profile_collects_optional_endpoints(monkeypatch):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+
+    class FakeResponse:
+        def __init__(self, text="", payload=None, status_code=200):
+            self.text = text
+            self._payload = payload
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError("boom", response=self)
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_get(url, timeout=None):
+        calls.append(Path(url).name)
+        if url.endswith("/api/v2/app/version"):
+            return FakeResponse(text="5.0.4")
+        if url.endswith("/api/v2/app/webapiVersion"):
+            return FakeResponse(text="2.11.4")
+        if url.endswith("/api/v2/app/buildInfo"):
+            return FakeResponse(payload={"qt": "6.6.2", "libtorrent": "2.0.9.0"})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    profile = client.get_server_profile()
+    assert isinstance(profile, QBitServerProfile)
+    assert profile.app_version == "5.0.4"
+    assert profile.webapi_version == "2.11.4"
+    assert profile.qt_version == "6.6.2"
+    assert profile.libtorrent_version == "2.0.9.0"
+    assert calls == ["version", "webapiVersion", "buildInfo"]
+
+
+def test_get_torrents_normalizes_pause_alias_and_derives_content_path(monkeypatch):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{
+                "hash": "abc123",
+                "name": "Movie.mkv",
+                "save_path": "/pool/media/torrents/seeding/site",
+                "content_path": "",
+                "state": "pausedDL",
+                "progress": 0.42,
+                "size": 100,
+                "added_on": 123,
+            }]
+
+    monkeypatch.setattr(client.session, "get", lambda url, params=None, timeout=None: FakeResponse())
+
+    torrents = client.get_torrents()
+    assert len(torrents) == 1
+    torrent = torrents[0]
+    assert torrent.state == "stoppedDL"
+    assert torrent.state_raw == "pausedDL"
+    assert torrent.content_path == "/pool/media/torrents/seeding/site/Movie.mkv"
+    assert torrent.added_on == 123
