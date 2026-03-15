@@ -18,6 +18,7 @@ Purpose: minimal, canonical documentation set for CLI agents.
 - `docs/handoff.md` - Compact-safe current handoff summary.
 - `docs/next-agent.md` - Compact-safe recovery checklist.
 - `docs/NEXT-AGENT-PROMPT.md` - Prompt-safe compact recovery summary.
+- `docs/CROSS-REPO-QB-HELPER-INSTRUCTIONS.md` - Cross-repo instruction set for agents that should consume hashall qB helper/cache tooling.
 - `docs/ops-log.md` - Rolling operational log when recent context matters.
 
 ## Hygiene
