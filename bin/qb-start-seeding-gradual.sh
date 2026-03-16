@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qb-start-seeding-gradual.sh — gradually start stoppedUP torrents in escalating batches.
-# Version: 1.4.0
-# Date:    2026-03-15
+# Version: 1.4.1
+# Date:    2026-03-16
 #
 # After each batch waits for state to settle, then checks the protected watch
 # scope (all torrents added before today) for downloading/broken flips. On any
@@ -29,8 +29,8 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.4.0"
-SCRIPT_DATE="2026-03-15"
+SCRIPT_VERSION="1.4.1"
+SCRIPT_DATE="2026-03-16"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
@@ -52,6 +52,7 @@ CACHE_MAX_AGE=15
 GUARD_STOP_COOLDOWN=120
 GUARD_INCLUDE_CHECKINGDL=false
 CACHE_AGENT="${QBIT_CACHE_AGENT:-$SCRIPT_DIR/qb-cache-agent.py}"
+QB_ACTION_HELPER="${QBIT_ACTION_HELPER:-$SCRIPT_DIR/qb-action.py}"
 CACHE_CLIENT_ID="${SCRIPT_NAME}:$$"
 IGNORE_HASHES=""
 IGNORE_HASHES_FILE=""
@@ -221,6 +222,10 @@ if [[ "$USE_CACHE" == true && ! -f "$CACHE_AGENT" ]]; then
   echo "--cache enabled but cache agent not found: $CACHE_AGENT" >&2
   exit 2
 fi
+if [[ "$APPLY" == true && ! -f "$QB_ACTION_HELPER" ]]; then
+  echo "qB action helper not found: $QB_ACTION_HELPER" >&2
+  exit 2
+fi
 
 COOKIE=$(mktemp /tmp/qb.XXXXXX)
 TMPJSON=$(mktemp /tmp/qb_sg.XXXXXX)
@@ -263,6 +268,25 @@ qb_login() {
   curl -fsS -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
     --data-urlencode "username=$QB_USER" \
     --data-urlencode "password=$QB_PASS" >/dev/null
+}
+
+qb_action() {
+  local action="$1"
+  local hashes="$2"
+  QBIT_URL="$QB_URL" QBIT_USER="$QB_USER" QBIT_PASS="$QB_PASS" \
+    python3 "$QB_ACTION_HELPER" "$action" "$hashes"
+}
+
+qb_action_best_effort() {
+  local action="$1"
+  local hashes="$2"
+  local label="$3"
+  local output=""
+  if output="$(qb_action "$action" "$hashes" 2>&1)"; then
+    log "  ${label}: $output"
+  else
+    log "  ${label} failed: ${output:-unknown_error}"
+  fi
 }
 
 fetch_torrents_info() {
@@ -511,25 +535,26 @@ PYEOF
     done
 
     if [[ "$APPLY" == true ]]; then
-      qb_login 2>/dev/null || true
       PIPE=$(IFS='|'; echo "${batch[*]}")
-      HTTP=$(curl -sS -o/dev/null -w "%{http_code}" \
-          -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/start" \
-          --data-urlencode "hashes=$PIPE")
-      log "  start HTTP: $HTTP"
+      if START_OUT="$(qb_action resume "$PIPE" 2>&1)"; then
+        log "  start request: $START_OUT"
+      else
+        log "  ERROR: start request failed: ${START_OUT:-unknown_error}"
+        echo "safety_check_failed:start_request:$PIPE" > "$TMPHALT"
+        failures=$(( failures + bsize ))
+        ramp_halted=true
+        break
+      fi
       total_started=$(( total_started + bsize ))
 
       log "  waiting ${SETTLE_SECS}s for state to settle..."
       sleep "$SETTLE_SECS"
-      qb_login 2>/dev/null || true
 
       # Check protected watch scope for bad states (read watch list from file, not arg)
       if ! fetch_torrents_info 3 2; then
         log "  ERROR: unable to fetch state after settle window; stopping batch and halting."
         PIPE=$(IFS='|'; echo "${batch[*]}")
-        curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
-            --data-urlencode "hashes=$PIPE" >/dev/null 2>&1 || true
-        log "  stop HTTP sent for batch: $PIPE"
+        qb_action_best_effort pause "$PIPE" "stop request sent for batch"
         echo "safety_check_failed:fetch_torrents_info:$PIPE" > "$TMPHALT"
         failures=$(( failures + bsize ))
         ramp_halted=true
@@ -565,9 +590,7 @@ PYEOF
       then
         log "  ERROR: failed to parse state-check payload; stopping batch and halting."
         PIPE=$(IFS='|'; echo "${batch[*]}")
-        curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
-            --data-urlencode "hashes=$PIPE" >/dev/null 2>&1 || true
-        log "  stop HTTP sent for batch: $PIPE"
+        qb_action_best_effort pause "$PIPE" "stop request sent for batch"
         echo "safety_check_failed:parse_state_payload:$PIPE" > "$TMPHALT"
         failures=$(( failures + bsize ))
         ramp_halted=true
@@ -586,9 +609,7 @@ PYEOF
       ); then
         log "  ERROR: failed to summarize state-check payload; stopping batch and halting."
         PIPE=$(IFS='|'; echo "${batch[*]}")
-        curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
-            --data-urlencode "hashes=$PIPE" >/dev/null 2>&1 || true
-        log "  stop HTTP sent for batch: $PIPE"
+        qb_action_best_effort pause "$PIPE" "stop request sent for batch"
         echo "safety_check_failed:parse_state_counts:$PIPE" > "$TMPHALT"
         failures=$(( failures + bsize ))
         ramp_halted=true
@@ -607,9 +628,7 @@ PYEOF
       then
         log "  ERROR: failed to extract downloading hash set; stopping batch and halting."
         PIPE=$(IFS='|'; echo "${batch[*]}")
-        curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
-            --data-urlencode "hashes=$PIPE" >/dev/null 2>&1 || true
-        log "  stop HTTP sent for batch: $PIPE"
+        qb_action_best_effort pause "$PIPE" "stop request sent for batch"
         echo "safety_check_failed:extract_downloading_hash_set:$PIPE" > "$TMPHALT"
         failures=$(( failures + bsize ))
         ramp_halted=true
@@ -642,11 +661,9 @@ for h, s, p in d.get('downloading', []):
 PYEOF
         fi
         if [[ -n "$BAD_HASHES" ]]; then
-          curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
-              --data-urlencode "hashes=$BAD_HASHES" >/dev/null 2>&1 || true
-          log "  stop HTTP sent for: $BAD_HASHES"
+          qb_action_best_effort pause "$BAD_HASHES" "stop request sent for"
         else
-          log "  stop HTTP skipped: no concrete flipped hashes resolved"
+          log "  stop request skipped: no concrete flipped hashes resolved"
         fi
         log ""
         log "HALTED — check the torrents listed above."
@@ -675,11 +692,9 @@ print('HASHES:' + '|'.join(h for h, s, p in selected))
 PYEOF
 )
         if [[ -n "$BAD_HASHES" ]]; then
-          curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
-              --data-urlencode "hashes=$BAD_HASHES" >/dev/null 2>&1 || true
-          log "  stop HTTP sent for: $BAD_HASHES"
+          qb_action_best_effort pause "$BAD_HASHES" "stop request sent for"
         else
-          log "  stop HTTP skipped: no concrete bad-state hashes resolved"
+          log "  stop request skipped: no concrete bad-state hashes resolved"
         fi
         log ""
         log "HALTED — check the torrents listed above."
@@ -901,12 +916,9 @@ PYEOF
       log "guard: cooldown=${GUARD_STOP_COOLDOWN}s stop_now=${stop_count} suppressed=${suppress_count} state=${GUARD_COOLDOWN_STATE}"
     fi
     if [[ -n "$stop_hashes" ]]; then
-      qb_login 2>/dev/null || true
-      curl -fsS -b "$COOKIE" -X POST "$QB_URL/api/v2/torrents/stop" \
-        --data-urlencode "hashes=$stop_hashes" >/dev/null 2>&1 || true
-      log "guard: stop HTTP sent for: $stop_hashes"
+      qb_action_best_effort pause "$stop_hashes" "guard: stop request sent for"
     else
-      log "guard: stop suppressed by cooldown (no stop HTTP sent this pass)"
+      log "guard: stop suppressed by cooldown (no stop request sent this pass)"
     fi
   elif [[ "$APPLY" != true ]]; then
     log "guard: [dry-run] would stop detected downloading-like hashes"
