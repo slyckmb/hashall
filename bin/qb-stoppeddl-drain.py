@@ -22,7 +22,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hashall.qbittorrent import QBittorrentClient, QBitTorrent, get_qbittorrent_client
+from hashall.qbittorrent import QBittorrentClient, QBitTorrent, get_qbittorrent_client, get_torrents_from_cache
 from rehome.seed_state import SEED_ROOT_STATE_PATH, validate_seed_root_state
 
 SEMVER = "0.1.24"
@@ -714,11 +714,16 @@ def source_preference_rank(source: str) -> int:
     return 0
 
 
-def fetch_qb_rows() -> Tuple[QBittorrentClient, Dict[str, QBitTorrent], Dict[Tuple[str, int], List[QBitTorrent]]]:
+def fetch_qb_rows(
+    cached_payloads: Optional[List[dict]] = None,
+) -> Tuple[QBittorrentClient, Dict[str, QBitTorrent], Dict[Tuple[str, int], List[QBitTorrent]]]:
     qb = get_qbittorrent_client()
     if not qb.test_connection() or not qb.login():
         raise RuntimeError("qB connection/login failed")
-    rows = qb.get_torrents()
+    if cached_payloads is not None:
+        rows = [qb._torrent_from_payload(p) for p in cached_payloads]
+    else:
+        rows = qb.get_torrents()
     by_hash = {str(r.hash or "").lower(): r for r in rows if str(r.hash or "").strip()}
     by_name_size: Dict[Tuple[str, int], List[QBitTorrent]] = defaultdict(list)
     for r in rows:
@@ -1099,6 +1104,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(skip_live_active=True)
     p.set_defaults(stop_on_a=True)
     p.set_defaults(same_filesystem_only=True)
+    p.add_argument(
+        "--cache",
+        action="store_true",
+        default=False,
+        help="Read full torrent list from shared cache file instead of live API (default: disabled)",
+    )
+    p.add_argument(
+        "--cache-max-age",
+        type=float,
+        default=30.0,
+        help="Max cache file age in seconds when --cache is set (default: 30)",
+    )
     return p
 
 
@@ -1220,7 +1237,14 @@ def main() -> int:
         print("summary selected=0 reason=no_hashes")
         return 0
 
-    qb_client, by_hash_qb, by_name_size_qb = fetch_qb_rows()
+    _cached_payloads: Optional[List[dict]] = None
+    if args.cache:
+        _cached_payloads = get_torrents_from_cache(max_age_s=args.cache_max_age)
+        if _cached_payloads is None:
+            print("cache_miss falling_back=live_api")
+        else:
+            print(f"cache_hit count={len(_cached_payloads)} max_age_s={args.cache_max_age}")
+    qb_client, by_hash_qb, by_name_size_qb = fetch_qb_rows(cached_payloads=_cached_payloads)
     conn = sqlite3.connect(str(Path(args.db).expanduser()))
     conn.row_factory = sqlite3.Row
     global_db_index: Optional[GlobalDbIndex] = None

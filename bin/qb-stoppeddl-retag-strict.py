@@ -141,6 +141,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Output json summary path (default: <bucket>/reports/stoppeddl-retag-strict-<ts>.json).",
     )
+    p.add_argument(
+        "--cache",
+        action="store_true",
+        default=False,
+        help="Read full torrent list from shared cache file instead of live API (default: disabled)",
+    )
+    p.add_argument(
+        "--cache-max-age",
+        type=float,
+        default=30.0,
+        help="Max cache file age in seconds when --cache is set (default: 30)",
+    )
     return p
 
 

@@ -16,7 +16,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
+from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client, get_torrents_from_cache
 
 SEMVER = "0.1.3"
 SCRIPT_NAME = Path(__file__).name
@@ -175,10 +175,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional report path (default: <bucket>/reports/sync-<ts>.json)",
     )
+    p.add_argument(
+        "--cache",
+        action="store_true",
+        default=False,
+        help="Read full torrent list from shared cache file instead of live API (default: disabled)",
+    )
+    p.add_argument(
+        "--cache-max-age",
+        type=float,
+        default=30.0,
+        help="Max cache file age in seconds when --cache is set (default: 30)",
+    )
     return p
 
 
-def fetch_torrents(explicit_hashes: List[str], states: Set[str]) -> tuple[List[QBitTorrent], int]:
+def fetch_torrents(
+    explicit_hashes: List[str],
+    states: Set[str],
+    cached_payloads: Optional[List[dict]] = None,
+) -> tuple[List[QBitTorrent], int]:
     qb = get_qbittorrent_client()
     if not qb.test_connection() or not qb.login():
         raise RuntimeError("qB connection/login failed")
@@ -194,6 +210,9 @@ def fetch_torrents(explicit_hashes: List[str], states: Set[str]) -> tuple[List[Q
                 missing_in_qb += 1
                 continue
             rows.append(row)
+    elif cached_payloads is not None:
+        all_rows = [qb._torrent_from_payload(p) for p in cached_payloads]
+        rows = [r for r in all_rows if str(r.state or "").lower() in states]
     else:
         all_rows = qb.get_torrents()
         rows = [r for r in all_rows if str(r.state or "").lower() in states]
@@ -239,7 +258,14 @@ def main() -> int:
 
     if explicit_hashes and ignore_set:
         explicit_hashes = [h for h in explicit_hashes if not hash_matches_filters(h, ignore_set)]
-    rows, missing_in_qb = fetch_torrents(explicit_hashes, states)
+    _cached_payloads: Optional[List[dict]] = None
+    if args.cache and not explicit_hashes:
+        _cached_payloads = get_torrents_from_cache(max_age_s=args.cache_max_age)
+        if _cached_payloads is None:
+            print("cache_miss falling_back=live_api")
+        else:
+            print(f"cache_hit count={len(_cached_payloads)} max_age_s={args.cache_max_age}")
+    rows, missing_in_qb = fetch_torrents(explicit_hashes, states, cached_payloads=_cached_payloads)
     ignored = 0
     if ignore_set:
         kept: List[QBitTorrent] = []

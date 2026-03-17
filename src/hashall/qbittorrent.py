@@ -4,12 +4,37 @@ qBittorrent Web API integration (read-only).
 Connects to qBittorrent to retrieve torrent information for payload mapping.
 """
 
+import json
 import os
 import requests
 import time
 from typing import Any, List, Dict, Optional
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+
+def get_torrents_from_cache(
+    max_age_s: float = 30.0,
+    cache_path: "Path | None" = None,
+) -> "list[dict] | None":
+    """Read the shared qB cache file if it is fresh enough.
+
+    Returns the parsed list of torrent dicts, or None if the cache is absent
+    or older than *max_age_s* seconds.  Never raises; returns None on any error.
+    """
+    if cache_path is None:
+        cache_path = Path.home() / ".cache" / "hashall-qb" / "qbit-cache-latest.json"
+    try:
+        age = time.time() - os.stat(cache_path).st_mtime
+        if age > max_age_s:
+            return None
+        with cache_path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, list):
+            return None
+        return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
 
 
 @dataclass
