@@ -71,6 +71,7 @@ Single operational runbook for rehome planning, apply flow, and safety gates.
     - require explicit allowed-save-root / allowed-donor-root policy
     - verify with libtorrent before any qB mutation
     - protect against download-like state flips after apply
+    - use the shared qB helper/cache contract so old/new qB API differences and temporary auth slowness are normalized centrally rather than patched per tool
 
 - Legacy stale-root `missingFiles` after earlier rehome success
   - Failure mode: qB and `.fastresume` remain pointed at `/pool/data/...` after an older `REUSE success`, while payload already lives at `/pool/media/...`

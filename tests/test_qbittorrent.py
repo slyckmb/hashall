@@ -1,13 +1,16 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import requests
 
 from hashall.qbittorrent import (
+    DEFAULT_QB_CACHE_FILE,
     QBittorrentClient,
     QBitFile,
     QBitServerProfile,
     QBitTorrent,
+    get_torrents_from_cache,
 )
 
 
@@ -233,6 +236,118 @@ def test_get_server_profile_collects_optional_endpoints(monkeypatch):
     assert profile.qt_version == "6.6.2"
     assert profile.libtorrent_version == "2.0.9.0"
     assert calls == ["version", "webapiVersion", "buildInfo"]
+
+
+def test_get_server_profile_falls_back_to_cached_meta(monkeypatch, tmp_path):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.cache_meta_file = tmp_path / "torrents-info.meta.json"
+    client.cache_meta_file.write_text(
+        json.dumps(
+            {
+                "qb_profile": {
+                    "app_version": "4.4.5",
+                    "webapi_version": "2.8.5",
+                    "qt_version": "6.4.1",
+                    "libtorrent_version": "1.2.18.0",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(client, "_get_optional_text", lambda _endpoint: None)
+    monkeypatch.setattr(client, "_get_optional_json", lambda _endpoint: None)
+
+    profile = client.get_server_profile(force_refresh=True)
+
+    assert profile.app_version == "4.4.5"
+    assert profile.webapi_version == "2.8.5"
+
+
+def test_get_torrent_info_falls_back_to_cache_on_timeout(monkeypatch, tmp_path):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.request_retries = 1
+    client.cache_file = tmp_path / "torrents-info.json"
+    client.cache_file.write_text(
+        json.dumps(
+            [
+                {
+                    "hash": "abc123",
+                    "name": "Movie.mkv",
+                    "save_path": "/pool/media/site",
+                    "content_path": "/pool/media/site/Movie.mkv",
+                    "state": "pausedUP",
+                    "progress": 1.0,
+                    "size": 100,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+
+    def fake_get(_url, params=None, timeout=None):
+        raise requests.Timeout("read timeout")
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    info = client.get_torrent_info("abc123")
+
+    assert info is not None
+    assert info.hash == "abc123"
+    assert info.state == "stoppedUP"
+    assert client.last_error is not None
+    assert client.last_error.startswith("cache_fallback:")
+
+
+def test_export_torrent_file_falls_back_to_bt_backup_on_404(monkeypatch, tmp_path):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.bt_backup_dir = tmp_path / "BT_backup"
+    client.bt_backup_dir.mkdir()
+    backup_torrent = client.bt_backup_dir / "abc123.torrent"
+    backup_torrent.write_bytes(b"torrent-bytes")
+    out_path = tmp_path / "exported" / "abc123.torrent"
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+
+    class FakeResponse:
+        status_code = 404
+        text = "Not Found"
+
+        def raise_for_status(self):
+            raise requests.HTTPError("boom", response=self)
+
+    monkeypatch.setattr(client.session, "get", lambda *_args, **_kwargs: FakeResponse())
+
+    blob = client.export_torrent_file("abc123", out_path=out_path)
+
+    assert blob == b"torrent-bytes"
+    assert out_path.read_bytes() == b"torrent-bytes"
+
+
+def test_export_torrent_file_uses_bt_backup_when_auth_fails(monkeypatch, tmp_path):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.bt_backup_dir = tmp_path / "BT_backup"
+    client.bt_backup_dir.mkdir()
+    backup_torrent = client.bt_backup_dir / "abc123.torrent"
+    backup_torrent.write_bytes(b"torrent-bytes")
+
+    def fail_auth():
+        raise RuntimeError("Failed to authenticate with qBittorrent")
+
+    monkeypatch.setattr(client, "_ensure_authenticated", fail_auth)
+
+    blob = client.export_torrent_file("abc123")
+
+    assert blob == b"torrent-bytes"
+
+
+def test_get_torrents_from_cache_defaults_to_hashall_cache_path(monkeypatch, tmp_path):
+    cache_file = tmp_path / "torrents-info.json"
+    cache_file.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr("hashall.qbittorrent.DEFAULT_QB_CACHE_FILE", cache_file)
+
+    payload = get_torrents_from_cache(max_age_s=30.0)
+
+    assert payload == []
 
 
 def test_get_torrents_normalizes_pause_alias_and_derives_content_path(monkeypatch):

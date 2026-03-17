@@ -7,10 +7,17 @@ Connects to qBittorrent to retrieve torrent information for payload mapping.
 import json
 import os
 import requests
+import shutil
 import time
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Iterable
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+
+DEFAULT_QB_CACHE_DIR = Path.home() / ".cache" / "hashall-qb"
+DEFAULT_QB_CACHE_FILE = DEFAULT_QB_CACHE_DIR / "torrents-info.json"
+DEFAULT_QB_CACHE_META_FILE = DEFAULT_QB_CACHE_DIR / "torrents-info.meta.json"
+DEFAULT_QB_BT_BACKUP_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 
 
 def get_torrents_from_cache(
@@ -23,7 +30,7 @@ def get_torrents_from_cache(
     or older than *max_age_s* seconds.  Never raises; returns None on any error.
     """
     if cache_path is None:
-        cache_path = Path.home() / ".cache" / "hashall-qb" / "qbit-cache-latest.json"
+        cache_path = DEFAULT_QB_CACHE_FILE
     try:
         age = time.time() - os.stat(cache_path).st_mtime
         if age > max_age_s:
@@ -35,6 +42,59 @@ def get_torrents_from_cache(
         return data
     except (OSError, json.JSONDecodeError, ValueError):
         return None
+
+
+def _load_json_file(path: Path) -> Optional[Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def get_qb_cache_meta(meta_path: "Path | None" = None) -> "dict | None":
+    path = meta_path or DEFAULT_QB_CACHE_META_FILE
+    payload = _load_json_file(path)
+    return payload if isinstance(payload, dict) else None
+
+
+def get_qb_cached_server_profile(meta_path: "Path | None" = None) -> "QBitServerProfile | None":
+    meta = get_qb_cache_meta(meta_path)
+    if not meta:
+        return None
+    profile = meta.get("qb_profile")
+    if not isinstance(profile, dict):
+        return None
+    return QBitServerProfile(
+        app_version=str(profile.get("app_version", "") or ""),
+        webapi_version=str(profile.get("webapi_version", "") or ""),
+        qt_version=str(profile.get("qt_version", "") or ""),
+        libtorrent_version=str(profile.get("libtorrent_version", "") or ""),
+        state_alias_mode=str(profile.get("state_alias_mode", "stop_aliases") or "stop_aliases"),
+        pause_endpoint=str(profile.get("pause_endpoint", "/api/v2/torrents/pause") or "/api/v2/torrents/pause"),
+        pause_fallback_endpoint=str(profile.get("pause_fallback_endpoint", "/api/v2/torrents/stop") or "/api/v2/torrents/stop"),
+        resume_endpoint=str(profile.get("resume_endpoint", "/api/v2/torrents/resume") or "/api/v2/torrents/resume"),
+        resume_fallback_endpoint=str(profile.get("resume_fallback_endpoint", "/api/v2/torrents/start") or "/api/v2/torrents/start"),
+    )
+
+
+def _match_payload_filters(
+    payload: Dict[str, Any],
+    *,
+    category: Optional[str] = None,
+    tag: Optional[str] = None,
+    hashes: Optional[Iterable[str]] = None,
+) -> bool:
+    if category is not None and str(payload.get("category", "") or "") != str(category):
+        return False
+    if tag is not None:
+        tags = {item.strip() for item in str(payload.get("tags", "") or "").split(",") if item.strip()}
+        if str(tag) not in tags:
+            return False
+    if hashes is not None:
+        allowed = {str(h or "").strip().lower() for h in hashes if str(h or "").strip()}
+        if str(payload.get("hash", "") or "").strip().lower() not in allowed:
+            return False
+    return True
 
 
 @dataclass
@@ -137,6 +197,15 @@ class QBittorrentClient:
         }
         self.retryable_http_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
         self._server_profile: Optional[QBitServerProfile] = None
+        self.cache_file = Path(
+            os.getenv("HASHALL_QB_CACHE_FILE", str(DEFAULT_QB_CACHE_FILE))
+        ).expanduser()
+        self.cache_meta_file = Path(
+            os.getenv("HASHALL_QB_CACHE_META_FILE", str(DEFAULT_QB_CACHE_META_FILE))
+        ).expanduser()
+        self.bt_backup_dir = Path(
+            os.getenv("HASHALL_QB_BT_BACKUP_DIR", str(DEFAULT_QB_BT_BACKUP_DIR))
+        ).expanduser()
 
     @staticmethod
     def normalize_state_alias(state: str) -> str:
@@ -178,6 +247,25 @@ class QBittorrentClient:
         payload["completion_on"] = int(payload.get("completion_on", 0) or 0)
         payload["added_on"] = int(payload.get("added_on", 0) or 0)
         return payload
+
+    def _cached_payloads(
+        self,
+        *,
+        category: Optional[str] = None,
+        tag: Optional[str] = None,
+        hashes: Optional[Iterable[str]] = None,
+        max_age_s: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        age = self.request_timeout if max_age_s is None else max_age_s
+        cached = get_torrents_from_cache(max_age_s=age, cache_path=self.cache_file) or []
+        out: List[Dict[str, Any]] = []
+        for raw in cached:
+            if not isinstance(raw, dict):
+                continue
+            payload = self._normalize_torrent_payload(raw)
+            if _match_payload_filters(payload, category=category, tag=tag, hashes=hashes):
+                out.append(payload)
+        return out
 
     def _torrent_from_payload(self, torrent_data: Dict[str, Any]) -> QBitTorrent:
         payload = self._normalize_torrent_payload(torrent_data)
@@ -347,6 +435,17 @@ class QBittorrentClient:
                 or ""
             ),
         )
+        if not any((
+            profile.app_version,
+            profile.webapi_version,
+            profile.qt_version,
+            profile.libtorrent_version,
+        )):
+            cached_profile = get_qb_cached_server_profile(self.cache_meta_file)
+            if cached_profile is not None:
+                self._server_profile = cached_profile
+                self.last_error = self.last_error or "using_cached_qb_profile"
+                return cached_profile
         self._server_profile = profile
         return profile
 
@@ -396,6 +495,10 @@ class QBittorrentClient:
                     )
                     time.sleep(delay)
                     continue
+                cached = self._cached_payloads(category=category, tag=tag)
+                if cached:
+                    self.last_error = f"cache_fallback:{e}"
+                    return cached
                 print(f"⚠️ Failed to get torrents: {e}")
                 return []
             except requests.HTTPError as e:
@@ -412,6 +515,10 @@ class QBittorrentClient:
                     )
                     time.sleep(delay)
                     continue
+                cached = self._cached_payloads(category=category, tag=tag)
+                if cached:
+                    self.last_error = f"cache_fallback_http:{status}"
+                    return cached
                 print(f"⚠️ Failed to get torrents: {e}")
                 return []
             except requests.RequestException as e:
@@ -425,6 +532,10 @@ class QBittorrentClient:
                         )
                     time.sleep(delay)
                     continue
+                cached = self._cached_payloads(category=category, tag=tag)
+                if cached:
+                    self.last_error = f"cache_fallback:{e}"
+                    return cached
                 print(f"⚠️ Failed to get torrents: {e}")
                 return []
         return []
@@ -530,7 +641,19 @@ class QBittorrentClient:
         Returns:
             Raw torrent bytes on success, otherwise None.
         """
-        self._ensure_authenticated()
+        backup_torrent = self.bt_backup_dir / f"{str(torrent_hash or '').strip().lower()}.torrent"
+        try:
+            self._ensure_authenticated()
+        except RuntimeError:
+            if backup_torrent.exists():
+                blob = backup_torrent.read_bytes()
+                if out_path is not None:
+                    target = Path(out_path)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(backup_torrent, target)
+                self.last_error = None
+                return blob
+            raise
 
         response: Optional[requests.Response] = None
         for attempt in range(1, self.request_retries + 1):
@@ -561,6 +684,14 @@ class QBittorrentClient:
                     )
                     time.sleep(delay)
                     continue
+                if backup_torrent.exists():
+                    blob = backup_torrent.read_bytes()
+                    if out_path is not None:
+                        target = Path(out_path)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(backup_torrent, target)
+                    self.last_error = None
+                    return blob
                 print(f"⚠️ Failed to export torrent {torrent_hash}: {e}")
                 return None
             except requests.HTTPError as e:
@@ -587,6 +718,14 @@ class QBittorrentClient:
                 )
                 if body:
                     msg += f" body={body}"
+                if backup_torrent.exists():
+                    blob = backup_torrent.read_bytes()
+                    if out_path is not None:
+                        target = Path(out_path)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(backup_torrent, target)
+                    self.last_error = None
+                    return blob
                 print(msg)
                 return None
             except requests.RequestException as e:
@@ -600,6 +739,14 @@ class QBittorrentClient:
                         )
                     time.sleep(delay)
                     continue
+                if backup_torrent.exists():
+                    blob = backup_torrent.read_bytes()
+                    if out_path is not None:
+                        target = Path(out_path)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(backup_torrent, target)
+                    self.last_error = None
+                    return blob
                 print(f"⚠️ Failed to export torrent {torrent_hash}: {e}")
                 return None
         return None
@@ -650,6 +797,14 @@ class QBittorrentClient:
                     )
                     time.sleep(delay)
                     continue
+                cached = self._cached_payloads(hashes=clean_hashes)
+                if cached:
+                    self.last_error = f"cache_fallback:{e}"
+                    return {
+                        str(item.get("hash", "")).lower().strip(): self._torrent_from_payload(item)
+                        for item in cached
+                        if str(item.get("hash", "")).strip()
+                    }
                 print(f"⚠️ Failed to get batch info for {len(clean_hashes)} torrents: {e}")
                 return {}
             except requests.HTTPError as e:
@@ -667,6 +822,14 @@ class QBittorrentClient:
                     )
                     time.sleep(delay)
                     continue
+                cached = self._cached_payloads(hashes=clean_hashes)
+                if cached:
+                    self.last_error = f"cache_fallback_http:{status}"
+                    return {
+                        str(item.get("hash", "")).lower().strip(): self._torrent_from_payload(item)
+                        for item in cached
+                        if str(item.get("hash", "")).strip()
+                    }
                 print(f"⚠️ Failed to get batch info for {len(clean_hashes)} torrents: {e}")
                 return {}
             except requests.RequestException as e:
@@ -680,6 +843,14 @@ class QBittorrentClient:
                         )
                     time.sleep(delay)
                     continue
+                cached = self._cached_payloads(hashes=clean_hashes)
+                if cached:
+                    self.last_error = f"cache_fallback:{e}"
+                    return {
+                        str(item.get("hash", "")).lower().strip(): self._torrent_from_payload(item)
+                        for item in cached
+                        if str(item.get("hash", "")).strip()
+                    }
                 print(f"⚠️ Failed to get batch info for {len(clean_hashes)} torrents: {e}")
                 return {}
         return {}
@@ -1160,6 +1331,10 @@ class QBittorrentClient:
                     )
                     time.sleep(delay)
                     continue
+                cached = self._cached_payloads(hashes=[torrent_hash])
+                if cached:
+                    self.last_error = f"cache_fallback:{e}"
+                    return self._torrent_from_payload(cached[0])
                 print(f"⚠️ Failed to get info for torrent {torrent_hash}: {e}")
                 break
             except requests.HTTPError as e:
@@ -1177,11 +1352,19 @@ class QBittorrentClient:
                     )
                     time.sleep(delay)
                     continue
+                cached = self._cached_payloads(hashes=[torrent_hash])
+                if cached:
+                    self.last_error = f"cache_fallback_http:{status}"
+                    return self._torrent_from_payload(cached[0])
                 print(f"⚠️ Failed to get info for torrent {torrent_hash}: {e}")
                 break
             except requests.RequestException as e:
                 self.last_error = str(e)
                 if attempt == self.request_retries:
+                    cached = self._cached_payloads(hashes=[torrent_hash])
+                    if cached:
+                        self.last_error = f"cache_fallback:{e}"
+                        return self._torrent_from_payload(cached[0])
                     print(f"⚠️ Failed to get info for torrent {torrent_hash}: {e}")
                     break
                 delay = self._retry_delay_seconds(attempt)

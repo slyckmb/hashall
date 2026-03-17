@@ -35,6 +35,8 @@ What it gives you:
 - normalized pause-state aliases:
   - `pausedDL` / `stoppedDL` -> `stoppedDL`
   - `pausedUP` / `stoppedUP` -> `stoppedUP`
+- cached-profile and cached-torrent fallback when qB is slow/unresponsive
+- `.torrent` export fallback to qB `BT_backup` when old qB builds lack the export endpoint
 
 Shared cache:
 
