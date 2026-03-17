@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -9,7 +10,9 @@ from hashall.fastresume import read_fastresume
 from hashall.qb_repair_payload_group import (
     CatalogLookup,
     build_repair_plan,
+    can_reuse_good_save_path_directly,
     ensure_same_payload_group,
+    parse_args,
     patch_fastresume_with_journal,
 )
 
@@ -210,3 +213,47 @@ def test_patch_fastresume_with_journal_uses_shared_backup(tmp_path: Path) -> Non
     logged = json.loads(journal_path.read_text(encoding="utf-8").strip())
     assert logged["action"] == "fastresume_patch"
     assert logged["backup_path"] == entry["backup_path"]
+
+
+def test_parse_args_defaults_log_path_to_empty_string() -> None:
+    args = parse_args(["--good", "goodhash", "--broken", "brokenhash"])
+    assert args.log_path == ""
+
+
+def test_build_repair_plan_does_not_stat_live_files(monkeypatch, tmp_path: Path) -> None:
+    good_save = tmp_path / "good"
+    broken_save = tmp_path / "broken"
+    good_path = good_save / "movie.mkv"
+    broken_path = broken_save / "movie.mkv"
+    good_path.parent.mkdir(parents=True, exist_ok=True)
+    broken_path.parent.mkdir(parents=True, exist_ok=True)
+    good_path.write_text("good", encoding="utf-8")
+    broken_path.write_text("broken", encoding="utf-8")
+
+    monkeypatch.setattr(os, "stat", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("os.stat should not be called")))
+
+    plan = build_repair_plan(
+        good_save=str(good_save),
+        broken_save=str(broken_save),
+        good_files=[{"name": "movie.mkv", "size": 100}],
+        broken_files=[{"name": "movie.mkv", "size": 100}],
+        quick_hash_lookup=lambda _path: "same-qh",
+    )
+
+    assert len(plan) == 1
+    assert plan[0].action == "dup_copy"
+
+
+def test_can_reuse_good_save_path_directly_for_single_file_missing_attach() -> None:
+    plan = [
+        build_repair_plan(
+            good_save="/good",
+            broken_save="/broken",
+            good_files=[{"name": "movie.mkv", "size": 100}],
+            broken_files=[{"name": "movie.mkv", "size": 100}],
+            quick_hash_lookup=lambda _path: None,
+        )[0]
+    ]
+
+    assert plan[0].action == "missing"
+    assert can_reuse_good_save_path_directly(plan) is True

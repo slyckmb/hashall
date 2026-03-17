@@ -22,8 +22,8 @@ from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
 
 SCRIPT_NAME = "qb-repair-payload-group.sh"
-SCRIPT_VERSION = "0.2.0"
-SCRIPT_LAST_UPDATED = "2026-03-10"
+SCRIPT_VERSION = "0.2.1"
+SCRIPT_LAST_UPDATED = "2026-03-17"
 DEFAULT_DB = Path.home() / ".hashall" / "catalog.db"
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
@@ -343,18 +343,16 @@ def build_repair_plan(
 
         broken_record = broken_list[0]
         good_record = good_list[0]
+        # Avoid live inode/stat probing during repair planning. Some broken payload
+        # trees can sit on unhealthy/stalled mounts and block in uninterruptible D
+        # state when os.stat() touches them. Quick-hash equality is sufficient for
+        # safe repair planning here; any redundant relink is harmless compared with
+        # wedging the entire repair worker.
         same_inode = False
-        try:
-            if Path(broken_record.abs).exists() and Path(good_record.abs).exists():
-                same_inode = os.stat(broken_record.abs).st_ino == os.stat(good_record.abs).st_ino
-        except OSError:
-            same_inode = False
 
-        if same_inode:
-            action = "already_hardlinked"
-        elif broken_record.qhash and good_record.qhash and broken_record.qhash == good_record.qhash:
+        if broken_record.qhash and good_record.qhash and broken_record.qhash == good_record.qhash:
             action = "dup_copy"
-        elif not Path(broken_record.abs).exists():
+        elif broken_record.qhash is None:
             action = "missing"
         elif broken_record.qhash and broken_qhash_counts.get(broken_record.qhash, 0) > 1:
             action = "garbage"
@@ -436,6 +434,25 @@ def summarize_plan(plan: Sequence[RepairPlanItem]) -> Dict[str, int]:
 
 def plan_has_blockers(plan: Sequence[RepairPlanItem]) -> bool:
     return any(item.action in {"ambiguous_match", "no_good_match"} for item in plan)
+
+
+def can_reuse_good_save_path_directly(plan: Sequence[RepairPlanItem]) -> bool:
+    """Return True when a broken hash can safely reuse the donor save path.
+
+    This is intentionally conservative. It is primarily for single-file stoppedDL
+    rows whose broken save path is unhealthy enough to block local filesystem
+    probes or hardlink creation. In that case, reusing the known-good donor path
+    is safer than touching the broken root at all.
+    """
+
+    if len(plan) != 1:
+        return False
+    item = plan[0]
+    if item.action != "missing":
+        return False
+    if not item.good_abs or not item.good_rel:
+        return False
+    return item.broken_rel == item.good_rel
 
 
 def create_missing_hardlink(canonical_path: Path, duplicate_path: Path) -> Tuple[bool, Optional[str]]:
@@ -626,6 +643,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=f"Per-run artifact root (default: {DEFAULT_OUT_DIR})",
     )
     parser.add_argument(
+        "--log-path",
+        default="",
+        help="Optional explicit log path (default: <run-dir>/repair.log)",
+    )
+    parser.add_argument(
         "--success-file",
         default=str(DEFAULT_SUCCESS_FILE),
         help=f"Consecutive success counter file (default: {DEFAULT_SUCCESS_FILE})",
@@ -639,7 +661,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     broken_hash = str(args.broken or "").strip().lower()
     good_hash = str(args.good or "").strip().lower()
     run_dir = Path(args.out_dir).expanduser() / f"{stamp}-{broken_hash[:12]}"
-    log_path = DEFAULT_LOG_DIR / f"qbit-repair-payload-{stamp}-{broken_hash[:12]}.log"
+    log_path = Path(args.log_path).expanduser() if str(args.log_path or "").strip() else (run_dir / "repair.log")
     logger = RunLogger(log_path)
     logger.line(f"script={SCRIPT_NAME} version={SCRIPT_VERSION} last_updated={SCRIPT_LAST_UPDATED}")
     logger.line(f"ts={ts_human()} log={log_path}")
@@ -722,14 +744,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         logger.line(f"▸ P3 hardlink rebuild same_fs={same_fs}")
         target_save_path = broken_info.save_path
+        reuse_good_save_path = can_reuse_good_save_path_directly(plan)
+        if reuse_good_save_path:
+            target_save_path = good_info.save_path
+            logger.line(f"  donor-reuse fallback target={target_save_path}")
         if args.apply:
-            if same_fs:
+            if same_fs and not reuse_good_save_path:
                 execute_same_fs_rebuild(plan=plan, journal_path=work_journal, logger=logger)
             else:
                 target_save_path = good_info.save_path
-                logger.line(f"  cross-fs setLocation target={target_save_path}")
+                logger.line(f"  setLocation-only target={target_save_path}")
         else:
-            if same_fs:
+            if same_fs and not reuse_good_save_path:
                 logger.line("  [dry-run] would rebuild hardlinks for garbage/dup_copy/missing")
             else:
                 logger.line(f"  [dry-run] would setLocation broken -> {good_info.save_path}")
@@ -749,32 +775,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             patched_backup = ""
             qb_stopped = False
-            try:
-                if not fastresume_path.exists():
-                    raise RuntimeError(f"fastresume_missing path={fastresume_path}")
-                stop_qb_container(args.qb_container, logger)
-                qb_stopped = True
-                patch_entry = patch_fastresume_with_journal(
-                    fastresume_path=fastresume_path,
-                    target_save_path=target_save_path,
-                    backup_suffix=patch_suffix,
-                    journal_path=work_journal,
-                )
-                patched_backup = str(patch_entry.get("backup_path") or "")
-                logger.line(
-                    "  fastresume patched changed={changed} backup={backup}".format(
-                        changed=patch_entry["changed"],
-                        backup=patched_backup or "-",
+            if reuse_good_save_path:
+                logger.line("  fastresume patch skipped for donor-reuse attach")
+            else:
+                try:
+                    if not fastresume_path.exists():
+                        raise RuntimeError(f"fastresume_missing path={fastresume_path}")
+                    stop_qb_container(args.qb_container, logger)
+                    qb_stopped = True
+                    patch_entry = patch_fastresume_with_journal(
+                        fastresume_path=fastresume_path,
+                        target_save_path=target_save_path,
+                        backup_suffix=patch_suffix,
+                        journal_path=work_journal,
                     )
-                )
-            except Exception:
-                if qb_stopped and patched_backup and Path(patched_backup).exists():
-                    shutil.copy2(patched_backup, fastresume_path)
-                    logger.line(f"  restored fastresume backup={patched_backup}")
-                raise
-            finally:
-                if qb_stopped:
-                    start_qb_container(args.qb_container, args.qb_url, logger)
+                    patched_backup = str(patch_entry.get("backup_path") or "")
+                    logger.line(
+                        "  fastresume patched changed={changed} backup={backup}".format(
+                            changed=patch_entry["changed"],
+                            backup=patched_backup or "-",
+                        )
+                    )
+                except Exception:
+                    if qb_stopped and patched_backup and Path(patched_backup).exists():
+                        shutil.copy2(patched_backup, fastresume_path)
+                        logger.line(f"  restored fastresume backup={patched_backup}")
+                    raise
+                finally:
+                    if qb_stopped:
+                        start_qb_container(args.qb_container, args.qb_url, logger)
         else:
             logger.line("  [dry-run] would setLocation + stop qB + patch fastresume + restart")
 
