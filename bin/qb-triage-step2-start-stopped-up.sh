@@ -5,6 +5,8 @@
 set -euo pipefail
 
 set +x
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/qb-cache.sh"
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
 QB_USER="$QBITTORRENTAPI_USERNAME"
@@ -25,7 +27,7 @@ echo "================================================================" | tee -a
 echo "START stoppedUP torrents — $(date '+%F %T')" | tee -a "$LOG"
 echo "================================================================" | tee -a "$LOG"
 
-ALL_JSON=$(curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info")
+ALL_JSON="$(qb_cache_fetch_torrents_info "" 15 5 15)"
 
 # Collect stoppedUP hashes
 STOPPED_UP_HASHES=$(echo "$ALL_JSON" | jq -r '
@@ -56,13 +58,8 @@ fi
 echo "Start command sent. Waiting 15s for state to settle..." | tee -a "$LOG"
 sleep 15
 
-# Re-login (cookie may have expired)
-curl -fsS -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
-  --data-urlencode "username=$QB_USER" \
-  --data-urlencode "password=$QB_PASS" >/dev/null
-
 # Snapshot state after start
-AFTER_JSON=$(curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info")
+AFTER_JSON="$(qb_cache_fetch_torrents_info "" 5 5 5)"
 
 MISSING_AFTER=$(echo "$AFTER_JSON" | jq '[.[] | select((.state | ascii_downcase) == "missingfiles")] | length')
 STOPPED_UP_AFTER=$(echo "$AFTER_JSON" | jq '[.[] | select((.state | ascii_downcase) == "stoppedup")] | length')

@@ -19,6 +19,15 @@ import urllib.parse
 import urllib.request
 import http.cookiejar
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC_DIR = os.path.join(_REPO_ROOT, "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+try:
+    from hashall.qbittorrent import get_torrents_from_cache as _get_torrents_from_cache
+except ImportError:
+    _get_torrents_from_cache = None  # type: ignore[assignment]
 
 SCRIPT_NAME = "qb-path-watch.py"
 SCRIPT_VERSION = "0.3.0"
@@ -103,6 +112,12 @@ def parse_args() -> argparse.Namespace:
         dest="use_cache",
         action="store_false",
         help="Disable shared cache and query the qB WebUI API directly",
+    )
+    parser.add_argument(
+        "--cache",
+        action="store_true",
+        default=False,
+        help="Read torrents/info from the shared cache file directly via get_torrents_from_cache() (default: disabled)",
     )
     parser.add_argument(
         "--cache-agent-cmd",
@@ -307,7 +322,23 @@ def main() -> int:
             print("auth_status=ok method=session_cookie")
 
         while True:
-            if args.use_cache:
+            if args.cache and _get_torrents_from_cache is not None:
+                _cached = _get_torrents_from_cache(max_age_s=float(args.cache_max_age))
+                if _cached is not None:
+                    torrents = _cached
+                elif args.use_cache:
+                    torrents = fetch_torrents_from_cache(args)
+                else:
+                    try:
+                        torrents = fetch_torrents(opener, args.host)
+                    except urllib.error.HTTPError as exc:
+                        if exc.code in (401, 403):
+                            print(f"auth_status=retry reason=http_{exc.code}", file=sys.stderr)
+                            login(opener, args.host, args.username, args.password)
+                            torrents = fetch_torrents(opener, args.host)
+                        else:
+                            raise
+            elif args.use_cache:
                 torrents = fetch_torrents_from_cache(args)
             else:
                 try:

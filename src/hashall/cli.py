@@ -198,6 +198,13 @@ def cli():
 @click.option("--scan-nested-datasets", is_flag=True,
               help="Detect nested mountpoints/datasets and scan them separately.")
 @click.option(
+    "--drift-policy",
+    type=click.Choice(["metadata", "quick", "full"], case_sensitive=False),
+    default="metadata",
+    show_default=True,
+    help="How aggressively to rehash files whose size+mtime appear unchanged.",
+)
+@click.option(
     "--hash-progress",
     type=click.Choice(["auto", "minimal", "full"], case_sensitive=False),
     default="auto",
@@ -205,7 +212,7 @@ def cli():
     help="Hash progress detail level for full/upgrade hashing.",
 )
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
-def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, hash_progress, low_priority):
+def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag, show_path, scan_nested_datasets, drift_policy, hash_progress, low_priority):
     """Scan a directory and store file metadata in SQLite."""
     if low_priority:
         _apply_low_priority()
@@ -214,6 +221,7 @@ def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag,
     stats = scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
                       workers=workers, batch_size=batch_size, hash_mode=mode,
                       show_current_path=show_path, scan_nested_datasets=scan_nested_datasets,
+                      drift_policy=drift_policy.lower(),
                       hash_progress=hash_progress.lower())
     if getattr(stats, "safety_guard_triggered", False):
         raise click.ClickException(
@@ -1378,7 +1386,7 @@ def payload_show(torrent_hash, db):
     from hashall.model import connect_db
     from hashall.payload import get_torrent_instance, get_payload_by_id
 
-    conn = connect_db(Path(db))
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
 
     # Get torrent instance
     torrent = get_torrent_instance(conn, torrent_hash)
@@ -1428,7 +1436,7 @@ def payload_siblings(torrent_hash, db):
     from hashall.model import connect_db
     from hashall.payload import get_torrent_siblings, get_torrent_instance
 
-    conn = connect_db(Path(db))
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
 
     # Get siblings
     siblings = get_torrent_siblings(conn, torrent_hash)
@@ -3251,6 +3259,26 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
                 click.echo(f"   {error}")
             if len(result.errors) > 10:
                 click.echo(f"   ... and {len(result.errors) - 10} more errors")
+
+        if jdupes and jdupes_log_dir:
+            click.echo()
+            click.echo(f"🧾 jdupes logs: {Path(jdupes_log_dir).expanduser()}/plan-{plan_id}_sha256-*.log")
+
+        if result.actions_failed > 0:
+            failed_actions = [
+                action for action in get_plan_actions(conn, plan_id, limit=0)
+                if str(action.status or "") == "failed"
+            ]
+            if failed_actions:
+                click.echo()
+                click.echo(f"🧪 Failed actions ({min(5, len(failed_actions))} shown):")
+                for action in failed_actions[:5]:
+                    click.echo(
+                        f"   action={action.id} keep={action.canonical_path} "
+                        f"replace={action.duplicate_path}"
+                    )
+                    if action.error_message:
+                        click.echo(f"      error={action.error_message}")
 
         click.echo("=" * 60)
         click.echo()

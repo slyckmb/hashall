@@ -13,6 +13,8 @@
 set -euo pipefail
 
 set +x
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/qb-cache.sh"
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
 QB_USER="$QBITTORRENTAPI_USERNAME"
@@ -44,7 +46,7 @@ echo "================================================================" | tee -a
 echo "RELINK PARTIALS — $(date '+%F %T')  [APPLY=$APPLY]" | tee -a "$LOG"
 echo "================================================================" | tee -a "$LOG"
 
-ALL_JSON=$(curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info")
+ALL_JSON="$(qb_cache_fetch_torrents_info "" 15 5 15)"
 
 # ------------------------------------------------------------------
 # resolve_hash HASH QBIT_SAVE_PATH

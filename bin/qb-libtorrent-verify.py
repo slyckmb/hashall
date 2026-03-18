@@ -70,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Status poll interval seconds (default: 1)",
     )
     p.add_argument(
+        "--stalled-timeout",
+        type=float,
+        default=300.0,
+        help="Abort if checking_files makes no progress for this many seconds (default: 300, 0 disables)",
+    )
+    p.add_argument(
         "--show-progress",
         action="store_true",
         help="Print periodic progress lines while verifying",
@@ -264,7 +270,39 @@ def emit_progress_line(
     return next_len
 
 
-def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, show_progress: bool, label: str) -> dict:
+def update_stall_watch(
+    *,
+    state_value: int,
+    checking_files_value: int,
+    done: int,
+    wanted: int,
+    now: float,
+    last_progress_at: Optional[float],
+    last_done: int,
+    last_wanted: int,
+    stalled_timeout_s: float,
+) -> Tuple[Optional[float], int, int, bool]:
+    if state_value != checking_files_value:
+        return last_progress_at, last_done, last_wanted, False
+    if last_progress_at is None:
+        return now, int(done), int(wanted), False
+    if int(done) != int(last_done) or int(wanted) != int(last_wanted):
+        return now, int(done), int(wanted), False
+    if stalled_timeout_s > 0 and (now - last_progress_at) >= stalled_timeout_s:
+        return last_progress_at, int(last_done), int(last_wanted), True
+    return last_progress_at, int(last_done), int(last_wanted), False
+
+
+def verify_candidate(
+    lt,
+    ti,
+    save_path: Path,
+    timeout_s: float,
+    poll_s: float,
+    show_progress: bool,
+    label: str,
+    stalled_timeout_s: float,
+) -> dict:
     session = lt.session()
     try:
         # Disable discovery/network side effects; this is a local hash check pass.
@@ -297,6 +335,7 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
     start = time.monotonic()
     next_print = start
     timed_out = False
+    stalled = False
     seen_checking_files = False
     last_state = ""
     wanted = 0
@@ -314,6 +353,9 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
     checking_files = int(lt.torrent_status.checking_files)
     pending_states = {queued_for_checking, checking_resume_data}
     recheck_start_grace = max(3.0, min(30.0, float(poll_s) * 8.0))
+    last_progress_at: Optional[float] = None
+    last_done = 0
+    last_wanted = 0
 
     while True:
         status = handle.status()
@@ -327,6 +369,17 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
             seen_checking_files = True
 
         now = time.monotonic()
+        last_progress_at, last_done, last_wanted, stalled = update_stall_watch(
+            state_value=state_value,
+            checking_files_value=checking_files,
+            done=done,
+            wanted=wanted,
+            now=now,
+            last_progress_at=last_progress_at,
+            last_done=last_done,
+            last_wanted=last_wanted,
+            stalled_timeout_s=float(stalled_timeout_s),
+        )
         if show_progress and now >= next_print:
             elapsed_s = max(0.0, now - start)
             eta_s: Optional[float] = None
@@ -358,6 +411,8 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
                 last_emit_ts = float(now)
             next_print = now + max(0.2, poll_s)
 
+        if stalled:
+            break
         if now - start >= timeout_s:
             timed_out = True
             break
@@ -374,9 +429,11 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
         break
 
     elapsed = float(time.monotonic() - start)
-    verified = bool(wanted > 0 and done >= wanted and not timed_out and seen_checking_files)
+    verified = bool(wanted > 0 and done >= wanted and not timed_out and not stalled and seen_checking_files)
     if timed_out:
         verify_reason = "timeout"
+    elif stalled:
+        verify_reason = "stalled"
     elif seen_checking_files:
         verify_reason = "checked_files"
     elif done <= 0 and last_state in {"downloading", "downloading_metadata"}:
@@ -402,12 +459,14 @@ def verify_candidate(lt, ti, save_path: Path, timeout_s: float, poll_s: float, s
     return {
         "verified": verified,
         "timed_out": timed_out,
+        "stalled": bool(stalled),
         "verify_state": last_state,
         "verify_done": int(done),
         "verify_wanted": int(wanted),
         "verify_ratio": float(ratio),
         "verify_elapsed_s": round(elapsed, 3),
         "verify_reason": verify_reason,
+        "stalled_timeout_s": float(stalled_timeout_s),
         "seen_checking_files": bool(seen_checking_files),
     }
 
@@ -420,6 +479,31 @@ def classify_result(verified: bool, exact_tree: bool, ratio: float) -> str:
     if ratio > 0.0:
         return "partial_match"
     return "no_match"
+
+
+def finalize_verify_result(quick: dict, verify: dict) -> dict:
+    """Promote instant-complete checks that never emitted checking_files.
+
+    Some tiny or cache-hot torrents can jump from checking_resume_data straight
+    to a fully-complete seeding state immediately after force_recheck(). When
+    that happens, libtorrent has still accepted all bytes as valid, but the
+    older guard treated the missing checking_files transition as a hard failure.
+    """
+    verified = bool(verify.get("verified"))
+    reason = str(verify.get("verify_reason") or "")
+    state = str(verify.get("verify_state") or "").strip().lower()
+    ratio = float(verify.get("verify_ratio", 0.0) or 0.0)
+    exact_tree = bool(quick.get("exact_tree"))
+    if verified:
+        return verify
+    if not exact_tree or ratio < 0.9999 or reason != "no_recheck_transition":
+        return verify
+    if state not in {"seeding", "uploading", "stalledup", "forcedup", "pausedup", "finished"}:
+        return verify
+    promoted = dict(verify)
+    promoted["verified"] = True
+    promoted["verify_reason"] = "instant_complete_without_checking_transition"
+    return promoted
 
 
 def main() -> int:
@@ -476,7 +560,9 @@ def main() -> int:
                 poll_s=float(args.poll),
                 show_progress=bool(args.show_progress),
                 label=str(candidate),
+                stalled_timeout_s=float(args.stalled_timeout),
             )
+        verify = finalize_verify_result(quick, verify)
         classification = classify_result(
             verified=bool(verify["verified"]),
             exact_tree=bool(quick["exact_tree"]),

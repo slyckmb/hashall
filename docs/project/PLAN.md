@@ -14,6 +14,13 @@ Unified roadmap + active backlog for development and operations.
 3. Use one shared attach/repoint constructor for both `REUSE` and `MOVE`.
 4. Keep `hashall refresh` healthy and catalog identity stable.
 5. Resume `~noHL` only after the pool migration path is operationally proven.
+6. Use the `Alien Romulus` sibling group as the next targeted proving lane for:
+   - `~noHL` sibling expansion,
+   - guarded repair vs rehome decisioning,
+   - and de-hitchhiked per-item target-tree construction on `pool-media`.
+7. Investigate the incomplete `V for Vendetta` refresh-upgrade root when the active migration/cleanup lane is idle:
+   - refresh `20260313-172217` ended `OK`, but root `99/99` for `/pool/media/torrents/seeding/cross-seed/hawke-uno/V.for.Vendetta...` logged `files=0 bytes=0`
+   - treat this as a follow-up refresh/catalog/upgrade anomaly, not as proof that refresh itself failed
 
 ## Ranked Priorities
 
@@ -72,6 +79,16 @@ Unified roadmap + active backlog for development and operations.
 
 - After pool migration is solid, reassess moving `~noHL` payloads from `/data/media/torrents/seeding -> /pool/media/torrents/seeding`.
 - Reuse the donor-acquisition + shared attach architecture for those runs.
+- First explicit proving group:
+  - `Alien Romulus`
+  - current observed scope:
+    - `14` sibling candidates
+    - `7` marked `~noHL`
+    - mixed healthy siblings on `/data/...`, one incomplete `PD` row on `/pool/data/...`
+  - expected engineering use:
+    - audit whether current rehome/repair code can lift the `~noHL` siblings to `pool-media`
+    - prove that each qB item gets its own correct payload tree there
+    - keep those trees hardlink-backed where the filesystem allows it
 
 ## Immediate Execution Plan
 
@@ -79,7 +96,9 @@ Unified roadmap + active backlog for development and operations.
 2. Confirm the active `stash -> pool-media` `REUSE` pilot (`rehome_runs.id=338`) completes cleanly.
 3. If clean, scale `stash -> pool-media` in small `REUSE` batches.
 4. Run a live `MOVE` pilot only when the planner surfaces a real donor-acquisition case again.
-5. Afterwards, finish `~noHL`.
+5. Use the `Alien Romulus` group as the first deliberate `~noHL` rehome/repair proving task once the current cleanup + planner hardening slice is stable.
+6. Afterwards, continue the wider `~noHL` lane.
+7. When the live migration lane is stable, investigate the incomplete `V for Vendetta` refresh-upgrade root from refresh `20260313-172217`.
 
 ## Current Operating Rules
 

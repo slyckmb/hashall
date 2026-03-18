@@ -6,20 +6,30 @@ import click
 import fcntl
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import rehome
 from rehome import executor as rehome_executor
 from rehome import view_builder as rehome_view_builder
 from rehome import __version__
+from hashall.qbittorrent import get_qbittorrent_client
 from rehome.followup import run_followup
-from rehome.normalize import build_pool_path_normalization_batch
+from rehome.normalize import (
+    DEFAULT_UNIQUE_VIEW_SUBDIR,
+    build_pool_path_normalization_batch,
+    build_root_relocation_batch,
+)
+from rehome.qb_missing import audit_missing_root_drift, build_missing_sibling_reconnect_batch
+from rehome.reality import DEFAULT_FASTRESUME_DIR, build_plan_reality_snapshot
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
@@ -29,6 +39,126 @@ DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 
 def _debug_enabled() -> bool:
     return os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _wait_for_qb_ready(qbit, timeout_seconds: float = 120.0) -> None:
+    deadline = time.monotonic() + max(5.0, float(timeout_seconds or 0.0))
+    last_error = ""
+    while time.monotonic() <= deadline:
+        try:
+            if hasattr(qbit, "_authenticated"):
+                qbit._authenticated = False  # type: ignore[attr-defined]
+            qbit.get_torrents()
+            return
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(2.0)
+    raise RuntimeError(
+        f"qBittorrent not ready within {int(timeout_seconds)}s"
+        + (f": {last_error}" if last_error else "")
+    )
+
+
+def _resolve_device_alias_read_only(catalog_path: Path, value: str) -> int:
+    """Resolve a device alias using a dedicated immutable read-only catalog handle."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+
+    catalog_uri = f"file:{quote(str(catalog_path.expanduser().resolve()), safe='/')}?mode=ro&immutable=1"
+    conn = sqlite3.connect(catalog_uri, uri=True)
+    try:
+        row = conn.execute(
+            "SELECT device_id FROM devices WHERE device_alias = ?",
+            (str(value),),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row:
+        return int(row[0])
+    raise ValueError(
+        f"No device found with alias {value!r}. "
+        "Run 'make devices' to list registered devices and their aliases."
+    )
+
+
+def _resolve_live_qb_seed_payload_hashes(
+    *,
+    catalog_path: Path,
+    source_root: str,
+) -> tuple[Optional[set[str]], dict[str, object]]:
+    source_root_norm = str(Path(source_root).resolve())
+    info: dict[str, object] = {
+        "mode": "catalog_fallback",
+        "source_root": source_root_norm,
+        "qbit_hashes": 0,
+        "mapped_payload_hashes": 0,
+        "unmapped_hashes": [],
+        "reason": "",
+    }
+    try:
+        qbit = get_qbittorrent_client()
+        live_torrents = list(qbit.get_torrents() or [])
+        if not live_torrents:
+            info["reason"] = str(getattr(qbit, "last_error", "") or "qbit_unavailable")
+            return None, info
+
+        live_hashes = sorted(
+            {
+                str(getattr(torrent, "hash", "") or "").strip().lower()
+                for torrent in live_torrents
+                if str(getattr(torrent, "save_path", "") or "").startswith(source_root_norm)
+            }
+        )
+        info["qbit_hashes"] = len(live_hashes)
+        if not live_hashes:
+            info["mode"] = "live_qb_root"
+            return set(), info
+
+        catalog_uri = (
+            f"file:{quote(str(catalog_path.expanduser().resolve()), safe='/')}?mode=ro&immutable=1"
+        )
+        conn = sqlite3.connect(catalog_uri, uri=True)
+        try:
+            mapped: dict[str, str] = {}
+            chunk_size = 500
+            for offset in range(0, len(live_hashes), chunk_size):
+                chunk = live_hashes[offset : offset + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT lower(ti.torrent_hash) AS torrent_hash, p.payload_hash
+                    FROM torrent_instances ti
+                    JOIN payloads p ON p.payload_id = ti.payload_id
+                    WHERE lower(ti.torrent_hash) IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    torrent_hash = str(row[0] or "").strip().lower()
+                    payload_hash = str(row[1] or "").strip()
+                    if torrent_hash and payload_hash:
+                        mapped[torrent_hash] = payload_hash
+        finally:
+            conn.close()
+
+        seed_payload_hashes = {payload_hash for payload_hash in mapped.values() if payload_hash}
+        unmapped_hashes = sorted(hash_ for hash_ in live_hashes if hash_ not in mapped)
+        info.update(
+            {
+                "mode": "live_qb_root",
+                "mapped_payload_hashes": len(seed_payload_hashes),
+                "source_torrent_hashes": live_hashes,
+                "unmapped_hashes": unmapped_hashes,
+                "reason": "",
+            }
+        )
+        return seed_payload_hashes, info
+    except Exception as exc:
+        info["reason"] = str(exc)
+        return None, info
 
 
 def _print_post_apply_summary(executor: "DemotionExecutor", plans: list) -> bool:
@@ -110,6 +240,40 @@ def _print_post_apply_summary(executor: "DemotionExecutor", plans: list) -> bool
     return alarm_total == 0
 
 
+def _acquire_named_lock(lock_filename: str, description: str) -> "file":
+    lock_dir = Path.home() / ".hashall"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / lock_filename
+    lock_fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_fh.close()
+        holder = ""
+        try:
+            holder = lock_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            holder = ""
+        holder_suffix = f" holder={holder}" if holder else ""
+        click.echo(
+            f"❌ Another {description} is already running "
+            f"(lock held: {lock_path}{holder_suffix}). Aborting.",
+            err=True,
+        )
+        raise SystemExit(1)
+    metadata = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "cwd": str(Path.cwd()),
+    }
+    lock_fh.seek(0)
+    lock_fh.truncate()
+    lock_fh.write("\n".join(f"{key}={value}" for key, value in metadata.items()) + "\n")
+    lock_fh.flush()
+    return lock_fh
+
+
 def _acquire_rehome_lock() -> "file":
     """
     Acquire an exclusive process-level lock for rehome apply operations.
@@ -119,23 +283,12 @@ def _acquire_rehome_lock() -> "file":
 
     Raises SystemExit if the lock is held by another process.
     """
-    lock_dir = Path.home() / ".hashall"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / "rehome.lock"
-    lock_fh = open(lock_path, "w")
-    try:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock_fh.close()
-        click.echo(
-            "❌ Another rehome apply is already running "
-            f"(lock held: {lock_path}). Aborting.",
-            err=True,
-        )
-        raise SystemExit(1)
-    lock_fh.write(f"pid={os.getpid()}\n")
-    lock_fh.flush()
-    return lock_fh
+    return _acquire_named_lock("rehome.lock", "rehome apply")
+
+
+def _acquire_refresh_lock() -> "file":
+    """Acquire an exclusive process-level lock for refresh operations."""
+    return _acquire_named_lock("refresh.lock", "hashall refresh")
 
 
 def _emit_banner() -> None:
@@ -904,8 +1057,9 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
     with open(plan_path) as f:
         plan_data = json.load(f)
 
-    # Check if batch plan
-    is_batch = plan_data.get('batch', False)
+    # Batch plan files are now commonly represented as {"plans": [...]} even
+    # when they do not carry the older explicit batch=true marker.
+    is_batch = bool(plan_data.get('batch', False) or isinstance(plan_data.get('plans'), list))
 
     if is_batch:
         # Batch plan
@@ -934,6 +1088,17 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
             for reason in plan_data['reasons']:
                 click.echo(f"   {reason}")
             raise click.Abort()
+
+    batch_torrent_hashes = sorted(
+        {
+            str(torrent_hash or "").strip().lower()
+            for plan in plans_to_apply
+            for torrent_hash in (plan.get('affected_torrents') or [])
+            if str(torrent_hash or "").strip()
+        }
+    )
+    for plan in plans_to_apply:
+        plan["_batch_torrent_hashes"] = batch_torrent_hashes
 
     # Create executor
     executor = DemotionExecutor(catalog_path=catalog_path)
@@ -1023,13 +1188,17 @@ def apply_cmd(plan_file, dryrun, force, spot_check, rescan, cleanup_source_views
               help="Max payload groups to process (0 = all)")
 @click.option("--retry-failed", is_flag=True,
               help="Include rehome_verify_failed groups in this pass")
+@click.option("--cleanup-observe-seconds", type=float, default=60.0,
+              help="Observe qB for this many seconds after staging source cleanup before delete")
+@click.option("--cleanup-retention-hours", type=float, default=24.0,
+              help="Minimum rollback-retention window before cleanup is allowed (0 = disable)")
 @click.option("--strict", is_flag=True,
               help="Exit non-zero if any group remains pending or failed")
 @click.option("--output", type=click.Path(),
               help="Write JSON report to file")
 @click.option("--print-torrents", is_flag=True,
               help="Print per-torrent follow-up gate details")
-def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, output, print_torrents):
+def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, cleanup_observe_seconds, cleanup_retention_hours, strict, output, print_torrents):
     """Run rehome verification follow-up and optional deferred cleanup retry."""
     catalog_path = Path(catalog)
     try:
@@ -1039,6 +1208,8 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, 
             payload_hashes=set(payload_hashes) if payload_hashes else None,
             limit=limit,
             retry_failed=retry_failed,
+            cleanup_observe_seconds=float(cleanup_observe_seconds),
+            cleanup_retention_hours=float(cleanup_retention_hours),
         )
     except Exception as e:
         click.echo(f"❌ FOLLOWUP failed: {e}", err=True)
@@ -1054,20 +1225,29 @@ def followup_cmd(catalog, cleanup, payload_hashes, limit, retry_failed, strict, 
     click.echo(f"   cleanup_attempted: {summary.get('cleanup_attempted', 0)}")
     click.echo(f"   cleanup_done: {summary.get('cleanup_done', 0)}")
     click.echo(f"   cleanup_failed: {summary.get('cleanup_failed', 0)}")
+    click.echo(f"   cleanup_safe_now: {summary.get('cleanup_safe_now', 0)}")
+    click.echo(f"   cleanup_retain_for_rollback: {summary.get('cleanup_retain_for_rollback', 0)}")
+    click.echo(f"   cleanup_blocked: {summary.get('cleanup_blocked', 0)}")
+    click.echo(f"   cleanup_already_cleaned: {summary.get('cleanup_already_cleaned', 0)}")
+    click.echo(f"   cleanup_not_required: {summary.get('cleanup_not_required', 0)}")
 
     for entry in report.get("entries", []):
         payload_hash = str(entry.get("payload_hash", ""))
         click.echo(
             f"payload={payload_hash[:16]} outcome={entry.get('outcome')} "
             f"cleanup_required={str(bool(entry.get('cleanup_required'))).lower()} "
-            f"cleanup_result={entry.get('cleanup_result')}"
+            f"cleanup_result={entry.get('cleanup_result')} "
+            f"cleanup_disposition={entry.get('cleanup_disposition')}"
         )
         db_reasons = entry.get("db_reasons") or []
         source_reasons = entry.get("source_reasons") or []
+        cleanup_disposition_reasons = entry.get("cleanup_disposition_reasons") or []
         if db_reasons:
             click.echo(f"  db_reasons={','.join(db_reasons)}")
         if source_reasons:
             click.echo(f"  source_reasons={','.join(source_reasons)}")
+        if cleanup_disposition_reasons:
+            click.echo(f"  cleanup_reasons={','.join(cleanup_disposition_reasons)}")
         if print_torrents:
             for gate in entry.get("qb_checks", []):
                 reasons = gate.get("reasons") or []
@@ -1193,6 +1373,149 @@ def normalize_plan_cmd(
         f"fallback:{summary.get('fallback_used', 0)} "
         f"review:{summary.get('review_required', 0)}"
     )
+    if plans:
+        for plan in plans[:5]:
+            click.echo(
+                f"  {str(plan.get('decision', '')):5s} "
+                f"payload={str(plan.get('payload_hash', ''))[:16]} "
+                f"source={plan.get('source_path')} "
+                f"target={plan.get('target_path')}"
+            )
+        if len(plans) > 5:
+            click.echo(f"  ... ({len(plans) - 5} more)")
+
+    if print_skipped:
+        for item in report.get("skipped", []):
+            click.echo(
+                f"  skipped payload={str(item.get('payload_hash', ''))[:16]} "
+                f"reason={item.get('reason')} source={item.get('source_path')}"
+            )
+
+    click.echo()
+    click.echo(f"Next step: hashall rehome apply {output_path} --dryrun")
+
+
+@cli.command("relocate-plan")
+@click.option("--catalog", type=click.Path(exists=True), default=DEFAULT_CATALOG_PATH,
+              help="Path to hashall catalog database")
+@click.option("--source-device", type=str, required=True,
+              help="Source device alias or integer device_id")
+@click.option("--source-root", type=click.Path(), required=True,
+              help="Source seeding root to relocate from")
+@click.option("--target-device", type=str, required=True,
+              help="Target device alias or integer device_id")
+@click.option("--target-root", type=click.Path(), required=True,
+              help="Target seeding root to relocate into")
+@click.option("--reference-root", type=click.Path(),
+              help="Optional historical/source reference root for relative-path inference")
+@click.option("--payload-hash", "payload_hashes", multiple=True,
+              help="Restrict relocation planning to specific payload hash(es)")
+@click.option("--limit", type=int, default=0,
+              help="Max relocation candidates to include (0 = all)")
+@click.option("--flat-only/--all-mismatches", default=True,
+              help="Plan only payloads directly under source root (default) or all mismatches")
+@click.option("--unique-view-subdir", default=DEFAULT_UNIQUE_VIEW_SUBDIR, show_default=True,
+              help="Subdirectory under target root used for synthesized unique sibling views")
+@click.option("--output", "-o", type=click.Path(),
+              help="Output batch plan JSON (default: rehome-plan-relocate-<timestamp>.json)")
+@click.option("--print-skipped", is_flag=True,
+              help="Print skipped payload reasons")
+def relocate_plan_cmd(
+    catalog,
+    source_device,
+    source_root,
+    target_device,
+    target_root,
+    reference_root,
+    payload_hashes,
+    limit,
+    flat_only,
+    unique_view_subdir,
+    output,
+    print_skipped,
+):
+    """Create batch plan(s) to relocate payload roots between managed seeding roots."""
+    catalog_path = Path(catalog)
+
+    try:
+        source_device = _resolve_device_alias_read_only(catalog_path, source_device)
+        target_device = _resolve_device_alias_read_only(catalog_path, target_device)
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+
+    try:
+        seed_payload_hashes = set(payload_hashes) if payload_hashes else None
+        seed_info: dict[str, object] = {
+            "mode": "explicit_payload_hashes" if payload_hashes else "catalog_fallback",
+            "source_root": str(Path(source_root).resolve()),
+            "qbit_hashes": 0,
+            "mapped_payload_hashes": len(seed_payload_hashes or []),
+            "source_torrent_hashes": [],
+            "unmapped_hashes": [],
+            "reason": "",
+        }
+        if seed_payload_hashes is None:
+            seed_payload_hashes, seed_info = _resolve_live_qb_seed_payload_hashes(
+                catalog_path=catalog_path,
+                source_root=source_root,
+            )
+
+        scoped_torrent_hashes = (
+            set(seed_info.get("source_torrent_hashes") or [])
+            if seed_info.get("mode") == "live_qb_root"
+            else None
+        )
+
+        report = build_root_relocation_batch(
+            catalog_path=catalog_path,
+            source_device=int(source_device),
+            target_device=int(target_device),
+            source_root=source_root,
+            target_root=target_root,
+            reference_root=reference_root,
+            payload_hashes=seed_payload_hashes,
+            source_torrent_hashes=scoped_torrent_hashes,
+            limit=limit,
+            flat_only=flat_only,
+            unique_view_subdir=unique_view_subdir,
+            mode="root_relocation",
+        )
+        report["seed_scope"] = seed_info
+    except Exception as e:
+        click.echo(f"❌ relocate-plan failed: {e}", err=True)
+        raise click.Abort()
+
+    if not output:
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        output = f"rehome-plan-relocate-{stamp}.json"
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    summary = report.get("summary", {})
+    plans = report.get("plans", [])
+    click.echo(f"✅ Relocation plan written to: {output_path}")
+    click.echo(
+        "summary="
+        f"candidates:{summary.get('candidates', 0)} "
+        f"reuse:{summary.get('decision_reuse', 0)} "
+        f"move:{summary.get('decision_move', 0)} "
+        f"skipped:{summary.get('skipped', 0)} "
+        f"collisions:{summary.get('view_collisions', 0)} "
+        f"unique_views:{summary.get('unique_view_targets', 0)}"
+    )
+    seed_scope = report.get("seed_scope") or {}
+    click.echo(
+        "seed_scope="
+        f"mode:{seed_scope.get('mode')} "
+        f"qbit_hashes:{seed_scope.get('qbit_hashes', 0)} "
+        f"mapped_payloads:{seed_scope.get('mapped_payload_hashes', 0)} "
+        f"unmapped_hashes:{len(seed_scope.get('unmapped_hashes') or [])}"
+    )
+    if seed_scope.get("reason"):
+        click.echo(f"seed_scope_reason={seed_scope.get('reason')}")
     if plans:
         for plan in plans[:5]:
             click.echo(
@@ -1362,6 +1685,20 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 
 @cli.command("refresh")
 @click.option("--workers", default=8, show_default=True, help="Scan worker threads")
+@click.option(
+    "--scan-hash-mode",
+    type=click.Choice(["fast", "full", "upgrade"], case_sensitive=False),
+    default="fast",
+    show_default=True,
+    help="Hash mode to use for refresh scans.",
+)
+@click.option(
+    "--drift-policy",
+    type=click.Choice(["metadata", "quick", "full"], case_sensitive=False),
+    default="quick",
+    show_default=True,
+    help="How aggressively refresh scans should rehash unchanged files.",
+)
 @click.option("--no-dedup", "skip_dedup", is_flag=True,
               help="Skip dedup (dedup executes by default)")
 @click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
@@ -1376,7 +1713,7 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 @click.option("--seeding-root", default=None, hidden=True)
 @click.option("--pool-payload-root", default=None, hidden=True)
 @click.option("--catalog", default=None, help="Override config catalog path")
-def refresh_cmd(workers, skip_dedup, verbose, debug,
+def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debug,
                 active_device, dest_device, active_root, dest_root,
                 stash_device, pool_device, seeding_root, pool_payload_root,
                 catalog):
@@ -1408,6 +1745,8 @@ def refresh_cmd(workers, skip_dedup, verbose, debug,
         active_device=active_alias,
         dest_device=dest_alias,
         workers=workers,
+        scan_hash_mode=scan_hash_mode.lower(),
+        drift_policy=drift_policy.lower(),
         skip_dedup=skip_dedup,
         managed_roots=managed,
         verbose=verbose,
@@ -1415,6 +1754,307 @@ def refresh_cmd(workers, skip_dedup, verbose, debug,
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
+
+
+@cli.command("qb-missing-audit")
+@click.option("--source-root", required=True, help="Old qB/root path prefix to audit")
+@click.option("--target-root", required=True, help="Mapped replacement root to test")
+@click.option(
+    "--fastresume-dir",
+    type=click.Path(exists=True),
+    default="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup",
+    show_default=True,
+    help="Directory containing qB .fastresume files",
+)
+@click.option(
+    "--catalog",
+    type=click.Path(exists=True),
+    default=DEFAULT_CATALOG_PATH,
+    show_default=True,
+    help="Path to hashall catalog database",
+)
+@click.option("--output", "-o", type=click.Path(), help="Optional JSON report output path")
+def qb_missing_audit_cmd(source_root, target_root, fastresume_dir, catalog, output):
+    """Audit qB missingFiles torrents for old-root drift after relocation."""
+    from hashall.qbittorrent import get_qbittorrent_client
+
+    report = audit_missing_root_drift(
+        qb_client=get_qbittorrent_client(),
+        source_root=source_root,
+        target_root=target_root,
+        fastresume_dir=Path(fastresume_dir),
+        catalog_path=Path(catalog),
+    )
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        click.echo(f"📝 wrote {output_path}")
+
+    summary = report.get("summary") or {}
+    causes = report.get("root_causes") or {}
+    click.echo("🔎 qB missingFiles root-drift audit")
+    click.echo(f"   source_root: {report.get('source_root')}")
+    click.echo(f"   target_root: {report.get('target_root')}")
+    click.echo(f"   rows: {summary.get('rows', 0)}")
+    click.echo(f"   mapped_target_exists: {summary.get('mapped_target_exists', 0)}")
+    click.echo(f"   fastresume_old_save_path: {summary.get('fastresume_old_save_path', 0)}")
+    click.echo(f"   fastresume_old_qbt_save_path: {summary.get('fastresume_old_qbt_save_path', 0)}")
+    click.echo(f"   latest_rehome_reuse_success: {summary.get('latest_rehome_reuse_success', 0)}")
+    if causes:
+        click.echo("   root_causes:")
+        for cause, count in sorted(causes.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            click.echo(f"     {count:>4}  {cause}")
+
+    sample_rows = report.get("rows") or []
+    if sample_rows:
+        click.echo("   samples:")
+        for row in sample_rows[:5]:
+            click.echo(
+                "     "
+                f"{str(row.get('hash') or '')[:16]} "
+                f"cause={row.get('root_cause')} "
+                f"save={row.get('save_path')} "
+                f"mapped={row.get('mapped_content_path')}"
+            )
+
+
+@cli.command("qb-missing-remediate")
+@click.option("--source-root", required=True, help="Old qB/root path prefix to remediate")
+@click.option("--target-root", required=True, help="Replacement root where healthy sibling payloads live")
+@click.option(
+    "--fastresume-dir",
+    type=click.Path(exists=True),
+    default="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup",
+    show_default=True,
+    help="Directory containing qB .fastresume files",
+)
+@click.option(
+    "--catalog",
+    type=click.Path(exists=True),
+    default=DEFAULT_CATALOG_PATH,
+    show_default=True,
+    help="Path to hashall catalog database",
+)
+@click.option("--hash", "torrent_hashes", multiple=True, help="Specific missing torrent hash to remediate (repeatable)")
+@click.option("--limit", type=int, default=0, show_default=True, help="Maximum payload groups to include")
+@click.option(
+    "--unique-view-subdir",
+    default=DEFAULT_UNIQUE_VIEW_SUBDIR,
+    show_default=True,
+    help="Subdirectory under target root for synthesized unique views",
+)
+@click.option("--output", "-o", type=click.Path(), help="Optional JSON batch output path")
+@click.option("--apply/--dryrun", default=False, show_default=True, help="Execute the remediation instead of only planning it")
+@click.option("--resume/--keep-paused", default=False, show_default=True, help="Resume repointed torrents after successful remediation")
+@click.option("--pilot-size", type=int, default=1, show_default=True, help="Resume pilot size when --resume is enabled")
+@click.option("--observe-seconds", type=float, default=60.0, show_default=True, help="Resume observe window when --resume is enabled")
+def qb_missing_remediate_cmd(
+    source_root,
+    target_root,
+    fastresume_dir,
+    catalog,
+    torrent_hashes,
+    limit,
+    unique_view_subdir,
+    output,
+    apply,
+    resume,
+    pilot_size,
+    observe_seconds,
+):
+    """Plan or remediate stale sibling-root missingFiles rows via guarded REUSE attach."""
+    from hashall.qbittorrent import get_qbittorrent_client
+    from hashall.qb_zfs_relocate import DockerQbController, QBZFSRelocationTool
+
+    qbit = get_qbittorrent_client()
+    qb_container = os.getenv("HASHALL_REHOME_QB_CONTAINER", "qbittorrent_vpn").strip() or "qbittorrent_vpn"
+    QBZFSRelocationTool(
+        qb_client=qbit,
+        process_controller=DockerQbController(qb_container),
+    )._ensure_qb_online_for_orchestration(timeout_seconds=120.0)
+    _wait_for_qb_ready(qbit)
+    report = build_missing_sibling_reconnect_batch(
+        qb_client=qbit,
+        source_root=source_root,
+        target_root=target_root,
+        fastresume_dir=Path(fastresume_dir),
+        catalog_path=Path(catalog),
+        torrent_hashes=torrent_hashes,
+        limit=max(0, int(limit or 0)),
+        unique_view_subdir=str(unique_view_subdir or DEFAULT_UNIQUE_VIEW_SUBDIR),
+    )
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        click.echo(f"📝 wrote {output_path}")
+
+    summary = report.get("summary") or {}
+    audit = report.get("audit") or {}
+    click.echo("🔧 qB missingFiles sibling-target remediation")
+    click.echo(f"   source_root: {report.get('source_root')}")
+    click.echo(f"   target_root: {report.get('target_root')}")
+    click.echo(f"   audit_rows: {audit.get('rows', 0)}")
+    click.echo(f"   selected_plans: {summary.get('plans', 0)}")
+    click.echo(f"   skipped: {summary.get('skipped', 0)}")
+    click.echo(f"   unique_view_targets: {summary.get('unique_view_targets', 0)}")
+    causes = audit.get("root_causes") or {}
+    if causes:
+        click.echo("   audit_root_causes:")
+        for cause, count in sorted(causes.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            click.echo(f"     {count:>4}  {cause}")
+
+    for plan in (report.get("plans") or [])[:5]:
+        click.echo(
+            "   plan "
+            f"payload={str(plan.get('payload_hash') or '')[:16]} "
+            f"torrents={len(plan.get('affected_torrents') or [])} "
+            f"target={plan.get('target_path')}"
+        )
+
+    if not apply:
+        return
+
+    plans = list(report.get("plans") or [])
+    if not plans:
+        click.echo("ℹ️  No remediation plans to apply.")
+        return
+
+    lock_fh = _acquire_rehome_lock()
+    try:
+        executor = DemotionExecutor(Path(catalog).expanduser())
+        executor.resume_after_relocate = bool(resume)
+        executor.resume_pilot_size = max(1, int(pilot_size or 1))
+        executor.resume_observe_seconds = max(0.0, float(observe_seconds or 0.0))
+        for idx, plan in enumerate(plans, start=1):
+            click.echo(
+                "▶️  remediation "
+                f"{idx}/{len(plans)} payload={str(plan.get('payload_hash') or '')[:16]} "
+                f"torrents={len(plan.get('affected_torrents') or [])}"
+            )
+            executor.execute(plan)
+    finally:
+        try:
+            lock_fh.close()
+        except Exception:
+            pass
+
+
+@cli.command("drift-audit")
+@click.option("--plan", "plan_path", type=click.Path(exists=True), required=True, help="Rehome plan or batch JSON to audit against live qB/catalog state")
+@click.option(
+    "--catalog",
+    type=click.Path(exists=True),
+    default=DEFAULT_CATALOG_PATH,
+    show_default=True,
+    help="Path to hashall catalog database",
+)
+@click.option(
+    "--fastresume-dir",
+    type=click.Path(exists=True),
+    default=str(DEFAULT_FASTRESUME_DIR),
+    show_default=True,
+    help="Directory containing qB .fastresume files",
+)
+@click.option("--output", "-o", type=click.Path(), help="Optional JSON report output path")
+def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
+    """Compare a rehome plan to live qB, fastresume, filesystem, and catalog state."""
+    from hashall.qbittorrent import get_qbittorrent_client
+
+    data = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+    plans = list(data.get("plans") or [])
+    if not plans:
+        plans = [data]
+
+    qbit = get_qbittorrent_client()
+    _wait_for_qb_ready(qbit)
+
+    batch_torrent_hashes = sorted(
+        {
+            str(torrent_hash or "").strip().lower()
+            for plan in plans
+            for torrent_hash in (plan.get("affected_torrents") or [])
+            if str(torrent_hash or "").strip()
+        }
+    )
+
+    snapshots = [
+        build_plan_reality_snapshot(
+            plan=plan,
+            qb_client=qbit,
+            catalog_path=Path(catalog),
+            fastresume_dir=Path(fastresume_dir),
+            batch_torrent_hashes=batch_torrent_hashes,
+        )
+        for plan in plans
+    ]
+
+    group_states: dict[str, int] = {}
+    total_rows = 0
+    blocked_rows = 0
+    out_of_plan_groups = 0
+    for snapshot in snapshots:
+        state = str(snapshot.get("group_state") or "unknown")
+        group_states[state] = group_states.get(state, 0) + 1
+        total_rows += int((snapshot.get("summary") or {}).get("rows", 0))
+        if int((snapshot.get("summary") or {}).get("out_of_plan_siblings", 0)) > 0:
+            out_of_plan_groups += 1
+        for row in snapshot.get("rows") or []:
+            if str(row.get("classification") or "") not in {"aligned_target", "catalog_drift_already_targeted"}:
+                blocked_rows += 1
+
+    report = {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "plan_path": str(Path(plan_path).expanduser().resolve()),
+        "catalog": str(Path(catalog).expanduser().resolve()),
+        "fastresume_dir": str(Path(fastresume_dir).expanduser().resolve()),
+        "summary": {
+            "plans": len(snapshots),
+            "rows": total_rows,
+            "group_states": group_states,
+            "attention_rows": blocked_rows,
+            "plans_with_out_of_plan_siblings": out_of_plan_groups,
+        },
+        "plans": snapshots,
+    }
+
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        click.echo(f"📝 wrote {output_path}")
+
+    click.echo("🔎 rehome drift audit")
+    click.echo(f"   plan_path: {report['plan_path']}")
+    click.echo(f"   plans: {report['summary']['plans']}")
+    click.echo(f"   rows: {report['summary']['rows']}")
+    click.echo(f"   attention_rows: {report['summary']['attention_rows']}")
+    click.echo(
+        "   plans_with_out_of_plan_siblings: "
+        f"{report['summary']['plans_with_out_of_plan_siblings']}"
+    )
+    if group_states:
+        click.echo("   group_states:")
+        for state, count in sorted(group_states.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            click.echo(f"     {count:>4}  {state}")
+    click.echo("   samples:")
+    printed = 0
+    for snapshot in snapshots:
+        for row in snapshot.get("rows") or []:
+            classification = str(row.get("classification") or "")
+            if classification in {"aligned_target", "catalog_drift_already_targeted"}:
+                continue
+            click.echo(
+                "     "
+                f"{str(row.get('torrent_hash') or '')[:16]} "
+                f"group={snapshot.get('group_state')} "
+                f"class={classification} "
+                f"reason={row.get('operator_reason')}"
+            )
+            printed += 1
+            if printed >= 5:
+                return
 
 
 def _db_open_readonly(catalog_path: Path) -> Optional[sqlite3.Connection]:

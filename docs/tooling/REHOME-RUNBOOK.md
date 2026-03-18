@@ -1,6 +1,6 @@
 # Rehome Runbook (Canonical)
 
-Last updated: 2026-02-28
+Last updated: 2026-03-08
 Status: canonical
 
 ## Purpose
@@ -13,6 +13,7 @@ Single operational runbook for rehome planning, apply flow, and safety gates.
 - Prefer reuse over risky movement.
 - Apply only from fresh scan + payload sync state.
 - Treat `/data/media` and `/stash/media` as equivalent aliases.
+- Preserve the qB item invariant: every torrent should end up with its own correct payload tree on disk, normally instantiated from donor bytes via hardlinks instead of redundant physical copies.
 
 ## Baseline Workflow
 
@@ -33,8 +34,9 @@ Single operational runbook for rehome planning, apply flow, and safety gates.
 
 ## qB Integration Defaults
 
-- Preferred mutation order: `setLocation -> recheck -> verify seeding-safe state`.
-- Batch fastresume patching when required by selected hashes.
+- Preferred mutation order for relocation is now: `copy/verify -> qB stop -> offline fastresume patch -> qB start -> observe`.
+- Do not rely on qB `setLocation` as the primary mover for dataset migration.
+- Batch fastresume patching is acceptable only via the guarded offline path.
 - Avoid concurrent mutating workflows.
 - Treat `~/.hashall/seed-root-state.json` as the authoritative published seeding-root contract for external orchestration.
 
@@ -69,6 +71,14 @@ Single operational runbook for rehome planning, apply flow, and safety gates.
     - require explicit allowed-save-root / allowed-donor-root policy
     - verify with libtorrent before any qB mutation
     - protect against download-like state flips after apply
+    - use the shared qB helper/cache contract so old/new qB API differences and temporary auth slowness are normalized centrally rather than patched per tool
+
+- Legacy stale-root `missingFiles` after earlier rehome success
+  - Failure mode: qB and `.fastresume` remain pointed at `/pool/data/...` after an older `REUSE success`, while payload already lives at `/pool/media/...`
+  - Mitigation:
+    - prove the class with `hashall rehome qb-missing-audit`
+    - remediate in small guarded batches
+    - do not assume the cohort indicates new corruption or current mover regressions
 
 ## Dataset Migration Strategy
 
@@ -79,7 +89,7 @@ Target migration:
 Chosen approach:
 - hybrid
   - use existing `hashall` / `rehome` catalog, identity, and published seed-root-state contract
-  - use dedicated qB repair/migration safety tooling for qB-facing mutations and verification
+  - `rehome apply` now embeds the hardened qB relocation safety backend for qB-facing mutation and verification
 
 Reason:
 - `hashall` should own long-term seed placement and published seeding-root truth
@@ -96,11 +106,21 @@ Reason:
    - watch both:
      - `~/.logs/hashall/rehome/refresh/*.log`
      - `~/.logs/hashall/hashall.log`
+   - choose scan/drift mode deliberately:
+     - routine confidence pass: `hashall refresh --verbose --scan-hash-mode fast --drift-policy quick`
+     - drift-audit pass: `hashall refresh --verbose --scan-hash-mode full --drift-policy full`
 
 3. Audit qB risk set before mutation
    - stoppedDL / missingFiles / pausedDL / error
    - mixed save_path/content_path
    - roots outside allowed seeding roots
+   - for legacy `missingFiles`, run:
+
+```bash
+hashall rehome qb-missing-audit \
+  --source-root /pool/data/media/torrents/seeding \
+  --target-root /pool/media/torrents/seeding
+```
 
 4. Repair qB items in guarded batches
    - donor/root policy must be explicit
@@ -110,6 +130,8 @@ Reason:
 
 5. Migrate validated healthy payloads from source dataset to target dataset
    - batch by payload class
+   - construct destination payload trees per qB item, not duplicate byte copies per qB item
+   - prefer donor + hardlink-instantiated destination trees when filesystem boundaries allow it
    - verify qB save_path/content_path and seeding-safe state after each batch
    - keep old root as explicit migration source until batch follow-up is complete
 
@@ -131,6 +153,17 @@ hashall refresh --verbose
 
 ```bash
 hashall rehome auto --from pool-data --to pool-media --limit 1
+```
+
+Alternative explicit root-to-root planner:
+
+```bash
+hashall rehome relocate-plan \
+  --source-device pool-data \
+  --source-root /pool/data/media/torrents/seeding \
+  --target-device pool-media \
+  --target-root /pool/media/torrents/seeding \
+  -o out/rehome-plan-pool-data-to-media.json
 ```
 
 Important:

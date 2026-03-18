@@ -25,6 +25,8 @@
 #   -q           Quiet: suppress per-torrent lines, print summary only
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/qb-cache.sh"
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
 QB_USER="$QBITTORRENTAPI_USERNAME"
@@ -52,13 +54,8 @@ COOKIE=$(mktemp /tmp/qb.XXXXXX)
 TMPD=$(mktemp -d /tmp/pd_score.XXXXXX)
 trap 'rm -rf "$TMPD" "$COOKIE"' EXIT
 
-# ── Login + fetch all torrents ────────────────────────────────────────────────
-curl -fsS --max-time 15 -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
-  --data-urlencode "username=$QB_USER" \
-  --data-urlencode "password=$QB_PASS" >/dev/null
-
-curl -fsS --max-time 30 -b "$COOKIE" "$QB_URL/api/v2/torrents/info" \
-  > "$TMPD/all_torrents.json"
+# ── Fetch all torrents via shared cache ───────────────────────────────────────
+qb_cache_fetch_torrents_info "$TMPD/all_torrents.json" 15 5 15
 
 # ── Step 1: classify tiers, identify file lists needed ────────────────────────
 python3 - "$DB" "$TMPD" << 'PYEOF'

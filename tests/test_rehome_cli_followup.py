@@ -25,6 +25,11 @@ def test_followup_cli_prints_summary(monkeypatch, tmp_path: Path):
                 "cleanup_attempted": 0,
                 "cleanup_done": 0,
                 "cleanup_failed": 0,
+                "cleanup_safe_now": 1,
+                "cleanup_retain_for_rollback": 0,
+                "cleanup_blocked": 0,
+                "cleanup_already_cleaned": 0,
+                "cleanup_not_required": 1,
             },
             "entries": [
                 {
@@ -32,6 +37,8 @@ def test_followup_cli_prints_summary(monkeypatch, tmp_path: Path):
                     "outcome": "ok",
                     "cleanup_required": False,
                     "cleanup_result": "skipped",
+                    "cleanup_disposition": "not_required",
+                    "cleanup_disposition_reasons": [],
                     "db_reasons": [],
                     "source_reasons": [],
                     "qb_checks": [],
@@ -47,6 +54,8 @@ def test_followup_cli_prints_summary(monkeypatch, tmp_path: Path):
     assert "groups: 1" in result.output
     assert "pending: 0" in result.output
     assert "failed: 0" in result.output
+    assert "cleanup_safe_now: 1" in result.output
+    assert "cleanup_not_required: 1" in result.output
 
 
 def test_followup_cli_strict_fails_with_pending(monkeypatch, tmp_path: Path):
@@ -64,6 +73,10 @@ def test_followup_cli_strict_fails_with_pending(monkeypatch, tmp_path: Path):
                 "cleanup_attempted": 0,
                 "cleanup_done": 0,
                 "cleanup_failed": 0,
+                "cleanup_safe_now": 0,
+                "cleanup_retain_for_rollback": 1,
+                "cleanup_blocked": 0,
+                "cleanup_already_cleaned": 0,
             },
             "entries": [],
         },

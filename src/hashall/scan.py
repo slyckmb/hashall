@@ -878,6 +878,7 @@ def _hash_file_worker(
     alias_mounts: tuple[Path, ...],
     existing_files: Dict[str, dict],
     hash_mode: str = 'fast',
+    drift_policy: str = 'metadata',
     expected_device_id: Optional[int] = None,
     hash_progress_cb: Optional[Callable[..., None]] = None,
 ):
@@ -919,17 +920,20 @@ def _hash_file_worker(
         existing_repr = existing_files.get(rel_path_repr)
 
         # Determine if we need to hash the representative file
-        need_hash = _needs_representative_hash(
+        metadata_same = _same_metadata(existing_repr, stat.st_size, stat.st_mtime)
+        hash_strategy = _representative_hash_strategy(
             hash_mode=hash_mode,
+            drift_policy=drift_policy,
             existing_repr=existing_repr,
             stat_size=stat.st_size,
             stat_mtime=stat.st_mtime,
         )
+        need_hash = hash_strategy is not None
         quick_hash = None
         sha1 = None
         sha256 = None
 
-        if existing_repr and existing_repr['size'] == stat.st_size and abs(existing_repr['mtime'] - stat.st_mtime) < 0.001:
+        if metadata_same:
             # Representative file unchanged - reuse existing hashes
             quick_hash = existing_repr.get('quick_hash')
             sha1 = existing_repr.get('sha1')
@@ -938,7 +942,17 @@ def _hash_file_worker(
         # Hash the representative file if needed
         if need_hash:
             quick_hash = compute_quick_hash(representative_path)
-            if hash_mode == 'full' or hash_mode == 'upgrade':
+            quick_mismatch = bool(
+                metadata_same
+                and existing_repr is not None
+                and existing_repr.get("quick_hash") is not None
+                and existing_repr.get("quick_hash") != quick_hash
+            )
+            should_full_hash = bool(
+                hash_strategy == "full"
+                or quick_mismatch
+            )
+            if should_full_hash:
                 if hash_progress_cb is not None:
                     try:
                         hash_progress_cb(
@@ -980,7 +994,15 @@ def _hash_file_worker(
             rel_path = _relative_to_any_mount(path, mount_point, alias_mounts)
             existing_file = existing_files.get(rel_path)
             is_new = existing_file is None
-            is_updated = not is_new and need_hash
+            same_existing = (
+                existing_file is not None
+                and existing_file.get("size") == stat.st_size
+                and abs(float(existing_file.get("mtime") or 0.0) - stat.st_mtime) < 0.001
+                and existing_file.get("quick_hash") == quick_hash
+                and existing_file.get("sha1") == sha1
+                and existing_file.get("sha256") == sha256
+            )
+            is_updated = not is_new and not same_existing
 
             # Determine hash_source
             hash_source = None
@@ -1114,27 +1136,72 @@ def _should_skip_deletion(*, existing_count: int, discovered_count: int, seen_co
     return seen_count < min_expected_seen
 
 
+def _same_metadata(
+    existing_repr: Optional[dict],
+    stat_size: int,
+    stat_mtime: float,
+) -> bool:
+    if not existing_repr:
+        return False
+    return bool(
+        existing_repr["size"] == stat_size
+        and abs(existing_repr["mtime"] - stat_mtime) < 0.001
+    )
+
+
+def _representative_hash_strategy(
+    *,
+    hash_mode: str,
+    drift_policy: str,
+    existing_repr: Optional[dict],
+    stat_size: int,
+    stat_mtime: float,
+) -> Optional[str]:
+    """Return required hash strategy for a representative file."""
+    if hash_mode not in {"fast", "full", "upgrade"}:
+        return "full"
+    if drift_policy not in {"metadata", "quick", "full"}:
+        return "full"
+
+    metadata_same = _same_metadata(existing_repr, stat_size, stat_mtime)
+    if metadata_same:
+        quick_hash = existing_repr.get("quick_hash")
+        sha1 = existing_repr.get("sha1")
+        sha256 = existing_repr.get("sha256")
+        if hash_mode == "fast":
+            if quick_hash is None:
+                return "quick"
+        elif hash_mode in {"full", "upgrade"}:
+            if sha1 is None or sha256 is None:
+                return "full"
+
+        if drift_policy == "quick":
+            return "quick"
+        if drift_policy == "full":
+            return "full"
+        return None
+
+    if hash_mode == "fast":
+        return "quick"
+    return "full"
+
+
 def _needs_representative_hash(
     *,
     hash_mode: str,
+    drift_policy: str,
     existing_repr: Optional[dict],
     stat_size: int,
     stat_mtime: float,
 ) -> bool:
     """Return True when a representative file requires hash computation."""
-    if hash_mode not in {"fast", "full", "upgrade"}:
-        return True
-
-    if existing_repr and existing_repr["size"] == stat_size and abs(existing_repr["mtime"] - stat_mtime) < 0.001:
-        quick_hash = existing_repr.get("quick_hash")
-        sha1 = existing_repr.get("sha1")
-        sha256 = existing_repr.get("sha256")
-        if hash_mode == "fast":
-            return quick_hash is None
-        if hash_mode in {"full", "upgrade"}:
-            return sha1 is None or sha256 is None
-        return False
-    return True
+    return _representative_hash_strategy(
+        hash_mode=hash_mode,
+        drift_policy=drift_policy,
+        existing_repr=existing_repr,
+        stat_size=stat_size,
+        stat_mtime=stat_mtime,
+    ) is not None
 
 
 def _progress_kwargs(*, total: int | None, tqdm_position: int | None, quiet: bool, file=None) -> dict:
@@ -1180,6 +1247,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
               tqdm_position: int | None = None, quiet: bool = False,
               hash_mode: str = 'fast', show_current_path: bool = False,
               scan_nested_datasets: bool = False,
+              drift_policy: str = "metadata",
               hash_progress: str = "auto"):
     """
     Incrementally scan a directory with per-device table tracking.
@@ -1193,6 +1261,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         tqdm_position: Position for progress bar (for nested display)
         quiet: Suppress verbose output (for nested progress bars)
         hash_mode: 'fast' (quick_hash only), 'full' (both hashes), 'upgrade' (add full hashes)
+        drift_policy: 'metadata' (trust unchanged size+mtime), 'quick' (rehash quick hash on unchanged),
+            or 'full' (rehash full hashes on unchanged)
         scan_nested_datasets: Detect nested mountpoints/datasets and scan them separately
         hash_progress: Hash progress style ('auto', 'minimal', 'full')
     """
@@ -1420,6 +1490,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             existing_repr = existing_files.get(rel_path_repr)
             if not _needs_representative_hash(
                 hash_mode=hash_mode,
+                drift_policy=drift_policy,
                 existing_repr=existing_repr,
                 stat_size=int(work_item["size"]),
                 stat_mtime=float(work_item["stat"].st_mtime),
@@ -1498,6 +1569,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     alias_mounts,
                     existing_files,
                     hash_mode,
+                    drift_policy,
                     expected_device_id=device_id,
                     hash_progress_cb=hash_progress_cb,
                 )
@@ -1539,6 +1611,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     alias_mounts,
                     existing_files,
                     hash_mode,
+                    drift_policy,
                     expected_device_id=device_id,
                     hash_progress_cb=hash_progress_cb,
                 )
@@ -1592,6 +1665,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                         alias_mounts,
                         existing_files,
                         hash_mode,
+                        drift_policy,
                         device_id,
                         hash_progress_cb,
                     )
@@ -1665,6 +1739,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 alias_mounts,
                                 existing_files,
                                 hash_mode,
+                                drift_policy,
                                 device_id,
                                 hash_progress_cb,
                             )
@@ -1741,6 +1816,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                     mount_point=mount_point,
                                     existing_files=existing_files,
                                     hash_mode=hash_mode,
+                                    drift_policy=drift_policy,
                                     expected_device_id=device_id,
                                     hash_progress_cb=hash_progress_cb,
                                 )

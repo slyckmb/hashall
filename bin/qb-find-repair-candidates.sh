@@ -5,6 +5,8 @@
 # Usage: bin/qb-find-repair-candidates.sh [--limit N]
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/qb-cache.sh"
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
 DB="${HOME}/.hashall/catalog.db"
@@ -18,11 +20,7 @@ done
 
 COOKIE=$(mktemp /tmp/qb.XXXXXX)
 trap 'rm -f "$COOKIE"' EXIT
-curl -fsS -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
-  --data-urlencode "username=$QBITTORRENTAPI_USERNAME" \
-  --data-urlencode "password=$QBITTORRENTAPI_PASSWORD" >/dev/null
-
-curl -fsS -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > /tmp/qb_candidates_all.json
+qb_cache_fetch_torrents_info /tmp/qb_candidates_all.json 15 5 15
 
 python3 << 'EOF'
 import json, sqlite3, os, sys

@@ -9,8 +9,10 @@ import shutil
 import os
 import errno
 import subprocess
+import re
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import json
 from datetime import datetime
 from urllib.parse import quote
@@ -20,12 +22,28 @@ from dataclasses import dataclass
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from hashall.device import ensure_files_table, get_files_table_name
-from hashall.fastresume import patch_fastresume_file
+from hashall.fastresume import normalize_save_path, patch_fastresume_file
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.qbittorrent import get_qbittorrent_client
 from hashall.payload import get_payload_file_rows
 from hashall.scan import compute_sha256
-from rehome.view_builder import build_torrent_view
+from hashall.qb_zfs_relocate import (
+    DockerQbController,
+    QBZFSRelocationTool,
+    build_manifest_for_relocations,
+    emit_log,
+    format_hms,
+    row_selection,
+    write_json,
+)
+from rehome.view_builder import (
+    _common_prefix,
+    _ensure_hardlink,
+    _normalize_rel_path,
+    build_torrent_view,
+    derive_view_layout,
+)
+from rehome.reality import build_plan_reality_snapshot
 
 
 @dataclass(frozen=True)
@@ -36,6 +54,23 @@ class TargetDonor:
     acquisition_mode: str
     move_strategy: str = "existing"
     moved_payload: bool = False
+    target_preexisting: bool = False
+
+
+@dataclass(frozen=True)
+class PathStats:
+    path: Path
+    exists: bool
+    is_file: bool
+    file_count: int
+    total_bytes: int
+
+
+@dataclass(frozen=True)
+class PreflightCheckStatus:
+    blocked: Tuple[str, ...]
+    transient_only: bool
+    message: str
 
 
 class DemotionExecutor:
@@ -96,6 +131,18 @@ class DemotionExecutor:
         except ValueError:
             self.recheck_safety_margin = 2.0
         try:
+            self.preflight_settle_attempts = max(
+                0, int(os.getenv("HASHALL_REHOME_PREFLIGHT_SETTLE_ATTEMPTS", "3"))
+            )
+        except ValueError:
+            self.preflight_settle_attempts = 3
+        try:
+            self.preflight_settle_seconds = max(
+                1.0, float(os.getenv("HASHALL_REHOME_PREFLIGHT_SETTLE_SECONDS", "20"))
+            )
+        except ValueError:
+            self.preflight_settle_seconds = 20.0
+        try:
             self.recheck_max_seconds = max(
                 self.recheck_base_seconds,
                 float(os.getenv("HASHALL_REHOME_QB_RECHECK_MAX_SECONDS", "7200")),
@@ -124,6 +171,46 @@ class DemotionExecutor:
             )
         ).expanduser()
         self.qb_container = os.getenv("HASHALL_REHOME_QB_CONTAINER", "qbittorrent_vpn").strip()
+        self.relocation_artifact_root = Path(
+            os.getenv(
+                "HASHALL_REHOME_RELOCATE_ARTIFACT_ROOT",
+                str(Path.home() / ".logs" / "hashall" / "reports" / "rehome-relocate"),
+            )
+        ).expanduser()
+        try:
+            self.relocation_verify_timeout_seconds = max(
+                60.0, float(os.getenv("HASHALL_REHOME_VERIFY_TIMEOUT_SECONDS", "1800"))
+            )
+        except ValueError:
+            self.relocation_verify_timeout_seconds = 1800.0
+        self.recheck_source_on_verify_fail = (
+            os.getenv("HASHALL_REHOME_RECHECK_SOURCE_ON_VERIFY_FAIL", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        try:
+            self.relocation_recheck_timeout_seconds = max(
+                60.0,
+                float(
+                    os.getenv(
+                        "HASHALL_REHOME_SOURCE_RECHECK_TIMEOUT_SECONDS",
+                        str(self.relocation_verify_timeout_seconds),
+                    )
+                ),
+            )
+        except ValueError:
+            self.relocation_recheck_timeout_seconds = self.relocation_verify_timeout_seconds
+        try:
+            self.resume_pilot_size = max(
+                1, int(os.getenv("HASHALL_REHOME_QB_PILOT_SIZE", "1"))
+            )
+        except ValueError:
+            self.resume_pilot_size = 1
+        try:
+            self.resume_observe_seconds = max(
+                0.0, float(os.getenv("HASHALL_REHOME_QB_OBSERVE_SECONDS", "60"))
+            )
+        except ValueError:
+            self.resume_observe_seconds = 60.0
 
     def _get_db_connection(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Get database connection."""
@@ -194,6 +281,96 @@ class DemotionExecutor:
         icon = prefixes.get(prefix, "ℹ️")
         print(f"{icon} {message}")
 
+    def _path_stats(self, path: Path) -> PathStats:
+        """Return file-count and byte totals for a file or directory path."""
+        target = Path(path)
+        if not target.exists():
+            return PathStats(
+                path=target,
+                exists=False,
+                is_file=False,
+                file_count=0,
+                total_bytes=0,
+            )
+        if target.is_file():
+            return PathStats(
+                path=target,
+                exists=True,
+                is_file=True,
+                file_count=1,
+                total_bytes=int(target.stat().st_size),
+            )
+
+        file_count = 0
+        total_bytes = 0
+        for candidate in target.rglob("*"):
+            if not candidate.is_file():
+                continue
+            file_count += 1
+            total_bytes += int(candidate.stat().st_size)
+        return PathStats(
+            path=target,
+            exists=True,
+            is_file=False,
+            file_count=file_count,
+            total_bytes=total_bytes,
+        )
+
+    @staticmethod
+    def _format_path_stats(
+        stats: PathStats,
+        *,
+        expected_count: Optional[int] = None,
+        expected_bytes: Optional[int] = None,
+    ) -> str:
+        fields = [
+            f"path={stats.path}",
+            f"exists={str(stats.exists).lower()}",
+            f"is_file={str(stats.is_file).lower()}",
+            f"actual_files={stats.file_count}",
+            f"actual_bytes={stats.total_bytes}",
+        ]
+        if expected_count is not None:
+            fields.append(f"expected_files={int(expected_count)}")
+        if expected_bytes is not None:
+            fields.append(f"expected_bytes={int(expected_bytes)}")
+        return " ".join(fields)
+
+    @staticmethod
+    def _path_stats_match(stats: PathStats, expected_count: int, expected_bytes: int) -> bool:
+        return (
+            stats.exists
+            and int(stats.file_count) == int(expected_count)
+            and int(stats.total_bytes) == int(expected_bytes)
+        )
+
+    @staticmethod
+    def _path_stats_empty(stats: PathStats) -> bool:
+        return stats.exists and int(stats.file_count) == 0 and int(stats.total_bytes) == 0
+
+    def _assert_path_matches_expected(
+        self,
+        path: Path,
+        *,
+        expected_count: int,
+        expected_bytes: int,
+        label: str,
+    ) -> PathStats:
+        stats = self._path_stats(path)
+        if self._path_stats_match(stats, expected_count, expected_bytes):
+            return stats
+
+        if not stats.exists:
+            reason = "missing"
+        elif int(stats.file_count) != int(expected_count):
+            reason = "file_count_mismatch"
+        else:
+            reason = "total_bytes_mismatch"
+        raise RuntimeError(
+            f"{label} mismatch reason={reason} "
+            f"{self._format_path_stats(stats, expected_count=expected_count, expected_bytes=expected_bytes)}"
+        )
+
     def _verify_file_count(self, path: Path, expected_count: int) -> bool:
         """
         Verify file count matches expected.
@@ -205,14 +382,8 @@ class DemotionExecutor:
         Returns:
             True if counts match
         """
-        if not path.exists():
-            return False
-
-        if path.is_file():
-            return expected_count == 1
-
-        actual_count = sum(1 for _ in path.rglob('*') if _.is_file())
-        return actual_count == expected_count
+        stats = self._path_stats(path)
+        return bool(stats.exists and int(stats.file_count) == int(expected_count))
 
     def _verify_total_bytes(self, path: Path, expected_bytes: int) -> bool:
         """
@@ -225,14 +396,8 @@ class DemotionExecutor:
         Returns:
             True if bytes match
         """
-        if not path.exists():
-            return False
-
-        if path.is_file():
-            return path.stat().st_size == expected_bytes
-
-        actual_bytes = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
-        return actual_bytes == expected_bytes
+        stats = self._path_stats(path)
+        return bool(stats.exists and int(stats.total_bytes) == int(expected_bytes))
 
     def _is_cross_filesystem(self, source_path: Path, target_parent: Path) -> bool:
         """Return True when source and target parent are on different filesystems."""
@@ -334,10 +499,438 @@ class DemotionExecutor:
         self._log(
             f"step=move_payload method=rsync low_priority=true source={source_path} target={target_path}"
         )
+        start = time.monotonic()
         try:
-            subprocess.run(cmd, check=True)
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            if proc.stdout is None:
+                raise RuntimeError("Failed to capture rsync stdout")
+            last_progress_at = 0.0
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip()
+                progress = self._parse_rsync_progress_line(line)
+                if progress is not None:
+                    percent, copied, rate, eta = progress
+                    now = time.monotonic()
+                    if last_progress_at <= 0.0 or now - last_progress_at >= 5.0 or percent >= 100.0:
+                        copied_field = f" copied={copied}" if copied else ""
+                        rate_field = f" rate={rate}" if rate else ""
+                        eta_field = f" eta={eta}" if eta else ""
+                        self._log(
+                            "copy_progress"
+                            f" percent={percent:.2f}"
+                            f" elapsed={format_hms(now - start)}"
+                            f"{eta_field}{copied_field}{rate_field}"
+                        )
+                        last_progress_at = now
+                elif line:
+                    self._log(f"copy_detail line={line}")
+            returncode = proc.wait()
+            if returncode != 0:
+                raise subprocess.CalledProcessError(returncode, cmd)
+            self._log(f"step=move_payload_complete elapsed={format_hms(time.monotonic() - start)}")
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"Failed to copy payload with rsync: {exc}") from exc
+
+    @staticmethod
+    def _parse_rsync_progress_line(line: str) -> Optional[Tuple[float, str, str, str]]:
+        line = (line or "").strip()
+        if not line or "%" not in line:
+            return None
+        match = re.search(
+            r"(?P<copied>[0-9][0-9,\.]*[A-Za-z]*)\s+"
+            r"(?P<percent>[0-9]+(?:\.[0-9]+)?)%\s+"
+            r"(?P<rate>[0-9][0-9,\.]*[A-Za-z/]+)\s+"
+            r"(?P<eta>[0-9:]+)(?:\s+\(xfr#[^)]+\))?",
+            line,
+        )
+        if not match:
+            return None
+        return (
+            float(match.group("percent")),
+            str(match.group("copied") or ""),
+            str(match.group("rate") or ""),
+            str(match.group("eta") or ""),
+        )
+
+    def _relocation_artifact_dir(self, plan: Dict) -> Path:
+        existing = str(plan.get("_artifact_dir") or "").strip()
+        if existing:
+            return Path(existing)
+        payload_hash = str(plan.get("payload_hash") or "unknown")[:16]
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        root = self.relocation_artifact_root
+        artifact_name = f"{stamp}-{payload_hash}"
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            artifact_dir = root / artifact_name
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            root = Path(self.catalog_path).expanduser().resolve().parent / ".rehome-relocate"
+            root.mkdir(parents=True, exist_ok=True)
+            artifact_dir = root / artifact_name
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+        plan["_artifact_dir"] = str(artifact_dir)
+        return artifact_dir
+
+    def _write_plan_reality_snapshot(
+        self,
+        plan: Dict,
+        *,
+        artifact_dir: Path,
+        phase: str,
+        error: str = "",
+    ) -> Optional[Dict[str, object]]:
+        try:
+            snapshot = build_plan_reality_snapshot(
+                plan=plan,
+                qb_client=self.qbit_client,
+                catalog_path=self.catalog_path,
+                fastresume_dir=self.fastresume_dir,
+                phase=phase,
+                batch_torrent_hashes=plan.get("_batch_torrent_hashes") or [],
+            )
+        except Exception as exc:
+            self._log(
+                f"reality_snapshot_failed phase={phase} error={type(exc).__name__}:{exc}",
+                "warning",
+            )
+            return None
+
+        if error:
+            snapshot["error"] = str(error)
+        snapshot_path = artifact_dir / f"reality-{phase}.json"
+        write_json(snapshot_path, snapshot)
+        plan[f"_reality_snapshot_{phase}"] = snapshot
+        summary = snapshot.get("summary") or {}
+        warnings = snapshot.get("group_warnings") or []
+        self._log(
+            "reality_snapshot "
+            f"phase={phase} "
+            f"path={snapshot_path} "
+            f"group_state={snapshot.get('group_state')} "
+            f"rows={summary.get('rows', 0)} "
+            f"out_of_plan_siblings={summary.get('out_of_plan_siblings', 0)}"
+        )
+        for warning in warnings[:3]:
+            self._log(f"reality_warning phase={phase} detail={warning}", "warning")
+        return snapshot
+
+    def _build_qb_zfs_relocation_tool(self) -> QBZFSRelocationTool:
+        return QBZFSRelocationTool(
+            qb_client=self.qbit_client,
+            process_controller=DockerQbController(self.qb_container),
+        )
+
+    def _build_hardened_relocation_manifest(
+        self,
+        plan: Dict,
+        relocations: List[Dict],
+        *,
+        artifact_dir: Path,
+    ) -> Path:
+        torrent_dir = artifact_dir / "torrents"
+        torrent_dir.mkdir(parents=True, exist_ok=True)
+        normalization = plan.get("normalization") or {}
+        source_root = str(
+            normalization.get("source_root")
+            or plan.get("source_path")
+            or (relocations[0].get("source_save_path") if relocations else "")
+            or ""
+        )
+        dest_root = str(
+            normalization.get("target_root")
+            or plan.get("target_path")
+            or (relocations[0].get("target_save_path") if relocations else "")
+            or ""
+        )
+        manifest = build_manifest_for_relocations(
+            qb_client=self.qbit_client,
+            relocations=relocations,
+            fastresume_dir=self.fastresume_dir,
+            torrent_dir=torrent_dir,
+            source_root=source_root,
+            dest_root=dest_root,
+            mode=str(normalization.get("mode") or "rehome_apply"),
+            apply_context={
+                "payload_hash": str(plan.get("payload_hash") or ""),
+                "decision": str(plan.get("decision") or ""),
+                "direction": str(plan.get("direction") or ""),
+                "source_path": str(plan.get("source_path") or ""),
+                "target_path": str(plan.get("target_path") or ""),
+            },
+        )
+        manifest_path = artifact_dir / "manifest.json"
+        write_json(manifest_path, manifest)
+        self._log(f"hardened_manifest path={manifest_path}")
+        return manifest_path
+
+    def _attach_torrents_via_hardened_fastresume(
+        self,
+        plan: Dict,
+        donor: TargetDonor,
+        *,
+        relocations: List[Dict],
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> Dict[str, float]:
+        import time
+
+        phase_times: Dict[str, float] = {}
+
+        t0 = time.monotonic()
+        artifact_dir = self._relocation_artifact_dir(plan)
+        manifest_path = self._build_hardened_relocation_manifest(
+            plan,
+            relocations,
+            artifact_dir=artifact_dir,
+        )
+        patch_journal_path = artifact_dir / "patch-journal.jsonl"
+        tool = self._build_qb_zfs_relocation_tool()
+        manifest = tool._load_manifest(manifest_path)
+        rows = row_selection(manifest["rows"])
+        for row in rows:
+            row["_pre_pause_state"] = str(row.get("state") or "")
+        tool._pause_selected(rows)
+        tool._refresh_rows_from_qb(rows)
+        tool._checkpoint_manifest(manifest_path, manifest)
+        phase_times["prepare_manifest"] = time.monotonic() - t0
+
+        t0 = time.monotonic()
+        verify_code = tool.verify(
+            manifest_path=manifest_path,
+            timeout_seconds=self.relocation_verify_timeout_seconds,
+            quick_only=False,
+            recheck_source_on_fail=self.recheck_source_on_verify_fail,
+            recheck_timeout_seconds=self.relocation_recheck_timeout_seconds,
+        )
+        if verify_code != 0:
+            raise RuntimeError(f"offline verify failed manifest={manifest_path}")
+        phase_times["offline_verify"] = time.monotonic() - t0
+
+        manifest = tool._load_manifest(manifest_path)
+        rows = row_selection(manifest["rows"])
+        self._normalize_verified_manifest_rows_for_patch(rows)
+        reconcile_hashes = self._hardened_manifest_reconcile_hashes(rows)
+        patch_hashes = self._hardened_manifest_patch_hashes(rows, reconcile_hashes)
+        if reconcile_hashes:
+            reconcile_rows = [
+                row for row in rows if str(row.get("hash") or "") in reconcile_hashes
+            ]
+            self._restore_reconcile_rows(reconcile_rows)
+            for row in reconcile_rows:
+                row["selected"] = False
+        if reconcile_hashes and not patch_hashes:
+            self._log(
+                f"rehome_reconcile_only manifest={manifest_path} rows={len(rows)}"
+            )
+            self._filter_plan_to_hashes(plan, reconcile_hashes)
+            tool._checkpoint_manifest(manifest_path, manifest)
+            plan["catalog_reconcile_only"] = True
+            phase_times["validate"] = 0.0
+            phase_times["patch"] = 0.0
+            phase_times["post_patch"] = 0.0
+            return phase_times
+        if reconcile_hashes:
+            self._log(
+                "rehome_reconcile_subset "
+                f"manifest={manifest_path} rows={len(rows)} "
+                f"reconcile_rows={len(reconcile_hashes)} patch_rows={len(patch_hashes)}"
+            )
+            tool._checkpoint_manifest(manifest_path, manifest)
+            plan["catalog_reconcile_only"] = False
+
+        t0 = time.monotonic()
+        controller = tool._ensure_controller()
+        controller_stopped_for_patch = False
+        try:
+            if not controller.is_stopped():
+                emit_log("qb_stop", phase="validate", reason="prepare_for_patch")
+                controller.stop()
+                controller_stopped_for_patch = True
+            validate_code = tool.validate(
+                manifest_path=manifest_path,
+                allow_partials=False,
+                for_patch=True,
+                journal_path=patch_journal_path,
+                require_stopped_qb=True,
+                require_torrents_stopped=False,
+            )
+            if validate_code != 0:
+                raise RuntimeError(f"rehome relocation validate failed manifest={manifest_path}")
+            phase_times["validate"] = time.monotonic() - t0
+
+            t0 = time.monotonic()
+            patch_code = tool.patch(
+                manifest_path=manifest_path,
+                journal_path=patch_journal_path,
+                apply=True,
+                auto_stop_qb=True,
+            )
+            if patch_code != 0:
+                raise RuntimeError(f"rehome relocation patch failed manifest={manifest_path}")
+            phase_times["patch"] = time.monotonic() - t0
+
+            t0 = time.monotonic()
+            if self.resume_after_relocate:
+                resume_code = tool.resume(
+                    manifest_path=manifest_path,
+                    apply=True,
+                    pilot_size=self.resume_pilot_size,
+                    observe_seconds=self.resume_observe_seconds,
+                    resume_remaining=True,
+                    recheck_on_failure=self.force_recheck_after_relocate,
+                )
+                if resume_code != 0:
+                    raise RuntimeError(f"rehome relocation resume failed manifest={manifest_path}")
+            else:
+                controller = tool._ensure_controller()
+                if controller.is_stopped():
+                    controller.start()
+                tool._wait_for_qb_online()
+                manifest = tool._load_manifest(manifest_path)
+                for row in row_selection(manifest["rows"]):
+                    if str(row.get("patch_status") or "") != "patched":
+                        continue
+                    info = self.qbit_client.get_torrent_info(str(row.get("hash") or ""))
+                    if info is None:
+                        raise RuntimeError(f"qB info unavailable after patch for torrent {row['hash'][:16]}")
+                    if canonicalize_path(Path(info.save_path).resolve()) != canonicalize_path(
+                        Path(str(row.get("new_save_path") or "")).resolve()
+                    ):
+                        raise RuntimeError(
+                            f"save_path verification failed after patch hash={row['hash'][:16]} "
+                            f"expected={row.get('new_save_path')} actual={getattr(info, 'save_path', '')}"
+                        )
+                    if not self._post_patch_qb_accounting_healthy(info):
+                        raise RuntimeError(
+                            "post-patch qB accounting incomplete "
+                            f"hash={row['hash'][:16]} state={getattr(info, 'state', '')} "
+                            f"progress={getattr(info, 'progress', '')} "
+                            f"completed={getattr(info, 'completed', '')} "
+                            f"amount_left={getattr(info, 'amount_left', '')} "
+                            f"size={getattr(info, 'size', '')}"
+                        )
+                    row["resume_status"] = "kept_paused"
+                tool._checkpoint_manifest(manifest_path, manifest)
+            phase_times["post_patch"] = time.monotonic() - t0
+        except Exception:
+            if controller_stopped_for_patch:
+                controller = tool._ensure_controller()
+                if controller.is_stopped():
+                    emit_log("qb_start", phase="failure_recovery", reason="restore_after_relocation_failure")
+                    controller.start()
+                    tool._wait_for_qb_online()
+            raise
+        return phase_times
+
+    @staticmethod
+    def _hardened_manifest_reconcile_hashes(rows: Sequence[Dict[str, object]]) -> set[str]:
+        reconcile_hashes: set[str] = set()
+        for row in rows:
+            if not bool(row.get("verified")):
+                continue
+            old_save_path = str(row.get("old_save_path") or "")
+            new_save_path = str(row.get("new_save_path") or "")
+            content_path = str(row.get("content_path") or "")
+            dest_content_path = str(row.get("dest_content_path") or "")
+            if not old_save_path or not new_save_path or not content_path or not dest_content_path:
+                continue
+            if normalize_save_path(old_save_path) != normalize_save_path(new_save_path):
+                continue
+            if canonicalize_path(Path(content_path).resolve()) != canonicalize_path(
+                Path(dest_content_path).resolve()
+            ):
+                continue
+            reconcile_hashes.add(str(row.get("hash") or ""))
+        return reconcile_hashes
+
+    @staticmethod
+    def _hardened_manifest_patch_hashes(
+        rows: Sequence[Dict[str, object]], reconcile_hashes: set[str]
+    ) -> set[str]:
+        patch_hashes: set[str] = set()
+        for row in rows:
+            torrent_hash = str(row.get("hash") or "")
+            if not torrent_hash or torrent_hash in reconcile_hashes:
+                continue
+            if not bool(row.get("verified")):
+                continue
+            patch_hashes.add(torrent_hash)
+        return patch_hashes
+
+    @staticmethod
+    def _normalize_verified_manifest_rows_for_patch(rows: Sequence[Dict[str, object]]) -> None:
+        for row in rows:
+            if not bool(row.get("verified")):
+                continue
+            if str(row.get("verify_classification") or "") == "exact_tree":
+                row["path_shape_match"] = True
+            copy_status = str(row.get("copy_status") or "").strip()
+            if copy_status in {"", "pending"}:
+                row["copy_status"] = "reused_existing_dest"
+
+    @staticmethod
+    def _post_patch_qb_accounting_healthy(info: object) -> bool:
+        try:
+            progress = float(getattr(info, "progress", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        try:
+            amount_left = int(getattr(info, "amount_left", 0) or 0)
+        except (TypeError, ValueError):
+            amount_left = 0
+        try:
+            completed = int(getattr(info, "completed", 0) or 0)
+        except (TypeError, ValueError):
+            completed = 0
+        try:
+            size = int(getattr(info, "size", 0) or 0)
+        except (TypeError, ValueError):
+            size = 0
+
+        if progress < 1.0:
+            return False
+        if amount_left > 0:
+            return False
+        if size > 0 and completed == 0:
+            return False
+        if size > 0 and 0 < completed < size:
+            return False
+        return True
+
+    @staticmethod
+    def _filter_plan_to_hashes(plan: Dict[str, object], allowed_hashes: set[str]) -> None:
+        allowed = {str(h) for h in allowed_hashes}
+        affected = [h for h in plan.get("affected_torrents", []) if str(h) in allowed]
+        plan["affected_torrents"] = affected
+        if plan.get("torrent_hash") not in allowed and affected:
+            plan["torrent_hash"] = affected[0]
+        if plan.get("view_targets"):
+            plan["view_targets"] = [
+                target
+                for target in plan.get("view_targets", [])
+                if str(target.get("torrent_hash", "")) in allowed
+            ]
+
+    def _restore_reconcile_rows(self, rows: Sequence[Dict[str, object]]) -> None:
+        for row in rows:
+            torrent_hash = str(row.get("hash") or "")
+            if not torrent_hash:
+                continue
+            previous_state = str(row.get("_pre_pause_state") or "").strip().lower()
+            if previous_state.startswith("stopped") or previous_state.startswith("paused"):
+                row["resume_status"] = "already_repointed_kept_paused"
+                continue
+            if not self.qbit_client.resume_torrent(torrent_hash):
+                raise RuntimeError(
+                    f"Failed to restore already-repointed torrent {torrent_hash[:16]} after verify"
+                )
+            row["resume_status"] = "already_repointed"
 
     def _is_under_roots(self, path: Path, roots: List[Path]) -> bool:
         """Check if a path is under any of the given roots."""
@@ -535,6 +1128,8 @@ class DemotionExecutor:
         progress_every = 5 if total <= 50 else 25
         files_cache: Dict[str, List] = dict(preloaded_files or {})
         seen_view_targets: set[tuple[str, str]] = set()
+        view_roots_by_key: Dict[tuple[str, str], str] = {}
+        constructed_payload_roots: Dict[str, str] = {}
         skipped_hashes: set[str] = set()
 
         conn = self._get_db_connection()
@@ -562,6 +1157,9 @@ class DemotionExecutor:
                 root_name = target.get("root_name")
                 view_key = (str(target_save_path), str(root_name or ""))
                 if view_key in seen_view_targets:
+                    existing_root = view_roots_by_key.get(view_key)
+                    if existing_root:
+                        constructed_payload_roots[torrent_hash.lower()] = existing_root
                     self._log(
                         "  build_views_progress phase=skip_duplicate_view "
                         f"done={idx}/{total} hash={torrent_hash[:16]}"
@@ -593,6 +1191,12 @@ class DemotionExecutor:
                     )
                     continue
 
+                layout = derive_view_layout(
+                    payload_root=payload_root,
+                    target_save_path=target_save_path,
+                    files=files,
+                    root_name=root_name,
+                )
                 link_start = time.monotonic()
                 try:
                     result = build_torrent_view(
@@ -626,6 +1230,9 @@ class DemotionExecutor:
                     f"  build_views_progress phase=link done={idx}/{total} "
                     f"hash={torrent_hash[:16]} elapsed_s={link_elapsed:.1f}"
                 )
+                built_root = str(result.view_root.resolve())
+                view_roots_by_key[view_key] = built_root
+                constructed_payload_roots[torrent_hash.lower()] = built_root
 
             if skipped_hashes:
                 before = len(plan.get("affected_torrents") or [])
@@ -651,22 +1258,151 @@ class DemotionExecutor:
                 )
                 if not filtered_torrents:
                     raise RuntimeError("No live torrents remain after build_views file checks")
+            if constructed_payload_roots:
+                prior_roots = {
+                    str(key).strip().lower(): str(value)
+                    for key, value in (plan.get("constructed_payload_roots") or {}).items()
+                    if str(key).strip() and str(value).strip()
+                }
+                prior_roots.update(constructed_payload_roots)
+                plan["constructed_payload_roots"] = prior_roots
         finally:
             conn.close()
+
+    def _preflight_existing_view_conflicts(
+        self,
+        payload_root: Path,
+        view_targets: List[Dict],
+        plan: Dict,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
+        """Read-only check for conflicting preexisting target view paths."""
+        if not view_targets:
+            return
+
+        files_cache: Dict[str, List] = dict(preloaded_files or {})
+        seen_view_targets: set[tuple[str, str]] = set()
+        total_views = len(view_targets)
+        start_ts = time.monotonic()
+        last_progress_log = start_ts
+        checked_paths = 0
+        existing_paths = 0
+
+        conn = self._get_db_connection()
+        table_name = self._get_device_table_name(conn, plan.get("target_device_id"))
+        mount_point, preferred_mount = self._get_device_mount_info(conn, plan.get("target_device_id"))
+        path_sha_cache: Dict[str, Optional[str]] = {}
+
+        def compare_hint(src: Path, dst: Path) -> Optional[bool]:
+            if not table_name:
+                return None
+            src_sha = self._get_known_sha256_for_abs_path(
+                conn, table_name, src, mount_point, preferred_mount, path_sha_cache
+            )
+            dst_sha = self._get_known_sha256_for_abs_path(
+                conn, table_name, dst, mount_point, preferred_mount, path_sha_cache
+            )
+            if src_sha and dst_sha:
+                return src_sha == dst_sha
+            return None
+
+        try:
+            for view_idx, target in enumerate(view_targets, 1):
+                torrent_hash = str(target.get("torrent_hash") or "")
+                target_save_path = Path(str(target.get("target_save_path") or ""))
+                root_name = target.get("root_name")
+                view_key = (str(target_save_path), str(root_name or ""))
+                if view_key in seen_view_targets:
+                    continue
+                seen_view_targets.add(view_key)
+
+                if torrent_hash in files_cache:
+                    files = files_cache[torrent_hash]
+                else:
+                    self._log(
+                        "  preflight_target_views_fetch "
+                        f"view={view_idx}/{total_views} hash={torrent_hash[:16]}"
+                    )
+                    files = self.qbit_client.get_torrent_files(torrent_hash)
+                    files_cache[torrent_hash] = files
+                if not files:
+                    continue
+
+                common_prefix = _common_prefix(files)
+                single_file = payload_root.is_file()
+                layout = derive_view_layout(
+                    payload_root=payload_root,
+                    target_save_path=target_save_path,
+                    files=files,
+                    root_name=root_name,
+                )
+                view_root = layout.view_root
+                single_file_direct_dst = layout.single_file_direct_dst
+
+                for file_idx, file_row in enumerate(files, 1):
+                    rel = _normalize_rel_path(file_row.name, common_prefix, root_name, payload_root)
+                    if single_file:
+                        src = payload_root
+                        dst = single_file_direct_dst if single_file_direct_dst is not None else (view_root / rel)
+                    else:
+                        src = payload_root / rel
+                        dst = view_root / rel
+                        if len(files) == 1 and len(rel.parts) == 1 and view_root.name == rel.name:
+                            dst = view_root
+                    checked_paths += 1
+                    now = time.monotonic()
+                    if now - last_progress_log >= 5:
+                        self._log(
+                            "  preflight_target_views_progress "
+                            f"view={view_idx}/{total_views} hash={torrent_hash[:16]} "
+                            f"file={file_idx}/{len(files)} checked_paths={checked_paths} "
+                            f"existing_paths={existing_paths} elapsed_s={now - start_ts:.1f}"
+                        )
+                        last_progress_log = now
+                    if not (dst.exists() or dst.is_symlink()):
+                        continue
+                    existing_paths += 1
+                    try:
+                        _ensure_hardlink(src, dst, compare_hint=compare_hint)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Target view conflict for {torrent_hash[:16]} at {dst}: {exc}"
+                        ) from exc
+                self._log(
+                    "  preflight_target_views_view_done "
+                    f"view={view_idx}/{total_views} hash={torrent_hash[:16]} "
+                    f"checked_paths={checked_paths} existing_paths={existing_paths} "
+                    f"elapsed_s={time.monotonic() - start_ts:.1f}"
+                )
+        finally:
+            conn.close()
+        self._log(
+            "  preflight_target_views_complete "
+            f"views={len(seen_view_targets)}/{total_views} checked_paths={checked_paths} "
+            f"existing_paths={existing_paths} elapsed_s={time.monotonic() - start_ts:.1f}"
+        )
 
     def _build_relocations(self, conn: sqlite3.Connection, plan: Dict) -> List[Dict]:
         """Build relocation targets for all torrents in plan."""
         relocations = []
         view_targets = plan.get("view_targets") or []
+        constructed_roots = {
+            str(key).strip().lower(): str(value)
+            for key, value in (plan.get("constructed_payload_roots") or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
 
         if view_targets:
             for target in view_targets:
+                torrent_hash = target["torrent_hash"]
                 if not target.get("source_save_path"):
-                    raise RuntimeError(f"Missing source_save_path for torrent {target['torrent_hash']}")
+                    raise RuntimeError(f"Missing source_save_path for torrent {torrent_hash}")
                 relocations.append({
-                    "torrent_hash": target["torrent_hash"],
+                    "torrent_hash": torrent_hash,
                     "source_save_path": target.get("source_save_path"),
                     "target_save_path": target["target_save_path"],
+                    "target_payload_root": constructed_roots.get(str(torrent_hash).strip().lower()),
                 })
             return relocations
 
@@ -689,8 +1425,26 @@ class DemotionExecutor:
                 "torrent_hash": torrent_hash,
                 "source_save_path": str(source_save) if source_save else None,
                 "target_save_path": str(target_save_path),
+                "target_payload_root": constructed_roots.get(
+                    str(torrent_hash).strip().lower(),
+                    str(fallback_target),
+                ),
             })
         return relocations
+
+    def _target_payload_roots_for_relocations(self, plan: Dict, relocations: List[Dict]) -> Dict[str, Path]:
+        roots: Dict[str, Path] = {}
+        for relocation in relocations:
+            torrent_hash = str(relocation.get("torrent_hash") or "").strip().lower()
+            if not torrent_hash:
+                continue
+            target_root = str(relocation.get("target_payload_root") or "").strip()
+            if not target_root:
+                target_root = str(plan.get("target_path") or "").strip()
+            if not target_root:
+                continue
+            roots[torrent_hash] = canonicalize_path(Path(target_root).resolve())
+        return roots
 
     @staticmethod
     def _derive_target_save_path_for_torrent(target_path: Path, files: List[object]) -> Path:
@@ -1953,23 +2707,34 @@ class DemotionExecutor:
         "error",
     })
 
-    def _preflight_torrent_state_check(self, plan: Dict) -> None:
+    def _evaluate_preflight_torrent_state_check(self, plan: Dict) -> PreflightCheckStatus:
         """
-        Block execution if any affected torrent is not seed-ready.
+        Evaluate whether any affected torrent is unsafe for rehome mutation.
 
         This is the primary guard against recurrence of the Feb-2026 disaster:
         torrents that are not 100% complete carry an active qBt-downloadPath in
         their fastresume file; rehoming them via setLocation leaves that field
         pointing at the old (now-wrong) path, causing stoppedDL on next qB restart.
-
-        Raises:
-            RuntimeError: If any torrent fails the state/progress check.
         """
         torrent_hashes = plan.get("affected_torrents") or []
         if not torrent_hashes:
-            return
+            return PreflightCheckStatus(blocked=(), transient_only=False, message="")
 
+        normalization = plan.get("normalization") or {}
+        allow_missingfiles = (
+            str(normalization.get("mode") or "").strip().lower()
+            == "qb_missing_sibling_reconnect"
+        )
+        snapshot = plan.get("_reality_snapshot_pre") or {}
+        snapshot_rows = {
+            str(row.get("torrent_hash") or "").strip().lower(): row
+            for row in (snapshot.get("rows") or [])
+            if str(row.get("torrent_hash") or "").strip()
+        }
+        snapshot_group_state = str(snapshot.get("group_state") or "").strip()
         blocked: List[str] = []
+        transient_blocked = 0
+        hard_blocked = 0
 
         for torrent_hash in torrent_hashes:
             info = self.qbit_client.get_torrent_info(torrent_hash)
@@ -1977,6 +2742,7 @@ class DemotionExecutor:
                 blocked.append(
                     f"{torrent_hash[:16]}: not found in qBittorrent"
                 )
+                hard_blocked += 1
                 continue
 
             state = str(getattr(info, "state", "") or "").strip().lower()
@@ -1992,27 +2758,138 @@ class DemotionExecutor:
                 for marker in ("checking", "moving", "allocating")
             )
 
-            if state in self._PREFLIGHT_BLOCKED_STATES or is_transient:
+            snapshot_row = snapshot_rows.get(str(torrent_hash).strip().lower(), {})
+            snapshot_classification = str(snapshot_row.get("classification") or "").strip()
+            allow_row_missingfiles = bool(
+                allow_missingfiles
+                or (
+                    state == "missingfiles"
+                    and snapshot_classification in {
+                        "source_only",
+                        "target_view_missing",
+                        "stale_runtime_root",
+                        "stale_runtime_and_fastresume_root",
+                        "catalog_drift_already_targeted",
+                    }
+                    and snapshot_group_state
+                    in {
+                        "ready_repoint_or_reconcile",
+                        "blocked_target_view_missing",
+                    }
+                )
+            )
+            blocked_states = set(self._PREFLIGHT_BLOCKED_STATES)
+            if allow_row_missingfiles:
+                blocked_states.discard("missingfiles")
+
+            if state in blocked_states or is_transient:
                 blocked.append(
                     f"{torrent_hash[:16]}: unsafe state={state!r} progress={progress:.4f}"
                 )
+                if is_transient:
+                    transient_blocked += 1
+                else:
+                    hard_blocked += 1
                 continue
 
-            if progress < 0.9999:
+            if progress < 0.9999 and not (allow_row_missingfiles and state == "missingfiles"):
                 blocked.append(
                     f"{torrent_hash[:16]}: incomplete progress={progress:.4f} state={state!r}"
                 )
+                hard_blocked += 1
 
         if blocked:
             detail = "\n  ".join(blocked)
-            raise RuntimeError(
+            group_reason = str(snapshot.get("group_reason") or "").strip()
+            human_blockers: List[str] = []
+            for row in snapshot.get("rows") or []:
+                classification = str(row.get("classification") or "")
+                if classification not in {"qbit_transient", "incomplete_torrent", "qbit_missing"}:
+                    continue
+                human_blockers.append(
+                    f"{str(row.get('torrent_hash') or '')[:16]}: {row.get('operator_reason')}"
+                )
+                if len(human_blockers) >= 3:
+                    break
+            message = (
                 f"Preflight check blocked {len(blocked)}/{len(torrent_hashes)} torrent(s) — "
                 f"rehome aborted before any mutation:\n  {detail}"
             )
+            if group_reason:
+                message += f"\n  guidance: {group_reason}"
+            group_warnings = list(snapshot.get("group_warnings") or [])
+            if group_warnings:
+                message += "\n  group_warnings:\n  " + "\n  ".join(group_warnings[:3])
+            if human_blockers:
+                message += "\n  live_reads:\n  " + "\n  ".join(human_blockers)
+            return PreflightCheckStatus(
+                blocked=tuple(blocked),
+                transient_only=bool(blocked) and transient_blocked > 0 and hard_blocked == 0,
+                message=message,
+            )
 
-        self._log(
-            f"preflight_state_check passed torrents={len(torrent_hashes)}"
+        snapshot = plan.get("_reality_snapshot_pre") or {}
+        if str(snapshot.get("group_state") or "").strip() == "blocked_qbit_sibling_gap":
+            group_reason = str(snapshot.get("group_reason") or "").strip()
+            group_warnings = list(snapshot.get("group_warnings") or [])
+            message = (
+                "Preflight check blocked 1/1 payload group(s) — "
+                "rehome aborted before any mutation:\n"
+                "  qB has same-name out-of-plan sibling torrents for this payload."
+            )
+            if group_reason:
+                message += f"\n  guidance: {group_reason}"
+            if group_warnings:
+                message += "\n  group_warnings:\n  " + "\n  ".join(group_warnings[:3])
+            return PreflightCheckStatus(
+                blocked=("qbit_sibling_gap",),
+                transient_only=False,
+                message=message,
+            )
+
+        return PreflightCheckStatus(
+            blocked=(),
+            transient_only=False,
+            message=f"preflight_state_check passed torrents={len(torrent_hashes)}",
         )
+
+    def _preflight_torrent_state_check(self, plan: Dict) -> None:
+        """Block execution if any affected torrent is not seed-ready."""
+        status = self._evaluate_preflight_torrent_state_check(plan)
+        if status.blocked:
+            raise RuntimeError(status.message)
+        self._log(status.message)
+
+    def _preflight_torrent_state_check_with_settle(
+        self, plan: Dict, *, artifact_dir: Optional[Path] = None
+    ) -> None:
+        """
+        Retry transient qB preflight blockers for a bounded settle window.
+
+        qB frequently leaves torrents in a short `checkingResumeData` or
+        `moving` state immediately after a successful prior plan. Those rows are
+        unsafe to mutate, but aborting the entire remaining batch immediately is
+        needlessly brittle. For transient-only blocks, wait briefly, refresh the
+        live snapshot, and retry before failing closed.
+        """
+        attempts = 1 + max(0, int(self.preflight_settle_attempts))
+        for attempt in range(1, attempts + 1):
+            if artifact_dir is not None:
+                self._write_plan_reality_snapshot(plan, artifact_dir=artifact_dir, phase="pre")
+            status = self._evaluate_preflight_torrent_state_check(plan)
+            if not status.blocked:
+                self._log(status.message)
+                return
+            if not status.transient_only or attempt >= attempts:
+                raise RuntimeError(status.message)
+            self._log(
+                "preflight_settle_wait "
+                f"attempt={attempt}/{attempts - 1} "
+                f"wait_s={self.preflight_settle_seconds:.0f} "
+                f"blocked={len(status.blocked)}",
+                "warning",
+            )
+            time.sleep(self.preflight_settle_seconds)
 
     @staticmethod
     def _split_tags(raw_tags: Optional[str]) -> List[str]:
@@ -2219,8 +3096,10 @@ class DemotionExecutor:
         if decision == 'BLOCK':
             raise RuntimeError("Cannot execute BLOCKED plan")
 
+        artifact_dir: Optional[Path] = None
         preloaded_files = self._sanitize_plan_live_torrents(plan)
-        self._preflight_torrent_state_check(plan)
+        artifact_dir = self._relocation_artifact_dir(plan)
+        self._preflight_torrent_state_check_with_settle(plan, artifact_dir=artifact_dir)
 
         self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
 
@@ -2260,6 +3139,8 @@ class DemotionExecutor:
             self._apply_rehome_provenance_tags(plan)
             if rescan:
                 self._rescan_after_rehome(plan)
+            if artifact_dir is not None:
+                self._write_plan_reality_snapshot(plan, artifact_dir=artifact_dir, phase="post")
 
             if run_id is not None:
                 run_conn = self._get_db_connection()
@@ -2278,6 +3159,13 @@ class DemotionExecutor:
             )
 
         except Exception as e:
+            if artifact_dir is not None:
+                self._write_plan_reality_snapshot(
+                    plan,
+                    artifact_dir=artifact_dir,
+                    phase="failure",
+                    error=str(e),
+                )
             if run_id is not None:
                 run_conn = self._get_db_connection()
                 try:
@@ -2292,6 +3180,7 @@ class DemotionExecutor:
         conn = self._get_db_connection()
         try:
             relocations = self._build_relocations(conn, plan)
+            target_payload_roots = self._target_payload_roots_for_relocations(plan, relocations)
             payload_has_fs_uuid = any(
                 str(r[1]) == "fs_uuid" for r in conn.execute("PRAGMA table_info(payloads)").fetchall()
             )
@@ -2310,9 +3199,163 @@ class DemotionExecutor:
                 device_id=plan.get("target_device_id"),
                 fs_uuid=target_fs_uuid,
             )
+            source_payload_meta = None
+            if plan.get("payload_id") is not None:
+                source_payload_meta = conn.execute(
+                    """
+                    SELECT payload_hash, file_count, total_bytes, status, last_built_at
+                    FROM payloads
+                    WHERE payload_id = ?
+                    LIMIT 1
+                    """,
+                    (int(plan.get("payload_id")),),
+                ).fetchone()
+
+            def ensure_target_payload_row(
+                *,
+                target_root: Path,
+                reuse_payload_id: Optional[int] = None,
+            ) -> int:
+                target_root_text = str(target_root)
+                if payload_has_fs_uuid and target_fs_uuid:
+                    existing = conn.execute(
+                        """
+                        SELECT payload_id
+                        FROM payloads
+                        WHERE payload_hash = ? AND fs_uuid = ? AND root_path = ? AND status = 'complete'
+                        ORDER BY payload_id
+                        LIMIT 1
+                        """,
+                        (plan.get("payload_hash"), target_fs_uuid, target_root_text),
+                    ).fetchone()
+                else:
+                    existing = conn.execute(
+                        """
+                        SELECT payload_id
+                        FROM payloads
+                        WHERE payload_hash = ? AND device_id = ? AND root_path = ? AND status = 'complete'
+                        ORDER BY payload_id
+                        LIMIT 1
+                        """,
+                        (plan.get("payload_hash"), target_device_id, target_root_text),
+                    ).fetchone()
+                if existing:
+                    return int(existing[0])
+
+                payload_hash_value = str(
+                    (source_payload_meta[0] if source_payload_meta else None)
+                    or plan.get("payload_hash")
+                    or ""
+                )
+                file_count_value = int(
+                    (source_payload_meta[1] if source_payload_meta else None)
+                    or plan.get("file_count")
+                    or 0
+                )
+                total_bytes_value = int(
+                    (source_payload_meta[2] if source_payload_meta else None)
+                    or plan.get("total_bytes")
+                    or 0
+                )
+                status_value = str(
+                    (source_payload_meta[3] if source_payload_meta else None)
+                    or "complete"
+                )
+                last_built_at_value = source_payload_meta[4] if source_payload_meta else None
+
+                if reuse_payload_id is not None:
+                    if payload_has_fs_uuid:
+                        conn.execute(
+                            """
+                            UPDATE payloads
+                            SET payload_hash = ?,
+                                device_id = ?,
+                                fs_uuid = ?,
+                                root_path = ?,
+                                file_count = ?,
+                                total_bytes = ?,
+                                status = ?,
+                                last_built_at = ?,
+                                updated_at = julianday('now')
+                            WHERE payload_id = ?
+                            """,
+                            (
+                                payload_hash_value,
+                                target_device_id,
+                                target_fs_uuid,
+                                target_root_text,
+                                file_count_value,
+                                total_bytes_value,
+                                status_value,
+                                last_built_at_value,
+                                int(reuse_payload_id),
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE payloads
+                            SET payload_hash = ?,
+                                device_id = ?,
+                                root_path = ?,
+                                file_count = ?,
+                                total_bytes = ?,
+                                status = ?,
+                                last_built_at = ?,
+                                updated_at = julianday('now')
+                            WHERE payload_id = ?
+                            """,
+                            (
+                                payload_hash_value,
+                                target_device_id,
+                                target_root_text,
+                                file_count_value,
+                                total_bytes_value,
+                                status_value,
+                                last_built_at_value,
+                                int(reuse_payload_id),
+                            ),
+                        )
+                    return int(reuse_payload_id)
+
+                if payload_has_fs_uuid:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO payloads
+                            (payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status, last_built_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, julianday('now'))
+                        """,
+                        (
+                            payload_hash_value,
+                            target_device_id,
+                            target_fs_uuid,
+                            target_root_text,
+                            file_count_value,
+                            total_bytes_value,
+                            status_value,
+                            last_built_at_value,
+                        ),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO payloads
+                            (payload_hash, device_id, root_path, file_count, total_bytes, status, last_built_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, julianday('now'))
+                        """,
+                        (
+                            payload_hash_value,
+                            target_device_id,
+                            target_root_text,
+                            file_count_value,
+                            total_bytes_value,
+                            status_value,
+                            last_built_at_value,
+                        ),
+                    )
+                return int(cursor.lastrowid)
 
             if plan.get("decision") == "REUSE":
-                # Reassign torrents to payload on target device
                 target_path = plan.get("target_path")
                 same_device_reuse = (
                     target_path
@@ -2320,98 +3363,35 @@ class DemotionExecutor:
                     and source_device_id is not None
                     and int(target_device_id) == int(source_device_id)
                 )
-                if payload_has_fs_uuid and target_fs_uuid:
-                    target_payload_row = conn.execute(
-                        """
-                        SELECT payload_id
-                        FROM payloads
-                        WHERE payload_hash = ? AND fs_uuid = ? AND status = 'complete'
-                          AND (? IS NULL OR root_path = ?)
-                        ORDER BY CASE WHEN root_path = ? THEN 0 ELSE 1 END, payload_id
-                        LIMIT 1
-                        """,
-                        (
-                            plan.get("payload_hash"),
-                            target_fs_uuid,
-                            target_path,
-                            target_path,
-                            target_path,
-                        ),
-                    ).fetchone()
-                else:
-                    target_payload_row = conn.execute(
-                        """
-                        SELECT payload_id
-                        FROM payloads
-                        WHERE payload_hash = ? AND device_id = ? AND status = 'complete'
-                          AND (? IS NULL OR root_path = ?)
-                        ORDER BY CASE WHEN root_path = ? THEN 0 ELSE 1 END, payload_id
-                        LIMIT 1
-                        """,
-                        (
-                            plan.get("payload_hash"),
-                            target_device_id,
-                            target_path,
-                            target_path,
-                            target_path,
-                        ),
-                    ).fetchone()
-
-                target_payload_id: Optional[int] = None
-                if target_payload_row:
-                    target_payload_id = int(target_payload_row[0])
-                elif same_device_reuse and plan.get("payload_id") is not None:
-                    # Normalization case: target path can already exist on disk while
-                    # catalog still points to source payload row on the same device.
-                    if payload_has_fs_uuid and target_fs_uuid:
-                        source_payload_row = conn.execute(
-                            """
-                            SELECT payload_id
-                            FROM payloads
-                            WHERE payload_id = ? AND payload_hash = ? AND fs_uuid = ? AND status = 'complete'
-                            LIMIT 1
-                            """,
-                            (
-                                int(plan.get("payload_id")),
-                                plan.get("payload_hash"),
-                                target_fs_uuid,
-                            ),
-                        ).fetchone()
-                    else:
-                        source_payload_row = conn.execute(
-                            """
-                            SELECT payload_id
-                            FROM payloads
-                            WHERE payload_id = ? AND payload_hash = ? AND device_id = ? AND status = 'complete'
-                            LIMIT 1
-                            """,
-                            (
-                                int(plan.get("payload_id")),
-                                plan.get("payload_hash"),
-                                int(target_device_id),
-                            ),
-                        ).fetchone()
-                    if source_payload_row:
-                        target_payload_id = int(source_payload_row[0])
-
-                if target_payload_id is None:
-                    raise RuntimeError("Target payload not found for catalog sync")
-
-                plan["target_payload_id"] = target_payload_id
-
-                # Same-device REUSE may intentionally "re-point" the canonical payload
-                # root to an existing target view path (normalization flow).
-                if same_device_reuse:
-                    conn.execute(
-                        """
-                        UPDATE payloads
-                        SET root_path = ?, updated_at = julianday('now')
-                        WHERE payload_id = ?
-                        """,
-                        (target_path, target_payload_id),
+                primary_hash = str(plan.get("torrent_hash") or "").strip().lower()
+                target_payload_ids: Dict[str, int] = {}
+                for r in relocations:
+                    torrent_hash = str(r.get("torrent_hash") or "").strip().lower()
+                    target_root = target_payload_roots.get(torrent_hash)
+                    if target_root is None:
+                        raise RuntimeError(f"Missing target payload root for catalog sync: {torrent_hash}")
+                    reuse_payload_id = None
+                    if (
+                        same_device_reuse
+                        and plan.get("payload_id") is not None
+                        and torrent_hash == primary_hash
+                        and str(target_root) == str(target_path)
+                    ):
+                        reuse_payload_id = int(plan.get("payload_id"))
+                    target_payload_ids[torrent_hash] = ensure_target_payload_row(
+                        target_root=target_root,
+                        reuse_payload_id=reuse_payload_id,
                     )
 
+                plan["target_payload_ids"] = target_payload_ids
+                plan["target_payload_id"] = target_payload_ids.get(primary_hash) or next(
+                    iter(target_payload_ids.values()),
+                    None,
+                )
+
                 for r in relocations:
+                    torrent_hash = str(r.get("torrent_hash") or "").strip().lower()
+                    target_payload_id = target_payload_ids[torrent_hash]
                     if torrent_has_fs_uuid:
                         conn.execute(
                             """
@@ -2424,7 +3404,7 @@ class DemotionExecutor:
                                 target_device_id,
                                 target_fs_uuid,
                                 r.get("target_save_path"),
-                                r.get("torrent_hash"),
+                                torrent_hash,
                             ),
                         )
                     else:
@@ -2438,52 +3418,72 @@ class DemotionExecutor:
                                 target_payload_id,
                                 target_device_id,
                                 r.get("target_save_path"),
-                                r.get("torrent_hash"),
+                                torrent_hash,
                             ),
                         )
 
                 self._sync_files_catalog_for_reuse_cleanup(conn, plan)
 
             elif plan.get("decision") == "MOVE":
-                plan["target_payload_id"] = plan.get("payload_id")
-                # Update payload location
-                if payload_has_fs_uuid:
-                    conn.execute(
-                        """
-                        UPDATE payloads
-                        SET device_id = ?, fs_uuid = ?, root_path = ?, updated_at = julianday('now')
-                        WHERE payload_id = ?
-                        """,
-                        (target_device_id, target_fs_uuid, plan.get("target_path"), plan.get("payload_id")),
-                    )
-                else:
-                    conn.execute(
-                        """
-                        UPDATE payloads
-                        SET device_id = ?, root_path = ?, updated_at = julianday('now')
-                        WHERE payload_id = ?
-                        """,
-                        (target_device_id, plan.get("target_path"), plan.get("payload_id"))
+                primary_hash = str(plan.get("torrent_hash") or "").strip().lower()
+                target_payload_ids: Dict[str, int] = {}
+                primary_target_root = target_payload_roots.get(primary_hash)
+                for r in relocations:
+                    torrent_hash = str(r.get("torrent_hash") or "").strip().lower()
+                    target_root = target_payload_roots.get(torrent_hash)
+                    if target_root is None:
+                        raise RuntimeError(f"Missing target payload root for MOVE catalog sync: {torrent_hash}")
+                    reuse_payload_id = None
+                    if (
+                        plan.get("payload_id") is not None
+                        and (
+                            torrent_hash == primary_hash
+                            or (primary_target_root is not None and target_root == primary_target_root)
+                        )
+                    ):
+                        reuse_payload_id = int(plan.get("payload_id"))
+                    target_payload_ids[torrent_hash] = ensure_target_payload_row(
+                        target_root=target_root,
+                        reuse_payload_id=reuse_payload_id,
                     )
 
+                plan["target_payload_ids"] = target_payload_ids
+                plan["target_payload_id"] = target_payload_ids.get(primary_hash) or next(
+                    iter(target_payload_ids.values()),
+                    None,
+                )
+
                 for r in relocations:
+                    torrent_hash = str(r.get("torrent_hash") or "").strip().lower()
+                    target_payload_id = target_payload_ids[torrent_hash]
                     if torrent_has_fs_uuid:
                         conn.execute(
                             """
                             UPDATE torrent_instances
-                            SET device_id = ?, fs_uuid = ?, save_path = ?
+                            SET payload_id = ?, device_id = ?, fs_uuid = ?, save_path = ?
                             WHERE torrent_hash = ?
                             """,
-                            (target_device_id, target_fs_uuid, r.get("target_save_path"), r.get("torrent_hash")),
+                            (
+                                target_payload_id,
+                                target_device_id,
+                                target_fs_uuid,
+                                r.get("target_save_path"),
+                                torrent_hash,
+                            ),
                         )
                     else:
                         conn.execute(
                             """
                             UPDATE torrent_instances
-                            SET device_id = ?, save_path = ?
+                            SET payload_id = ?, device_id = ?, save_path = ?
                             WHERE torrent_hash = ?
                             """,
-                            (target_device_id, r.get("target_save_path"), r.get("torrent_hash"))
+                            (
+                                target_payload_id,
+                                target_device_id,
+                                r.get("target_save_path"),
+                                torrent_hash,
+                            ),
                         )
 
                 self._sync_files_catalog_for_move(conn, plan)
@@ -2786,10 +3786,12 @@ class DemotionExecutor:
         # 1. Verify existing payload on stash
         t0 = time.monotonic()
         self._log(f"step=verify_stash_payload path={target_path}")
-        if not self._verify_file_count(target_path, plan['file_count']):
-            raise RuntimeError(f"Stash payload file count mismatch at {target_path}")
-        if not self._verify_total_bytes(target_path, plan['total_bytes']):
-            raise RuntimeError(f"Stash payload total bytes mismatch at {target_path}")
+        self._assert_path_matches_expected(
+            target_path,
+            expected_count=plan["file_count"],
+            expected_bytes=plan["total_bytes"],
+            label="Stash payload",
+        )
 
         # Spot-check (optional)
         self._spot_check_payload(target_path, target_device_id, spot_check)
@@ -2797,6 +3799,13 @@ class DemotionExecutor:
 
         # Build views (if mapping provided)
         t0 = time.monotonic()
+        self._log("step=preflight_target_views")
+        self._preflight_existing_view_conflicts(
+            target_path,
+            plan.get("view_targets") or [],
+            plan,
+            preloaded_files=preloaded_files,
+        )
         self._log("step=build_views")
         self._build_views(
             target_path,
@@ -2841,10 +3850,12 @@ class DemotionExecutor:
         decision = str(plan.get("decision") or "").upper()
         if decision == "REUSE":
             self._log(f"step=verify_pool_payload path={target_path}")
-            if not self._verify_file_count(target_path, plan["file_count"]):
-                raise RuntimeError(f"Pool payload file count mismatch at {target_path}")
-            if not self._verify_total_bytes(target_path, plan["total_bytes"]):
-                raise RuntimeError(f"Pool payload total bytes mismatch at {target_path}")
+            self._assert_path_matches_expected(
+                target_path,
+                expected_count=plan["file_count"],
+                expected_bytes=plan["total_bytes"],
+                label="Pool payload",
+            )
             self._spot_check_payload(target_path, target_device_id, spot_check)
             return TargetDonor(
                 source_path=source_path,
@@ -2858,29 +3869,57 @@ class DemotionExecutor:
 
         self._log(f"step=verify_source path={source_path}")
         moved_payload = False
-        move_strategy = "rename"
+        move_strategy = "rsync_copy_first"
+        target_preexisting = target_path.exists()
+        target_stats = self._path_stats(target_path)
+        cleanup_partial_target = not target_preexisting
 
         if source_path.exists():
-            if not self._verify_file_count(source_path, plan["file_count"]):
-                raise RuntimeError("Source file count mismatch")
-            if not self._verify_total_bytes(source_path, plan["total_bytes"]):
-                raise RuntimeError("Source total bytes mismatch")
+            self._assert_path_matches_expected(
+                source_path,
+                expected_count=plan["file_count"],
+                expected_bytes=plan["total_bytes"],
+                label="Source payload",
+            )
 
-            is_cross_fs = self._is_cross_filesystem(source_path, target_path.parent)
-            if target_path.exists() and not is_cross_fs:
-                raise RuntimeError(f"Target path already exists before move: {target_path}")
-
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                if is_cross_fs:
-                    move_strategy = "rsync_copy"
-                    self._copy_with_rsync_progress(source_path, target_path)
+            if target_preexisting:
+                if self._path_stats_match(target_stats, plan["file_count"], plan["total_bytes"]):
+                    move_strategy = "idempotent_reconcile"
+                    self._log(
+                        "step=verify_target "
+                        f"target_preexisting=true mode=idempotent_reconcile "
+                        f"{self._format_path_stats(target_stats, expected_count=plan['file_count'], expected_bytes=plan['total_bytes'])}"
+                    )
+                elif not self._path_stats_empty(target_stats):
+                    raise RuntimeError(
+                        "Refusing MOVE into preexisting non-empty target "
+                        + self._format_path_stats(
+                            target_stats,
+                            expected_count=plan["file_count"],
+                            expected_bytes=plan["total_bytes"],
+                        )
+                    )
                 else:
-                    self._log(f"step=move_payload method=rename source={source_path} target={target_path}")
-                    shutil.move(str(source_path), str(target_path))
-                moved_payload = True
-            except Exception as e:
-                raise RuntimeError(f"Failed to move payload: {e}")
+                    cleanup_partial_target = True
+
+            if move_strategy != "idempotent_reconcile":
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    self._copy_with_rsync_progress(source_path, target_path)
+                    moved_payload = True
+                except Exception as e:
+                    if cleanup_partial_target and target_path.exists():
+                        try:
+                            if target_path.is_dir():
+                                shutil.rmtree(target_path)
+                            else:
+                                target_path.unlink()
+                        except Exception as cleanup_error:
+                            self._log(
+                                f"cleanup_partial_target_failed path={target_path} error={cleanup_error}",
+                                "warning",
+                            )
+                    raise RuntimeError(f"Failed to move payload: {e}")
         else:
             if not target_path.exists():
                 raise RuntimeError(f"Source path does not exist: {source_path}")
@@ -2888,10 +3927,12 @@ class DemotionExecutor:
             self._log("step=verify_source source_missing=true mode=idempotent_reconcile", "warning")
 
         self._log(f"step=verify_target path={target_path}")
-        if not self._verify_file_count(target_path, plan["file_count"]):
-            raise RuntimeError("Target file count mismatch after move")
-        if not self._verify_total_bytes(target_path, plan["total_bytes"]):
-            raise RuntimeError("Target total bytes mismatch after move")
+        self._assert_path_matches_expected(
+            target_path,
+            expected_count=plan["file_count"],
+            expected_bytes=plan["total_bytes"],
+            label="Target payload after move",
+        )
         self._spot_check_payload(target_path, target_device_id, spot_check)
 
         return TargetDonor(
@@ -2901,6 +3942,7 @@ class DemotionExecutor:
             acquisition_mode="copied" if move_strategy != "idempotent_reconcile" else "existing",
             move_strategy=move_strategy,
             moved_payload=moved_payload,
+            target_preexisting=target_preexisting,
         )
 
     def _build_execute_plan_for_donor(self, plan: Dict, donor: TargetDonor) -> Dict:
@@ -2925,6 +3967,13 @@ class DemotionExecutor:
         target_path = donor.target_path
 
         t0 = time.monotonic()
+        self._log("step=preflight_target_views")
+        self._preflight_existing_view_conflicts(
+            target_path,
+            plan.get("view_targets") or [],
+            plan,
+            preloaded_files=preloaded_files,
+        )
         self._log("step=build_views")
         self._build_views(
             target_path,
@@ -2946,7 +3995,15 @@ class DemotionExecutor:
         self._log("step=relocate_siblings")
         if self.reuse_transport == "fastresume":
             self._log("  reuse_transport=fastresume")
-            self._repoint_torrents_via_fastresume_batch(relocations)
+            phase_times.update(
+                self._attach_torrents_via_hardened_fastresume(
+                    plan,
+                    donor,
+                    relocations=relocations,
+                    preloaded_files=preloaded_files,
+                )
+            )
+            return phase_times
         elif allow_set_location_fallback and self.reuse_transport == "set_location":
             self._log("  reuse_transport=set_location", "warning")
             self._relocate_torrents_atomic(relocations)
@@ -2963,6 +4020,50 @@ class DemotionExecutor:
             self._log(f"  MANUAL_ACTION_REQUIRED: Verify torrents work, then delete {source_path}", "warning")
         else:
             plan.pop("cleanup_source_deferred_path", None)
+
+    def _cleanup_unused_target_donor(self, plan: Dict, donor: TargetDonor) -> bool:
+        snapshot = plan.get("_reality_snapshot_pre") or {}
+        summary = snapshot.get("summary") or {}
+        if int(summary.get("out_of_plan_siblings", 0) or 0) > 0:
+            self._log(
+                "  cleanup_unused_target_donor_skipped "
+                "reason=out_of_plan_siblings_present",
+                "warning",
+            )
+            return False
+
+        constructed_roots = {
+            canonicalize_path(Path(str(value)).resolve())
+            for value in (plan.get("constructed_payload_roots") or {}).values()
+            if str(value).strip()
+        }
+        protected_targets = set(constructed_roots)
+        for entry in (plan.get("payload_group") or []):
+            for key in ("dest_content_path", "target_path", "target_payload_root"):
+                raw = str(entry.get(key) or "").strip()
+                if not raw:
+                    continue
+                protected_targets.add(canonicalize_path(Path(raw).resolve()))
+        donor_root = canonicalize_path(donor.target_path.resolve())
+        if donor_root in protected_targets or not constructed_roots:
+            return False
+        if not donor_root.exists():
+            return False
+
+        try:
+            if donor_root.is_dir():
+                shutil.rmtree(donor_root)
+            else:
+                donor_root.unlink()
+            plan["cleanup_unused_target_donor"] = str(donor_root)
+            self._log(f"  cleanup_unused_target_donor path={donor_root}")
+            return True
+        except Exception as exc:
+            self._log(
+                f"  cleanup_unused_target_donor_failed path={donor_root} error={exc}",
+                "warning",
+            )
+            return False
 
     def _rollback_move_donor(self, execute_plan: Dict, donor: TargetDonor) -> None:
         self._log("relocation_failed rolling_back_payload", "error")
@@ -2988,49 +4089,8 @@ class DemotionExecutor:
         self._rollback_partial_target_views(execute_plan)
 
     def _cleanup_move_source_after_success(self, plan: Dict, donor: TargetDonor) -> str:
-        cleanup_source_status = "deleted"
-        source_path = donor.source_path
-        plan["cleanup_source_deferred"] = False
-        plan.pop("cleanup_source_deferred_path", None)
-
-        if donor.move_strategy == "rsync_copy" and source_path.exists():
-            self._log(f"step=cleanup_source_after_rsync path={source_path}")
-            try:
-                self._delete_path(source_path)
-            except Exception as e:
-                if self._is_permission_error(e):
-                    self._log(
-                        f"cleanup_source_permission_denied path={source_path} error={e}",
-                        "warning",
-                    )
-                    repaired = self._repair_permissions_for_cleanup(source_path)
-                    if repaired:
-                        try:
-                            self._delete_path(source_path)
-                            self._log(
-                                f"cleanup_source_after_rsync recovered=true path={source_path}",
-                                "success",
-                            )
-                        except Exception as retry_exc:
-                            cleanup_source_status = "deferred"
-                            plan["cleanup_source_deferred"] = True
-                            plan["cleanup_source_deferred_path"] = str(source_path)
-                            self._log(
-                                f"cleanup_source_deferred path={source_path} error={retry_exc}",
-                                "warning",
-                            )
-                    else:
-                        cleanup_source_status = "deferred"
-                        plan["cleanup_source_deferred"] = True
-                        plan["cleanup_source_deferred_path"] = str(source_path)
-                        self._log(
-                            f"cleanup_source_deferred path={source_path} "
-                            "reason=permission_repair_failed",
-                            "warning",
-                        )
-                else:
-                    raise RuntimeError(f"Failed to remove source after rsync move: {e}") from e
-        return cleanup_source_status
+        self._mark_cleanup_pending(plan, donor.source_path, donor.target_path)
+        return "deferred" if bool(plan.get("cleanup_source_deferred")) else "not_required"
 
     def _execute_reuse(
         self,
@@ -3052,6 +4112,7 @@ class DemotionExecutor:
             allow_set_location_fallback=True,
         )
         phase_times.update(attach_times)
+        self._cleanup_unused_target_donor(execute_plan, donor)
 
         t0 = time.monotonic()
         self._log(f"step=cleanup_stash path={donor.source_path} relocated={len(plan.get('affected_torrents') or [])}")
@@ -3086,6 +4147,7 @@ class DemotionExecutor:
                 allow_set_location_fallback=False,
             )
             phase_times.update(attach_times)
+            self._cleanup_unused_target_donor(execute_plan, donor)
         except Exception:
             self._rollback_move_donor(execute_plan, donor)
             raise

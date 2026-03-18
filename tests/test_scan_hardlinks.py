@@ -333,3 +333,113 @@ def test_full_scan_rehashes_unchanged_when_sha256_missing(tmp_path):
     ).fetchone()
     conn.close()
     assert repaired is not None and repaired[0] is not None and repaired[1] is not None
+
+
+def test_drift_policy_full_rehashes_same_metadata_content_change(tmp_path):
+    """Full drift policy should catch changed bytes even when size and mtime match."""
+    file_path = tmp_path / "drift.bin"
+    original = b"A" * 4096
+    drifted = b"B" * 4096
+    file_path.write_bytes(original)
+    original_stat = file_path.stat()
+
+    db_path = tmp_path.parent / f"{tmp_path.name}_catalog.db"
+    first = scan_path(db_path, tmp_path, hash_mode="full", quiet=True)
+    assert first.files_added == 1
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    device_id = os.stat(tmp_path).st_dev
+    table_name = f"files_{device_id}"
+    before = cursor.execute(
+        f"SELECT quick_hash, sha1, sha256 FROM {table_name} WHERE path LIKE ?",
+        ("%drift.bin",),
+    ).fetchone()
+    conn.close()
+
+    assert before is not None
+    assert before[0] is not None
+    assert before[1] is not None
+    assert before[2] is not None
+
+    file_path.write_bytes(drifted)
+    os.utime(file_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    second = scan_path(
+        db_path,
+        tmp_path,
+        hash_mode="full",
+        drift_policy="full",
+        quiet=True,
+    )
+
+    assert second.files_updated == 1
+    assert second.files_unchanged == 0
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    after = cursor.execute(
+        f"SELECT quick_hash, sha1, sha256 FROM {table_name} WHERE path LIKE ?",
+        ("%drift.bin",),
+    ).fetchone()
+    conn.close()
+
+    assert after is not None
+    assert after[0] != before[0]
+    assert after[1] != before[1]
+    assert after[2] != before[2]
+
+
+def test_drift_policy_quick_escalates_to_full_on_quick_hash_mismatch(tmp_path):
+    """Quick drift policy should escalate to full hashing when unchanged metadata drifts."""
+    file_path = tmp_path / "quick-drift.bin"
+    original = (b"front" * 256) + (b"tail" * 256)
+    drifted = (b"drift" * 256) + (b"tail" * 256)
+    file_path.write_bytes(original)
+    original_stat = file_path.stat()
+
+    db_path = tmp_path.parent / f"{tmp_path.name}_catalog.db"
+    first = scan_path(db_path, tmp_path, hash_mode="fast", quiet=True)
+    assert first.files_added == 1
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    device_id = os.stat(tmp_path).st_dev
+    table_name = f"files_{device_id}"
+    before = cursor.execute(
+        f"SELECT quick_hash, sha1, sha256 FROM {table_name} WHERE path LIKE ?",
+        ("%quick-drift.bin",),
+    ).fetchone()
+    conn.close()
+
+    assert before is not None
+    assert before[0] is not None
+    assert before[1] is None
+    assert before[2] is None
+
+    file_path.write_bytes(drifted)
+    os.utime(file_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    second = scan_path(
+        db_path,
+        tmp_path,
+        hash_mode="fast",
+        drift_policy="quick",
+        quiet=True,
+    )
+
+    assert second.files_updated == 1
+    assert second.files_unchanged == 0
+
+    conn = connect_db(db_path)
+    cursor = conn.cursor()
+    after = cursor.execute(
+        f"SELECT quick_hash, sha1, sha256 FROM {table_name} WHERE path LIKE ?",
+        ("%quick-drift.bin",),
+    ).fetchone()
+    conn.close()
+
+    assert after is not None
+    assert after[0] != before[0]
+    assert after[1] is not None
+    assert after[2] is not None

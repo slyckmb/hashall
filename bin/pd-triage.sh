@@ -19,6 +19,8 @@
 #   --hash HASH  Limit output to specific broken hash(es) (comma-separated, prefix OK)
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/qb-cache.sh"
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null
 QB_URL="http://localhost:9003"
 QB_USER="$QBITTORRENTAPI_USERNAME"
@@ -38,13 +40,8 @@ COOKIE=$(mktemp /tmp/qb.XXXXXX)
 TMPD=$(mktemp -d /tmp/pd_triage.XXXXXX)
 trap 'rm -rf "$TMPD" "$COOKIE"' EXIT
 
-# ── Login ─────────────────────────────────────────────────────────────────────
-curl -fsS --max-time 15 -c "$COOKIE" -X POST "$QB_URL/api/v2/auth/login" \
-  --data-urlencode "username=$QB_USER" \
-  --data-urlencode "password=$QB_PASS" >/dev/null
-
-# ── Fetch all torrents ─────────────────────────────────────────────────────────
-curl -fsS --max-time 30 -b "$COOKIE" "$QB_URL/api/v2/torrents/info" > "$TMPD/all_torrents.json"
+# ── Fetch all torrents via shared cache ───────────────────────────────────────
+qb_cache_fetch_torrents_info "$TMPD/all_torrents.json" 15 5 15
 
 # ── Step 1: identify PD hashes and their good candidates ──────────────────────
 python3 - "$DB" "$TMPD" "$FILTER_HASHES" << 'PYEOF'

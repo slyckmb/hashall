@@ -20,6 +20,7 @@ A unified catalog system for file deduplication and management. Hashall maintain
 - 📦 **ZFS Ready** - Built for ZFS + jdupes + qBittorrent workflows
 - 📊 **Progress Bars** - tqdm-powered feedback for all operations
 - 🎯 **Payload Identity** - Track multiple torrents pointing to same content
+- 🧱 **Per-Item Payload Trees** - Materialize unique qB item layouts from donor payloads via hardlinks instead of unnecessary byte-copy duplication
 
 ---
 
@@ -120,7 +121,7 @@ hashall link execute 1 --dry-run
 hashall link execute 1
 ```
 
-See `docs/tooling/link-guide.md` for complete workflow.
+See `docs/tooling/CLI-OPERATIONS.md` for the canonical workflow.
 
 ### 5. View Device Statistics
 
@@ -160,6 +161,8 @@ hashall payload siblings <torrent_hash>
 ```
 
 **Payload identity** tracks the on-disk content independently of torrent metadata. Different torrents (v1/v2, different piece sizes, different sources) that point to identical content map to the same payload.
+
+For qB workflows, the goal is not “one physical copy per torrent.” The goal is “one correct on-disk payload tree per torrent item,” normally instantiated from donor content via hardlinks when the filesystem allows it.
 
 ---
 
@@ -299,7 +302,7 @@ See `benchmarks/` for detailed results and analysis.
 - **Canonical paths** - Symlinks resolved to avoid double-scanning
 - **Direct SQL** - No JSON intermediates, fast queries
 
-See `docs/architecture/architecture.md` for complete details.
+See `docs/architecture/SYSTEM.md` for the canonical architecture overview.
 
 ---
 
@@ -315,7 +318,7 @@ hashall export old.db --root /pool --out /tmp/pool.json
 hashall import /tmp/pool.json --device /pool
 ```
 
-See `docs/architecture/architecture.md` for migration guide.
+See `docs/tooling/REHOME-RUNBOOK.md` for the canonical migration/runbook flow.
 
 ---
 
@@ -351,7 +354,7 @@ See `docs/architecture/architecture.md` for migration guide.
 ## 🤝 Contributing
 
 Contributions welcome! Please:
-1. Read `docs/architecture/architecture.md` to understand the unified catalog model
+1. Read `docs/architecture/SYSTEM.md` to understand the unified catalog model
 2. Check existing issues or create a new one
 3. Submit PRs with tests and documentation
 

@@ -3,11 +3,35 @@
 Canonical state document:
 `docs/operations/RUN-STATE.md`
 
-Prompt-critical context (2026-03-06):
+Prompt-critical context (2026-03-12):
 
+- `hashall` is now `0.8.0`.
+- qB cache/profile hardening landed in this repo:
+  - local cache:
+    - `src/hashall/qb_cache.py`
+    - `bin/qb-cache-agent.py`
+    - `bin/qb-cache-daemon.py`
+  - local cache root:
+    - `~/.cache/hashall-qb/`
+  - qB compatibility/profile detection now lives in:
+    - `src/hashall/qbittorrent.py`
+  - normalized pause-state aliases:
+    - `pausedDL` / `stoppedDL` -> `stoppedDL`
+    - `pausedUP` / `stoppedUP` -> `stoppedUP`
+  - read-heavy hashall qB scripts now prefer the local cache by default
+  - external qbitui dashboard/cache alignment remains separate follow-up work
+
+- New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
+  - `bin/qb-zfs-relocate.py` (`v0.1.8`)
+  - `src/hashall/qb_zfs_relocate.py`
+  - guarded phases: `plan/copy/verify/validate/patch/resume/cleanup/rollback`
+  - shared parser: `src/hashall/bencode.py`
+  - validation slice now passes locally for its targeted relocation tests.
+  - wrapper flows now preserve timestamped manifests under `out/qb-zfs-relocate/pool-data-to-media/runs/<stamp>/manifest.json`
+  - cleanup is now staged-safe and available both standalone and via `migrate --auto-cleanup=safe`
 - Use worktree/branch:
-  - `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260305-181919`
-  - `chatrap/codex-hashall-20260305-181919`
+  - `/home/michael/dev/work/hashall/.agent/worktrees/codex-hashall-20260307-234425`
+  - `chatrap/codex-hashall-20260307-234425`
 - Latest fixed blocker:
   - `qb-stoppeddl-drain` empty-bucket index now no-ops cleanly.
   - commit `657eccc`, script semver `0.1.23`.
@@ -16,7 +40,124 @@ Prompt-critical context (2026-03-06):
 - New identity repair tooling is now live:
   - `hashall doctor repair-identity`
   - `bin/hashall-fs-identity-repair.py` (`v0.1.1`)
-  - `hashall` version now `0.4.133`.
+  - `hashall` version now `0.7.0`.
+  - active docs are now intentionally minimal and stub-free; use the canonical set in `docs/README.md` and archive superseded material instead of leaving active-tree pointers.
+  - anchor invariant for all migration/rehome work:
+    - a qB item needs its own correct payload tree / file-structure instantiation on disk
+    - that tree should normally be instantiated from donor payloads via hardlinks
+    - `unique target` means unique per-item payload structure, not duplicate physical byte copies
+  - newest scan/refresh drift hardening:
+    - `hashall scan` now supports `--drift-policy metadata|quick|full`
+    - `hashall refresh --verbose` now accepts:
+      - `--scan-hash-mode fast|full|upgrade`
+      - `--drift-policy metadata|quick|full`
+    - use `--drift-policy quick` for routine confidence scans and `--drift-policy full` for true drift-audit passes
+  - latest hardlink-normalization fixes:
+    - `src/rehome/view_builder.py` now relinks identical existing destination files to donor inodes
+    - `bin/qb-repair-fresh.py` now relinks identical existing repair targets the same way
+    - successful runs should no longer preserve copied bytes in those two paths just because the destination file already existed
+  - latest planner stale-no-op hardening:
+    - `relocate-plan` now skips groups when all per-hash view targets are already `source_save_path == target_save_path`
+    - this removes fully converged families from the active remainder even when source cleanup is still deferred
+  - latest live Brave proof:
+    - `Brave.New.World.US.S01...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-114142-66eebb2df636b12a/`
+    - fresh remainder plan drops from `31` to `29` candidates
+  - latest Twisters bridge hardening:
+    - planner prefers surviving target donors for stale already-targeted rows
+    - unique single-file targets now keep `root_dir/file` layout
+    - mixed `reconcile_subset + patch_one` manifests are supported
+    - qB is restarted automatically after validate/patch failures that happen after `qb_stop`
+    - reality snapshots classify this lane as `stale_runtime_and_fastresume_root`
+  - latest live proof:
+    - `Twisters.2024...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-112558-9962465e30b69544/`
+    - `9/9` verified `exact_tree`
+    - `reconcile_rows=8 patch_rows=1`
+  - latest planner-expansion hardening:
+    - `relocate-plan` now includes already-targeted same-`payload_hash` siblings instead of silently limiting batches to source-root members
+  - newest migration invariant:
+    - multi-hash root-relocation plans now default to per-hash unique target roots
+    - `qb-missing-remediate` reconnect plans now follow the same rule
+    - stash->pool `rehome` view planning now also routes multi-hash groups into `_rehome-unique/<hash>` targets
+    - successful attaches now remove an unused intermediate donor root when the full sibling group is covered in-plan
+    - use this to distinguish old hitchhiker debt from new runs, which should now converge toward unique per-hash payload trees backed by hardlinks
+  - active remainder baseline is now:
+    - `out/rehome-plan-pool-data-to-media-refresh6-20260313.json`
+    - `out/rehome-plan-pool-data-to-media-refresh6-20260313-drift.json`
+    - `plans=31`
+    - `rows=189`
+    - `attention_rows=167`
+    - `plans_with_out_of_plan_siblings=11`
+    - `23 ready_repoint_or_reconcile`
+    - `5 blocked_qbit_sibling_gap`
+    - `3 blocked_target_view_missing`
+  - latest live proof before the planner flip:
+    - `Cinderella.2021...` succeeded at `~/.logs/hashall/reports/rehome-relocate/20260313-095751-578fffbfe4fc2f8c/`
+    - its post snapshot still warned about a shared payload row because the run started before the de-hitchhike planner landed
+  - next clean live slice:
+    - `out/rehome-plan-pool-data-to-media-twisters-only-20260313.json`
+    - `out/rehome-plan-pool-data-to-media-twisters-only-20260313-drift.json`
+    - `MOVE`
+    - `affected_torrents=9`
+    - `out_of_plan_siblings=0`
+    - `unique_view_targets=9`
+  - latest preflight feedback hardening:
+    - `_preflight_existing_view_conflicts()` now emits:
+      - `preflight_target_views_progress`
+      - `preflight_target_views_view_done`
+      - `preflight_target_views_complete`
+    - this closes the long quiet window between `step=verify_target` and `step=build_views`
+  - latest `rehome` target-view hardening:
+    - `step=preflight_target_views` now runs before `build_views`
+    - conflicting preexisting target-view files are detected read-only and block the plan before any sibling view mutation
+    - this closes the `Novitiate...` partial-view-build risk
+    - live proof:
+      - `The.Long.Walk.2025...` `REUSE` completed cleanly at `~/.logs/hashall/reports/rehome-relocate/20260312-214219-38c7f2c20c7af677/`
+  - current live migration baseline:
+    - `old_path_count=34`
+    - `new_path_count=317`
+    - next source-of-truth remainder plan:
+      - `out/rehome-plan-pool-data-to-media-liveqb-20260313.json`
+      - `seed_scope=live_qb_root`
+      - `qbit_hashes=34`
+      - `mapped_payloads=14`
+      - `14` candidates (`7 REUSE`, `7 MOVE`, `0` skipped)
+      - `covered old-root hashes=34/34`
+    - qB health:
+      - `stalledup=5147`
+      - `uploading=5`
+      - `stoppeddl=1` (`Alien Romulus`, repair lane only)
+      - `stalleddl=2` (outside the pool-data lane under `/data/media/.../radarr`)
+    - explicit next proving task:
+      - use the `Alien Romulus` sibling family next
+      - current observed scope:
+        - `14` sibling candidates
+        - `7` `~noHL` siblings
+        - one known incomplete `PD` row (`1376e795...`)
+      - goal:
+        - prove that rehome/repair can bring the `~noHL` siblings over to `pool-media`
+        - keep the resulting destination as unique per-item payload trees backed by hardlinks where possible
+  - latest stale reconnect proof:
+    - `Peppermint...` old `/data -> /pool/data` reuse-drift lane is now remediated
+    - `qb-missing-remediate` now builds guarded reconnect plans for `root_drift_after_rehome_reuse` rows when the surviving mapped target payload exists under a different catalog `payload_hash`
+    - live report dir:
+      - `~/.logs/hashall/reports/rehome-relocate/20260312-212329-4f2ac41db39d760f/`
+    - source audit now returns `0` rows for:
+      - `hashall rehome qb-missing-audit --source-root /data/media/torrents/seeding --target-root /pool/data/media/torrents/seeding`
+  - `rehome` now has a shared stale-assumption / reality layer:
+    - module: `src/rehome/reality.py`
+    - CLI: `hashall rehome drift-audit --plan <plan.json>`
+    - every `rehome apply` artifact dir now includes:
+      - `reality-pre.json`
+      - `reality-post.json`
+      - `reality-failure.json`
+    - preflight failures now include plain-English guidance and sample live blocker reads from the snapshot
+  - latest follow-up fix for that reality layer:
+    - source-only `MOVE` rows are no longer mislabeled as `target_view_missing`
+    - `qb-libtorrent-verify.py` now treats `exact_tree + verify_ratio=1.0 + no_recheck_transition + healthy upload state` as success
+    - post-apply target-side qB checking is now reported as `post_apply_settling` / `settling_after_apply`, not as a false blocked drift state
+    - `rehome apply` now accepts generated batch slices that only contain a top-level `plans` list
+    - drift snapshots now expose uncovered same-payload siblings via `out_of_plan_siblings` / `group_warnings`
+    - live proof: `David Khune - Wakanda - Native American Magic.epub` rerun succeeded at `~/.logs/hashall/reports/rehome-relocate/20260312-145812-6bb9bb5432f39cbb/`
 - Known catalog inconsistencies to account for in migrations and repair logic:
   - stale/missing device identities in payload/torrent tables (`141`, `NULL`, legacy `49`).
   - parked negative `device_id` in devices table.
@@ -31,6 +172,90 @@ Prompt-critical context (2026-03-06):
   - read-only lookup bug is fixed and regression-tested.
   - live `hashall devices migrate-files-tables` execution completed successfully with snapshot + post-preflight verification.
   - next-agent work should treat fs_uuid-backed files tables as the current production model.
+  - qB relocation has already completed live 2-item migrate pilots successfully on 2026-03-08 (`resume_ok=2`, `exit_code=0` for both runs).
+  - cleanup dry-runs against both successful migrate manifests returned `blocked=0`, `dryrun=2`.
+  - live cleanup has now completed for both successful batches; the four source payloads are gone from `/pool/data/media/torrents/seeding`.
+  - resume observe now honors `PILOT_OBSERVE_SECONDS`; wrapper default is `60`.
+  - latest `v0.1.4` live run completed with `resume_ok=2`, `cleaned=2`, `blocked=0`, and a real `60s` resume soak.
+  - new planner commit `e572bf8` added `hashall rehome relocate-plan` for explicit root-to-root relocation planning.
+  - that planner can now surface shared-root sibling payload groups and synthesize unique destination views for `2-to-1 -> 2-to-2` planning.
+  - `rehome apply` is now wired to the hardened `qb-zfs-relocate` backend for donor verification, offline fastresume mutation, restart checks, and deferred cleanup.
+  - commit `65eaa82` lets `qb-zfs-relocate` reuse an already-present destination payload when the old source path is gone.
+  - a new `hashall rehome qb-missing-audit` command classifies stale-root `missingFiles` cohorts; the current live cohort is `49` items, currently reported as `root_drift_fastresume_stale`.
+  - `qb-start-seeding-gradual` halt set (`35` hashes) is a subset of that `49` cohort.
+  - the old `/pool/data` stale-root lane has since been remediated live.
+  - the former `/data == /stash` `missingFiles` lane is now fixed:
+    - new CLI: `hashall rehome qb-missing-remediate`
+    - live proofs:
+      - `Cleverman.S02...` (`2`)
+      - `Megalopolis...` (`4`)
+    - current qB state:
+      - `missingFiles=0`
+      - `stoppedUP=6` because the remediated hashes were intentionally kept paused
+  - commit `5d83419` hardened `bin/qb-repair-payload-group.sh` into a backed-up, journaled Python path:
+    - `src/hashall/qb_repair_payload_group.py`
+    - script semver `0.2.0`
+    - validation: `pytest tests/test_fastresume.py tests/test_qb_repair_payload_group.py -q` -> `8 passed`
+  - current repair proof artifacts:
+    - `out/qb-repair-payload-group/20260310-102047-0fff0ce260a5/repair-plan.json`
+    - `out/qb-repair-payload-group/20260310-164254-0fff0ce260a5/repair-plan.json`
+  - read-only `hashall payload siblings` bug is fixed in commit `74ea2b5`
+  - latest refresh returned `OK`
+  - `hashall rehome qb-missing-audit --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding` now returns `0`
+  - `rehome apply` is now proven live on both:
+    - `REUSE`: `The.West.Wing.S07...`
+      - rerun path uses `rehome_reconcile_only` to catalog-sync already-repointed rows
+    - `MOVE`: `Megalopolis.2024.REPACK...`
+      - executor now explicitly stops qB before patch-mode validate
+  - mixed-state reruns are now supported by commit `85b91af`:
+    - post-patch verification ignores unpatched rows
+    - `rehome_reconcile_subset` can catalog-sync the already-good subset of a mixed batch
+  - first curated mixed batch is now green:
+    - `Longlegs...` REUSE completed via `rehome_reconcile_subset`
+    - `Brave.New.World.US.S01...` MOVE completed successfully
+    - `Greenland.2020.Repack...` MOVE completed successfully
+  - one real bad reuse candidate is now known and should be excluded:
+    - `Shining.Girls...` REUSE group from `mixed4`
+    - all three rows failed destination offline verify as `partial_match`
+  - later curated batch `next4c` is also green:
+    - `Brave.New.World.US.S01...`
+    - `Greenland.2020.Repack...`
+    - `Azrael...`
+    - `Stranger.Things.S03...`
+    - shared summary: `25 torrent(s) checked, all in acceptable state`
+  - two current `MOVE` carve-outs should stay excluded from the clean batch lane:
+    - `Magic.City.S01...`
+      - dirty/preexisting target; observed source `8 files / 106474639951 bytes`, target `9 files / 110028001871 bytes`
+    - `Wilding.2023...`
+      - copy completed and target verify passed, but offline verify stalled at `checking_files 0.00%` for `15m+`
+  - audit conclusion:
+    - no broad errant fastresume edit bug was found
+    - next code work should harden:
+      - fail-closed MOVE rejection on dirty targets
+      - offline verify stagnation detection
+      - stronger rehome lock-holder diagnostics
+  - staged follow-up cleanup is now live in `rehome`:
+    - commit `f960483`
+    - `hashall rehome followup --cleanup` now does `rename -> observe -> delete` with automatic restore on qB regression
+  - follow-up-side catalog reconcile is now live:
+    - commit `2511ce2`
+  - commit `f3071ff` fixed and live-proved the `Mickey.17...` false-partial verify case:
+    - source bytes were good
+    - qB recheck completion detection had been too permissive
+    - verify retry logic had been too narrow for `rehome` manifests
+    - rerun ended `stoppedUP 100%` on `/pool/media/...`
+  - new preventive hardening:
+    - `rehome followup --cleanup` now blocks staged cleanup when any same-`payload_hash` torrent row still points at a non-target device or old `/data`/`/stash` alias
+    - `qb-missing-audit` now classifies sibling-root drift even when there is no simple direct mapped target path because a surviving sibling target already exists
+    - healthy rows can switch `torrent_instances.payload_id` to the already-correct target payload row before cleanup
+  - live cleanup result:
+    - one pilot payload plus six `/pool/data` payload groups cleaned successfully
+    - two final retries completed after narrow source-side ownership fixes
+    - post-cleanup qB snapshot: `stalledUP=5147`, `uploading=4`
+    - remaining follow-up backlog:
+      - exactly one failed group remains
+      - payload `a1041c6049c66abe...` (`Longlegs...`)
+      - reason: one member still points at `/pool/data/...`
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/NEXT-AGENT-PROMPT.md`

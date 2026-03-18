@@ -65,6 +65,7 @@ LOGDIR="$HOME/.logs/hashall/reports/db-refresh"
 mkdir -p "$LOGDIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOGFILE="$LOGDIR/step3_5-link-dedup-${STAMP}.log"
+SUMMARY_JSON="$LOGDIR/step3_5-link-dedup-${STAMP}.json"
 
 echo "================================================================" | tee -a "$LOGFILE"
 echo "STEP 3.5: link dedup plan/execute — $(date '+%F %T')" | tee -a "$LOGFILE"
@@ -72,6 +73,7 @@ echo "log: $LOGFILE" | tee -a "$LOGFILE"
 echo "apply=${APPLY} devices=${DEVICES_CSV} min_size=${MIN_SIZE} limit=${EXEC_LIMIT}" | tee -a "$LOGFILE"
 echo "lock_retry_secs=${LOCK_RETRY_SECS} lock_max_retries=${LOCK_MAX_RETRIES}" | tee -a "$LOGFILE"
 echo "db=${DB_PATH}" | tee -a "$LOGFILE"
+echo "summary_json=${SUMMARY_JSON}" | tee -a "$LOGFILE"
 echo "================================================================" | tee -a "$LOGFILE"
 
 IFS=',' read -r -a DEVICES <<< "$DEVICES_CSV"
@@ -116,6 +118,68 @@ if requested_lc in {"spare", "hotspare6tb"}:
         raise SystemExit(0)
 
 print("")
+PY
+}
+
+show_plan_json() {
+  local plan_id="$1"
+  local out_file="$2"
+  run_hashall_with_retry "$out_file" link show-plan "$plan_id" --format json --limit 0
+}
+
+append_summary_entry() {
+  local device="$1"
+  local plan_name="$2"
+  local plan_id="$3"
+  local dryrun_rc="$4"
+  local apply_rc="$5"
+  local show_json="$6"
+  python3 - "$SUMMARY_JSON" "$device" "$plan_name" "$plan_id" "$dryrun_rc" "$apply_rc" "$show_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+device = sys.argv[2]
+plan_name = sys.argv[3]
+plan_id = int(sys.argv[4])
+dryrun_rc = int(sys.argv[5])
+apply_rc = int(sys.argv[6])
+show_json_path = Path(sys.argv[7])
+
+payload = {"devices": []}
+if summary_path.exists():
+    payload = json.loads(summary_path.read_text())
+entry = {
+    "device": device,
+    "plan_name": plan_name,
+    "plan_id": plan_id,
+    "dryrun_rc": dryrun_rc,
+    "apply_rc": apply_rc,
+}
+if show_json_path.exists():
+    try:
+        plan = json.loads(show_json_path.read_text())
+        entry["plan_status"] = plan.get("status")
+        entry["actions_total"] = plan.get("summary", {}).get("actions_total")
+        entry["actions_executed"] = plan.get("summary", {}).get("actions_executed")
+        entry["actions_failed"] = plan.get("summary", {}).get("actions_failed")
+        entry["actions_skipped"] = plan.get("summary", {}).get("actions_skipped")
+        failed_actions = [
+            {
+                "id": action.get("id"),
+                "canonical_path": action.get("canonical_path"),
+                "duplicate_path": action.get("duplicate_path"),
+                "error_message": action.get("error_message"),
+            }
+            for action in plan.get("actions", [])
+            if str(action.get("status") or "") == "failed"
+        ]
+        entry["failed_actions_preview"] = failed_actions[:5]
+    except Exception as exc:
+        entry["summary_parse_error"] = str(exc)
+payload.setdefault("devices", []).append(entry)
+summary_path.write_text(json.dumps(payload, indent=2) + "\n")
 PY
 }
 
@@ -180,6 +244,9 @@ run_device_plan() {
 
   PLAN_NAME="db-refresh-step3_5-${DEVICE}-${STAMP}"
   TMP_OUT="$(mktemp /tmp/link-plan.${DEVICE}.XXXXXX)"
+  local dryrun_rc=0
+  local apply_rc=0
+  local show_json_file=""
 
   echo "" | tee -a "$LOGFILE"
   echo "--- device=${DEVICE} plan=${PLAN_NAME} --- $(date '+%F %T')" | tee -a "$LOGFILE"
@@ -216,14 +283,59 @@ PY
 
   echo "--- dry-run execute plan_id=${PLAN_ID} ---" | tee -a "$LOGFILE"
   TMP_OUT="$(mktemp /tmp/link-dryrun.${DEVICE}.XXXXXX)"
+  set +e
   run_hashall_with_retry "$TMP_OUT" link execute "$PLAN_ID" --dry-run --limit "$EXEC_LIMIT"
+  dryrun_rc=$?
+  set -e
   rm -f "$TMP_OUT"
 
   if [[ "$APPLY" == "true" ]]; then
     echo "--- apply execute plan_id=${PLAN_ID} ---" | tee -a "$LOGFILE"
     TMP_OUT="$(mktemp /tmp/link-apply.${DEVICE}.XXXXXX)"
+    set +e
     run_hashall_with_retry "$TMP_OUT" link execute "$PLAN_ID" --limit "$EXEC_LIMIT" --yes
+    apply_rc=$?
+    set -e
     rm -f "$TMP_OUT"
+  fi
+
+  show_json_file="$(mktemp /tmp/link-show-json.${DEVICE}.XXXXXX)"
+  show_plan_json "$PLAN_ID" "$show_json_file" || true
+  append_summary_entry "$DEVICE" "$PLAN_NAME" "$PLAN_ID" "$dryrun_rc" "$apply_rc" "$show_json_file"
+
+  echo "--- device summary device=${DEVICE} plan_id=${PLAN_ID} dryrun_rc=${dryrun_rc} apply_rc=${apply_rc} ---" | tee -a "$LOGFILE"
+  python3 - "$show_json_file" <<'PY' | tee -a "$LOGFILE"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    print("summary_status=missing")
+    raise SystemExit(0)
+plan = json.loads(path.read_text())
+summary = plan.get("summary", {})
+print(
+    "summary_status="
+    f"{plan.get('status')} actions_total={summary.get('actions_total')} "
+    f"actions_executed={summary.get('actions_executed')} "
+    f"actions_failed={summary.get('actions_failed')} "
+    f"actions_skipped={summary.get('actions_skipped')}"
+)
+failed = [a for a in plan.get("actions", []) if str(a.get("status") or "") == "failed"]
+for action in failed[:5]:
+    print(
+        "failed_action "
+        f"id={action.get('id')} "
+        f"canonical={action.get('canonical_path')} "
+        f"duplicate={action.get('duplicate_path')} "
+        f"error={action.get('error_message')}"
+    )
+PY
+  rm -f "$show_json_file"
+
+  if [[ "$dryrun_rc" -ne 0 || "$apply_rc" -ne 0 ]]; then
+    return 1
   fi
 }
 
@@ -244,6 +356,7 @@ rm -f "$TMP_OUT"
 echo "" | tee -a "$LOGFILE"
 echo "STEP 3.5 DONE — $(date '+%F %T')" | tee -a "$LOGFILE"
 echo "log: $LOGFILE" | tee -a "$LOGFILE"
+echo "summary_json: $SUMMARY_JSON" | tee -a "$LOGFILE"
 if [[ "$APPLY" == "true" ]]; then
   echo ">>> Hardlink actions were applied. Review output before step 4. <<<" | tee -a "$LOGFILE"
 else

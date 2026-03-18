@@ -54,6 +54,27 @@ class FakeQbitClient:
         return []
 
 
+class SequencedStateQbitClient(FakeQbitClient):
+    def __init__(self, states):
+        super().__init__()
+        self._states = list(states)
+        self._calls = 0
+
+    def get_torrent_info(self, torrent_hash: str):
+        idx = min(self._calls, len(self._states) - 1)
+        state, progress = self._states[idx]
+        self._calls += 1
+        return SimpleNamespace(
+            save_path=self.save_paths.get(torrent_hash, self.default_path),
+            auto_tmm=False,
+            state=state,
+            progress=progress,
+            amount_left=0,
+            size=1024,
+            completed=int(1024 * progress),
+        )
+
+
 def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
@@ -71,18 +92,81 @@ def test_atomic_relocation_rolls_back_on_failure(tmp_path, monkeypatch):
     assert executor.qbit_client.save_paths["t1"] == "/stash/seeding"
 
 
+def test_preflight_waits_for_transient_qbit_settle(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = SequencedStateQbitClient(
+        [("checkingResumeData", 0.0), ("stalledUP", 1.0)]
+    )
+    executor.preflight_settle_attempts = 2
+    executor.preflight_settle_seconds = 7.0
+
+    plan = {"affected_torrents": ["abc123"]}
+
+    executor._preflight_torrent_state_check_with_settle(plan)
+
+    assert sleeps == [7.0]
+
+
+def test_preflight_raises_after_transient_settle_window_exhausted(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = SequencedStateQbitClient(
+        [("checkingResumeData", 0.0), ("checkingResumeData", 0.0), ("checkingResumeData", 0.0)]
+    )
+    executor.preflight_settle_attempts = 2
+    executor.preflight_settle_seconds = 5.0
+
+    plan = {"affected_torrents": ["abc123"]}
+
+    with pytest.raises(RuntimeError, match="checkingresumedata"):
+        executor._preflight_torrent_state_check_with_settle(plan)
+
+    assert sleeps == [5.0, 5.0]
+
+
+def test_preflight_blocks_qbit_sibling_gap_snapshot(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    plan = {
+        "affected_torrents": ["abc123"],
+        "_reality_snapshot_pre": {
+            "group_state": "blocked_qbit_sibling_gap",
+            "group_reason": "qB still has same-name sibling torrents outside this plan.",
+            "group_warnings": [
+                "qB still has 4 same-name out-of-plan torrent(s) that match this payload's size."
+            ],
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="same-name out-of-plan sibling"):
+        executor._preflight_torrent_state_check_with_settle(plan)
+
+
 def test_copy_with_rsync_progress_applies_bwlimit_env(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
 
     commands = []
 
-    def fake_run(cmd, check=True):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         commands.append(cmd)
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
     monkeypatch.setenv("REHOME_RSYNC_BWLIMIT_KBPS", "51200")
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
 
     source = tmp_path / "source.bin"
     source.write_bytes(b"x")
@@ -103,13 +187,20 @@ def test_copy_with_rsync_progress_ignores_invalid_bwlimit_env(tmp_path, monkeypa
     commands = []
     messages = []
 
-    def fake_run(cmd, check=True):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         commands.append(cmd)
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
     monkeypatch.setenv("REHOME_RSYNC_BWLIMIT_KBPS", "abc")
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
     monkeypatch.setattr(executor, "_log", lambda message, prefix="info": messages.append((prefix, message)))
 
     source = tmp_path / "source.bin"
@@ -122,6 +213,134 @@ def test_copy_with_rsync_progress_ignores_invalid_bwlimit_env(tmp_path, monkeypa
     cmd = commands[0]
     assert not any(part.startswith("--bwlimit=") for part in cmd)
     assert any(prefix == "warning" and "REHOME_RSYNC_BWLIMIT_KBPS" in msg for prefix, msg in messages)
+
+
+def test_ensure_target_donor_rejects_dirty_preexisting_target(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    monkeypatch.setattr(executor, "_spot_check_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        executor,
+        "_copy_with_rsync_progress",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("copy should not run")),
+    )
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "movie.mkv").write_bytes(b"payload")
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "movie.mkv").write_bytes(b"payload")
+    (target / "extra.nfo").write_bytes(b"extra")
+
+    plan = {
+        "decision": "MOVE",
+        "source_path": str(source),
+        "target_path": str(target),
+        "file_count": 1,
+        "total_bytes": len(b"payload"),
+        "target_device_id": 44,
+    }
+
+    with pytest.raises(RuntimeError, match="Refusing MOVE into preexisting non-empty target") as excinfo:
+        executor._ensure_target_donor(plan)
+
+    message = str(excinfo.value)
+    assert "expected_files=1" in message
+    assert "actual_files=2" in message
+    assert f"expected_bytes={len(b'payload')}" in message
+
+
+def test_ensure_target_donor_reuses_exact_preexisting_target(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    monkeypatch.setattr(executor, "_spot_check_payload", lambda *args, **kwargs: None)
+    copy_called = {"value": False}
+
+    def fake_copy(*_args, **_kwargs):
+        copy_called["value"] = True
+
+    monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "movie.mkv").write_bytes(b"payload")
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "movie.mkv").write_bytes(b"payload")
+
+    plan = {
+        "decision": "MOVE",
+        "source_path": str(source),
+        "target_path": str(target),
+        "file_count": 1,
+        "total_bytes": len(b"payload"),
+        "target_device_id": 44,
+    }
+
+    donor = executor._ensure_target_donor(plan)
+
+    assert copy_called["value"] is False
+    assert donor.acquisition_mode == "existing"
+    assert donor.move_strategy == "idempotent_reconcile"
+    assert donor.moved_payload is False
+    assert donor.target_preexisting is True
+
+
+def test_cleanup_unused_target_donor_removes_intermediate_root(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    donor_root = tmp_path / "pool-media" / "cross-seed" / "Donor"
+    donor_root.mkdir(parents=True, exist_ok=True)
+    (donor_root / "movie.mkv").write_bytes(b"movie")
+
+    unique_root = tmp_path / "pool-media" / "_rehome-unique" / "hash-a" / "Movie"
+    unique_root.mkdir(parents=True, exist_ok=True)
+    (unique_root / "movie.mkv").write_bytes(b"movie")
+
+    plan = {
+        "_reality_snapshot_pre": {"summary": {"out_of_plan_siblings": 0}},
+        "constructed_payload_roots": {"hash-a": str(unique_root)},
+    }
+
+    removed = executor._cleanup_unused_target_donor(
+        plan,
+        SimpleNamespace(target_path=donor_root),
+    )
+
+    assert removed is True
+    assert not donor_root.exists()
+    assert plan["cleanup_unused_target_donor"] == str(donor_root.resolve())
+
+
+def test_cleanup_unused_target_donor_keeps_single_file_direct_target(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    donor_file = tmp_path / "pool-media" / "abtorrents" / "book.epub"
+    donor_file.parent.mkdir(parents=True, exist_ok=True)
+    donor_file.write_bytes(b"book")
+
+    plan = {
+        "_reality_snapshot_pre": {"summary": {"out_of_plan_siblings": 0}},
+        # Single-file direct-target runs currently record the constructed root
+        # as the parent directory, not the file path itself.
+        "constructed_payload_roots": {"hash-a": str(donor_file.parent)},
+        "payload_group": [
+            {
+                "hash": "hash-a",
+                "dest_content_path": str(donor_file),
+            }
+        ],
+    }
+
+    removed = executor._cleanup_unused_target_donor(
+        plan,
+        SimpleNamespace(target_path=donor_file),
+    )
+
+    assert removed is False
+    assert donor_file.exists()
+    assert "cleanup_unused_target_donor" not in plan
 
 
 def test_atomic_relocation_rollback_uses_qb_runtime_source_path(tmp_path, monkeypatch):
@@ -559,7 +778,7 @@ def test_atomic_relocation_reverify_path_after_mismatch(tmp_path, monkeypatch):
     assert reapply["count"] >= 1
 
 
-def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, monkeypatch):
+def test_execute_move_cross_filesystem_uses_rsync_and_defers_source_cleanup(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()
 
@@ -570,15 +789,23 @@ def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, m
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
 
-    rsync_calls = {}
+    popen_calls = []
 
-    def fake_run(cmd, check):
-        rsync_calls["cmd"] = cmd
-        target_path.mkdir(parents=True, exist_ok=True)
-        (target_path / "video.mkv").write_bytes(b"x")
-        return SimpleNamespace(returncode=0)
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
 
-    monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        if "rsync" in cmd:
+            target_path.mkdir(parents=True, exist_ok=True)
+            (target_path / "video.mkv").write_bytes(b"x")
+        return FakeProc()
+
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
     monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         executor,
@@ -597,9 +824,11 @@ def test_execute_move_cross_filesystem_uses_rsync_and_removes_source(tmp_path, m
 
     executor._execute_move(plan, spot_check=0)
 
-    assert "rsync" in rsync_calls["cmd"]
+    assert any("rsync" in cmd for cmd in popen_calls)
     assert target_path.exists()
-    assert not source_path.exists()
+    assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
+    assert plan["cleanup_source_deferred_path"] == str(source_path)
 
 
 def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path, monkeypatch):
@@ -613,12 +842,19 @@ def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path,
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
 
-    def fake_run(cmd, check):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         target_path.mkdir(parents=True, exist_ok=True)
         (target_path / "video.mkv").write_bytes(b"x")
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
-    monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
     def fail_attach(*_args, **_kwargs):
         raise RuntimeError("relocation failed")
 
@@ -708,12 +944,19 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
 
-    def fake_run(cmd, check):
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         target_path.mkdir(parents=True, exist_ok=True)
         (target_path / "video.mkv").write_bytes(b"x")
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
-    monkeypatch.setattr("rehome.executor.subprocess.run", fake_run)
+    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
     monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
     monkeypatch.setattr("rehome.executor.get_payload_file_rows", lambda *_args, **_kwargs: [])
 
@@ -728,7 +971,8 @@ def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):
 
     executor._execute_move(plan, spot_check=1)
     assert target_path.exists()
-    assert not source_path.exists()
+    assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
 
 
 def test_execute_move_filters_view_target_that_recreates_source(tmp_path, monkeypatch):
@@ -770,7 +1014,8 @@ def test_execute_move_filters_view_target_that_recreates_source(tmp_path, monkey
     executor._execute_move(plan, spot_check=0)
     assert captured["view_targets"] == []
     assert target_path.exists()
-    assert not source_path.exists()
+    assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
 
 
 def test_atomic_relocation_fails_when_qb_content_path_stays_missing(tmp_path, monkeypatch):
@@ -875,7 +1120,7 @@ def test_spot_check_persists_sha256_and_inode_peers(tmp_path, monkeypatch):
     assert as_map[str(peer_path)] == "inode:777"
 
 
-def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tmp_path, monkeypatch):
+def test_execute_move_cross_filesystem_marks_cleanup_pending(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()
 
@@ -893,21 +1138,6 @@ def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tm
     monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
     monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
 
-    calls = {"delete": 0, "repair": 0}
-
-    def fake_delete(path):
-        calls["delete"] += 1
-        if calls["delete"] == 1:
-            raise PermissionError(13, "Permission denied", str(path))
-        shutil.rmtree(path)
-
-    def fake_repair(_path):
-        calls["repair"] += 1
-        return True
-
-    monkeypatch.setattr(executor, "_delete_path", fake_delete)
-    monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", fake_repair)
-
     plan = {
         "decision": "MOVE",
         "source_path": str(source_path),
@@ -918,12 +1148,13 @@ def test_execute_move_cross_filesystem_cleanup_permission_repair_then_success(tm
     }
 
     executor._execute_move(plan, spot_check=0)
-    assert calls["repair"] == 1
     assert target_path.exists()
-    assert not source_path.exists()
+    assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
+    assert plan["cleanup_source_deferred_path"] == str(source_path)
 
 
-def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_path, monkeypatch):
+def test_execute_move_cross_filesystem_cleanup_stays_deferred(tmp_path, monkeypatch):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
     executor.qbit_client = FakeQbitClient()
 
@@ -940,12 +1171,6 @@ def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_pa
 
     monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
     monkeypatch.setattr(executor, "_attach_torrents_to_donor", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        executor,
-        "_delete_path",
-        lambda _path: (_ for _ in ()).throw(PermissionError(13, "Permission denied")),
-    )
-    monkeypatch.setattr(executor, "_repair_permissions_for_cleanup", lambda _path: False)
 
     plan = {
         "decision": "MOVE",
@@ -959,3 +1184,4 @@ def test_execute_move_cross_filesystem_cleanup_deferred_when_repair_fails(tmp_pa
     executor._execute_move(plan, spot_check=0)
     assert target_path.exists()
     assert source_path.exists()
+    assert plan["cleanup_source_deferred"] is True
