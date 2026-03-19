@@ -190,9 +190,15 @@ def _build_view_targets(
             "root_name": root_name,
         })
 
-    if len(raw_targets) <= 1:
+    if len(raw_targets) == 0:
         return raw_targets
 
+    # Always use the unique-view subdirectory scheme, even for a single torrent.
+    # This ensures consistent target paths regardless of payload torrent count:
+    # - Prevents target collisions when two single-torrent payloads share root_name.
+    # - Prevents state mismatch when a payload gains a cross-seed after initial
+    #   demotion (re-plan would compute unique-view for 2 torrents, but old data
+    #   lives at the direct path that the shortcut produced the first time).
     unique_targets = []
     for target in raw_targets:
         torrent_hash = str(target["torrent_hash"])
