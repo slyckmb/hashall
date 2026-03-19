@@ -35,6 +35,12 @@ machine, table lookups fail or return wrong results.
 ### Evidence
 `tests/test_scan_integration.py` uses `tempfile.TemporaryDirectory()` and
 `pytest`'s `tmp_path` fixture, both of which resolve to `/tmp/` on this host.
+Observed assertion failure:
+```
+assert 0 == 3  # "Should have 3 active files in device table"
+```
+The device table is created under a different name than the test queries,
+so it finds 0 rows.
 
 ### Proposed fix
 **Option A — skip on `/tmp`-on-root hosts (minimal, immediate):**
@@ -89,28 +95,38 @@ test_nohl_restart_watchdog_allow_file_is_rendered_when_set
 ```
 
 ### Root cause
-The tests run `bin/codex-says-run-this-next.sh` with:
-- `REHOME_PROCESS_MODE=nohl-restart`
-- `--min-free-pct <N>` flag
-- Expected output strings: `mode=nohl-restart min_free_pct=17`,
-  `bin/rehome-89_nohl-basics-qb-automation-audit.sh`,
-  `bin/qb-checking-watch.sh --interval`, `--allow-file /tmp/watch-allow.txt`
+The tests run `bin/codex-says-run-this-next.sh` with env
+`REHOME_PROCESS_MODE=nohl-restart` and args like `--min-free-pct 17`, expecting
+output strings such as `mode=nohl-restart min_free_pct=17`,
+`bin/rehome-89_nohl-basics-qb-automation-audit.sh`, etc.
 
-The **actual** script is a sequential pipeline runner:
+The **actual** script is a sequential real-filesystem pipeline runner:
 ```bash
 step "1. Scan /stash/media ..." "$repo_root/bin/db-refresh-step1-scan-stash.sh"
 step "2. Scan /pool/data ..."   "$repo_root/bin/db-refresh-step2-scan-pool-hotspare.sh"
 ...
 ```
-It takes no CLI arguments and knows nothing about `nohl-restart` mode or
-`--min-free-pct`. The tests fail immediately with `returncode != 0` because
-`bash` returns an error when an unknown flag is passed.
+
+`bash script.sh --min-free-pct 17` silently ignores the unknown args (bash
+doesn't validate them). The script then **actually runs the full refresh
+pipeline against the live filesystem**, taking ~18 minutes before failing with:
+
+```
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+```
+
+This JSON error comes from a step inside the pipeline attempting to parse a qB
+cache or state file that is empty or missing in the test environment. Exit code
+is `1` (not `0` as tests expect for success, not `2` as the numeric-validation
+test expects for a validation error).
+
+**Secondary cost:** these 4 tests consume ~18 minutes of CI time on every run
+while executing real scans on the live filesystem, which is a safety concern.
 
 ### Likely history
 The tests were written speculatively to describe the *intended* behavior of a
-nohl-restart orchestration wrapper that has not yet been implemented in
-`bin/codex-says-run-this-next.sh`. The script name was reused for a different
-purpose (or the tests were written against a stub that was later replaced).
+nohl-restart orchestration wrapper. The script name was reused for a different
+purpose (full refresh pipeline), and the tests were never updated to match.
 
 ### Proposed fix
 **Option A — implement the described interface (correct long-term):**
@@ -128,6 +144,10 @@ Mark all four tests `@pytest.mark.xfail(reason="bin/codex-says-run-this-next.sh 
 **Recommended:** Clarify intent — if the nohl-restart wrapper is still planned,
 implement it (Option A) or xfail while it's in progress (Option C). If the
 design moved on, delete the tests (Option B).
+
+⚠️ **Immediate concern regardless of long-term plan:** Add a guard at the top of
+the script (or in a conftest skip fixture) to prevent CI runs from executing the
+18-minute live filesystem scan as a side effect of these tests.
 
 ---
 
