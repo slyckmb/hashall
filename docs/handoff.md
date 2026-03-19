@@ -1,5 +1,28 @@
 # Handoff Notes
 
+## 2026-03-19 Migration Analysis (same branch)
+
+Pool-data → pool-media migration is still `in_progress` with two blockers.
+
+**Live counts:**
+- `old_path_count=41` pool-data torrents (up from 34 in Mar-13 docs; all `stalledUP`)
+- `new_path_count=344` pool-media torrents
+
+**Blockers before resuming:**
+1. Stale `~/.hashall/rehome.lock` — 5 days old (2026-03-14 10:02). Verify process dead, then `rm`.
+2. 640 consecutive qB API failures in cache meta. Cache itself is fresh (`source=daemon_live`, `2026-03-19T15:32`). Investigate `last_error` and confirm live API responds before trusting plan output.
+
+**Resumption order:**
+1. Phase 0: clear lock, verify qB health, `hashall refresh --verbose`
+2. Phase 1: `hashall rehome relocate-plan --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding --output out/rehome-plan-pool-data-to-media-2026-03-19.json`; audit coverage vs. 41 qB pool-data hashes
+3. Phase 2: execute in small curated batches
+
+**Code notes for new plan:** 2026-03-18/19 audit fixes (bind-mount false-positive, unique-view single-torrent) may reclassify some previously-BLOCKED candidates. No executor logic changed.
+
+**Out/ plan files:** plan files live in the main repo, not this worktree. Run plan generation from main repo or copy output after.
+
+---
+
 ## 2026-03-18/19 Audit Session (branch: cr/claude-hashall-20260318-232039)
 
 ### What happened

@@ -1,5 +1,18 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-03-19 Migration State (compact-safe)
+
+- **41** pool-data torrents remain (was 34 per Mar-13 docs; all `stalledUP`)
+- **344** pool-media torrents
+- Migration state: `in_progress`
+- **Blocker 1:** stale `~/.hashall/rehome.lock` (5 days; verify pid dead, then rm)
+- **Blocker 2:** 640 consecutive qB API failures in cache meta — investigate before running new plan
+- **Next step:** Phase 0 (clear lock, verify qB API, `hashall refresh`) → Phase 1 (fresh relocate-plan) → Phase 2 (batched execution)
+- Full resumption commands: `docs/operations/RUN-STATE.md` "2026-03-19 Migration Analysis" section
+- Full context: `docs/handoff.md` "2026-03-19 Migration Analysis" section
+
+---
+
 ## 2026-03-18/19 Audit Session Summary (compact-safe)
 
 - `hashall` is now `0.8.4` (bumped from `0.8.0` during a REQUIREMENTS.md audit session).
