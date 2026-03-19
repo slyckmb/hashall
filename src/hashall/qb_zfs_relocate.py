@@ -63,6 +63,7 @@ GOOD_RESUME_STATES = {
     "stoppedup",
 }
 FINAL_CLEANUP_STATES = {"cleaned", "source_missing"}
+GOOD_RECHECK_COMPLETION_STATES = {"stalledup", "uploading", "forcedup", "pausedup", "queuedup", "stoppedup"}
 _RUN_TEXT_LOG_PATH: Optional[Path] = None
 _RUN_JSONL_LOG_PATH: Optional[Path] = None
 _RUN_TEXT_LOG_HANDLE: Any = None
@@ -1178,6 +1179,107 @@ class QBZFSRelocationTool:
                 last_emit_at = now
             self.sleep_fn(1.0)
 
+    @staticmethod
+    def _source_recheck_proved_clean(snapshot: Dict[str, Any]) -> bool:
+        status = str(snapshot.get("status") or "")
+        after_state = str(snapshot.get("after_state") or "").strip().lower()
+        after_progress = float(snapshot.get("after_progress", 0.0) or 0.0)
+        return (
+            status == "completed"
+            and after_state in GOOD_RECHECK_COMPLETION_STATES
+            and after_progress >= 0.999999
+        )
+
+    def preverify_source(
+        self,
+        *,
+        manifest_path: Path,
+        timeout_seconds: float,
+        apply: bool,
+    ) -> int:
+        manifest = self._load_manifest(manifest_path)
+        rows = row_selection(manifest["rows"])
+        if not apply:
+            emit_log("phase_skip", phase="preverify-source", reason="apply_only")
+            return 0
+        self._refresh_rows_from_qb(rows)
+        results: List[Dict[str, Any]] = []
+        processed_seconds = 0.0
+        total_rows = len(rows)
+        for index, row in enumerate(rows, start=1):
+            started_at = time.monotonic()
+            emit_log(
+                "item_start",
+                phase="preverify-source",
+                index=index,
+                total=total_rows,
+                hash=row["hash"],
+                name=row.get("name", ""),
+                source=row.get("content_path", ""),
+            )
+            snapshot = self._recheck_source_after_verify_failure(
+                row,
+                timeout_seconds=timeout_seconds,
+            )
+            row["source_recheck_status"] = str(snapshot.get("status") or "pending")
+            row["source_recheck_before_state"] = str(snapshot.get("before_state") or "")
+            row["source_recheck_before_progress"] = float(snapshot.get("before_progress", 0.0) or 0.0)
+            row["source_recheck_after_state"] = str(snapshot.get("after_state") or "")
+            row["source_recheck_after_progress"] = float(snapshot.get("after_progress", 0.0) or 0.0)
+            row["source_recheck_elapsed_seconds"] = float(snapshot.get("elapsed_seconds", 0.0) or 0.0)
+            clean = self._source_recheck_proved_clean(snapshot)
+            row["preverify_source_status"] = "verified" if clean else "verify_failed"
+            if clean:
+                remove_issue(row, "source_preverify_failed")
+            else:
+                add_issue(row, "source_preverify_failed")
+            results.append(
+                {
+                    "hash": row["hash"],
+                    "status": row["preverify_source_status"],
+                    "source_recheck_status": row.get("source_recheck_status"),
+                    "source_recheck_after_state": row.get("source_recheck_after_state"),
+                    "source_recheck_after_progress": row.get("source_recheck_after_progress"),
+                }
+            )
+            elapsed_seconds = max(0.0, time.monotonic() - started_at)
+            remaining_items = total_rows - index
+            eta_seconds = estimate_remaining_seconds(
+                completed_items=index - 1,
+                completed_seconds=processed_seconds,
+                current_elapsed_seconds=elapsed_seconds,
+                remaining_items=remaining_items,
+            )
+            processed_seconds += elapsed_seconds
+            emit_log(
+                "item_end",
+                phase="preverify-source",
+                index=index,
+                total=total_rows,
+                hash=row["hash"],
+                status=row.get("preverify_source_status", ""),
+                elapsed=format_hms(elapsed_seconds),
+                eta=format_hms(eta_seconds),
+                remaining=remaining_items,
+            )
+        report_path = manifest_report_path(manifest_path, "preverify-source")
+        write_json(report_path, {"phase": "preverify-source", "apply": True, "results": results, "generated_at": ts_iso()})
+        self._save_manifest(
+            manifest_path,
+            manifest,
+            phase="preverify-source",
+            mode="apply",
+            report_path=report_path,
+        )
+        emit_summary(
+            {
+                "rows": len(rows),
+                "verified": sum(1 for row in rows if row.get("preverify_source_status") == "verified"),
+                "failed": sum(1 for row in rows if row.get("preverify_source_status") == "verify_failed"),
+            }
+        )
+        return 0 if all(row.get("preverify_source_status") == "verified" for row in rows) else 1
+
     def _cleanup_qb_snapshot(self, row: Dict[str, Any]) -> Dict[str, Any]:
         try:
             info = self.qb_client.get_torrent_info(str(row.get("hash") or ""))
@@ -1536,8 +1638,10 @@ class QBZFSRelocationTool:
         apply: bool,
         timeout_seconds: float,
         quick_only: bool,
+        preverify_source: bool = False,
         recheck_source_on_verify_fail: bool = False,
         recheck_timeout_seconds: float = 1800.0,
+        rsync_checksum: bool = False,
         allow_partials: bool,
         journal_path: Path,
         auto_stop_qb: bool,
@@ -1569,7 +1673,20 @@ class QBZFSRelocationTool:
                     export_torrents_dir=export_torrents_dir,
                 ),
             ),
-            ("copy", lambda: self.copy(manifest_path=manifest_path, apply=apply)),
+        ]
+        if preverify_source:
+            phases.append(
+                (
+                    "preverify-source",
+                    lambda: self.preverify_source(
+                        manifest_path=manifest_path,
+                        timeout_seconds=recheck_timeout_seconds,
+                        apply=apply,
+                    ),
+                )
+            )
+        phases.extend([
+            ("copy", lambda: self.copy(manifest_path=manifest_path, apply=apply, rsync_checksum=rsync_checksum)),
             (
                 "verify",
                 lambda: self.verify(
@@ -1611,7 +1728,7 @@ class QBZFSRelocationTool:
                     recheck_on_failure=recheck_on_failure,
                 ),
             ),
-        ]
+        ])
         for phase, run_phase in phases:
             emit_log("phase_start", phase=phase, mode="apply" if apply else "dryrun")
             code = int(run_phase() or 0)
@@ -1660,7 +1777,7 @@ class QBZFSRelocationTool:
                 return code
         return 0
 
-    def copy(self, *, manifest_path: Path, apply: bool) -> int:
+    def copy(self, *, manifest_path: Path, apply: bool, rsync_checksum: bool = False) -> int:
         manifest = self._load_manifest(manifest_path)
         rows = row_selection(manifest["rows"])
         if apply:
@@ -1703,6 +1820,8 @@ class QBZFSRelocationTool:
                     "--numeric-ids",
                     "--itemize-changes",
                 ]
+                if rsync_checksum:
+                    cmd.append("--checksum")
                 if apply:
                     cmd.extend(["--human-readable", "--info=progress2"])
                 else:
@@ -2858,6 +2977,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_copy = subparsers.add_parser("copy", help="Pause selected torrents and rsync payload data")
     add_common_manifest_argument(p_copy)
     add_mutation_flags(p_copy)
+    p_copy.add_argument("--rsync-checksum", action="store_true", help="Use rsync --checksum during copy")
 
     p_verify = subparsers.add_parser("verify", help="Offline verify destination payloads")
     add_common_manifest_argument(p_verify)
@@ -2949,8 +3069,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_migrate.add_argument("--export-torrents-dir", default="")
     p_migrate.add_argument("--timeout", type=float, default=1800.0)
     p_migrate.add_argument("--quick-only", action="store_true")
+    p_migrate.add_argument("--preverify-source", action="store_true")
     p_migrate.add_argument("--recheck-source-on-verify-fail", action="store_true")
     p_migrate.add_argument("--recheck-timeout", type=float, default=1800.0)
+    p_migrate.add_argument("--rsync-checksum", action="store_true")
     p_migrate.add_argument("--allow-partials", action="store_true")
     p_migrate.add_argument("--journal", default="")
     p_migrate.add_argument("--auto-stop-qb", action="store_true")
@@ -3017,7 +3139,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 export_torrents_dir=export_dir,
             )
         elif args.phase == "copy":
-            code = tool.copy(manifest_path=manifest_path, apply=resolve_apply(args))
+            code = tool.copy(
+                manifest_path=manifest_path,
+                apply=resolve_apply(args),
+                rsync_checksum=bool(getattr(args, "rsync_checksum", False)),
+            )
         elif args.phase == "verify":
             code = tool.verify(
                 manifest_path=manifest_path,
@@ -3112,8 +3238,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 apply=resolve_apply(args),
                 timeout_seconds=float(args.timeout),
                 quick_only=bool(args.quick_only),
+                preverify_source=bool(args.preverify_source),
                 recheck_source_on_verify_fail=bool(args.recheck_source_on_verify_fail),
                 recheck_timeout_seconds=float(args.recheck_timeout),
+                rsync_checksum=bool(args.rsync_checksum),
                 allow_partials=bool(args.allow_partials),
                 journal_path=journal_path,
                 auto_stop_qb=bool(args.auto_stop_qb),

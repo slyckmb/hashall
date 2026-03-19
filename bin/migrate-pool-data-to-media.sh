@@ -31,6 +31,12 @@ fi
 if [[ "${RECHECK_SOURCE_ON_VERIFY_FAIL:-1}" == "1" ]]; then
   EXTRA_ARGS+=(--recheck-source-on-verify-fail --recheck-timeout "$RECHECK_TIMEOUT")
 fi
+if [[ "${PREVERIFY_SOURCE:-0}" == "1" ]]; then
+  EXTRA_ARGS+=(--preverify-source)
+fi
+if [[ "${RSYNC_CHECKSUM:-0}" == "1" ]]; then
+  EXTRA_ARGS+=(--rsync-checksum)
+fi
 
 exec "$PYTHON_BIN" "$TOOL" migrate \
   --manifest "$MANIFEST" \
