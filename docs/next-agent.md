@@ -1,21 +1,23 @@
 # Next Agent Entry (Compact-Safe)
 
-## 2026-03-19 Migration State (compact-safe)
+## 2026-03-19 Migration State (compact-safe) — UPDATED
 
-- **41** pool-data torrents remain (was 34 per Mar-13 docs; all `stalledUP`)
-- **344** pool-media torrents
-- Migration state: `in_progress`
-- **Blocker 1:** stale `~/.hashall/rehome.lock` (5 days; verify pid dead, then rm)
-- **Blocker 2:** 640 consecutive qB API failures in cache meta — investigate before running new plan
-- **Next step:** Phase 0 (clear lock, verify qB API, `hashall refresh`) → Phase 1 (fresh relocate-plan) → Phase 2 (batched execution)
-- Full resumption commands: `docs/operations/RUN-STATE.md` "2026-03-19 Migration Analysis" section
-- Full context: `docs/handoff.md` "2026-03-19 Migration Analysis" section
+- `hashall` is now `0.8.5`
+- **41** pool-data torrents remain (all `stalledUP`); **344** on pool-media; state: `in_progress`
+- **Blockers CLEARED:**
+  - `~/.hashall/rehome.lock` removed (pid confirmed dead)
+  - `consecutive_failures=640` was a stale counter artifact — fixed in code; qB API healthy
+- **Next step:** `hashall refresh --verbose` → generate fresh relocate-plan → execute in batches
+- Phase 0→1 commands: `docs/operations/RUN-STATE.md` "2026-03-19 Migration Analysis" section
+- Bug fixes this sub-session: `qb_cache.py` counter reset, `qb-checking-watch.sh` help text,
+  stoppeddl bucket path, `migrate_common.sh` comment, version bump
+- Full context: `docs/handoff.md` "2026-03-19 Migration Audit + Bug Fixes" section
 
 ---
 
 ## 2026-03-18/19 Audit Session Summary (compact-safe)
 
-- `hashall` is now `0.8.4` (bumped from `0.8.0` during a REQUIREMENTS.md audit session).
+- `hashall` was `0.8.4` after the audit session (now `0.8.5` after the 2026-03-19 bug-fix sub-session).
 - Branch `cr/claude-hashall-20260318-232039` has two commits beyond the session baseline:
   - `3fd06c0`: HIGH + MEDIUM bugs (followup GOOD_STATES, scan drift_policy, planner bind-mount)
   - `b88343f`: LOW bugs (unique-view shortcut, qb_cache daemon URL env var)

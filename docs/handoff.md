@@ -1,5 +1,35 @@
 # Handoff Notes
 
+## 2026-03-19 Migration Audit + Bug Fixes (same branch)
+
+### Stale lock cleared
+`~/.hashall/rehome.lock` pid 3888189 confirmed dead and removed. Migration is now unblocked.
+
+### qB consecutive_failures counter bug fixed
+`src/hashall/qb_cache.py`: `_write_meta` on successful fetch did not include
+`consecutive_failures: 0`, so the 640-failure count from a prior qB outage persisted
+in the meta file even after recovery (`source=daemon_live`, fresh cache). Fixed: both
+the `daemon_once` and `daemon_live` success paths now explicitly write `consecutive_failures: 0`.
+Test added: `test_daemon_once_resets_consecutive_failures_on_success`.
+
+### Other fixes in this sub-session
+- `bin/qb-checking-watch.sh` help text: `--interval` and `--cache-max-age` both said
+  `"default: 15"` but actual defaults are `30`. Corrected.
+- `bin/qb-stoppeddl-apply-watch.sh`: default `BUCKET_DIR` changed from
+  `/tmp/qb-stoppeddl-bucket-live` (volatile) to `~/.hashall/qb-stoppeddl-bucket`.
+- `bin/migrate-pool-data-to-media_common.sh:14`: added portability comment to
+  `FASTRESUME_DIR` host-specific default.
+- `docs/operations/RUN-STATE.md`: updated opening version line from `0.8.0` to `0.8.5`.
+- `src/hashall/__init__.py`: version bumped to `0.8.5`.
+
+### Migration readiness (post-fixes)
+- Lock: cleared ✓
+- qB API: healthy (cache fresh, failure counter now resets correctly after recovery)
+- Migration scripts: `bin/migrate-pool-data-to-media.sh` ready for Phase 1 plan generation
+- Next step: run Phase 0→1 workflow (see RUN-STATE.md "2026-03-19 Migration Analysis")
+
+---
+
 ## 2026-03-19 Migration Analysis (same branch)
 
 Pool-data → pool-media migration is still `in_progress` with two blockers.

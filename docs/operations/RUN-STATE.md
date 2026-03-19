@@ -84,7 +84,7 @@ Last updated: 2026-03-13 (historical section below)
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.8.0`.
+- `hashall` is now `0.8.5` (see version history below for prior milestones).
 - New 2026-03-15 qB compatibility/cache hardening:
   - local cache implementation now lives in this repo:
     - `src/hashall/qb_cache.py`
