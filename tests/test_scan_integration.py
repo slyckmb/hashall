@@ -22,6 +22,9 @@ from hashall.scan import scan_path
 from hashall.model import connect_db
 
 
+pytestmark = pytest.mark.usefixtures("require_separate_tmp_mount")
+
+
 @pytest.fixture
 def test_env():
     """Create a temporary test environment with DB and root directory."""

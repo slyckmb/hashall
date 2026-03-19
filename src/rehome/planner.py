@@ -190,9 +190,15 @@ def _build_view_targets(
             "root_name": root_name,
         })
 
-    if len(raw_targets) <= 1:
+    if len(raw_targets) == 0:
         return raw_targets
 
+    # Always use the unique-view subdirectory scheme, even for a single torrent.
+    # This ensures consistent target paths regardless of payload torrent count:
+    # - Prevents target collisions when two single-torrent payloads share root_name.
+    # - Prevents state mismatch when a payload gains a cross-seed after initial
+    #   demotion (re-plan would compute unique-view for 2 torrents, but old data
+    #   lives at the direct path that the shortcut produced the first time).
     unique_targets = []
     for target in raw_targets:
         torrent_hash = str(target["torrent_hash"])
@@ -385,9 +391,11 @@ class DemotionPlanner:
             return []
 
         def _normalize_abs_path(path: Path) -> str:
-            # Local filesystem normalization is sufficient for seeding-domain checks.
+            # Use canonicalize_path (resolves bind mounts via findmnt) so that
+            # hardlink paths are normalized the same way as self.seeding_roots,
+            # preventing false-positive BLOCK when paths are under a bind alias.
             try:
-                return str(path.resolve())
+                return str(canonicalize_path(path))
             except Exception:
                 return str(path)
 
@@ -446,10 +454,13 @@ class DemotionPlanner:
             file_rows = conn.execute(query, (rel_root_str, low, high)).fetchall()
 
         else:
-            # Legacy table stores absolute paths
+            # Legacy table stores absolute paths.  Use the original (pre-canonicalized)
+            # root_path as the query prefix because legacy paths may be stored under a
+            # bind-mount alias (e.g. /data/media/...) that differs from the canonical
+            # form returned by canonicalize_path (e.g. /stash/media/...).
             if not root.is_absolute():
                 raise ValueError("Relative payload root with legacy files table")
-            root_str = str(root)
+            root_str = root_path  # original string, not str(root) which is canonicalized
             low, high = _prefix_bounds(root_str)
             legacy_has_status = _local_table_has_column("files", "status")
             if legacy_has_status:

@@ -90,15 +90,39 @@ Unified roadmap + active backlog for development and operations.
     - prove that each qB item gets its own correct payload tree there
     - keep those trees hardlink-backed where the filesystem allows it
 
+## Migration Resumption Tasking (2026-03-19)
+
+Live state as of 2026-03-19: 41 pool-data torrents remain (was 34 in Mar-13 docs).
+Two blockers must be cleared before running a new plan.
+
+### Phase 0 — Blocker investigation (operator, read-only)
+- [ ] Verify and remove stale `~/.hashall/rehome.lock` (5 days old, pid likely dead)
+- [ ] Investigate 640 consecutive qB API failures in cache meta (check `last_error`, confirm live API responds)
+- [ ] Run `hashall refresh --verbose` to confirm catalog freshness
+
+### Phase 1 — Fresh plan generation
+- [ ] Generate new relocate plan: `hashall rehome relocate-plan --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding --output out/rehome-plan-pool-data-to-media-2026-03-19.json`
+- [ ] Audit plan coverage vs. live qB pool-data list (41 hashes expected)
+- [ ] Investigate any pool-data torrents not in plan (likely: missing catalog entry, stale reuse, or repair-lane items)
+- [ ] Note: 2026-03-18/19 audit fixes (unique-view, bind-mount) may reclassify some previously-BLOCKED candidates
+
+### Phase 2 — Execution
+- [ ] Execute migration in conservative batches; gate each on absence of download-like flips, clean qB states, and catalog OK
+- [ ] Handle `Alien Romulus` stoppedDL separately (repair lane, not plain MOVE)
+- [ ] Run `hashall rehome followup --cleanup` after each green apply batch
+
+See `docs/operations/RUN-STATE.md` "2026-03-19 Migration Analysis" for shell commands.
+
+---
+
 ## Immediate Execution Plan
 
-1. Close cleanup-source provenance drift on completed pool-data `REUSE` runs.
-2. Confirm the active `stash -> pool-media` `REUSE` pilot (`rehome_runs.id=338`) completes cleanly.
-3. If clean, scale `stash -> pool-media` in small `REUSE` batches.
-4. Run a live `MOVE` pilot only when the planner surfaces a real donor-acquisition case again.
-5. Use the `Alien Romulus` group as the first deliberate `~noHL` rehome/repair proving task once the current cleanup + planner hardening slice is stable.
-6. Afterwards, continue the wider `~noHL` lane.
-7. When the live migration lane is stable, investigate the incomplete `V for Vendetta` refresh-upgrade root from refresh `20260313-172217`.
+1. **Phase 0 first** (see Migration Resumption Tasking above): clear stale lock, verify qB, confirm catalog.
+2. **Phase 1**: generate fresh relocate plan for the remaining 41 pool-data torrents and audit coverage.
+3. **Phase 2**: execute migration in small curated batches.
+4. Use the `Alien Romulus` group as the first deliberate `~noHL` rehome/repair proving task once the current cleanup + planner hardening slice is stable.
+5. Afterwards, continue the wider `~noHL` lane.
+6. When the live migration lane is stable, investigate the incomplete `V for Vendetta` refresh-upgrade root from refresh `20260313-172217`.
 
 ## Current Operating Rules
 

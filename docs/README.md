@@ -11,6 +11,7 @@ Purpose: minimal, canonical documentation set for CLI agents.
 5. `docs/operations/RUN-STATE.md` - Current living operational state and next actions.
 6. `docs/project/AGENT-PLAYBOOK.md` - Agent read order, rules, test strategy.
 7. `docs/project/PLAN.md` - Active roadmap and backlog.
+8. `docs/project/KNOWN-TEST-FAILURES.md` - Pre-existing test failures: root causes and fix plans.
 8. `README.md` - Project overview and onboarding.
 
 ## Active Continuity Docs

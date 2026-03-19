@@ -1,10 +1,90 @@
 # Operational Run State
 
-Last updated: 2026-03-13
+Last updated: 2026-03-19
+
+## 2026-03-19 Migration Analysis
+
+**Live counts (as of 2026-03-19):**
+- Pool-data torrents remaining: `old_path_count=41` (up from 34 in 2026-03-13 docs)
+- Pool-media torrents: `new_path_count=344`
+- `/stash` torrents: `0`
+- Migration seed-root-state: `in_progress`
+
+**Blockers — must resolve before resuming migration:**
+
+1. **Stale rehome.lock** (`~/.hashall/rehome.lock`)
+   - Lock is 5 days old (last written 2026-03-14 10:02)
+   - Process is almost certainly dead; verify and remove:
+     ```bash
+     cat ~/.hashall/rehome.lock
+     ps -p <pid-from-lock> || echo "process dead → safe to remove"
+     rm ~/.hashall/rehome.lock
+     ```
+
+2. **640 consecutive qB API failures** in cache meta
+   - Cache is fresh (`source=daemon_live`, updated `2026-03-19T15:32`)
+   - Failure count may be a transient artifact from a qB restart; verify before trusting plan output:
+     ```bash
+     python3 -c "
+     import json, pathlib
+     m = pathlib.Path.home() / '.cache/hashall-qb/torrents-info.meta.json'
+     d = json.loads(m.read_text())
+     print('last_error:', d.get('last_error'))
+     print('last_error_at:', d.get('last_error_at_iso'))
+     print('consecutive_failures:', d.get('consecutive_failures'))
+     print('source:', d.get('source'))
+     "
+     hashall qb status 2>&1 | head -5
+     ```
+
+3. **Catalog freshness** — confirm before running a new plan:
+   ```bash
+   hashall refresh --verbose 2>&1 | tail -20
+   ```
+
+**Phase 0 → Phase 1 resumption workflow:**
+```bash
+# Phase 0: clear blockers (operator)
+rm ~/.hashall/rehome.lock        # only after confirming process dead
+hashall qb status                # verify live API responds
+hashall refresh --verbose        # confirm catalog fresh
+
+# Phase 1: generate fresh plan
+hashall rehome relocate-plan \
+  --source-root /pool/data/media/torrents/seeding \
+  --target-root /pool/media/torrents/seeding \
+  --output out/rehome-plan-pool-data-to-media-2026-03-19.json \
+  2>&1 | tee ~/.logs/hashall/rehome/relocate-plan-2026-03-19.log
+
+# Phase 1: verify plan covers all 41 qB pool-data torrents
+python3 -c "
+import json, pathlib
+cache = json.loads((pathlib.Path.home()/'.cache/hashall-qb/torrents-info.json').read_text())
+torrents = cache if isinstance(cache, list) else cache.get('result', cache.get('torrents', []))
+pool_data = [(t.get('hash',''), t.get('name','')[:60], t.get('state',''))
+             for t in torrents if '/pool/data' in t.get('save_path','')]
+plan = json.loads(pathlib.Path('out/rehome-plan-pool-data-to-media-2026-03-19.json').read_text())
+plan_hashes = {h for p in plan.get('plans', []) for h in (p.get('affected_torrents') or [])}
+print(f'qB pool-data torrents: {len(pool_data)}')
+print(f'Plan covers: {len(plan_hashes)} hashes')
+for hash_, name, state in pool_data:
+    covered = '✓' if hash_ in plan_hashes else '✗ NOT IN PLAN'
+    print(f'  {covered}  {state:15s}  {name}')
+"
+```
+
+**Notes on 2026-03-18/19 code audit (may affect plan output):**
+- `planner.py` bind-mount false-positive fix: may reclassify previously-BLOCKED candidates
+- `planner.py` single-torrent unique-view fix: target paths change for 1-torrent payloads
+- Both are LOW-risk corrections; executor logic unchanged
+
+---
+
+Last updated: 2026-03-13 (historical section below)
 
 ## Live Reality / Drift
 
-- `hashall` is now `0.8.0`.
+- `hashall` is now `0.8.5` (see version history below for prior milestones).
 - New 2026-03-15 qB compatibility/cache hardening:
   - local cache implementation now lives in this repo:
     - `src/hashall/qb_cache.py`

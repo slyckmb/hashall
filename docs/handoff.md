@@ -1,8 +1,128 @@
 # Handoff Notes
 
+## 2026-03-19 Migration Audit + Bug Fixes (same branch)
+
+### Stale lock cleared
+`~/.hashall/rehome.lock` pid 3888189 confirmed dead and removed. Migration is now unblocked.
+
+### qB consecutive_failures counter bug fixed
+`src/hashall/qb_cache.py`: `_write_meta` on successful fetch did not include
+`consecutive_failures: 0`, so the 640-failure count from a prior qB outage persisted
+in the meta file even after recovery (`source=daemon_live`, fresh cache). Fixed: both
+the `daemon_once` and `daemon_live` success paths now explicitly write `consecutive_failures: 0`.
+Test added: `test_daemon_once_resets_consecutive_failures_on_success`.
+
+### Other fixes in this sub-session
+- `bin/qb-checking-watch.sh` help text: `--interval` and `--cache-max-age` both said
+  `"default: 15"` but actual defaults are `30`. Corrected.
+- `bin/qb-stoppeddl-apply-watch.sh`: default `BUCKET_DIR` changed from
+  `/tmp/qb-stoppeddl-bucket-live` (volatile) to `~/.hashall/qb-stoppeddl-bucket`.
+- `bin/migrate-pool-data-to-media_common.sh:14`: added portability comment to
+  `FASTRESUME_DIR` host-specific default.
+- `docs/operations/RUN-STATE.md`: updated opening version line from `0.8.0` to `0.8.5`.
+- `src/hashall/__init__.py`: version bumped to `0.8.5`.
+
+### Migration readiness (post-fixes)
+- Lock: cleared ✓
+- qB API: healthy (cache fresh, failure counter now resets correctly after recovery)
+- Migration scripts: `bin/migrate-pool-data-to-media.sh` ready for Phase 1 plan generation
+- Next step: run Phase 0→1 workflow (see RUN-STATE.md "2026-03-19 Migration Analysis")
+
+---
+
+## 2026-03-19 Migration Analysis (same branch)
+
+Pool-data → pool-media migration is still `in_progress` with two blockers.
+
+**Live counts:**
+- `old_path_count=41` pool-data torrents (up from 34 in Mar-13 docs; all `stalledUP`)
+- `new_path_count=344` pool-media torrents
+
+**Blockers before resuming:**
+1. Stale `~/.hashall/rehome.lock` — 5 days old (2026-03-14 10:02). Verify process dead, then `rm`.
+2. 640 consecutive qB API failures in cache meta. Cache itself is fresh (`source=daemon_live`, `2026-03-19T15:32`). Investigate `last_error` and confirm live API responds before trusting plan output.
+
+**Resumption order:**
+1. Phase 0: clear lock, verify qB health, `hashall refresh --verbose`
+2. Phase 1: `hashall rehome relocate-plan --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding --output out/rehome-plan-pool-data-to-media-2026-03-19.json`; audit coverage vs. 41 qB pool-data hashes
+3. Phase 2: execute in small curated batches
+
+**Code notes for new plan:** 2026-03-18/19 audit fixes (bind-mount false-positive, unique-view single-torrent) may reclassify some previously-BLOCKED candidates. No executor logic changed.
+
+**Out/ plan files:** plan files live in the main repo, not this worktree. Run plan generation from main repo or copy output after.
+
+---
+
+## 2026-03-18/19 Audit Session (branch: cr/claude-hashall-20260318-232039)
+
+### What happened
+Full code audit against `docs/REQUIREMENTS.md` (which was itself updated to v1.1 in this session).
+Five bugs found; five fixed across two commits. Tests written for all fixes. No regressions
+(636 pass; 13 pre-existing failures unrelated to this work).
+
+### REQUIREMENTS.md v1.1 (docs/REQUIREMENTS.md)
+- Gap analysis of ~30 items applied: §2.5 Seeding Domain, §2.6 Seed-Root State Contract added;
+  ZFS pool topology table added; `~noHL` advisory-only note; hitchhiker invariant; staged cleanup
+  model; drift policy tables; fastresume-preferred qB integration; reality snapshots; partial
+  reconcile exception; 14 new glossary terms; §11 roadmap updated.
+
+### Bug fixes in this session (commits 3fd06c0 and b88343f)
+
+#### HIGH — followup.py: GOOD_STATES missing 'stoppedup'
+- File: `src/rehome/followup.py` line 31
+- Before: `{"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}`
+- After: added `"stoppedup"` — without this, paused-after-rehome torrents (state=stoppedUP,
+  normal operator behavior) permanently accumulate `.rehome-cleanup-stage/` directories.
+- Test: `tests/test_rehome_followup.py::test_followup_cleanup_passes_gate_when_torrent_is_stoppedup`
+
+#### MEDIUM — scan.py: nested dataset scan dropped drift_policy
+- File: `src/hashall/scan.py` (~line 2025)
+- `--drift-policy=full/quick` silently fell back to `metadata` for all nested ZFS datasets.
+- Fix: added `drift_policy=drift_policy` to the recursive `scan_path` call.
+- Test: `tests/test_scan_hardlinks.py::test_drift_policy_forwarded_to_nested_dataset_scan`
+
+#### MEDIUM — planner.py: bind-mount false-positive BLOCK on external consumer detection
+- File: `src/rehome/planner.py`
+- Two sub-fixes:
+  1. `_normalize_abs_path` now calls `canonicalize_path` instead of `path.resolve()` so
+     bind-alias hardlink paths (/data/media/...) are mapped to canonical form (/stash/media/...)
+     before seeding-domain comparison.
+  2. Legacy-table DB prefix query now uses original `root_path` string (pre-canonicalization)
+     rather than `str(root)` (post-canonicalization) — canonicalized prefix wouldn't match
+     rows stored under the bind alias.
+- Test: `tests/test_rehome.py::TestExternalConsumerDetection::test_external_consumer_no_false_positive_when_hardlink_under_bind_alias`
+
+#### LOW — planner.py: single-torrent bypass of unique-view scheme
+- File: `src/rehome/planner.py` `_build_view_targets()`
+- `if len(raw_targets) <= 1: return raw_targets` bypassed the `_rehome-unique/<hash>` scheme
+  for single-torrent payloads. Risk: collision when two single-torrent payloads share
+  `root_name`; state mismatch when payload gains a cross-seed after initial demotion.
+- Fix: changed `<= 1` to `== 0` so single-torrent payloads also use unique-view.
+- Updated test: `tests/test_rehome_mapping.py::test_plan_includes_view_targets`
+  (expected path updated to `/pool/data/_rehome-unique/torrent_map`)
+
+#### LOW — qb_cache.py: daemon URL env var gap
+- File: `src/hashall/qb_cache.py` `daemon_main()`
+- Daemon only read `QBIT_URL`; `qbittorrent.py` falls back through `QBITTORRENT_API_URL`
+  → `QBITTORRENT_URL` → `QBITTORRENT_HOST` → `QBITTORRENTAPI_HOST`. Setting any standard
+  var had no effect on the cache daemon.
+- Fix: daemon now tries the full fallback chain before defaulting to `http://localhost:9003`.
+
+### Version after this session
+- `hashall` semver: `0.8.4` (bumped in `src/hashall/__init__.py`)
+- Branch commits: `3fd06c0` (HIGH+MEDIUM fixes), `b88343f` (LOW fixes)
+
+### Test baseline after this session
+- 636 passed, 13 pre-existing failures (not introduced by this session):
+  - `test_scan_integration.py` (7): findmnt -T resolves /tmp through /dev/nvme0n1p7 on this host
+  - `test_codex_says_run_this_next_script.py` (4): pre-existing
+  - `test_payload_auto_workflow.py` (2): pre-existing
+
+---
+
 ## Key Facts
 
-- `hashall` semver baseline is now `0.8.0`.
+- `hashall` semver baseline is now `0.8.4` (was 0.8.0 before this audit session).
 - New 2026-03-15 qB compatibility/cache baseline:
   - `hashall` now owns a local qB shared-cache implementation:
     - `src/hashall/qb_cache.py`

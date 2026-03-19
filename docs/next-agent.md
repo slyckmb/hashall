@@ -1,6 +1,35 @@
 # Next Agent Entry (Compact-Safe)
 
-- `hashall` is now `0.8.0`.
+## 2026-03-19 Migration State (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.5`
+- **41** pool-data torrents remain (all `stalledUP`); **344** on pool-media; state: `in_progress`
+- **Blockers CLEARED:**
+  - `~/.hashall/rehome.lock` removed (pid confirmed dead)
+  - `consecutive_failures=640` was a stale counter artifact — fixed in code; qB API healthy
+- **Next step:** `hashall refresh --verbose` → generate fresh relocate-plan → execute in batches
+- Phase 0→1 commands: `docs/operations/RUN-STATE.md` "2026-03-19 Migration Analysis" section
+- Bug fixes this sub-session: `qb_cache.py` counter reset, `qb-checking-watch.sh` help text,
+  stoppeddl bucket path, `migrate_common.sh` comment, version bump
+- Full context: `docs/handoff.md` "2026-03-19 Migration Audit + Bug Fixes" section
+
+---
+
+## 2026-03-18/19 Audit Session Summary (compact-safe)
+
+- `hashall` was `0.8.4` after the audit session (now `0.8.5` after the 2026-03-19 bug-fix sub-session).
+- Branch `cr/claude-hashall-20260318-232039` has two commits beyond the session baseline:
+  - `3fd06c0`: HIGH + MEDIUM bugs (followup GOOD_STATES, scan drift_policy, planner bind-mount)
+  - `b88343f`: LOW bugs (unique-view shortcut, qb_cache daemon URL env var)
+- Full details in `docs/handoff.md` top section ("2026-03-18/19 Audit Session").
+- Test baseline: 636 pass / 13 pre-existing failures (see handoff.md for breakdown).
+- `docs/REQUIREMENTS.md` is now v1.1 — the canonical requirements reference for all rehome work.
+- No operational migration work was done in this session; live migration state is unchanged
+  from the 2026-03-13/15 baselines documented below.
+
+---
+
+- `hashall` is now `0.8.4`.
 - qB cache compatibility is now partially internalized:
   - use `bin/qb-cache-agent.py --status` to inspect the local cache
   - local cache path is `~/.cache/hashall-qb/`

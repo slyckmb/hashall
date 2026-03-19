@@ -443,3 +443,23 @@ def test_drift_policy_quick_escalates_to_full_on_quick_hash_mismatch(tmp_path):
     assert after[0] != before[0]
     assert after[1] is not None
     assert after[2] is not None
+
+
+def test_drift_policy_forwarded_to_nested_dataset_scan():
+    """drift_policy must appear in the nested-dataset recursive scan_path call.
+
+    Previously the recursive call omitted drift_policy, so a caller requesting
+    'full' or 'quick' silently got 'metadata' for all nested ZFS datasets.
+    This test guards the implementation directly since creating a real alternate-
+    device mount in a tmp_path is not possible in unit tests.
+    """
+    import inspect
+    import hashall.scan as scan_mod
+
+    source = inspect.getsource(scan_mod.scan_path)
+    # Locate the nested-dataset block and verify drift_policy is forwarded.
+    assert "drift_policy=drift_policy" in source, (
+        "scan_path's nested-dataset recursive call must forward drift_policy. "
+        "Without this, --drift-policy=full silently falls back to 'metadata' "
+        "for all nested ZFS datasets."
+    )

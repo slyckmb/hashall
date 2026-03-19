@@ -28,7 +28,7 @@ PATH_ALIAS_PREFIXES = (
     ("/stash/media", "/data/media"),
 )
 
-GOOD_STATES = {"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}
+GOOD_STATES = {"uploading", "stalledup", "stoppedup", "queuedup", "forcedup", "pausedup"}
 TRANSIENT_REASONS = {
     "progress_below_100",
     "state_transient",

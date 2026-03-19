@@ -98,7 +98,10 @@ def test_plan_includes_view_targets(tmp_path):
     plan = planner.plan_demotion("torrent_map")
     assert plan["decision"] != "BLOCK"
     assert plan.get("view_targets")
-    assert plan["view_targets"][0]["target_save_path"] == "/pool/data"
+    # Single-torrent payloads now use the same unique-view scheme as multi-torrent
+    # payloads to prevent target collisions and state mismatches if a cross-seed
+    # is added after initial demotion.
+    assert plan["view_targets"][0]["target_save_path"] == "/pool/data/_rehome-unique/torrent_map"
 
 
 def test_move_target_preserves_seeding_relative_structure(tmp_path):
