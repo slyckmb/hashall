@@ -47,6 +47,18 @@ Pool-data → pool-media migration is still `in_progress` with two blockers.
 2. Phase 1: `hashall rehome relocate-plan --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding --output out/rehome-plan-pool-data-to-media-2026-03-19.json`; audit coverage vs. 41 qB pool-data hashes
 3. Phase 2: execute in small curated batches
 
+**Special-case audit update (2026-03-19):**
+- The live `41` remaining `/pool/data` qB rows are split across three path families:
+  - `8` under `/pool/data/media/torrents/seeding`
+  - `28` under `/pool/data/cross-seed-link`
+  - `5` under `/pool/data/cross-seed`
+- Dry-running `bin/migrate-pool-data-to-media.sh` only selected the `8` rows under the exact
+  wrapper source root. It is therefore **not** the full 41-row resume command as currently wired.
+- That dry-run also included `Alien Romulus` (`1376e795...`), which remains a deliberate
+  repair/proving-lane item and should stay out of plain migration batches.
+- `Shining.Girls...` also remains unresolved as a bad reuse candidate and should stay excluded
+  from plain migration batches until it is explicitly re-audited.
+
 **Code notes for new plan:** 2026-03-18/19 audit fixes (bind-mount false-positive, unique-view single-torrent) may reclassify some previously-BLOCKED candidates. No executor logic changed.
 
 **Out/ plan files:** plan files live in the main repo, not this worktree. Run plan generation from main repo or copy output after.

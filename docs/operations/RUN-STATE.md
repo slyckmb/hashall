@@ -10,6 +10,42 @@ Last updated: 2026-03-19
 - `/stash` torrents: `0`
 - Migration seed-root-state: `in_progress`
 
+**Current live split of the 41 pool-data torrents (confirmed from qB cache on 2026-03-19):**
+- `8` under `/pool/data/media/torrents/seeding`
+- `28` under `/pool/data/cross-seed-link`
+- `5` under `/pool/data/cross-seed`
+- state mix: `40 stalledUP`, `1 uploading`
+
+**Wrapper warning — `bin/migrate-pool-data-to-media.sh` is not the full 41-torrent resume path:**
+- The wrapper's default `SOURCE_ROOT` is `/pool/data/media/torrents/seeding`.
+- A dry-run on 2026-03-19 selected only the `8` torrents under that exact root.
+- It did **not** include the other `33` remaining `/pool/data` torrents under
+  `/pool/data/cross-seed-link` and `/pool/data/cross-seed`.
+- The wrapper dry-run also included `Alien Romulus`, which remains a deliberate repair/proving lane
+  and should not be treated as a normal plain-migration batch item.
+- Practical meaning: use the fresh `relocate-plan` flow to reason about the full `41`-torrent
+  remainder; do not assume the wrapper resumes the whole lane as-is.
+
+**Current special cases within the live 41-torrent remainder:**
+- `Alien Romulus` (`1376e795...`) remains a real special-case/proving lane item:
+  - still lives under `/pool/data/media/torrents/seeding/cross-seed/hawke-uno`
+  - still tagged `~noHL`
+  - still belongs to the mixed sibling family called out in the active project docs
+  - status: **not resolved** for plain migration batching
+- `Shining.Girls...` remains a known bad reuse candidate:
+  - live pool-data hashes are `57316294...`, `0fff0ce2...`, and `4511c5f4...`
+  - the two rows under `/pool/data/media/torrents/seeding` are exactly the ones the old wrapper
+    would try to include
+  - project continuity docs already say to exclude this group from future plain batches
+  - status: **not resolved** for plain migration batching
+- `The.West.Wing.S02...` appears as a multi-row family in the old wrapper dry-run:
+  - hashes `62c3d90c...`, `cbe76a6e...`, `ce2445dd...`, `2179ba97...`, `71cdd51d...`
+  - this is not a blocker by itself, but it confirms the wrapper is row/per-torrent oriented rather
+    than a clean "unique payload family" batcher
+  - status: **not a separate blocker**, but a reason to prefer `relocate-plan` over the wrapper
+- `V for Vendetta` remains only a refresh follow-up anomaly, not an active migration blocker
+  for the pool-data remainder
+
 **Blockers — must resolve before resuming migration:**
 
 1. **Stale rehome.lock** (`~/.hashall/rehome.lock`)
@@ -51,7 +87,7 @@ hashall refresh --verbose        # confirm catalog fresh
 
 # Phase 1: generate fresh plan
 hashall rehome relocate-plan \
-  --source-root /pool/data/media/torrents/seeding \
+  --source-root /pool/data \
   --target-root /pool/media/torrents/seeding \
   --output out/rehome-plan-pool-data-to-media-2026-03-19.json \
   2>&1 | tee ~/.logs/hashall/rehome/relocate-plan-2026-03-19.log

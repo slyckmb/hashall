@@ -4,10 +4,21 @@
 
 - `hashall` is now `0.8.5`
 - **41** pool-data torrents remain (all `stalledUP`); **344** on pool-media; state: `in_progress`
+- Live split of those `41` rows on 2026-03-19:
+  - `8` under `/pool/data/media/torrents/seeding`
+  - `28` under `/pool/data/cross-seed-link`
+  - `5` under `/pool/data/cross-seed`
 - **Blockers CLEARED:**
   - `~/.hashall/rehome.lock` removed (pid confirmed dead)
   - `consecutive_failures=640` was a stale counter artifact — fixed in code; qB API healthy
 - **Next step:** `hashall refresh --verbose` → generate fresh relocate-plan → execute in batches
+- Important: `bin/migrate-pool-data-to-media.sh` is **not** the full 41-row resume path as currently wired.
+  - Its dry-run on 2026-03-19 only selected the `8` rows under the exact
+    `/pool/data/media/torrents/seeding` source root.
+  - It also included `Alien Romulus`, which remains a special-case repair/proving lane item.
+- Current known special cases:
+  - `Alien Romulus` (`1376e795...`) is **still active as a special case**, not resolved for plain batching
+  - `Shining.Girls...` is **still a bad reuse candidate** and should stay excluded from plain batches
 - Phase 0→1 commands: `docs/operations/RUN-STATE.md` "2026-03-19 Migration Analysis" section
 - Bug fixes this sub-session: `qb_cache.py` counter reset, `qb-checking-watch.sh` help text,
   stoppeddl bucket path, `migrate_common.sh` comment, version bump
