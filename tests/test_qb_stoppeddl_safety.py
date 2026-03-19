@@ -145,6 +145,12 @@ def test_drain_root_policy_check_blocks_forbidden_path() -> None:
     assert reason == "forbidden_root:/data/media"
 
 
+def test_drain_parser_exposes_verify_heartbeat() -> None:
+    mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-drain.py", "qb_stoppeddl_drain_mod")
+    args = mod.build_parser().parse_args([])
+    assert float(args.verify_heartbeat) == 30.0
+
+
 def test_apply_path_equivalent_does_not_alias_pool_data_to_data_media() -> None:
     mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-apply.py", "qb_stoppeddl_apply_mod")
     assert mod.path_equivalent(

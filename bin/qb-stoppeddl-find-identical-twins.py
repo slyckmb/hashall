@@ -7,6 +7,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -331,8 +332,11 @@ def run_verify(
     reports_dir: Path,
     target_hash: str,
     sibling_hash: str,
+    candidate_index: int,
+    candidate_total: int,
     timeout_s: int,
     poll_s: int,
+    heartbeat_s: int,
     show_progress: bool,
 ) -> Tuple[dict, str, str, str]:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -355,7 +359,27 @@ def run_verify(
     if show_progress:
         cmd.append("--show-progress")
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    started = time.monotonic()
+    next_heartbeat = started + max(5, int(heartbeat_s))
+    poll_sleep = max(0.2, float(max(1, int(poll_s))))
+    while proc.poll() is None:
+        now = time.monotonic()
+        if now >= next_heartbeat:
+            elapsed = int(now - started)
+            print(
+                "  verify_wait "
+                f"target={target_hash[:12]} sibling={sibling_hash[:12]} "
+                f"candidate={candidate_index}/{candidate_total} "
+                f"elapsed_s={elapsed} timeout_s={int(timeout_s)} "
+                f"path={candidate_path}"
+            )
+            next_heartbeat = now + max(5, int(heartbeat_s))
+        time.sleep(poll_sleep)
+
+    out, err = proc.communicate()
+    proc_stdout = str(out or "").strip()
+    proc_stderr = str(err or "").strip()
 
     fallback = {
         "path": str(candidate_path),
@@ -367,7 +391,7 @@ def run_verify(
     }
 
     if not json_out.exists():
-        return fallback, str(json_out), (proc.stdout or "").strip(), (proc.stderr or "").strip()
+        return fallback, str(json_out), proc_stdout, proc_stderr
 
     try:
         payload = json.loads(json_out.read_text(encoding="utf-8"))
@@ -376,11 +400,11 @@ def run_verify(
             r0 = dict(results[0])
             if not r0.get("reason"):
                 r0["reason"] = "verified_from_libtorrent"
-            return r0, str(json_out), (proc.stdout or "").strip(), (proc.stderr or "").strip()
+            return r0, str(json_out), proc_stdout, proc_stderr
     except Exception as e:
         fallback["reason"] = f"verify_json_parse_error:{e}"
 
-    return fallback, str(json_out), (proc.stdout or "").strip(), (proc.stderr or "").strip()
+    return fallback, str(json_out), proc_stdout, proc_stderr
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -456,6 +480,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="libtorrent verify poll seconds (default: 1)",
+    )
+    p.add_argument(
+        "--verify-heartbeat",
+        type=int,
+        default=30,
+        help="Heartbeat seconds while a libtorrent verify subprocess is running (default: 30)",
     )
     p.add_argument(
         "--show-verify-progress",
@@ -728,8 +758,11 @@ def main() -> int:
                 reports_dir=reports_dir,
                 target_hash=h,
                 sibling_hash=sh,
+                candidate_index=n,
+                candidate_total=len(verify_candidates),
                 timeout_s=int(args.verify_timeout),
                 poll_s=int(args.verify_poll),
+                heartbeat_s=int(args.verify_heartbeat),
                 show_progress=bool(args.show_verify_progress),
             )
             letter = classify_letter(result)
