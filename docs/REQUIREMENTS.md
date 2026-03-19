@@ -1,8 +1,8 @@
 # Seed Data Management System - Requirements & Implementation
 
-**Version:** 1.0 (Living Document)
-**Last Updated:** 2026-02-05
-**Status:** Active Development - Core features implemented, refinements in progress
+**Version:** 1.1 (Living Document)
+**Last Updated:** 2026-03-18
+**Status:** Active Development - Core features implemented, pool dataset migration in progress
 
 ---
 
@@ -21,17 +21,19 @@ This document serves as the single source of truth for:
 ## Table of Contents
 
 1. [System Overview](#1-system-overview)
-2. [Storage Architecture](#2-storage-architecture)
+2. [Storage Architecture](#2-storage-architecture) — §2.1 topology, §2.5 seeding domain, §2.6 seed-root contract
 3. [Application Stack](#3-application-stack)
-4. [Core Requirements](#4-core-requirements)
-5. [Data Movement (Rehoming)](#5-data-movement-rehoming)
-6. [Deduplication](#6-deduplication)
-7. [Catalog System (hashall)](#7-catalog-system-hashall)
-8. [Orchestration System (rehome)](#8-orchestration-system-rehome)
-9. [Operational Requirements](#9-operational-requirements)
+4. [Core Requirements](#4-core-requirements) — §4.1 residency rules (incl. `~noHL` advisory), §4.3 external consumer detection
+5. [Data Movement (Rehoming)](#5-data-movement-rehoming) — §5.1 demotion (staged cleanup, preexisting target), §5.3 payload groups (partial reconcile, ATM)
+6. [Deduplication](#6-deduplication) — §6.3 view building (hitchhiker invariant, cross-device donor prohibition)
+7. [Catalog System (hashall)](#7-catalog-system-hashall) — §7.3 scanning (drift policy modes)
+8. [Orchestration System (rehome)](#8-orchestration-system-rehome) — §8.2 planning, §8.3 apply, §8.4 qB integration (fastresume, cache), §8.5 safety, §8.6 recovery lane, §8.7 reality snapshots
+9. [Operational Requirements](#9-operational-requirements) — §9.2 safety guarantees, §9.3 idempotency
 10. [Terminology](#10-terminology)
 11. [Implementation Status](#11-implementation-status)
 12. [Success Criteria](#12-success-criteria)
+
+> **Note for agents:** Always check `docs/operations/RUN-STATE.md` for current live system state before planning. REQUIREMENTS.md describes intended behavior; RUN-STATE.md captures the operational truth at any point in time, including known gaps and carve-outs.
 
 ---
 
@@ -92,6 +94,26 @@ In short: **unique per-item payload tree, shared physical bytes via hardlinks wh
   - No \*arr consumers
   - Hardware: RAID array of HDDs in USB enclosures
 
+**Pool ZFS Datasets (Sub-pools):**
+
+The `/pool` pool contains multiple ZFS datasets that are distinct filesystems (distinct `fs_uuid`, distinct `device_id`). Hardlinks do not cross dataset boundaries. The two primary seeding datasets are:
+
+| Dataset alias | Mount point | Role |
+|---|---|---|
+| `pool-data` | `/pool/data/` | Legacy seeding root (source of current migration) |
+| `pool-media` | `/pool/media/` | Active seeding target (destination of current migration) |
+
+**Active Dataset Migration (2026):**
+The system is actively migrating seeding content from `pool-data` (`/pool/data/media/torrents/seeding`) to `pool-media` (`/pool/media/torrents/seeding`). During this transition:
+- Both datasets are valid seeding roots
+- `pool-data` participates as a `mirror_root` (source) until migration is complete
+- `pool-media` is the canonical target for new placements
+- The published seeding-root contract (`~/.hashall/seed-root-state.json`) reflects which datasets are active/legacy at any point in time
+- All planning and apply tooling must be dataset-aware; "pool" is not a single target
+
+**Stable Device Identity:**
+ZFS filesystem UUIDs (`fs_uuid`) are stable across reboots; Linux `device_id` values are not. All long-term catalog identity uses `fs_uuid`. Device aliases (e.g., `stash`, `pool-data`, `pool-media`) are registered in the `devices` table and used in CLI parameters instead of raw device IDs.
+
 ### 2.2 Bind Mounts & Path Mapping
 
 **Purpose:** Container applications (qBittorrent, cross-seed, \*arr apps) use `/data/media` paths while the underlying storage is at `/stash/media`.
@@ -128,11 +150,20 @@ Container View          Real ZFS Path
   └── [other tracker categories]/
 ```
 
-**Seeding Domain (Cold - Pool):**
+**Seeding Domain (Cold - Pool, legacy dataset):**
 ```
-/pool/data/cross-seed/                  (cross-seed links on pool)
+/pool/data/media/torrents/seeding/      (pool-data seeding root, migration source)
+/pool/data/cross-seed/                  (cross-seed links on pool-data)
 /pool/data/RecycleBin/                  (qbit_manage recycle bin)
 /pool/data/orphaned_data/               (orphaned files)
+```
+
+**Seeding Domain (Cold - Pool, active dataset):**
+```
+/pool/media/torrents/seeding/           (pool-media seeding root, migration target)
+  ├── cross-seed/                       (cross-seed links on pool-media)
+  ├── _rehome-unique/<hash>/            (unique per-item payload trees for shared-root groups)
+  └── [tracker categories]/
 ```
 
 **Media Libraries (External Consumers - Stash):**
@@ -156,6 +187,25 @@ The system is designed to accommodate additional paths as the media library grow
 - Additional cross-seed dataDirs for matching
 
 **Design Principle:** Path expansion should not require architectural changes, only configuration updates.
+
+### 2.5 Seeding Domain Definition
+
+The **seeding domain** is the set of filesystem paths where torrent payload data lives for seeding. It is:
+- **Configurable**, not hard-coded — defined at planning time via `--seeding-root` flags or the seed-root-state contract
+- **Multi-root** — multiple paths may be active simultaneously (e.g., during dataset migration both `pool-data` and `pool-media` seeding roots are valid)
+- **Device-scoped** — each root carries its dataset alias to preserve hardlink boundary awareness
+
+External consumer detection, BLOCK decisions, and cleanup logic must all use the current seeding domain definition at execution time, not a stale cached version.
+
+### 2.6 Seed-Root State Contract
+
+**File:** `~/.hashall/seed-root-state.json`
+
+This file is the **authoritative published seeding-root contract** consumed by external orchestration tools (`hashall refresh`, `rehome apply`, `qb-zfs-relocate`, triage scripts, etc.). It declares which roots are:
+- `active` — canonical targets for new placements
+- `mirror_roots` / legacy — still valid seeding sources, included in seeding domain during migration
+
+**Requirement:** Any tool that needs to know valid seeding roots at runtime must read this file rather than hard-coding paths. The file must be updated when dataset migration adds, removes, or changes the role of a seeding root.
 
 ---
 
@@ -260,9 +310,11 @@ linkCategory: "cross-seed"
 
 #### 4.1.1 Hardlink-Based Residency
 
-**Seeding Domain Paths:**
-- Primary: `/stash/media/torrents/seeding/` (or `/data/media/torrents/seeding/` via bind mount)
-- Pool: `/pool/data/cross-seed/`
+**Seeding Domain Paths (configurable — see §2.5 and §2.6):**
+- Stash primary: `/stash/media/torrents/seeding/` (or `/data/media/torrents/seeding/` via bind mount)
+- Pool legacy: `/pool/data/media/torrents/seeding/`, `/pool/data/cross-seed/`
+- Pool active: `/pool/media/torrents/seeding/`
+- (All active seeding roots from `~/.hashall/seed-root-state.json`)
 
 **External Consumer Paths (Media Libraries):**
 - `/stash/media/books/`
@@ -289,6 +341,8 @@ A torrent's data is **eligible to move to `/pool`** if:
 - All hardlinks are siblings within the seeding domain only
 - No hardlinks exist in external consumer paths
 - Typically identified by `~noHL` tag from qbit_manage
+
+**Important: `~noHL` is advisory only.** The tag reflects qbit_manage's scan at a specific point in time. A `*arr` import between the qbit_manage scan and a rehome plan execution can create a new external hardlink. The authoritative external consumer check is always the plan-time scan of current catalog/filesystem state. The `~noHL` tag is a pre-filter that narrows candidates; it does not bypass the external consumer check.
 
 ### 4.2 Payload Identity
 
@@ -320,22 +374,26 @@ A torrent's data is **eligible to move to `/pool`** if:
 1. For each file in torrent payload:
    - Get inode + device_id
    - Find all paths with matching inode + device_id
-   - Check if any path is outside seeding domain roots
+   - **Canonicalize all paths** (resolve bind mounts and symlinks) before comparing against seeding domain roots
+   - Check if any canonical path is outside seeding domain roots
 2. If ANY file has external consumer → BLOCK demotion
+
+**Canonicalization Requirement:**
+Both the candidate hardlink paths and the seeding domain root definitions must be canonicalized before comparison. `/data/media/movies/...` and `/stash/media/movies/...` are the same inode via bind mount; without canonicalization a path under `/data/media/movies/` might falsely appear "inside" a stash-based seeding domain definition. The device registry's `preferred_mount_point` provides the canonical form for each filesystem.
 
 **Example:**
 ```
 Seeding domain: /stash/media/torrents/seeding/
 
 File: /stash/media/torrents/seeding/radarr/Movie.2024/video.mkv (inode 5678)
-Hardlinks:
+Hardlinks (canonical paths):
   ✅ /stash/media/torrents/seeding/radarr/Movie.2024/video.mkv (inside domain)
   ❌ /stash/media/movies/Movie (2024)/video.mkv (outside domain - EXTERNAL CONSUMER)
 
 Result: BLOCKED (cannot demote because external consumer exists)
 ```
 
-**Automated Detection:** qbit_manage's `~noHL` tag indicates no external consumers detected.
+**Automated Detection:** qbit_manage's `~noHL` tag is an advisory pre-filter. See §4.1.1 for the authoritative check requirement.
 
 ---
 
@@ -377,15 +435,19 @@ Does it have external consumers?
 
 **MOVE Flow:**
 1. Verify source exists and matches expected file count/bytes
-2. Move payload root directory (stash → pool)
-3. Verify target matches expected file count/bytes
-4. For each sibling torrent:
+2. **Check for preexisting content at target** — if target path already has files with a different file count or different total bytes, ABORT before any data movement. Do not silently overwrite unexpected content.
+3. Copy/move payload root directory (stash → pool)
+4. Verify target matches expected file count/bytes after copy
+5. For each sibling torrent:
    - Build torrent view on pool (hardlinks to payload)
-   - Pause torrent in qBittorrent
-   - Relocate torrent to pool path via API
-   - Resume torrent
-   - Verify torrent can access files
-5. Verify stash source is removed
+   - Stop torrent in qBittorrent
+   - Patch fastresume offline (preferred) or set location via API
+   - Restart torrent
+   - Verify torrent reaches a seeding-safe state (not `stoppedDL` / `missingFiles`)
+6. Verify stash source is cleanly removable before removing it
+
+**Staged Cleanup:**
+Source cleanup after a successful MOVE is **deferred by default** and runs as a separate step via `hashall rehome followup --cleanup`. Cleanup stages the source root into `.rehome-cleanup-stage/<payload_hash>/...` rather than deleting immediately, observes qB state on the target paths, and only performs final deletion after the target is confirmed healthy. Any qB regression during the observation window automatically restores the staged source.
 
 **Safety:** Demotion is BLOCKED if external consumers exist. No silent breakage of media library links.
 
@@ -432,12 +494,18 @@ Does identical payload exist on stash?
 
 **Definition:** A payload-group is the set of sibling torrents that share a payload_hash.
 
-**Rehoming Principle:** All siblings in a payload-group are rehomed together as a unit.
+**Rehoming Principle:** All siblings in a payload-group are rehomed together as a unit when possible.
 
 **Why?**
 - Prevents split scenarios (some siblings on stash, others on pool)
 - Single source of truth for payload location
 - Simplifies reasoning about system state
+
+**Partial Reconcile Exception:**
+When a plan is re-applied after a partial failure, or when siblings have already been relocated by a prior run, the system must handle mixed-state groups without aborting. Siblings already on the target device and path are reconciled into the catalog (`rehome_reconcile_subset`); remaining siblings are processed normally. This preserves the "no re-doing already-done work" idempotency requirement while avoiding silent skips.
+
+**ATM Interaction:**
+qBittorrent's Automatic Torrent Management (ATM) automatically moves torrent data when its category changes. For a torrent with ATM enabled that is rehomed to pool, the ATM category save path must point to the target pool path — otherwise qB may auto-relocate it back to stash on the next category update. Rehome must either: (a) disable ATM on rehomed torrents, or (b) verify that the torrent's category save path resolves to the target device before considering the operation complete. cross-seed torrents already have ATM disabled; this requirement primarily applies to ATM-enabled stash-to-pool demotions.
 
 ---
 
@@ -508,14 +576,26 @@ Does identical payload exist on stash?
 
 **Example:**
 ```
-Canonical payload: /pool/data/Movie.2024/
-Torrent A view:    /pool/data/cross-seed/Aither (API)/Movie.2024/
+Canonical payload: /pool/media/Movie.2024/
+Torrent A view:    /pool/media/torrents/seeding/cross-seed/Aither (API)/Movie.2024/
                    └── (hardlinks to canonical payload)
-Torrent B view:    /pool/data/cross-seed/Darkpeers (API)/Movie.2024/
+Torrent B view:    /pool/media/torrents/seeding/cross-seed/Darkpeers (API)/Movie.2024/
                    └── (hardlinks to canonical payload)
 
 Result: Distinct per-torrent payload trees on disk, with shared physical bytes when hardlinks are possible
 ```
+
+**Hitchhiker Invariant (anti-pattern prohibition):**
+
+A **hitchhiker** is when two or more torrents with different payload content share a single target directory (N→1 mapping). This produces incorrect save-path semantics and is prohibited for new operations.
+
+**Requirement:** Newly constructed migrations, rehome plans, and view builds must always produce **per-hash unique target roots** — one directory tree per `payload_hash`. For cases where a natural target path would collide (e.g., two different payloads that would both want the same directory name), the system must route into `_rehome-unique/<payload_hash>/` subdirectories to preserve uniqueness.
+
+Existing legacy hitchhiker groups may persist until explicitly de-hitchhiked. Do not create new hitchhiker targets even as a workaround.
+
+**Cross-Filesystem Donor Prohibition:**
+
+When building a view via hardlinks, the donor payload must be on the **same filesystem** as the target. Selecting a stash donor to build a pool view — or vice versa — is not allowed because hardlinks cannot span filesystems. This check must be enforced before any view-building mutation. Cross-filesystem donor selection requires explicit operator override and produces physical copies, not hardlinks.
 
 ---
 
@@ -594,13 +674,30 @@ catalog.db
 2. For each file:
    - Check if exists in catalog (by path + device_id)
    - Compare size + mtime
-   - If unchanged → skip hash computation, use cached hashes
-   - If changed → recompute SHA256, update catalog
-   - If new → compute SHA256, insert into catalog
+   - Apply drift policy (see below)
+   - If changed or new → recompute SHA256, update catalog
 3. Detect deletions (files in catalog but not on filesystem, scoped to scan root)
 4. Performance: ~500-1000 files/sec (sequential), ~2000-5000 files/sec (parallel)
 
 **Result: 10-100x speedup on rescans**
+
+**Drift Policy Modes (`--drift-policy`):**
+
+| Mode | Behavior | Use Case |
+|---|---|---|
+| `metadata` | Trust unchanged size+mtime; skip rehashing | Routine confidence pass (cheapest) |
+| `quick` | Recompute quick hash even for metadata-unchanged files; escalate to full hash if drift detected | Balance between speed and drift detection |
+| `full` | Fully rehash all files in scope regardless of metadata | Drift audit; highest confidence |
+
+**Hash Mode (`--hash-mode`):**
+
+| Mode | Behavior |
+|---|---|
+| `fast` | Compute and store only quick hashes (partial content sample) |
+| `full` | Compute full SHA256 for all scanned files |
+| `upgrade` | Normal incremental behavior but backfill missing full hashes on existing records |
+
+Choose `--scan-hash-mode fast --drift-policy metadata` for routine rescans. Choose `--scan-hash-mode full --drift-policy full` for pre-migration integrity audits.
 
 **Scoped Deletion Detection:**
 - Only marks files as deleted if they're under a scanned root
@@ -642,24 +739,32 @@ catalog.db
 
 ### 8.1 Overview
 
-**Tool:** `rehome` (external orchestration tool, not part of hashall core)
+**Tool:** `rehome` (orchestration subsystem within hashall)
 
-**Purpose:** Safely orchestrate payload movement between stash and pool
+**Purpose:** Safely orchestrate payload movement between stash and pool datasets
 
 **Why it matters:** Rehome is the core workflow this system is built to support. Hashall’s catalog + payload identity are required inputs to rehome’s plan/apply logic.
-
-**Current Version:** Stage 5 (Demotion + Promotion with qBittorrent integration)
 
 **Capabilities:**
 - Demotion planning and execution (stash → pool)
 - Promotion planning and execution (pool → stash, reuse-only)
+- Root-to-root relocation planning (`rehome relocate-plan`) for dataset migration within a pool
 - External consumer detection (blocks unsafe demotions)
-- qBittorrent API integration (pause/relocate/resume)
+- qBittorrent integration (stop/offline fastresume patch/start)
 - Batch operations (by payload-hash or qBittorrent tag)
 - REUSE/MOVE/BLOCK decision logic
 - Dry-run mode for safety
+- Live drift snapshots (`reality-pre/post/failure.json`) per apply run
+- Staged cleanup with automatic rollback on qB regression
 
-**Architecture:** Plan → Review → Apply workflow
+**Operational Lanes:**
+1. **Scan lane** — maintain filesystem truth via `hashall scan` / `hashall refresh`
+2. **Payload sync lane** — map qB torrents to payload state via `hashall payload sync`
+3. **Link lane** — same-device hardlink dedup planning + execution
+4. **Rehome lane** — guarded stash/pool relocation with verification and per-item payload-tree instantiation
+5. **Recovery lane** — classify and prune recovered non-seeding data; triage `stoppedDL`/`missingFiles` cohorts; repair fastresume/location drift
+
+**Architecture:** Plan → Review → Apply workflow with mandatory dry-run before force-apply.
 
 **Detailed Usage:** See `docs/tooling/REHOME-RUNBOOK.md`
 
@@ -673,9 +778,8 @@ catalog.db
 
 **Inputs:**
 - Torrent hash, payload hash, or tag (mutually exclusive)
-- `--seeding-root`: Path(s) defining seeding domain (can specify multiple)
-- `--stash-device`: Device ID for stash (e.g., 50)
-- `--pool-device`: Device ID for pool (e.g., 49)
+- `--seeding-root`: Path(s) defining seeding domain (can specify multiple; should match `seed-root-state.json`)
+- `--stash-device`, `--pool-device`: Device aliases (e.g., `stash`, `pool-media`) — use stable aliases from the devices table, not raw `device_id` values (which are not stable across reboots)
 - `--catalog`: Path to hashall database (default: `~/.hashall/catalog.db`)
 
 **Process:**
@@ -698,7 +802,13 @@ catalog.db
    - All affected torrents (siblings)
    - Verification checksums (file count, total bytes)
 
-**Output:** Plan JSON file (e.g., `rehome-plan-abc123de.json`)
+**NULL Payload Hash:**
+Payloads with `payload_hash = NULL` (full SHA256 not yet computed for all files) are **not eligible for REUSE planning** — sibling matching requires a complete hash. These payloads must have `hashall sha256-backfill` run first. MOVE planning for NULL-hash payloads is allowed only when relying on file-count and byte-count verification alone (lower confidence).
+
+**Catalog Freshness Requirement:**
+Plans must be generated from a current catalog state. **Always run `hashall refresh` (or `hashall scan` + `hashall payload sync`) immediately before generating a plan.** A stale catalog may show payloads at incorrect locations, miss recently-created external consumers, or produce incorrect sibling lists. The REHOME-RUNBOOK makes this a hard operational requirement.
+
+**Output:** Plan JSON file — written to `~/.logs/hashall/reports/rehome-runs/plans/<plan>.json`
 
 ### 8.3 Application Phase
 
@@ -713,36 +823,47 @@ catalog.db
 - `--cleanup-empty-dirs`: Remove empty directories under seeding roots
 
 **REUSE Execution:**
-1. Verify existing payload on target device
-2. For each sibling torrent:
+1. Preflight existing target views — compare any preexisting destination files read-only against the donor before building new hardlinks. Abort the entire plan if any target-view path contains different bytes.
+2. Verify existing payload on target device (file count, bytes, optional hash spot-check)
+3. For each sibling torrent:
    - Build torrent view on target (hardlinks to payload)
-   - Pause torrent in qBittorrent
-   - Set location to target path via API
-   - Resume torrent
-   - Verify torrent can access files (spot-check)
-3. Optional: Remove source-side torrent views (if cleanup flags enabled)
+   - Libtorrent-verify donor before any qB mutation
+   - Stop torrent in qBittorrent
+   - Patch fastresume offline (preferred) or set location via API
+   - Restart torrent
+   - Verify torrent reaches seeding-safe state (not `stoppedDL` / `missingFiles`)
+4. Log `reality-post.json` drift snapshot
+5. Optional: Remove source-side torrent views (staged cleanup, see §5.1)
 
 **MOVE Execution:**
 1. Verify source exists (file count, bytes)
-2. Move payload root directory (stash → pool or vice versa)
-3. Verify target matches expected (file count, bytes)
+2. Check for preexisting content at target — abort if target path has unexpected files
+3. Copy payload to target; verify target matches expected (file count, bytes) after copy
 4. For each sibling torrent:
    - Build torrent view on target
-   - Pause torrent in qBittorrent
-   - Set location to target path via API
-   - Resume torrent
-   - Verify torrent can access files
-5. Verify source is removed
+   - Libtorrent-verify donor before any qB mutation
+   - Stop torrent in qBittorrent
+   - Patch fastresume offline (preferred) or set location via API
+   - Restart torrent
+   - Verify torrent reaches seeding-safe state (not `stoppedDL` / `missingFiles`)
+5. Log `reality-post.json` drift snapshot
+6. Source cleanup is deferred (staged, not immediate) — see §5.1
+
+**Post-Apply Download-State Guard:**
+After any apply, the system must verify that no torrent transitioned to a downloading-like state (`stoppedDL`, `stalledDL`, `downloading`). Any such regression is a hard failure and must immediately halt further operations on the affected batch. The system should log the failure and restore affected torrents to their prior state where possible.
 
 **BLOCKED Execution:**
 - Refuses to execute
 - Prints reasons from plan (e.g., "External consumer at /stash/media/movies/...")
 
+**Offline Verify Stagnation:**
+Libtorrent verification (`checking_files`) that shows no progress for longer than a configurable timeout (default: 15 minutes at 0% or no change) must be treated as a stagnation failure. The system must abort the verification, restore the torrent to its prior state, and report the stagnation. Do not wait indefinitely.
+
 **Failure Handling:**
-- If relocation fails, torrent is resumed at old location
-- If any torrent relocation fails, entire operation aborts
-- For MOVE plans, payload is rolled back to source on failure
-- Cleanup is skipped on any relocation failure
+- If relocation fails, torrent is restarted at old location
+- If any torrent relocation fails in a batch, the failed item is reported but the batch continues for other items unless the failure indicates a systemic issue
+- For MOVE plans, source cleanup remains staged (not committed) on any failure
+- Cleanup is never performed on apply failure
 
 **Usage examples:** See `docs/tooling/REHOME-RUNBOOK.md`.
 
@@ -752,17 +873,34 @@ catalog.db
 - Environment variables: `QBITTORRENT_URL`, `QBITTORRENT_USER`, `QBITTORRENT_PASS`
 - Session-based authentication via Web API
 - Cookie management handled automatically
+- A shared qB client (`src/hashall/qbittorrent.py`) centralizes authentication, API version detection, and state normalization
 
-**Relocation Flow:**
-1. Pause torrent: `POST /api/v2/torrents/pause`
-2. Set location: `POST /api/v2/torrents/setLocation`
-3. Resume torrent: `POST /api/v2/torrents/resume`
-4. Verify new location matches expected path
+**Preferred Relocation Flow (offline fastresume patch):**
+1. Copy/verify donor content to target (filesystem operation, qB not involved)
+2. Libtorrent-verify the donor before any qB mutation
+3. Stop torrent in qBittorrent (`POST /api/v2/torrents/stop`)
+4. Patch `.fastresume` file offline with correct `save_path` and `content_path`; remove `qbt-downloadPath` if present to prevent stoppedDL regression
+5. Start torrent in qBittorrent (`POST /api/v2/torrents/start`)
+6. Observe: verify torrent reaches `stalledUP` / `seeding` state, not `stoppedDL` / `missingFiles`
 
-**Why Pause/Resume?**
-- Ensures qBittorrent isn't accessing files during relocation
-- Prevents partial state (files moved but qBittorrent still checking old location)
-- Clean state transition
+**Why Not `setLocation`?**
+The qB `setLocation` API is not the preferred primary mover for dataset migration. It caused the Feb-2026 incident (`qbt-downloadPath` in fastresume → 2103 torrents stoppedDL on restart). For rehome/migration operations, offline fastresume patching provides better control and safety.
+
+**State Normalization:**
+qBittorrent API state strings differ across versions. The shared client normalizes:
+- `pausedDL` / `stoppedDL` → `stoppedDL`
+- `pausedUP` / `stoppedUP` → `stoppedUP`
+
+All code that inspects torrent state must go through the shared client or its normalization layer. Hard-coding version-specific state strings is prohibited.
+
+**qB Cache Layer:**
+A local cache (`src/hashall/qb_cache.py`, `~/.cache/hashall-qb/`) reduces load on the qB API for read-heavy operations (status checks, torrent list queries, triage scripts). The cache is populated by `bin/qb-cache-agent.py` / `bin/qb-cache-daemon.py`.
+
+**Requirements:**
+- Read-heavy operations (list/status queries, triage, dashboards) should use the cache by default
+- Write/mutation operations (stop, start, patch) hit qB directly for immediate freshness
+- The cache also stores server profile info (`app_version`, `webapi_version`, `libtorrent_version`) detected at startup
+- If qB is temporarily unavailable or authentication is slow, the client falls back to cached data for read operations
 
 ### 8.5 Safety Features
 
@@ -772,19 +910,63 @@ catalog.db
 - Total bytes verification
 - Source existence verification
 - Target device availability
+- Preexisting-target content check for MOVE plans (ABORT if target has unexpected content)
+- Preflight target-view comparison for REUSE plans (ABORT if preexisting view files have different bytes)
+- Libtorrent verification of donor before any qB mutation
 
 **Execution Safety:**
 - Dry-run mode for previewing changes
 - Step-by-step logging with `key=value` format
+- Live drift snapshots: `reality-pre.json`, `reality-post.json`, `reality-failure.json` written per apply run (compare qB state, fastresume paths, catalog rows, and filesystem existence)
 - Verification after each major operation
 - Fail-fast on any verification failure
-- Cleanup is opt-in and skipped on failure
+- Cleanup is deferred/staged and skipped on failure
 - Never destroy the last physical copy of data
+- Post-apply download-state guard: halt on any new downloading-like state regression
+
+**Concurrency Control:**
+- `~/.hashall/rehome.lock` (fcntl `LOCK_EX|LOCK_NB`) prevents concurrent mutating workflows
+- Attempting to run two apply operations simultaneously will fail on the lock
+- Diagnostic tooling that only reads state does not require the lock
 
 **Limitations (Current):**
-- No advanced view building (assumes torrent name matches directory name)
-- Limited rollback (MOVE plans attempt rollback on relocation failure; other failures require manual recovery)
+- No advanced view building (assumes torrent name matches directory name for some cases)
+- Rollback for MOVE plans: source cleanup is deferred; if a relocation fails mid-batch, remaining siblings in the batch may be in mixed state requiring manual triage
 - Sequential batch processing (not parallel)
+
+### 8.6 Recovery Lane
+
+**Purpose:** Classify and repair qBittorrent items in broken or mislocated states without triggering new data movements.
+
+**Trigger Conditions:**
+- Torrents in `stoppedDL` / `missingFiles` state after a dataset migration or fastresume patch failure
+- Torrents whose `save_path` / `content_path` points to a stale/old root that no longer contains their files
+- Fastresume files that disagree with qB runtime state or catalog records
+
+**Key Commands:**
+- `hashall rehome qb-missing-audit` — classify `missingFiles` torrents against catalog, fastresume, and rehome history
+- `hashall rehome qb-missing-remediate` — build guarded reconnect plans for classified missing-files cohorts
+- `hashall rehome drift-audit --plan <plan.json>` — compare qB runtime state, fastresume paths, catalog rows, and filesystem existence for a given plan
+
+**Recovery Principles:**
+- Classify before acting: identify whether a `missingFiles` state is due to stale fastresume drift, actual data loss, or a recently completed rehome that hasn't been reconciled
+- Use guarded reconnect plans (same plan-review-apply workflow as normal rehome) rather than ad-hoc API calls
+- Prefer repoint-to-existing-payload over re-copy when the payload is already on the target device
+- Never treat a repair success as implying the whole cohort is clean; audit the full cohort and track individually
+
+### 8.7 Live Drift Snapshots
+
+Each `rehome apply` run writes three structured JSON snapshots to its report directory:
+
+| File | Written | Content |
+|---|---|---|
+| `reality-pre.json` | Before any mutation | qB runtime state, fastresume paths, catalog rows, filesystem existence for all plan items |
+| `reality-post.json` | After apply completes | Same, plus result classifications |
+| `reality-failure.json` | On abort | State at point of failure |
+
+**Purpose:** Enable post-hoc diagnosis without relying on memory. Snapshots explain blocked/skipped rows in plain English rather than raw qB state strings. Required reading before any follow-up remediation.
+
+**`hashall rehome drift-audit`:** Reads plan JSON and compares its targets against live qB/catalog state. Useful for proactively identifying plans whose assumptions have drifted before running apply.
 
 ---
 
@@ -808,13 +990,23 @@ The system must be:
 - Silently duplicate data across pools
 - Skip verification steps
 - Proceed when checks fail
+- Create a hitchhiker (multiple payload hashes sharing one target directory)
+- Select a cross-filesystem donor for hardlink view building without an explicit override
+- Leave a torrent in a downloading-like state after a relocation operation
+- Run concurrent mutating workflows (use the rehome lock)
+- Commit source cleanup before target is verified live in qB
 
 **Always:**
 - Verify before delete (counts, sizes, optional hash spot-checks)
-- Move at payload-group level (all siblings together)
+- Move at payload-group level (all siblings together) unless partial reconcile applies
 - Preserve hardlink relationships within filesystems
-- Log operations with full context
+- Log operations with full context including `key=value` format
 - Provide dry-run for preview
+- Write reality snapshots (pre/post/failure) for every apply run
+- Check for preexisting target content before MOVE operations
+- Libtorrent-verify the donor before any qB mutation
+- Run the post-apply download-state guard before declaring success
+- Stage source cleanup rather than deleting immediately
 
 ### 9.3 Idempotency
 
@@ -824,9 +1016,10 @@ The system must be:
 - Deletions are scoped to scan root (no false deletions)
 
 **Rehoming:**
-- Applying same plan multiple times is safe (checks current state)
-- If payload already on target, becomes no-op
-- If torrents already relocated, verified and continued
+- Applying the same plan multiple times is safe (checks current state before each operation)
+- If payload already on target, becomes reconcile-only (`rehome_reconcile_only`)
+- If some torrents already relocated and others not, applies partial reconcile (`rehome_reconcile_subset`) rather than failing or re-processing already-good items
+- Staged cleanup directories survive re-apply without double-deletion
 
 **Deduplication:**
 - Re-running link execution on same duplicates is safe (checks if already linked)
@@ -836,7 +1029,7 @@ The system must be:
 
 ## 10. Terminology
 
-**ATM (Automatic Torrent Management):** qBittorrent feature that automatically moves torrents to category save paths when categories change. Disabled by cross-seed for precise control.
+**ATM (Automatic Torrent Management):** qBittorrent feature that automatically moves torrents to category save paths when categories change. Disabled by cross-seed for precise control. Rehomed torrents must have their ATM category save path consistent with the target device to prevent auto-relocation back to stash.
 
 **Bind Mount:** Linux mount that makes a directory accessible at another location. `/data/media` is a bind mount to `stash/media`, so both paths reference the same filesystem.
 
@@ -876,7 +1069,33 @@ The system must be:
 
 **Unified Catalog:** Single database (`~/.hashall/catalog.db`) that tracks all files across all storage devices using stable fs_uuid-bound files tables plus `files_<device_id>` compatibility views.
 
-**View (Torrent View):** A torrent-specific payload tree composed from a canonical donor payload, normally via hardlinks. Multiple views can preserve distinct qB item layout semantics while reusing the same physical bytes with zero additional disk usage.
+**Dataset Migration:** The process of moving seeding content between ZFS datasets within the same pool (e.g., `pool-data` → `pool-media`). Unlike stash↔pool rehoming, this is a same-pool operation. Uses the `hashall rehome relocate-plan` / `rehome apply` workflow rather than `rehome auto`.
+
+**De-hitchhike:** The process of splitting a hitchhiker group (multiple payload hashes sharing a single target directory) into proper per-hash unique target roots. Legacy hitchhiker groups persist until explicitly de-hitchhiked; new operations must not create new hitchhikers.
+
+**Drift Policy:** Controls how the scanner handles files whose size+mtime appear unchanged. `metadata` trusts the cached hash; `quick` rechecks the quick hash; `full` recomputes the full SHA256. See §7.3.
+
+**Fastresume Patch (offline):** Modifying qBittorrent's `.fastresume` files while qB is stopped, to update `save_path`/`content_path` without using the `setLocation` API. The preferred relocation mechanism for dataset migration to avoid `qbt-downloadPath` regressions.
+
+**Hitchhiker:** An anti-pattern where two or more torrents with different payload content share a single on-disk target directory (N→1 mapping). Prohibited for new operations; existing legacy hitchhikers must be tracked and eventually de-hitchhiked.
+
+**Pool-Data / Pool-Media:** The two active ZFS datasets within the `/pool` pool. `pool-data` is the legacy seeding root being migrated from; `pool-media` is the active target. They have distinct `fs_uuid`s and `device_id`s; hardlinks do not cross between them.
+
+**`qbt-downloadPath`:** A field in qBittorrent's `.fastresume` files that, if set to a path not visible to qB, causes `stoppedDL` regression on restart. Must be removed or corrected during fastresume patching.
+
+**Reality Snapshot:** Structured JSON file (`reality-pre/post/failure.json`) capturing qB runtime state, fastresume paths, catalog rows, and filesystem existence at a specific point during a `rehome apply` run. Written per apply run for auditability and post-hoc diagnosis.
+
+**`rehome_reconcile_only`:** Classification for a re-applied plan where all torrents are already on the target paths and verified. No relocation is performed; only catalog is updated.
+
+**`rehome_reconcile_subset`:** Classification for a re-applied plan where some torrents are already on target and others are not. The already-good subset is reconciled into the catalog; remaining items are processed normally.
+
+**`_rehome-unique/<hash>/`:** A path convention for per-item payload trees when a shared target root would create a hitchhiker. Used when two payload families would otherwise collide on the same directory name.
+
+**Seed-Root State Contract:** The file `~/.hashall/seed-root-state.json` that publishes which seeding roots are active, legacy, or mirror roots. Authoritative source for external tools that need to know valid seeding paths.
+
+**Staged Cleanup:** Source cleanup that stages the source root into `.rehome-cleanup-stage/<payload_hash>/...` after a successful move, observes qB state, and only deletes after the target is confirmed live. Automatic restoration on qB regression. See §5.1.
+
+**View (Torrent View):** A torrent-specific payload tree composed from a canonical donor payload, normally via hardlinks. Multiple views can preserve distinct qB item layout semantics while reusing the same physical bytes with zero additional disk usage. Each view must have a unique root per payload hash (no hitchhikers).
 
 ---
 
@@ -884,16 +1103,16 @@ The system must be:
 
 ### 11.1 Completed ✅
 
-**hashall (Catalog System) - v0.5.0+:**
+**hashall (Catalog System) - v0.8.0:**
 - ✅ Unified catalog model with filesystem-bound files tables and compatibility views
 - ✅ Filesystem UUID tracking (persistent across reboots)
-- ✅ Incremental scanning (10-100x speedup on rescans)
-- ✅ SHA256 file hashing (SHA1 legacy retained)
+- ✅ Incremental scanning with configurable drift policy (`metadata` / `quick` / `full`)
+- ✅ SHA256 file hashing (SHA1 legacy retained); `--hash-mode fast|full|upgrade`
 - ✅ Parallel scanning (multi-threaded hashing, 4-5x faster)
 - ✅ Scoped deletion detection
 - ✅ Hardlink tracking (inode + device_id)
 - ✅ Symlink/bind mount safe scanning (canonical path resolution)
-- ✅ Device management CLI (list, show, alias)
+- ✅ Device management CLI (list, show, alias) using stable `fs_uuid`-bound aliases
 - ✅ Statistics and audit trail
 - ✅ Payload identity tracking
 - ✅ qBittorrent torrent sync (payload mapping)
@@ -901,29 +1120,45 @@ The system must be:
 - ✅ Collision detection with auto-upgrade logic
 - ✅ Fast hash support for rapid initial scanning
 - ✅ Link deduplication workflow (analyze → plan → show/list → execute)
+- ✅ qB shared cache layer (`src/hashall/qb_cache.py`, `bin/qb-cache-agent.py`, `bin/qb-cache-daemon.py`)
+- ✅ qB server profile detection and state alias normalization (centralized in `src/hashall/qbittorrent.py`)
+- ✅ Exponential backoff on consecutive qB API fetch failures
 
-**rehome (Orchestration System) - Stage 5:**
+**rehome (Orchestration System):**
 - ✅ Demotion planning (stash → pool)
 - ✅ Demotion execution (REUSE and MOVE flows)
 - ✅ Promotion planning (pool → stash, reuse-only)
 - ✅ Promotion execution (REUSE flow only, no blind copy)
+- ✅ Root-to-root relocation planner (`hashall rehome relocate-plan`) for dataset migration
 - ✅ External consumer detection (blocks unsafe demotions)
-- ✅ qBittorrent API integration (pause/relocate/resume)
+- ✅ Offline fastresume patching (primary qB relocation mechanism)
+- ✅ Libtorrent verification before mutation
 - ✅ Batch operations (by payload-hash or tag)
 - ✅ REUSE/MOVE/BLOCK decision logic
-- ✅ Verification and safety checks
+- ✅ Partial reconcile (`rehome_reconcile_only`, `rehome_reconcile_subset`)
+- ✅ Preflight target-view check (abort if preexisting view has different bytes)
+- ✅ Preexisting-target content detection for MOVE plans
+- ✅ Per-apply reality snapshots (`reality-pre/post/failure.json`)
+- ✅ `hashall rehome drift-audit` proactive plan validator
+- ✅ `hashall rehome qb-missing-audit` / `qb-missing-remediate` for recovery lane
+- ✅ De-hitchhike invariant (per-hash unique target roots; `_rehome-unique/<hash>`)
+- ✅ Staged cleanup (`hashall rehome followup --cleanup`) with automatic rollback on qB regression
+- ✅ Post-apply download-state guard
+- ✅ Concurrency lock (`~/.hashall/rehome.lock`)
+- ✅ rsync-based copy with streaming progress for MOVE
 - ✅ Dry-run mode
-- ✅ Guarded cleanup (opt-in flags)
 
 **Integration:**
-- ✅ qbit_manage `~noHL` tag detection
+- ✅ qbit_manage `~noHL` tag detection (advisory pre-filter; not a bypass of plan-time external consumer check)
 - ✅ cross-seed linkDirs support (filesystem-aware)
 - ✅ \*arr hardlink import compatibility
+- ✅ `~/.hashall/seed-root-state.json` published seeding-root contract
 
 ### 11.2 In Progress 🚧
 
 - 🚧 Subtree treehash for fast directory comparison
 - 🚧 Advanced torrent view building (complex layouts, renamed files)
+- 🚧 Pool dataset migration (`pool-data` → `pool-media`): `old_path_count=34`, `new_path_count=317` as of 2026-03-13 (see `docs/operations/RUN-STATE.md` for current live state)
 
 ### 11.3 Planned 📋
 
@@ -938,8 +1173,11 @@ The system must be:
 - 📋 Advanced payload view building (handle renamed files, different layouts)
 - 📋 Fuzzy payload matching (similar but not identical content)
 - 📋 Automated rehoming schedules (e.g., demote all `~noHL` tagged torrents weekly)
-- 📋 Undo/rollback capability
+- 📋 Full undo/rollback capability (currently: staged cleanup with manual fallback)
 - 📋 Web UI for plan review and approval
+- 📋 Offline verify stagnation detection with configurable timeout
+- 📋 Explicit lock-holder diagnostics (`~/.hashall/rehome.lock`)
+- 📋 Automated de-hitchhike tooling for legacy shared-root groups
 
 **Integration:**
 - 📋 Automated rehoming based on qbit_manage tags
@@ -975,6 +1213,27 @@ The system is successful if:
 ---
 
 ## Document History
+
+**Version 1.1 (2026-03-18):**
+- Corrected pool topology: added `pool-data`/`pool-media` ZFS dataset distinction and active dataset migration
+- Added §2.5 (Seeding Domain Definition) and §2.6 (Seed-Root State Contract)
+- Updated qB relocation approach from API setLocation to offline fastresume patch as preferred method
+- Added `~noHL` advisory-only note; plan-time external consumer check is authoritative
+- Added canonicalization requirement to external consumer detection (§4.3)
+- Added preexisting-target content check requirement for MOVE (§5.1)
+- Added staged cleanup model (§5.1)
+- Added partial reconcile handling for split-sibling groups (§5.3)
+- Added ATM interaction requirement (§5.3)
+- Added hitchhiker invariant and cross-filesystem donor prohibition (§6.3)
+- Added drift policy modes documentation (§7.3)
+- Updated §8 extensively: fastresume approach, preflight target-view check, stagnation requirement, download-state guard, qB cache layer, state normalization, plan path correction, catalog freshness requirement, NULL hash planning rule
+- Added §8.6 Recovery Lane
+- Added §8.7 Live Drift Snapshots
+- Updated §9.2 safety guarantees with new Never/Always items
+- Updated §9.3 idempotency to reflect partial reconcile behavior
+- Updated §10 terminology with 14 new terms
+- Updated §11 implementation status (hashall 0.8.0, many new completed items)
+- Updated §11.3 planned items
 
 **Version 1.0 (2026-02-02):**
 - Complete rewrite from user-derived requirements draft

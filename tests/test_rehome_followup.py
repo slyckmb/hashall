@@ -756,3 +756,64 @@ def test_followup_cleanup_repairs_permissions_and_retries(monkeypatch, tmp_path:
     assert report["summary"]["cleanup_done"] == 1
     assert report["entries"][0]["cleanup_result"] == "done"
     assert source_dir.exists() is False
+
+
+def test_followup_cleanup_passes_gate_when_torrent_is_stoppedup(monkeypatch, tmp_path: Path):
+    """stoppedUP (user-paused after seeding) must pass the cleanup gate.
+
+    Previously GOOD_STATES omitted 'stoppedup', causing source directories to
+    accumulate permanently whenever an operator paused a successfully-rehomed torrent.
+    """
+    db_path = _make_db(tmp_path)
+    source_dir = tmp_path / "stash-source-stoppedup"
+    source_dir.mkdir()
+    (source_dir / "file.mkv").write_bytes(b"abc")
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        f"""
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES
+          (1, 'hash-stoppedup', 141, '/pool/media/torrents/seeding/cross-seed/Aither (API)/Movie', 1, 3, 'complete'),
+          (2, 'hash-stoppedup', 49, '{source_dir}', 1, 3, 'complete');
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, tags)
+        VALUES ('torrent-stoppedup', 1, 141, '/pool/media/torrents/seeding/cross-seed/Aither (API)',
+                'rehome,rehome_from_stash,rehome_to_pool,rehome_at_20260219,rehome_verify_pending,rehome_cleanup_source_required');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fake = FakeQbitClient()
+    fake.torrents_by_tag["rehome_verify_pending"] = [
+        SimpleNamespace(
+            hash="torrent-stoppedup",
+            tags="rehome,rehome_from_stash,rehome_to_pool,rehome_at_20260219,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    fake.torrents_by_tag["rehome_cleanup_source_required"] = [
+        SimpleNamespace(
+            hash="torrent-stoppedup",
+            tags="rehome,rehome_from_stash,rehome_to_pool,rehome_at_20260219,rehome_verify_pending,rehome_cleanup_source_required",
+        )
+    ]
+    # Torrent is paused by the user after successful rehome — stoppedUP state.
+    fake.torrent_info["torrent-stoppedup"] = SimpleNamespace(
+        hash="torrent-stoppedup",
+        tags="rehome,rehome_from_stash,rehome_to_pool,rehome_at_20260219,rehome_verify_pending,rehome_cleanup_source_required",
+        progress=1.0,
+        state="stoppedUP",
+        auto_tmm=False,
+        save_path="/pool/media/torrents/seeding/cross-seed/Aither (API)",
+    )
+
+    monkeypatch.setattr("rehome.followup.get_qbittorrent_client", lambda: fake)
+
+    report = run_followup(catalog_path=db_path, cleanup=True, cleanup_retention_hours=0)
+
+    assert report["summary"]["cleanup_attempted"] == 1
+    assert report["summary"]["cleanup_done"] == 1, (
+        "stoppedUP torrent should pass the cleanup gate — "
+        "GOOD_STATES must include 'stoppedup'"
+    )
+    assert source_dir.exists() is False

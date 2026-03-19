@@ -319,6 +319,121 @@ class TestExternalConsumerDetection:
         assert plan["decision"] == "BLOCK"
         assert any("outside" in r.lower() or "external" in r.lower() for r in plan["reasons"])
 
+    def test_external_consumer_no_false_positive_when_hardlink_under_bind_alias(
+        self, tmp_path, monkeypatch
+    ):
+        """Seeding-domain hardlinks stored under a bind alias must not be classified external.
+
+        The legacy `files` table stores absolute paths. When a scan ran via the
+        /data/media bind alias, paths are stored as /data/media/torrents/seeding/...
+        While seeding_roots are canonicalized to /stash/media/torrents/seeding/.
+
+        Old code: _normalize_abs_path used path.resolve(), leaving the bind-alias
+        path as /data/media/..., which fails relative_to against /stash/media/...
+        → every seeding-domain hardlink classified as external → false-positive BLOCK.
+
+        Fix: _normalize_abs_path now uses canonicalize_path so bind-alias paths
+        are mapped to /stash/media/... before comparison.
+        """
+        db_path = tmp_path / "catalog.db"
+        conn = sqlite3.connect(db_path)
+
+        # Legacy-style schema: single `files` table with absolute paths.
+        conn.executescript("""
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                inode INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                sha1 TEXT,
+                status TEXT DEFAULT 'active'
+            );
+
+            CREATE TABLE payloads (
+                payload_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload_hash TEXT,
+                device_id INTEGER,
+                root_path TEXT NOT NULL,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'incomplete'
+            );
+
+            CREATE TABLE torrent_instances (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_id INTEGER NOT NULL,
+                device_id INTEGER,
+                save_path TEXT,
+                root_name TEXT,
+                category TEXT,
+                tags TEXT,
+                last_seen_at REAL,
+                FOREIGN KEY (payload_id) REFERENCES payloads(payload_id)
+            );
+
+            -- Scan root recorded under the canonical path.
+            CREATE TABLE scan_roots (
+                fs_uuid TEXT,
+                root_path TEXT,
+                last_scanned_at TEXT,
+                scan_count INTEGER,
+                PRIMARY KEY (fs_uuid, root_path)
+            );
+
+            INSERT INTO scan_roots VALUES ('fs-50', '/stash/media/torrents/seeding', '2026-01-01', 1);
+        """)
+
+        # Both hardlinks are inside the seeding domain, but stored under the
+        # bind-alias prefix /data/media (as if scanned via that mount path).
+        conn.execute(
+            "INSERT INTO files VALUES (?, ?, ?, ?, ?, ?)",
+            ("/data/media/torrents/seeding/cross-seed/aither/Movie/video.mkv", 1001, 1000000, 0.0, "abc", "active"),
+        )
+        conn.execute(
+            "INSERT INTO files VALUES (?, ?, ?, ?, ?, ?)",
+            ("/data/media/torrents/seeding/myanonamouse/Movie/video.mkv", 1001, 1000000, 0.0, "abc", "active"),
+        )
+        payload_root = "/data/media/torrents/seeding/cross-seed/aither/Movie"
+        conn.execute(
+            "INSERT INTO payloads VALUES (1, 'phash-noext', 50, ?, 1, 1000000, 'complete')",
+            (payload_root,),
+        )
+        conn.commit()
+        conn.close()
+
+        # canonicalize_path maps /data/media -> /stash/media.
+        def fake_canonicalize(path):
+            p = Path(path)
+            s = str(p)
+            if s.startswith("/data/media"):
+                return Path(s.replace("/data/media", "/stash/media", 1))
+            return p
+
+        monkeypatch.setattr("rehome.planner.canonicalize_path", fake_canonicalize)
+
+        # Seeding roots canonicalized to /stash/media. Hardlinks in the legacy
+        # table are stored as /data/media/... — they must be canonicalized before
+        # the relative_to check, otherwise every seeding-domain hardlink looks external.
+        planner = DemotionPlanner(
+            catalog_path=db_path,
+            seeding_roots=["/stash/media/torrents/seeding"],
+            library_roots=[],
+            stash_device=50,
+            pool_device=49,
+        )
+
+        consumers = planner._detect_external_consumers(
+            sqlite3.connect(db_path),
+            payload_root,
+        )
+
+        assert consumers == [], (
+            "All hardlinks are inside the seeding domain; no external consumer "
+            "should be detected. A non-empty result means _normalize_abs_path "
+            "left the bind-alias /data/media/... path un-canonicalized, causing "
+            "a false-positive BLOCK."
+        )
+
     def test_external_consumer_detection_uses_fs_uuid_backed_files_relation(self, tmp_path):
         """Planner should resolve devices.files_table and not require a physical files_<device_id> table."""
         db_path = tmp_path / "catalog.db"
