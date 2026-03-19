@@ -100,6 +100,7 @@ def test_relocate_plan_accepts_device_aliases(tmp_path: Path):
             "--target-root",
             str(target_root),
             "--all-mismatches",
+            "--payload-hash", "hash01",
             "-o",
             str(out_path),
         ],
