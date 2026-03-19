@@ -453,7 +453,7 @@ def test_main_fail_closed_stops_on_stale_qbit_manage(monkeypatch, tmp_path):
 
     monkeypatch.setattr(workflow, "connect_db", lambda db_path: conn)
     monkeypatch.setattr(workflow, "_discover_roots", lambda _conn: ["/stash/media"])
-    monkeypatch.setattr(workflow, "_load_completed_torrent_hashes", lambda: (set(), True, None))
+    monkeypatch.setattr(workflow, "load_completed_torrent_hashes", lambda: (set(), True, None))
     monkeypatch.setattr(
         workflow,
         "_qbit_manage_freshness",
@@ -535,7 +535,7 @@ def test_main_dry_run_previews_once_when_upgrade_needed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(workflow, "connect_db", lambda db_path: DummyConn())
     monkeypatch.setattr(workflow, "_discover_roots", lambda _conn: ["/stash/media"])
-    monkeypatch.setattr(workflow, "_load_completed_torrent_hashes", lambda: (set(), True, None))
+    monkeypatch.setattr(workflow, "load_completed_torrent_hashes", lambda: (set(), True, None))
     monkeypatch.setattr(
         workflow,
         "_qbit_manage_freshness",
