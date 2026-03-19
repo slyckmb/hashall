@@ -12,8 +12,11 @@ from hashall.qb_repair_payload_group import (
     build_repair_plan,
     can_reuse_good_save_path_directly,
     ensure_same_payload_group,
+    load_payload_pair,
     parse_args,
     patch_fastresume_with_journal,
+    payload_identity_evidence_matches,
+    qbtree_evidence_matches,
 )
 
 
@@ -78,6 +81,48 @@ def test_ensure_same_payload_group_rejects_mismatch(tmp_path: Path) -> None:
             ensure_same_payload_group(catalog, "goodhash", "brokenhash")
     finally:
         catalog.close()
+
+
+def test_payload_identity_evidence_matches_allows_catalog_drift_when_shape_matches(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.db"
+    _init_catalog(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (1, "payload-a", 1, "/pool/media/a", 22, 71017483824),
+            (2, "payload-b", 1, "/pool/media/b", 22, 71017483824),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("goodhash", 1, 1, "/pool/media/save-a", "The.West.Wing.S02"),
+            ("brokenhash", 2, 1, "/pool/media/save-b", "The.West.Wing.S02"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = CatalogLookup(db_path)
+    try:
+        good, broken = load_payload_pair(catalog, "goodhash", "brokenhash")
+        assert payload_identity_evidence_matches(good, broken) is True
+    finally:
+        catalog.close()
+
+
+def test_qbtree_evidence_matches_when_root_names_differ() -> None:
+    good_files = [
+        {"name": "Show.Good/Disc1/track01.flac", "size": 10},
+        {"name": "Show.Good/Disc2/track01.flac", "size": 11},
+    ]
+    broken_files = [
+        {"name": "Show Bad/Disc1/track01.flac", "size": 10},
+        {"name": "Show Bad/Disc2/track01.flac", "size": 11},
+    ]
+
+    assert qbtree_evidence_matches(good_files, broken_files) is True
 
 
 def test_catalog_lookup_supports_pool_media(tmp_path: Path) -> None:
@@ -218,6 +263,12 @@ def test_patch_fastresume_with_journal_uses_shared_backup(tmp_path: Path) -> Non
 def test_parse_args_defaults_log_path_to_empty_string() -> None:
     args = parse_args(["--good", "goodhash", "--broken", "brokenhash"])
     assert args.log_path == ""
+    assert args.force_identical is False
+
+
+def test_parse_args_accepts_force_identical() -> None:
+    args = parse_args(["--good", "goodhash", "--broken", "brokenhash", "--force-identical"])
+    assert args.force_identical is True
 
 
 def test_build_repair_plan_does_not_stat_live_files(monkeypatch, tmp_path: Path) -> None:
