@@ -8,10 +8,12 @@ import contextlib
 import io
 import json
 import os
+import queue
 import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -343,6 +345,96 @@ def _parse_link_plan_id(stdout: str) -> Optional[str]:
     return None
 
 
+def _stream_subprocess_output(
+    cmd: list[str],
+    *,
+    heartbeat_s: int,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """
+    Run *cmd* with live stdout/stderr relay while retaining combined stdout text.
+
+    This keeps wrapper commands operator-visible during long-running child work
+    without losing captured output needed for post-step quality gates.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    output_queue: "queue.Queue[tuple[str, Optional[str]]]" = queue.Queue()
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def _reader(stream: Any, stream_name: str) -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                output_queue.put((stream_name, line))
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            output_queue.put((stream_name, None))
+
+    stdout_thread = threading.Thread(
+        target=_reader, args=(proc.stdout, "stdout"), daemon=True
+    )
+    stderr_thread = threading.Thread(
+        target=_reader, args=(proc.stderr, "stderr"), daemon=True
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    started_monotonic = time.monotonic()
+    next_heartbeat = started_monotonic + max(5, heartbeat_s)
+    stream_done = {"stdout": False, "stderr": False}
+    tail_hint = "tail -n0 -F ~/.logs/hashall/hashall.log"
+
+    while True:
+        drained = False
+        try:
+            while True:
+                stream_name, payload = output_queue.get_nowait()
+                drained = True
+                if payload is None:
+                    stream_done[stream_name] = True
+                    continue
+                if stream_name == "stdout":
+                    stdout_chunks.append(payload)
+                    print(payload, end="")
+                else:
+                    stderr_chunks.append(payload)
+                    print(payload, end="", file=sys.stderr)
+        except queue.Empty:
+            pass
+
+        rc = proc.poll()
+        if rc is not None and all(stream_done.values()) and not drained:
+            break
+
+        now_monotonic = time.monotonic()
+        if now_monotonic >= next_heartbeat:
+            elapsed_hb = int(now_monotonic - started_monotonic)
+            print(
+                "  [refresh] still running "
+                f"elapsed={elapsed_hb}s watch='{tail_hint}'"
+            )
+            next_heartbeat = now_monotonic + max(5, heartbeat_s)
+        time.sleep(0.2)
+
+    stdout_thread.join(timeout=1.0)
+    stderr_thread.join(timeout=1.0)
+    rc = proc.wait()
+    stdout = "".join(stdout_chunks)
+    stderr = "".join(stderr_chunks)
+    return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr=stderr), stdout
+
+
 # ---------------------------------------------------------------------------
 # Inline verify
 # ---------------------------------------------------------------------------
@@ -507,21 +599,16 @@ def run_refresh(
                 t0 = datetime.now()
                 print(f"\n[refresh] {label}")
                 print(f"  $ {' '.join(cmd)}")
+                try:
+                    heartbeat_s = max(5, int(os.environ.get("REHOME_REFRESH_HEARTBEAT_S", "30")))
+                except ValueError:
+                    heartbeat_s = 30
                 should_capture = capture or logger.verbose
                 if should_capture:
-                    result = subprocess.run(cmd, capture_output=True, text=True)
-                    if result.stdout:
-                        print(result.stdout, end="")
+                    result, stdout = _stream_subprocess_output(cmd, heartbeat_s=heartbeat_s)
                     if result.stderr:
-                        # stderr goes to stderr; write_raw ensures it lands in the log too
-                        print(result.stderr, end="", file=sys.stderr)
                         logger.write_raw(result.stderr)
-                    stdout = result.stdout or ""
                 else:
-                    try:
-                        heartbeat_s = max(5, int(os.environ.get("REHOME_REFRESH_HEARTBEAT_S", "30")))
-                    except ValueError:
-                        heartbeat_s = 30
                     started_monotonic = time.monotonic()
                     next_heartbeat = started_monotonic + heartbeat_s
                     proc = subprocess.Popen(cmd)
