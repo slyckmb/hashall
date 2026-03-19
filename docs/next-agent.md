@@ -1,6 +1,20 @@
 # Next Agent Entry (Compact-Safe)
 
-- `hashall` is now `0.8.0`.
+## 2026-03-18/19 Audit Session Summary (compact-safe)
+
+- `hashall` is now `0.8.4` (bumped from `0.8.0` during a REQUIREMENTS.md audit session).
+- Branch `cr/claude-hashall-20260318-232039` has two commits beyond the session baseline:
+  - `3fd06c0`: HIGH + MEDIUM bugs (followup GOOD_STATES, scan drift_policy, planner bind-mount)
+  - `b88343f`: LOW bugs (unique-view shortcut, qb_cache daemon URL env var)
+- Full details in `docs/handoff.md` top section ("2026-03-18/19 Audit Session").
+- Test baseline: 636 pass / 13 pre-existing failures (see handoff.md for breakdown).
+- `docs/REQUIREMENTS.md` is now v1.1 — the canonical requirements reference for all rehome work.
+- No operational migration work was done in this session; live migration state is unchanged
+  from the 2026-03-13/15 baselines documented below.
+
+---
+
+- `hashall` is now `0.8.4`.
 - qB cache compatibility is now partially internalized:
   - use `bin/qb-cache-agent.py --status` to inspect the local cache
   - local cache path is `~/.cache/hashall-qb/`

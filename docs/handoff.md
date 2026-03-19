@@ -1,8 +1,75 @@
 # Handoff Notes
 
+## 2026-03-18/19 Audit Session (branch: cr/claude-hashall-20260318-232039)
+
+### What happened
+Full code audit against `docs/REQUIREMENTS.md` (which was itself updated to v1.1 in this session).
+Five bugs found; five fixed across two commits. Tests written for all fixes. No regressions
+(636 pass; 13 pre-existing failures unrelated to this work).
+
+### REQUIREMENTS.md v1.1 (docs/REQUIREMENTS.md)
+- Gap analysis of ~30 items applied: §2.5 Seeding Domain, §2.6 Seed-Root State Contract added;
+  ZFS pool topology table added; `~noHL` advisory-only note; hitchhiker invariant; staged cleanup
+  model; drift policy tables; fastresume-preferred qB integration; reality snapshots; partial
+  reconcile exception; 14 new glossary terms; §11 roadmap updated.
+
+### Bug fixes in this session (commits 3fd06c0 and b88343f)
+
+#### HIGH — followup.py: GOOD_STATES missing 'stoppedup'
+- File: `src/rehome/followup.py` line 31
+- Before: `{"uploading", "stalledup", "queuedup", "forcedup", "pausedup"}`
+- After: added `"stoppedup"` — without this, paused-after-rehome torrents (state=stoppedUP,
+  normal operator behavior) permanently accumulate `.rehome-cleanup-stage/` directories.
+- Test: `tests/test_rehome_followup.py::test_followup_cleanup_passes_gate_when_torrent_is_stoppedup`
+
+#### MEDIUM — scan.py: nested dataset scan dropped drift_policy
+- File: `src/hashall/scan.py` (~line 2025)
+- `--drift-policy=full/quick` silently fell back to `metadata` for all nested ZFS datasets.
+- Fix: added `drift_policy=drift_policy` to the recursive `scan_path` call.
+- Test: `tests/test_scan_hardlinks.py::test_drift_policy_forwarded_to_nested_dataset_scan`
+
+#### MEDIUM — planner.py: bind-mount false-positive BLOCK on external consumer detection
+- File: `src/rehome/planner.py`
+- Two sub-fixes:
+  1. `_normalize_abs_path` now calls `canonicalize_path` instead of `path.resolve()` so
+     bind-alias hardlink paths (/data/media/...) are mapped to canonical form (/stash/media/...)
+     before seeding-domain comparison.
+  2. Legacy-table DB prefix query now uses original `root_path` string (pre-canonicalization)
+     rather than `str(root)` (post-canonicalization) — canonicalized prefix wouldn't match
+     rows stored under the bind alias.
+- Test: `tests/test_rehome.py::TestExternalConsumerDetection::test_external_consumer_no_false_positive_when_hardlink_under_bind_alias`
+
+#### LOW — planner.py: single-torrent bypass of unique-view scheme
+- File: `src/rehome/planner.py` `_build_view_targets()`
+- `if len(raw_targets) <= 1: return raw_targets` bypassed the `_rehome-unique/<hash>` scheme
+  for single-torrent payloads. Risk: collision when two single-torrent payloads share
+  `root_name`; state mismatch when payload gains a cross-seed after initial demotion.
+- Fix: changed `<= 1` to `== 0` so single-torrent payloads also use unique-view.
+- Updated test: `tests/test_rehome_mapping.py::test_plan_includes_view_targets`
+  (expected path updated to `/pool/data/_rehome-unique/torrent_map`)
+
+#### LOW — qb_cache.py: daemon URL env var gap
+- File: `src/hashall/qb_cache.py` `daemon_main()`
+- Daemon only read `QBIT_URL`; `qbittorrent.py` falls back through `QBITTORRENT_API_URL`
+  → `QBITTORRENT_URL` → `QBITTORRENT_HOST` → `QBITTORRENTAPI_HOST`. Setting any standard
+  var had no effect on the cache daemon.
+- Fix: daemon now tries the full fallback chain before defaulting to `http://localhost:9003`.
+
+### Version after this session
+- `hashall` semver: `0.8.4` (bumped in `src/hashall/__init__.py`)
+- Branch commits: `3fd06c0` (HIGH+MEDIUM fixes), `b88343f` (LOW fixes)
+
+### Test baseline after this session
+- 636 passed, 13 pre-existing failures (not introduced by this session):
+  - `test_scan_integration.py` (7): findmnt -T resolves /tmp through /dev/nvme0n1p7 on this host
+  - `test_codex_says_run_this_next_script.py` (4): pre-existing
+  - `test_payload_auto_workflow.py` (2): pre-existing
+
+---
+
 ## Key Facts
 
-- `hashall` semver baseline is now `0.8.0`.
+- `hashall` semver baseline is now `0.8.4` (was 0.8.0 before this audit session).
 - New 2026-03-15 qB compatibility/cache baseline:
   - `hashall` now owns a local qB shared-cache implementation:
     - `src/hashall/qb_cache.py`
