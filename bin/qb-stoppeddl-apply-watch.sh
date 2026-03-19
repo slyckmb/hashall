@@ -17,7 +17,7 @@ What this does:
   - Remembers the last applied drain report to avoid replaying stale work
 
 Options:
-  --bucket-dir PATH         Bucket directory (default: /tmp/qb-stoppeddl-bucket-live)
+  --bucket-dir PATH         Bucket directory (default: ~/.hashall/qb-stoppeddl-bucket)
   --poll N                  Seconds between checks in loop mode (default: 20)
   --once                    Run a single check/apply pass and exit
   --allow-class CSV         Allowed classes for eligible report check and apply (default: a,b,c)
@@ -47,7 +47,7 @@ USAGE
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-BUCKET_DIR="${BUCKET_DIR:-/tmp/qb-stoppeddl-bucket-live}"
+BUCKET_DIR="${BUCKET_DIR:-${HOME}/.hashall/qb-stoppeddl-bucket}"
 POLL="${POLL:-20}"
 ALLOW_CLASS="${ALLOW_CLASS:-a,b,c}"
 MIN_RATIO="${MIN_RATIO:-1.0}"
