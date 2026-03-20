@@ -350,6 +350,73 @@ def _choose_unique_target_save(
     return _canonical(baseline_target_save_path / subdir / torrent_hash)
 
 
+def _path_stats(path: Path) -> Tuple[bool, int, int]:
+    target = _canonical(path)
+    if not target.exists():
+        return False, 0, 0
+    if target.is_file():
+        return True, 1, int(target.stat().st_size)
+
+    file_count = 0
+    total_bytes = 0
+    for candidate in target.rglob("*"):
+        if not candidate.is_file():
+            continue
+        file_count += 1
+        total_bytes += int(candidate.stat().st_size)
+    return True, file_count, total_bytes
+
+
+def _inspect_existing_target_family(
+    *,
+    source_path: Path,
+    target_path: Path,
+    view_targets: Sequence[Dict[str, str]],
+    expected_count: int,
+    expected_bytes: int,
+) -> Tuple[Optional[Path], List[str], List[str]]:
+    candidate_roots: List[Path] = []
+    seen: Set[str] = set()
+
+    def _add(path: Optional[Path]) -> None:
+        if path is None:
+            return
+        normalized = _canonical(path)
+        key = str(normalized)
+        if key in seen:
+            return
+        seen.add(key)
+        candidate_roots.append(normalized)
+
+    _add(target_path)
+    for target in view_targets:
+        save_path = str(target.get("target_save_path") or "").strip()
+        root_name = str(target.get("root_name") or "").strip()
+        if not save_path or not root_name:
+            continue
+        _add(Path(save_path) / root_name)
+
+    exact_roots: List[str] = []
+    conflicting_roots: List[str] = []
+    donor_path: Optional[Path] = None
+
+    for candidate in candidate_roots:
+        if candidate == _canonical(source_path):
+            continue
+        exists, file_count, total_bytes = _path_stats(candidate)
+        if not exists:
+            continue
+        if int(file_count) == int(expected_count) and int(total_bytes) == int(expected_bytes):
+            exact_roots.append(str(candidate))
+            if donor_path is None:
+                donor_path = candidate
+            continue
+        if int(file_count) > 0 or int(total_bytes) > 0:
+            conflicting_roots.append(str(candidate))
+
+    return donor_path, exact_roots, conflicting_roots
+
+
 def _build_target_view_targets(
     *,
     device_torrents: Sequence[sqlite3.Row],
@@ -756,7 +823,18 @@ def build_root_relocation_batch(
                     ).fetchall()
                 ]
 
-            decision = "REUSE" if target_path.exists() else "MOVE"
+            existing_target_donor, exact_target_views, conflicting_target_views = _inspect_existing_target_family(
+                source_path=source_path,
+                target_path=target_path,
+                view_targets=view_targets,
+                expected_count=file_count,
+                expected_bytes=total_bytes,
+            )
+            if existing_target_donor is not None:
+                target_path = existing_target_donor
+            decision = "REUSE" if existing_target_donor is not None else "MOVE"
+            if conflicting_target_views and decision != "REUSE":
+                review_required = True
             plan = {
                 "version": "1.0",
                 "direction": "demote",
@@ -793,6 +871,9 @@ def build_root_relocation_batch(
                     "view_collisions": int(view_collisions),
                     "unique_view_targets": int(unique_view_targets),
                     "unique_view_subdir": _sanitize_path_component(unique_view_subdir),
+                    "target_family_exact_views": len(exact_target_views),
+                    "target_family_conflicts": len(conflicting_target_views),
+                    "target_family_donor_path": str(existing_target_donor) if existing_target_donor else None,
                 },
             }
             plans.append(plan)

@@ -842,19 +842,10 @@ def test_execute_move_cross_filesystem_relocation_failure_keeps_source(tmp_path,
 
     monkeypatch.setattr(executor, "_is_cross_filesystem", lambda *_: True)
 
-    class FakeProc:
-        def __init__(self):
-            self.stdout = iter([])
-
-        def wait(self):
-            return 0
-
-    def fake_popen(cmd, **kwargs):
+    def fake_copy(_source, _target):
         target_path.mkdir(parents=True, exist_ok=True)
         (target_path / "video.mkv").write_bytes(b"x")
-        return FakeProc()
-
-    monkeypatch.setattr("rehome.executor.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
     def fail_attach(*_args, **_kwargs):
         raise RuntimeError("relocation failed")
 
@@ -923,6 +914,7 @@ def test_execute_move_relocation_failure_cleans_partial_views(tmp_path, monkeypa
                 "root_name": target_path.name,
             },
         ],
+        "_created_target_views": [str(side_view_path)],
     }
 
     with pytest.raises(RuntimeError, match="relocation failed"):
@@ -931,6 +923,120 @@ def test_execute_move_relocation_failure_cleans_partial_views(tmp_path, monkeypa
     assert source_path.exists()
     assert not target_path.exists()
     assert not side_view_path.exists()
+
+
+def test_ensure_target_donor_promotes_move_to_reuse_when_existing_target_family_view_matches(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    monkeypatch.setattr(executor, "_spot_check_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        executor,
+        "_copy_with_rsync_progress",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("copy should not run")),
+    )
+
+    source = tmp_path / "pool-data" / "cross-seed" / "Aither" / "Show.S01"
+    source.mkdir(parents=True)
+    (source / "episode.mkv").write_bytes(b"payload")
+
+    existing_target = tmp_path / "pool-media" / "cross-seed" / "TorrentLeech" / "Show.S01"
+    existing_target.mkdir(parents=True)
+    (existing_target / "episode.mkv").write_bytes(b"payload")
+
+    plan = {
+        "decision": "MOVE",
+        "source_path": str(source),
+        "target_path": str(tmp_path / "pool-media" / "cross-seed" / "hawke-uno" / "Show.S01"),
+        "file_count": 1,
+        "total_bytes": len(b"payload"),
+        "target_device_id": 44,
+        "view_targets": [
+            {
+                "torrent_hash": "hash_a",
+                "source_save_path": str(source.parent),
+                "target_save_path": str(tmp_path / "pool-media" / "cross-seed" / "Aither"),
+                "root_name": "Show.S01",
+            },
+            {
+                "torrent_hash": "hash_b",
+                "source_save_path": str(source.parent),
+                "target_save_path": str(existing_target.parent),
+                "root_name": "Show.S01",
+            },
+        ],
+    }
+
+    donor = executor._ensure_target_donor(plan)
+
+    assert plan["decision"] == "REUSE"
+    assert plan["target_path"] == str(existing_target)
+    assert donor.acquisition_mode == "existing"
+    assert donor.target_path == existing_target
+
+
+def test_ensure_target_donor_blocks_before_copy_on_conflicting_existing_target_family_view(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    monkeypatch.setattr(executor, "_spot_check_payload", lambda *args, **kwargs: None)
+    copy_called = {"value": False}
+
+    def fake_copy(*_args, **_kwargs):
+        copy_called["value"] = True
+
+    monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
+
+    source = tmp_path / "pool-data" / "cross-seed" / "Aither" / "Show.S01"
+    source.mkdir(parents=True)
+    (source / "episode.mkv").write_bytes(b"payload")
+
+    conflicting_target = tmp_path / "pool-media" / "cross-seed" / "Aither" / "Show.S01"
+    conflicting_target.mkdir(parents=True)
+    (conflicting_target / "episode.mkv").write_bytes(b"payload")
+    (conflicting_target / "extra.nfo").write_bytes(b"extra")
+
+    plan = {
+        "decision": "MOVE",
+        "source_path": str(source),
+        "target_path": str(tmp_path / "pool-media" / "cross-seed" / "hawke-uno" / "Show.S01"),
+        "file_count": 1,
+        "total_bytes": len(b"payload"),
+        "target_device_id": 44,
+        "view_targets": [
+            {
+                "torrent_hash": "hash_a",
+                "source_save_path": str(source.parent),
+                "target_save_path": str(conflicting_target.parent),
+                "root_name": "Show.S01",
+            },
+        ],
+    }
+
+    with pytest.raises(RuntimeError, match="Target family conflict exists before donor copy"):
+        executor._ensure_target_donor(plan)
+
+    assert copy_called["value"] is False
+
+
+def test_rollback_partial_target_views_only_removes_paths_created_by_current_run(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    preexisting = tmp_path / "pool-media" / "cross-seed" / "Aither" / "Show.S01"
+    preexisting.mkdir(parents=True)
+    (preexisting / "episode.mkv").write_bytes(b"payload")
+
+    created = tmp_path / "pool-media" / "cross-seed" / "TorrentLeech" / "Show.S01"
+    created.mkdir(parents=True)
+    (created / "episode.mkv").write_bytes(b"payload")
+
+    plan = {
+        "source_path": str(tmp_path / "pool-data" / "cross-seed" / "Aither" / "Show.S01"),
+        "target_path": str(tmp_path / "pool-media" / "cross-seed" / "hawke-uno" / "Show.S01"),
+        "seeding_roots": [str(tmp_path / "pool-media"), str(tmp_path / "pool-data")],
+        "_created_target_views": [str(created)],
+    }
+
+    executor._rollback_partial_target_views(plan)
+
+    assert preexisting.exists()
+    assert created.exists() is False
 
 
 def test_execute_move_spot_check_no_sha256_does_not_fail(tmp_path, monkeypatch):

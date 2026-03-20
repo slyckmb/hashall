@@ -1,6 +1,41 @@
 # Operational Run State
 
-Last updated: 2026-03-19
+Last updated: 2026-03-20
+
+## 2026-03-20 West Wing Rehome Root Cause + Current Dry-Run State
+
+**Version:**
+- `hashall=0.8.6`
+
+**Root cause of the bad 2026-03-20 `West Wing S02` run:**
+- planner chose `MOVE` from the absence of one canonical target root and ignored alternate sibling
+  target views already present on `/pool/media`
+- target-view preflight mutated existing target files instead of only comparing them
+- rollback removed a pre-existing good `/pool/media` sibling view because it did not track which
+  views were created by the current run
+
+**Fixes now in code:**
+- family-level target reuse before donor copy
+- fail-fast alternate-sibling conflict detection before rsync
+- read-only target-view preflight
+- rollback only deletes target views created in the current run
+- extra `failure-pre-rollback` and `failure-post-rollback` reality snapshots
+
+**Fresh live dry-run on 2026-03-20 (`/pool/data/media/torrents/seeding` → `/pool/media/torrents/seeding`):**
+- `Shining.Girls...` -> `REUSE`
+- `The.West.Wing.S02...` -> `MOVE`
+- `Alien Romulus` -> `MOVE`
+
+**Important current reality for `West Wing`:**
+- the old good `/pool/media` sibling donor is already gone from the earlier buggy run
+- so the new live plan correctly reports:
+  - `target_family_exact_views=0`
+  - `target_family_conflicts=0`
+- this is expected current reality, not another planner miss
+
+**Recommended pilot after this fix set:**
+- pilot the `Shining.Girls...` `REUSE` family first
+- do **not** expect `West Wing` to be a reuse pilot until a good target-side donor exists again
 
 ## 2026-03-19 Migration Analysis
 

@@ -1,7 +1,7 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 [project]
 name = "hashall"
-version = "0.8.5"
+version = "0.8.6"
 description = "Smart CLI tool to scan, export, verify and repair file hashes."
 readme = "README.md"
 requires-python = ">=3.8"

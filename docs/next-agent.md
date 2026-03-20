@@ -1,5 +1,31 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-03-20 Rehome West-Wing Fixes (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.6`
+- Root cause of the failed `West Wing S02` rehome was confirmed and fixed in code:
+  - planner previously chose `MOVE` from one canonical target path and ignored existing sibling
+    views on `/pool/media`
+  - target-view preflight was mutating existing target files instead of only inspecting them
+  - rollback deleted a pre-existing good target-side sibling view because it did not track whether
+    that view existed before the run
+- Current code now:
+  - prefers family-level target reuse when an exact target-side sibling view already exists
+  - blocks `MOVE` before rsync when alternate sibling target views already exist but conflict
+  - keeps target-view preflight read-only
+  - rolls back only view paths created by the current run
+  - writes extra `failure-pre-rollback` / `failure-post-rollback` reality snapshots during move failures
+- Fresh live dry-run on 2026-03-20 for `/pool/data/media/torrents/seeding`:
+  - `Shining.Girls...` = `REUSE`
+  - `The.West.Wing.S02...` = `MOVE`
+  - `Alien Romulus` = `MOVE`
+- Important current reality:
+  - the previously good `/pool/media` `West Wing` donor/sibling view is already gone from the
+    earlier buggy run
+  - because of that, the fresh `West Wing` plan now correctly shows `target_family_exact_views=0`
+    and no longer tries to reuse a donor that is not actually present
+- Next recommended live pilot after this fix set: run the `Shining.Girls...` `REUSE` family first.
+
 ## 2026-03-19 Migration State (compact-safe) — UPDATED
 
 - `hashall` is now `0.8.5`

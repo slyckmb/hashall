@@ -73,6 +73,13 @@ class PreflightCheckStatus:
     message: str
 
 
+@dataclass(frozen=True)
+class TargetFamilyInspection:
+    candidate_roots: Tuple[Path, ...]
+    exact_roots: Tuple[Path, ...]
+    conflicting_roots: Tuple[Path, ...]
+
+
 class DemotionExecutor:
     """
     Executes demotion plans.
@@ -1130,6 +1137,11 @@ class DemotionExecutor:
         seen_view_targets: set[tuple[str, str]] = set()
         view_roots_by_key: Dict[tuple[str, str], str] = {}
         constructed_payload_roots: Dict[str, str] = {}
+        created_target_views: set[str] = {
+            str(canonicalize_path(Path(raw).resolve()))
+            for raw in (plan.get("_created_target_views") or [])
+            if str(raw).strip()
+        }
         skipped_hashes: set[str] = set()
 
         conn = self._get_db_connection()
@@ -1197,6 +1209,11 @@ class DemotionExecutor:
                     files=files,
                     root_name=root_name,
                 )
+                cleanup_path = layout.single_file_direct_dst if layout.single_file_direct_dst is not None else layout.view_root
+                cleanup_path_resolved = canonicalize_path(cleanup_path.resolve())
+                if not (cleanup_path.exists() or cleanup_path.is_symlink()):
+                    created_target_views.add(str(cleanup_path_resolved))
+                    plan["_created_target_views"] = sorted(created_target_views)
                 link_start = time.monotonic()
                 try:
                     result = build_torrent_view(
@@ -1266,8 +1283,108 @@ class DemotionExecutor:
                 }
                 prior_roots.update(constructed_payload_roots)
                 plan["constructed_payload_roots"] = prior_roots
+            if created_target_views:
+                plan["_created_target_views"] = sorted(created_target_views)
         finally:
             conn.close()
+
+    def _iter_target_family_roots(self, plan: Dict) -> List[Path]:
+        roots: List[Path] = []
+        seen: set[str] = set()
+
+        def _add(raw: object) -> None:
+            text = str(raw or "").strip()
+            if not text:
+                return
+            path = canonicalize_path(Path(text).resolve())
+            key = str(path)
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append(path)
+
+        _add(plan.get("target_path"))
+
+        snapshot = plan.get("_reality_snapshot_pre") or {}
+        for row in snapshot.get("rows") or []:
+            if bool(row.get("target_content_exists")):
+                _add(row.get("expected_target_content_path"))
+
+        for target in plan.get("view_targets") or []:
+            save_path = str(target.get("target_save_path") or "").strip()
+            root_name = str(target.get("root_name") or "").strip()
+            if not save_path or not root_name:
+                continue
+            _add(Path(save_path) / root_name)
+        return roots
+
+    def _inspect_target_family(self, plan: Dict) -> TargetFamilyInspection:
+        candidate_roots = self._iter_target_family_roots(plan)
+        source_path = (
+            canonicalize_path(Path(str(plan.get("source_path") or "")).resolve())
+            if str(plan.get("source_path") or "").strip()
+            else None
+        )
+        exact_roots: List[Path] = []
+        conflicting_roots: List[Path] = []
+        expected_count = int(plan.get("file_count") or 0)
+        expected_bytes = int(plan.get("total_bytes") or 0)
+
+        for candidate in candidate_roots:
+            if source_path is not None and candidate == source_path:
+                continue
+            stats = self._path_stats(candidate)
+            if self._path_stats_match(stats, expected_count, expected_bytes):
+                exact_roots.append(candidate)
+            elif stats.exists and not self._path_stats_empty(stats):
+                conflicting_roots.append(candidate)
+
+        return TargetFamilyInspection(
+            candidate_roots=tuple(candidate_roots),
+            exact_roots=tuple(exact_roots),
+            conflicting_roots=tuple(conflicting_roots),
+        )
+
+    def _align_plan_with_existing_target_family(self, plan: Dict) -> TargetFamilyInspection:
+        inspection = self._inspect_target_family(plan)
+        normalization = dict(plan.get("normalization") or {})
+        normalization["target_family_exact_views"] = len(inspection.exact_roots)
+        normalization["target_family_conflicts"] = len(inspection.conflicting_roots)
+        current_target = (
+            canonicalize_path(Path(str(plan.get("target_path") or "")).resolve())
+            if str(plan.get("target_path") or "").strip()
+            else None
+        )
+
+        if inspection.exact_roots:
+            donor_path = inspection.exact_roots[0]
+            prior_target = str(plan.get("target_path") or "").strip()
+            plan["target_path"] = str(donor_path)
+            if (
+                str(plan.get("decision") or "").upper() == "MOVE"
+                and canonicalize_path(Path(prior_target).resolve()) != donor_path
+            ):
+                self._log(
+                    "target_family_reuse_detected "
+                    f"prior_target={prior_target or '<none>'} donor={donor_path}",
+                    "warning",
+                )
+                plan["decision"] = "REUSE"
+            normalization["target_family_donor_path"] = str(donor_path)
+
+        blocking_conflicts = [
+            path for path in inspection.conflicting_roots
+            if current_target is None or path != current_target
+        ]
+        if str(plan.get("decision") or "").upper() == "MOVE" and blocking_conflicts:
+            conflicts = ", ".join(str(path) for path in blocking_conflicts[:3])
+            raise RuntimeError(
+                "Target family conflict exists before donor copy: "
+                f"payload={str(plan.get('payload_hash') or '')[:16]} conflicts={conflicts}"
+            )
+
+        plan["normalization"] = normalization
+        return inspection
 
     def _preflight_existing_view_conflicts(
         self,
@@ -1364,7 +1481,7 @@ class DemotionExecutor:
                         continue
                     existing_paths += 1
                     try:
-                        _ensure_hardlink(src, dst, compare_hint=compare_hint)
+                        _ensure_hardlink(src, dst, compare_hint=compare_hint, relink_identical=False)
                     except Exception as exc:
                         raise RuntimeError(
                             f"Target view conflict for {torrent_hash[:16]} at {dst}: {exc}"
@@ -2116,8 +2233,13 @@ class DemotionExecutor:
         This keeps rollback idempotent when payload move is restored but view links
         were already materialized for sibling save paths.
         """
-        view_targets = plan.get("view_targets") or []
-        if not view_targets:
+        created_view_paths = [
+            str(raw).strip()
+            for raw in (plan.get("_created_target_views") or [])
+            if str(raw).strip()
+        ]
+        if not created_view_paths:
+            self._log("  rollback_cleanup_summary removed=0 skipped=0 reason=no_created_target_views")
             return
 
         source_path = Path(plan.get("source_path", "")).resolve() if plan.get("source_path") else None
@@ -2127,14 +2249,8 @@ class DemotionExecutor:
         removed = 0
         skipped = 0
 
-        for target in view_targets:
-            target_save = str(target.get("target_save_path") or "").strip()
-            root_name = str(target.get("root_name") or "").strip()
-            if not target_save or not root_name:
-                skipped += 1
-                continue
-
-            view_path = (Path(target_save) / root_name).resolve()
+        for raw_path in created_view_paths:
+            view_path = Path(raw_path).resolve()
             key = str(view_path)
             if key in seen:
                 continue
@@ -3100,6 +3216,8 @@ class DemotionExecutor:
         preloaded_files = self._sanitize_plan_live_torrents(plan)
         artifact_dir = self._relocation_artifact_dir(plan)
         self._preflight_torrent_state_check_with_settle(plan, artifact_dir=artifact_dir)
+        self._align_plan_with_existing_target_family(plan)
+        decision = plan['decision']
 
         self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
 
@@ -3841,6 +3959,7 @@ class DemotionExecutor:
         plan: Dict,
         spot_check: int = 0,
     ) -> TargetDonor:
+        self._align_plan_with_existing_target_family(plan)
         source_path = Path(plan["source_path"])
         target_path = Path(plan["target_path"])
         target_device_id = self._resolve_plan_device_id(plan, "target")
@@ -4148,8 +4267,23 @@ class DemotionExecutor:
             )
             phase_times.update(attach_times)
             self._cleanup_unused_target_donor(execute_plan, donor)
-        except Exception:
+        except Exception as exc:
+            artifact_dir_raw = str(plan.get("_artifact_dir") or "").strip()
+            if artifact_dir_raw:
+                self._write_plan_reality_snapshot(
+                    execute_plan,
+                    artifact_dir=Path(artifact_dir_raw),
+                    phase="failure-pre-rollback",
+                    error=str(exc),
+                )
             self._rollback_move_donor(execute_plan, donor)
+            if artifact_dir_raw:
+                self._write_plan_reality_snapshot(
+                    execute_plan,
+                    artifact_dir=Path(artifact_dir_raw),
+                    phase="failure-post-rollback",
+                    error=str(exc),
+                )
             raise
 
         t0 = time.monotonic()

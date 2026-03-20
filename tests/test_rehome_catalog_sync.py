@@ -2366,6 +2366,8 @@ def test_preflight_existing_view_conflicts_logs_progress(tmp_path):
 
     executor._preflight_existing_view_conflicts(payload_file, view_targets, plan)
 
+    assert existing_target.read_bytes() == payload_file.read_bytes()
+    assert existing_target.stat().st_ino != payload_file.stat().st_ino
     assert any("preflight_target_views_view_done" in entry for entry in logs)
     assert any("preflight_target_views_complete" in entry for entry in logs)
 

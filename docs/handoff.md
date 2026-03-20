@@ -1,5 +1,48 @@
 # Handoff Notes
 
+## 2026-03-20 Rehome Planner/Executor Hardening (same branch)
+
+### Root cause confirmed
+The real `West Wing S02` apply on 2026-03-20 copied ~71 GB and then failed on a target-side
+`Aither (API)` sibling conflict. The real bug was not rsync. It was that the planner/executor
+treated one canonical target root as the whole truth:
+
+- planner chose `MOVE` when that one canonical target root was absent
+- it ignored alternate sibling target views already present on `/pool/media`
+- target-view “preflight” was not actually read-only; it could relink identical files
+- rollback then deleted a pre-existing good target-side sibling view because it did not track
+  whether a view existed before the run
+
+### Code fixes in this sub-session
+- `src/rehome/normalize.py`
+  - planner now inspects the whole target family and reuses an exact existing target-side sibling
+    as the donor when one exists
+- `src/rehome/executor.py`
+  - family-level target inspection now runs before donor acquisition
+  - alternate conflicting target siblings now block `MOVE` before rsync
+  - rollback now only removes target views created during the current run
+  - move failures now write both `failure-pre-rollback` and `failure-post-rollback` reality
+    snapshots
+- `src/rehome/view_builder.py`
+  - target-view preflight now compares existing targets without relinking them
+
+### Simulation / dry-run status
+- targeted simulation suite:
+  - `pytest tests/test_rehome_normalize.py tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py -q`
+  - result: `76 passed`
+- module compile check:
+  - `python3 -m py_compile src/rehome/normalize.py src/rehome/view_builder.py src/rehome/executor.py`
+  - result: passed
+- fresh live dry-run (2026-03-20):
+  - `Shining.Girls...` = `REUSE`
+  - `The.West.Wing.S02...` = `MOVE`
+  - `Alien Romulus` = `MOVE`
+
+### Current important live fact
+- the previously good `/pool/media` `West Wing` donor is already gone from the earlier buggy run
+- therefore the fresh `West Wing` plan correctly has no reusable target-side donor right now
+- if you want a real reuse/reconcile pilot, use `Shining.Girls...`, not `West Wing`
+
 ## 2026-03-19 Migration Audit + Bug Fixes (same branch)
 
 ### Stale lock cleared
