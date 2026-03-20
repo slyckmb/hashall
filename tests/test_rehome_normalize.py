@@ -103,7 +103,7 @@ def test_normalize_plan_prefers_rehome_run_relative_target(tmp_path):
     plan = report["plans"][0]
     assert plan["source_path"] == str(source)
     assert plan["target_path"] == str(target)
-    assert plan["decision"] == "REUSE"
+    assert plan["decision"] == "MOVE"
     assert plan["affected_torrents"] == ["thash1"]
 
 
@@ -579,7 +579,7 @@ def test_root_relocation_plan_prefers_existing_target_root_when_torrents_already
 
     assert report["summary"]["candidates"] == 1
     plan = report["plans"][0]
-    assert plan["decision"] == "MOVE"
+    assert plan["decision"] == "REUSE"
     assert plan["target_path"] == str(target_file)
     assert plan["normalization"]["source_hint"] == "torrent_save_path"
     assert plan["normalization"]["fallback_used"] is False
@@ -632,7 +632,7 @@ def test_root_relocation_plan_prefers_surviving_target_payload_when_source_root_
 
     assert report["summary"]["candidates"] == 1
     plan = report["plans"][0]
-    assert plan["decision"] == "MOVE"
+    assert plan["decision"] == "REUSE"
     assert plan["source_path"] == str(source_path)
     assert plan["target_path"] == str(target_file)
     assert plan["normalization"]["source_hint"] == "target_payload_root"
@@ -685,6 +685,6 @@ def test_root_relocation_plan_skips_groups_when_all_view_targets_are_already_tar
 
     assert report["summary"]["candidates"] == 1
     plan = report["plans"][0]
-    assert plan["decision"] == "REUSE"
+    assert plan["decision"] == "MOVE"
     assert plan["source_path"] == str(source_path)
     assert plan["target_path"] == str(target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash30a" / "Brave.New.World.US.S01")
