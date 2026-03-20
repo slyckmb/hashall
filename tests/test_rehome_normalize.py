@@ -457,20 +457,20 @@ def test_root_relocation_plan_synthesizes_unique_view_targets_for_colliding_sibl
 
     assert report["summary"]["candidates"] == 1
     assert report["summary"]["view_collisions"] == 1
-    assert report["summary"]["unique_view_targets"] == 2
+    assert report["summary"]["unique_view_targets"] == 1
 
     plan = report["plans"][0]
     assert plan["affected_torrents"] == ["thash21a", "thash21b"]
     assert plan["normalization"]["view_collisions"] == 1
     assert plan["normalization"]["unique_per_torrent"] is True
-    assert plan["normalization"]["unique_view_targets"] == 2
+    assert plan["normalization"]["unique_view_targets"] == 1
 
     by_hash = {row["torrent_hash"]: row for row in plan["view_targets"]}
-    assert by_hash["thash21a"]["target_save_path"] == str(
-        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21a"
-    )
+    assert by_hash["thash21a"]["target_save_path"] == str(source_root).replace(
+        str(source_root), str(target_root)
+    ) + "/tv"
     assert by_hash["thash21b"]["target_save_path"] == str(
-        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21b"
+        target_root / "tv" / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21b"
     )
 
 
@@ -522,16 +522,14 @@ def test_root_relocation_plan_includes_already_targeted_siblings_in_same_payload
     )
 
     assert report["summary"]["candidates"] == 1
-    assert report["summary"]["unique_view_targets"] == 2
+    assert report["summary"]["unique_view_targets"] == 1
     plan = report["plans"][0]
     assert plan["affected_torrents"] == ["thash22a", "thash22b"]
     assert plan["normalization"]["unique_per_torrent"] is True
     by_hash = {row["torrent_hash"]: row for row in plan["view_targets"]}
-    assert by_hash["thash22a"]["target_save_path"] == str(
-        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22a"
-    )
+    assert by_hash["thash22a"]["target_save_path"] == str(target_root / "tv")
     assert by_hash["thash22b"]["target_save_path"] == str(
-        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22b"
+        target_root / "tv" / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22b"
     )
 
 
@@ -581,7 +579,7 @@ def test_root_relocation_plan_prefers_existing_target_root_when_torrents_already
 
     assert report["summary"]["candidates"] == 1
     plan = report["plans"][0]
-    assert plan["decision"] == "REUSE"
+    assert plan["decision"] == "MOVE"
     assert plan["target_path"] == str(target_file)
     assert plan["normalization"]["source_hint"] == "torrent_save_path"
     assert plan["normalization"]["fallback_used"] is False
@@ -685,8 +683,8 @@ def test_root_relocation_plan_skips_groups_when_all_view_targets_are_already_tar
         flat_only=False,
     )
 
-    assert report["summary"]["candidates"] == 0
-    assert any(
-        item["reason"] == "already_targeted_view_targets"
-        for item in report["skipped"]
-    )
+    assert report["summary"]["candidates"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "REUSE"
+    assert plan["source_path"] == str(source_path)
+    assert plan["target_path"] == str(target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash30a" / "Brave.New.World.US.S01")

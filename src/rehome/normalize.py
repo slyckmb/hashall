@@ -342,12 +342,12 @@ def _map_target_save_path(
 
 def _choose_unique_target_save(
     *,
-    target_root: Path,
+    baseline_target_save_path: Path,
     torrent_hash: str,
     unique_view_subdir: str,
 ) -> Path:
     subdir = _sanitize_path_component(unique_view_subdir or DEFAULT_UNIQUE_VIEW_SUBDIR)
-    return _canonical(target_root / subdir / torrent_hash)
+    return _canonical(baseline_target_save_path / subdir / torrent_hash)
 
 
 def _build_target_view_targets(
@@ -397,31 +397,21 @@ def _build_target_view_targets(
         candidates.append((torrent_hash, save_path, root_name, target_save_path))
 
     affected_torrents = [torrent_hash for torrent_hash, _, _, _ in candidates]
-    force_unique_targets = bool(unique_per_torrent and len(candidates) > 1)
     view_targets: List[Dict[str, str]] = []
     unique_views = 0
     seen_view_keys: Set[Tuple[str, str]] = set()
 
     for torrent_hash, save_path, root_name, baseline_target_save_path in candidates:
         target_save_path = baseline_target_save_path
-        if force_unique_targets:
+        view_key = (str(target_save_path), root_name)
+        if view_key in seen_view_keys and (unique_on_collision or unique_per_torrent):
             target_save_path = _choose_unique_target_save(
-                target_root=target_root,
+                baseline_target_save_path=baseline_target_save_path,
                 torrent_hash=torrent_hash,
                 unique_view_subdir=unique_view_subdir,
             )
             if target_save_path != baseline_target_save_path:
                 unique_views += 1
-        else:
-            view_key = (str(target_save_path), root_name)
-            if view_key in seen_view_keys and unique_on_collision:
-                target_save_path = _choose_unique_target_save(
-                    target_root=target_root,
-                    torrent_hash=torrent_hash,
-                    unique_view_subdir=unique_view_subdir,
-                )
-                if target_save_path != baseline_target_save_path:
-                    unique_views += 1
 
         view_key = (str(target_save_path), root_name)
         seen_view_keys.add(view_key)
@@ -722,7 +712,11 @@ def build_root_relocation_batch(
                 if str(view.get("source_save_path") or "").strip()
             )
             if all_view_targets_already_targeted and (
-                source_path == target_path or not any_view_still_under_source_root
+                source_path == target_path
+                or (
+                    not any_view_still_under_source_root
+                    and not is_under(source_path, source_root_path)
+                )
             ):
                 skipped.append(
                     NormalizationSkip(
