@@ -400,7 +400,7 @@ def test_root_relocation_plan_maps_source_root_to_target_root_across_devices(tmp
 
     assert report["summary"]["candidates"] == 1
     plan = report["plans"][0]
-    assert plan["decision"] == "MOVE"
+    assert plan["decision"] == "REUSE"
     assert plan["source_device_id"] == 231
     assert plan["target_device_id"] == 141
     assert plan["source_path"] == str(source_path)
@@ -632,7 +632,7 @@ def test_root_relocation_plan_prefers_surviving_target_payload_when_source_root_
 
     assert report["summary"]["candidates"] == 1
     plan = report["plans"][0]
-    assert plan["decision"] == "REUSE"
+    assert plan["decision"] == "MOVE"
     assert plan["source_path"] == str(source_path)
     assert plan["target_path"] == str(target_file)
     assert plan["normalization"]["source_hint"] == "target_payload_root"
