@@ -1412,8 +1412,8 @@ def normalize_plan_cmd(
               help="Restrict relocation planning to specific payload hash(es)")
 @click.option("--limit", type=int, default=0,
               help="Max relocation candidates to include (0 = all)")
-@click.option("--flat-only/--all-mismatches", default=True,
-              help="Plan only payloads directly under source root (default) or all mismatches")
+@click.option("--flat-only/--all-mismatches", default=False,
+              help="Plan only payloads directly under source root or all mismatches (default)")
 @click.option("--unique-view-subdir", default=DEFAULT_UNIQUE_VIEW_SUBDIR, show_default=True,
               help="Subdirectory under target root used for synthesized unique sibling views")
 @click.option("--output", "-o", type=click.Path(),

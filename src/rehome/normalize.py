@@ -530,14 +530,25 @@ def build_root_relocation_batch(
         for payload_hash in payload_hash_order:
             rows_for_hash = payload_rows_by_hash[payload_hash]
             in_scope_rows: List[sqlite3.Row] = []
+            under_source_root_rows: List[sqlite3.Row] = []
             for row in rows_for_hash:
                 source = _canonical(str(row["root_path"]))
                 if not is_under(source, source_root_path):
                     continue
+                under_source_root_rows.append(row)
                 if flat_only and source.parent != source_root_path:
                     continue
                 in_scope_rows.append(row)
             if not in_scope_rows:
+                if under_source_root_rows:
+                    skipped.append(
+                        NormalizationSkip(
+                            payload_id=int(under_source_root_rows[0]["payload_id"]),
+                            payload_hash=payload_hash,
+                            source_path=str(_canonical(str(under_source_root_rows[0]["root_path"]))),
+                            reason="nested_under_source_root_flat_only",
+                        )
+                    )
                 continue
 
             row = max(in_scope_rows, key=_source_row_score)
