@@ -756,6 +756,7 @@ class DemotionExecutor:
         t0 = time.monotonic()
         controller = tool._ensure_controller()
         controller_stopped_for_patch = False
+        patch_applied = False
         try:
             if not controller.is_stopped():
                 emit_log("qb_stop", phase="validate", reason="prepare_for_patch")
@@ -782,6 +783,7 @@ class DemotionExecutor:
             )
             if patch_code != 0:
                 raise RuntimeError(f"rehome relocation patch failed manifest={manifest_path}")
+            patch_applied = True
             phase_times["patch"] = time.monotonic() - t0
 
             t0 = time.monotonic()
@@ -811,6 +813,30 @@ class DemotionExecutor:
                 tool._checkpoint_manifest(manifest_path, manifest)
             phase_times["post_patch"] = time.monotonic() - t0
         except Exception:
+            if patch_applied:
+                try:
+                    rollback_code = tool.rollback(
+                        manifest_path=manifest_path,
+                        journal_path=patch_journal_path,
+                        apply=True,
+                        auto_stop_qb=True,
+                    )
+                    if rollback_code != 0:
+                        self._log(
+                            f"  fastresume_rollback_failed manifest={manifest_path} code={rollback_code}",
+                            "warning",
+                        )
+                    else:
+                        self._log(
+                            f"  fastresume_rollback_restored manifest={manifest_path}",
+                            "warning",
+                        )
+                except Exception as rollback_exc:
+                    self._log(
+                        f"  fastresume_rollback_failed manifest={manifest_path} "
+                        f"error={type(rollback_exc).__name__}:{rollback_exc}",
+                        "warning",
+                    )
             if controller_stopped_for_patch:
                 controller = tool._ensure_controller()
                 if controller.is_stopped():

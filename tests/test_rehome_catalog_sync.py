@@ -1185,6 +1185,133 @@ def test_hardened_fastresume_restarts_qb_after_validate_failure(tmp_path, monkey
     assert relocation_tool.wait_calls == 1
 
 
+def test_hardened_fastresume_restores_fastresume_after_post_patch_failure(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "rows": [
+            {
+                "hash": "hash-a",
+                "selected": True,
+                "state": "stoppedUP",
+                "verified": False,
+                "old_save_path": "/pool/data/media/torrents/seeding/cross-seed/Aither (API)",
+                "new_save_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)",
+                "content_path": "/pool/data/media/torrents/seeding/cross-seed/Aither (API)/Sample.mkv",
+                "dest_content_path": "/pool/media/torrents/seeding/cross-seed/Aither (API)/Sample.mkv",
+            }
+        ]
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest))
+    patch_journal_path = tmp_path / "patch-journal.jsonl"
+
+    class FakeController:
+        def __init__(self):
+            self.running = True
+            self.stop_calls = 0
+            self.start_calls = 0
+
+        def is_stopped(self):
+            return not self.running
+
+        def stop(self):
+            self.running = False
+            self.stop_calls += 1
+
+        def start(self):
+            self.running = True
+            self.start_calls += 1
+
+    class FakeRelocationTool:
+        def __init__(self, path: Path):
+            self.path = path
+            self.controller = FakeController()
+            self.wait_calls = 0
+            self.rollback_calls = []
+
+        def _ensure_controller(self):
+            return self.controller
+
+        def _wait_for_qb_online(self):
+            self.wait_calls += 1
+
+        def _load_manifest(self, path: Path):
+            return __import__("json").loads(Path(path).read_text())
+
+        def _checkpoint_manifest(self, path: Path, manifest):
+            Path(path).write_text(__import__("json").dumps(manifest))
+
+        def _pause_selected(self, rows):
+            for row in rows:
+                row["state"] = "stoppedUP"
+
+        def _refresh_rows_from_qb(self, rows):
+            return None
+
+        def verify(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["verified"] = True
+                row["verify_status"] = "verified"
+                row["verify_classification"] = "exact_tree"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def validate(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["actionable"] = True
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def patch(self, **kwargs):
+            patch_journal_path.write_text("{}\n")
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["patch_status"] = "patched"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def rollback(self, **kwargs):
+            self.rollback_calls.append(dict(kwargs))
+            return 0
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClient(default_path="/pool/data/media/torrents/seeding/cross-seed/Aither (API)")
+    executor.resume_after_relocate = False
+    relocation_tool = FakeRelocationTool(manifest_path)
+
+    monkeypatch.setattr(executor, "_relocation_artifact_dir", lambda plan: tmp_path)
+    monkeypatch.setattr(executor, "_build_hardened_relocation_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr(executor, "_build_qb_zfs_relocation_tool", lambda: relocation_tool)
+    monkeypatch.setattr(executor, "_wait_qb_online_after_restart", lambda timeout_seconds=120.0: None)
+    monkeypatch.setattr(
+        executor,
+        "_ensure_post_patch_runtime_alignment",
+        lambda row, **kwargs: (_ for _ in ()).throw(RuntimeError("save_path verification failed after patch")),
+    )
+
+    with pytest.raises(RuntimeError, match="save_path verification failed after patch"):
+        executor._attach_torrents_via_hardened_fastresume(
+            {"payload_hash": "payload-hash"},
+            TargetDonor(
+                source_path=tmp_path / "src",
+                target_path=tmp_path / "dst",
+                target_device_id=141,
+                acquisition_mode="move",
+            ),
+            relocations=[],
+        )
+
+    assert len(relocation_tool.rollback_calls) == 1
+    rollback_call = relocation_tool.rollback_calls[0]
+    assert rollback_call["manifest_path"] == manifest_path
+    assert rollback_call["journal_path"] == patch_journal_path
+    assert rollback_call["apply"] is True
+    assert rollback_call["auto_stop_qb"] is True
+    assert relocation_tool.controller.start_calls == 1
+    assert relocation_tool.wait_calls == 1
+
+
 def test_move_idempotent_reconciles_files_tables_for_single_file(tmp_path):
     db_path = tmp_path / "catalog.db"
     stash_mount = tmp_path / "stash" / "media"

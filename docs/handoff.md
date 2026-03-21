@@ -1,5 +1,30 @@
 # Handoff Notes
 
+## 2026-03-21 Rehome Fastresume Rollback Fix (same branch)
+
+### What changed
+The `0.8.8` pilot exposed one more real bug after the qB runtime-settle fix: when hardened
+fastresume failed after patching, the executor rolled back copied files and views but did not
+restore the fastresume backups. That left qB pointed at `/pool/media` even though rollback had
+removed the target files.
+
+### Code fixes in this sub-session
+- `src/rehome/executor.py`
+  - hardened fastresume failure handling now calls the relocation tool rollback path when patching
+    had already succeeded
+  - this restores fastresume backups from the patch journal before qB is restarted
+- tests
+  - added a regression that forces a post-patch failure and asserts fastresume rollback is called
+
+### Validation
+- focused regression suite:
+  - `pytest tests/test_rehome_catalog_sync.py::test_hardened_fastresume_restores_fastresume_after_post_patch_failure tests/test_rehome_catalog_sync.py::test_hardened_fastresume_keep_paused_rejects_incomplete_qb_accounting tests/test_rehome_catalog_sync.py::test_hardened_fastresume_post_patch_reapplies_location_after_stale_runtime_save_path -q`
+  - result: `3 passed`
+
+### Operational note
+- Before another real `West Wing` pilot, the live qB rows need to be restored from the existing
+  fastresume backups so they point back to `/pool/data`.
+
 ## 2026-03-21 Rehome qB Runtime Settle Fix (same branch)
 
 ### What changed

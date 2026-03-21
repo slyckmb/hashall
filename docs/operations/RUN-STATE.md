@@ -2,6 +2,26 @@
 
 Last updated: 2026-03-21
 
+## 2026-03-21 Fastresume Rollback Fix
+
+**Version:**
+- `hashall=0.8.9`
+
+**New fix in code:**
+- hardened fastresume failure handling now restores fastresume backups when patching had already
+  succeeded but a later post-patch step failed
+- qB is then restarted after backup restore so runtime metadata can return to the pre-run source
+  paths instead of remaining stranded on `/pool/media`
+
+**Why this was needed:**
+- the `0.8.8` live `West Wing` retry showed all five siblings in `missingFiles` on `/pool/media`
+  even though the target files were gone
+- fastresume backups from the failed patched run still existed, which confirmed rollback had not
+  restored them automatically
+
+**Validation:**
+- focused fastresume rollback regressions passed
+
 ## 2026-03-21 qB Runtime Settle Fix
 
 **Version:**

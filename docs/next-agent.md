@@ -1,5 +1,20 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.9`
+- The `0.8.8` pilot exposed one more real failure path:
+  - a hardened fastresume apply could fail after patching
+  - payload/file rollback would run
+  - but fastresume metadata was not restored from backups
+  - qB could then stay pointed at `/pool/media` even though rollback removed the target files
+- Current code now:
+  - restores fastresume backups on post-patch hardened-fastresume failure
+  - restarts qB after that restore so runtime metadata returns to the pre-run source paths
+- Fresh validation on 2026-03-21:
+  - focused rollback regressions: passed
+  - this is the fix needed before another real `West Wing` pilot
+
 ## 2026-03-21 Rehome qB Runtime Settle Fix (compact-safe) — UPDATED
 
 - `hashall` is now `0.8.8`
