@@ -1,5 +1,38 @@
 # Handoff Notes
 
+## 2026-03-21 Rehome qB Runtime Settle Fix (same branch)
+
+### What changed
+The `West Wing` pilot had already proved the data path was good. The remaining failure was the
+post-patch qB runtime handoff after restart: `.fastresume` was correctly patched to `/pool/media`,
+but runtime verification could still see stale `/pool/data` information during qB restart jitter.
+
+### Code fixes in this sub-session
+- `src/rehome/executor.py`
+  - hardened fastresume post-patch now waits for qB restart/authentication
+  - runtime `save_path` verification now requires live qB API data and ignores cache-fallback
+    reads during verification
+  - if runtime `save_path` stays stale after a good patch, executor retries with an explicit
+    `set_location(expected_save_path)` nudge before failing
+  - post-patch accounting now waits for qB to settle, but still fails fast for definite bad
+    states like `pausedDL`, `stoppedDL`, or nonzero `amount_left`
+- tests
+  - added regressions for cache-fallback save-path polling
+  - added regressions for post-patch accounting settle
+  - added regressions for stale runtime `save_path` recovered by reapplying the target location
+
+### Simulation / dry-run status
+- targeted simulation suite:
+  - `pytest tests/test_rehome_catalog_sync.py tests/test_rehome_atomic_relocation.py tests/test_rehome_normalize.py -q`
+  - result: `81 passed`
+- live dry-run:
+  - `/home/michael/.venvs/hashall/bin/python -m hashall.cli rehome apply out/rehome-plan-west-wing-s02-2026-03-21-v087.json --dryrun`
+  - completed cleanly
+
+### Operational conclusion
+- The remaining `West Wing` issue was a qB runtime settle bug, not another data-move bug.
+- Next step is to rerun the same real `West Wing` pilot with `0.8.8`.
+
 ## 2026-03-21 Rehome Content Identity Hardening (same branch)
 
 ### What changed

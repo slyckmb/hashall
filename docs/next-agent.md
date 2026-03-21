@@ -1,5 +1,23 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-03-21 Rehome qB Runtime Settle Fix (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.8`
+- `West Wing` already proved the data path was good through copy, verify, view build, and sibling
+  relocate; the remaining failure was the post-patch qB runtime handoff.
+- Root cause was qB restart jitter plus cache-fallback API reads:
+  - `.fastresume` files were patched correctly to `/pool/media`
+  - but executor checked runtime `save_path` too early
+  - and cache-fallback qB API reads could still report stale `/pool/data` runtime info
+- Current code now:
+  - waits for qB restart/authentication before post-patch verification
+  - requires live qB runtime info for `save_path` checks instead of trusting cache fallback
+  - retries stale post-patch `save_path` with an explicit `set_location` nudge when needed
+  - waits for post-patch qB accounting to settle, but still fails fast for definite bad states
+- Fresh validation on 2026-03-21:
+  - rehome regression pack: `81 passed`
+  - live dry-run of `out/rehome-plan-west-wing-s02-2026-03-21-v087.json` is clean
+
 ## 2026-03-21 Rehome Content-Proofed Reuse (compact-safe) — UPDATED
 
 - `hashall` is now `0.8.7`

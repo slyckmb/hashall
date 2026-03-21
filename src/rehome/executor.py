@@ -801,29 +801,12 @@ class DemotionExecutor:
                 if controller.is_stopped():
                     controller.start()
                 tool._wait_for_qb_online()
+                self._wait_qb_online_after_restart()
                 manifest = tool._load_manifest(manifest_path)
                 for row in row_selection(manifest["rows"]):
                     if str(row.get("patch_status") or "") != "patched":
                         continue
-                    info = self.qbit_client.get_torrent_info(str(row.get("hash") or ""))
-                    if info is None:
-                        raise RuntimeError(f"qB info unavailable after patch for torrent {row['hash'][:16]}")
-                    if canonicalize_path(Path(info.save_path).resolve()) != canonicalize_path(
-                        Path(str(row.get("new_save_path") or "")).resolve()
-                    ):
-                        raise RuntimeError(
-                            f"save_path verification failed after patch hash={row['hash'][:16]} "
-                            f"expected={row.get('new_save_path')} actual={getattr(info, 'save_path', '')}"
-                        )
-                    if not self._post_patch_qb_accounting_healthy(info):
-                        raise RuntimeError(
-                            "post-patch qB accounting incomplete "
-                            f"hash={row['hash'][:16]} state={getattr(info, 'state', '')} "
-                            f"progress={getattr(info, 'progress', '')} "
-                            f"completed={getattr(info, 'completed', '')} "
-                            f"amount_left={getattr(info, 'amount_left', '')} "
-                            f"size={getattr(info, 'size', '')}"
-                        )
+                    info = self._ensure_post_patch_runtime_alignment(row)
                     row["resume_status"] = "kept_paused"
                 tool._checkpoint_manifest(manifest_path, manifest)
             phase_times["post_patch"] = time.monotonic() - t0
@@ -836,6 +819,67 @@ class DemotionExecutor:
                     tool._wait_for_qb_online()
             raise
         return phase_times
+
+    def _ensure_post_patch_runtime_alignment(
+        self,
+        row: Dict[str, object],
+        *,
+        timeout_seconds: float = 300.0,
+    ) -> object:
+        torrent_hash = str(row.get("hash") or "").strip()
+        expected_save_path_raw = str(row.get("new_save_path") or "").strip()
+        if not torrent_hash or not expected_save_path_raw:
+            raise RuntimeError("post-patch runtime alignment requires hash and new_save_path")
+
+        expected_path = canonicalize_path(Path(expected_save_path_raw).resolve())
+        info, actual_path = self._wait_for_save_path(
+            torrent_hash,
+            expected_path,
+            timeout_seconds=max(timeout_seconds, 120.0),
+            interval_seconds=1.0,
+            require_live=True,
+        )
+        if not info or actual_path != expected_path:
+            self._log(
+                "  retry_post_patch_set_location "
+                f"hash={torrent_hash[:16]} expected={expected_path} actual={actual_path}",
+                "warning",
+            )
+            self.qbit_client.pause_torrent(torrent_hash)
+            relocated = self._set_location_with_retry(
+                torrent_hash,
+                expected_save_path_raw,
+                attempts=12,
+                delay_seconds=1.0,
+            )
+            info, actual_path = self._wait_for_save_path(
+                torrent_hash,
+                expected_path,
+                timeout_seconds=max(timeout_seconds, 300.0),
+                interval_seconds=1.0,
+                require_live=True,
+            )
+            if (not relocated) or not info or actual_path != expected_path:
+                raise RuntimeError(
+                    f"save_path verification failed after patch hash={torrent_hash[:16]} "
+                    f"expected={expected_save_path_raw} actual={actual_path or getattr(info, 'save_path', '')}"
+                )
+
+        self._validate_qb_content_path(
+            torrent_hash,
+            attempts=5,
+            delay_seconds=1.0,
+            require_live=True,
+        )
+        settled = self._wait_for_post_patch_accounting(
+            torrent_hash,
+            expected_path=expected_path,
+            timeout_seconds=max(timeout_seconds, 180.0),
+            interval_seconds=2.0,
+        )
+        if settled is None:
+            raise RuntimeError(f"qB info unavailable after patch for torrent {torrent_hash[:16]}")
+        return settled
 
     @staticmethod
     def _hardened_manifest_reconcile_hashes(rows: Sequence[Dict[str, object]]) -> set[str]:
@@ -1642,18 +1686,39 @@ class DemotionExecutor:
         *,
         attempts: int = 3,
         delay_seconds: float = 1.0,
+        require_live: bool = False,
     ) -> Optional[object]:
         """Fetch torrent info with retries for transient qB timeouts."""
         import time
 
         for attempt in range(1, attempts + 1):
-            info = self.qbit_client.get_torrent_info(torrent_hash)
+            try:
+                info = self.qbit_client.get_torrent_info(torrent_hash)
+            except Exception as exc:
+                info = None
+                if attempt < attempts:
+                    self._log(
+                        f"  retry_get_torrent_info hash={torrent_hash[:16]} "
+                        f"attempt={attempt + 1}/{attempts} error={type(exc).__name__}:{exc}",
+                        "warning",
+                    )
+                    time.sleep(min(delay_seconds * attempt, 3.0))
+                    continue
+                self._log(
+                    f"  get_torrent_info_failed hash={torrent_hash[:16]} "
+                    f"attempt={attempt}/{attempts} error={type(exc).__name__}:{exc}",
+                    "warning",
+                )
+                return None
+            if info and require_live and self._qb_last_error_is_cache_fallback():
+                info = None
             if info:
                 return info
             if attempt < attempts:
+                reason = "cache_fallback" if require_live and self._qb_last_error_is_cache_fallback() else "no_info"
                 self._log(
                     f"  retry_get_torrent_info hash={torrent_hash[:16]} "
-                    f"attempt={attempt + 1}/{attempts}",
+                    f"attempt={attempt + 1}/{attempts} reason={reason}",
                     "warning",
                 )
                 time.sleep(min(delay_seconds * attempt, 3.0))
@@ -1902,14 +1967,33 @@ class DemotionExecutor:
     def _wait_qb_online_after_restart(self, timeout_seconds: float = 120.0) -> None:
         import time
 
+        if not hasattr(self.qbit_client, "test_connection") or not hasattr(self.qbit_client, "login"):
+            return
+
         deadline = time.monotonic() + max(10.0, timeout_seconds)
-        self.qbit_client._authenticated = False  # type: ignore[attr-defined]
+        if hasattr(self.qbit_client, "_authenticated"):
+            self.qbit_client._authenticated = False  # type: ignore[attr-defined]
+        last_error = ""
+        last_debug = 0.0
         while time.monotonic() <= deadline:
-            if self.qbit_client.test_connection() and self.qbit_client.login():
-                return
+            try:
+                connected = bool(self.qbit_client.test_connection())
+                if connected and self.qbit_client.login():
+                    return
+                last_error = str(getattr(self.qbit_client, "last_error", "") or "")
+            except Exception as exc:
+                last_error = str(exc)
+            now = time.monotonic()
+            if self.debug_qb and (last_debug == 0.0 or (now - last_debug) >= 5.0):
+                self._log(
+                    f"  qb_restart_wait error={last_error or 'not_ready'} timeout_s={int(timeout_seconds)}",
+                    "warning",
+                )
+                last_debug = now
             time.sleep(2.0)
         raise RuntimeError(
-            f"qB did not come back online after restart within {int(timeout_seconds)}s"
+            f"qB did not come back online after restart within {int(timeout_seconds)}s "
+            f"error={last_error or 'unknown'}"
         )
 
     def _restore_fastresume_backups(self, backups: Dict[Path, Path]) -> None:
@@ -2383,6 +2467,7 @@ class DemotionExecutor:
             expected,
             timeout_seconds=0.0,
             interval_seconds=0.0,
+            require_live=True,
         )
         if current_info and current_path == expected:
             return True
@@ -2396,6 +2481,7 @@ class DemotionExecutor:
                 expected,
                 timeout_seconds=2.0,
                 interval_seconds=0.5,
+                require_live=True,
             )
             if info and actual == expected:
                 return True
@@ -2415,6 +2501,7 @@ class DemotionExecutor:
             expected,
             timeout_seconds=5.0,
             interval_seconds=0.5,
+            require_live=True,
         )
         if info and actual == expected:
             return True
@@ -2466,37 +2553,164 @@ class DemotionExecutor:
         *,
         timeout_seconds: float = 45.0,
         interval_seconds: float = 1.0,
+        require_live: bool = False,
     ) -> tuple[Optional[object], Optional[Path]]:
         """Poll qB until save_path matches expected, or timeout."""
         import time
 
-        deadline = time.monotonic() + timeout_seconds
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
         last_info = None
         last_actual: Optional[Path] = None
         last_debug_log = 0.0
-        while time.monotonic() <= deadline:
-            info = self.qbit_client.get_torrent_info(torrent_hash)
+        last_error = ""
+        first_pass = True
+        while first_pass or time.monotonic() <= deadline:
+            first_pass = False
+            try:
+                info = self.qbit_client.get_torrent_info(torrent_hash)
+            except Exception as exc:
+                info = None
+                last_error = str(exc)
             if info:
-                last_info = info
-                try:
-                    last_actual = canonicalize_path(Path(info.save_path).resolve())
-                except Exception:
-                    last_actual = Path(info.save_path).resolve()
-                if last_actual == expected_path:
-                    return info, last_actual
+                if require_live and self._qb_last_error_is_cache_fallback():
+                    info = None
+                else:
+                    last_info = info
+                    try:
+                        last_actual = canonicalize_path(Path(info.save_path).resolve())
+                    except Exception:
+                        last_actual = Path(info.save_path).resolve()
+                    if last_actual == expected_path:
+                        return info, last_actual
+                    if self.debug_qb:
+                        now = time.monotonic()
+                        if last_debug_log == 0.0 or (now - last_debug_log) >= 5.0:
+                            self._log(
+                                f"  qb_wait hash={torrent_hash[:16]} "
+                                f"state={getattr(info, 'state', 'unknown')} "
+                                f"progress={getattr(info, 'progress', 'unknown')} "
+                                f"actual={last_actual} expected={expected_path}",
+                                "warning",
+                            )
+                            last_debug_log = now
+            if require_live and self._qb_last_error_is_cache_fallback():
+                last_error = str(getattr(self.qbit_client, "last_error", "") or "")
                 if self.debug_qb:
                     now = time.monotonic()
                     if last_debug_log == 0.0 or (now - last_debug_log) >= 5.0:
                         self._log(
-                            f"  qb_wait hash={torrent_hash[:16]} "
-                            f"state={getattr(info, 'state', 'unknown')} "
-                            f"progress={getattr(info, 'progress', 'unknown')} "
-                            f"actual={last_actual} expected={expected_path}",
+                            f"  qb_wait_live hash={torrent_hash[:16]} "
+                            f"reason={last_error or 'cache_fallback'} expected={expected_path}",
                             "warning",
                         )
                         last_debug_log = now
+            elif not info and last_error and self.debug_qb:
+                now = time.monotonic()
+                if last_debug_log == 0.0 or (now - last_debug_log) >= 5.0:
+                    self._log(
+                        f"  qb_wait hash={torrent_hash[:16]} error={last_error}",
+                        "warning",
+                    )
+                    last_debug_log = now
+            if time.monotonic() > deadline:
+                break
             time.sleep(interval_seconds)
         return last_info, last_actual
+
+    def _wait_for_post_patch_accounting(
+        self,
+        torrent_hash: str,
+        *,
+        expected_path: Optional[Path] = None,
+        timeout_seconds: float = 180.0,
+        interval_seconds: float = 2.0,
+    ) -> Optional[object]:
+        import time
+
+        deadline = time.monotonic() + max(10.0, timeout_seconds)
+        last_info = None
+        last_debug = 0.0
+
+        while time.monotonic() <= deadline:
+            info = self._get_torrent_info_with_retry(
+                torrent_hash,
+                attempts=2,
+                delay_seconds=interval_seconds,
+                require_live=True,
+            )
+            if info:
+                last_info = info
+                if expected_path is not None:
+                    try:
+                        actual_path = canonicalize_path(Path(info.save_path).resolve())
+                    except Exception:
+                        actual_path = Path(info.save_path).resolve()
+                    if actual_path != expected_path:
+                        now = time.monotonic()
+                        if self.debug_qb and (last_debug == 0.0 or (now - last_debug) >= 5.0):
+                            self._log(
+                                f"  post_patch_wait hash={torrent_hash[:16]} "
+                                f"reason=save_path_stale actual={actual_path} expected={expected_path}",
+                                "warning",
+                            )
+                            last_debug = now
+                        time.sleep(interval_seconds)
+                        continue
+                if self._post_patch_qb_accounting_healthy(info):
+                    return info
+                if self._post_patch_qb_accounting_definitive_failure(info):
+                    raise RuntimeError(
+                        "post-patch qB accounting incomplete "
+                        f"hash={torrent_hash[:16]} state={getattr(info, 'state', '')} "
+                        f"progress={getattr(info, 'progress', '')} "
+                        f"completed={getattr(info, 'completed', '')} "
+                        f"amount_left={getattr(info, 'amount_left', '')} "
+                        f"size={getattr(info, 'size', '')}"
+                    )
+                now = time.monotonic()
+                if self.debug_qb and (last_debug == 0.0 or (now - last_debug) >= 5.0):
+                    self._log(
+                        f"  post_patch_wait hash={torrent_hash[:16]} "
+                        f"state={getattr(info, 'state', '')} "
+                        f"progress={getattr(info, 'progress', '')} "
+                        f"completed={getattr(info, 'completed', '')} "
+                        f"amount_left={getattr(info, 'amount_left', '')} "
+                        f"size={getattr(info, 'size', '')}",
+                        "warning",
+                    )
+                    last_debug = now
+            time.sleep(interval_seconds)
+        return last_info
+
+    def _qb_last_error_is_cache_fallback(self) -> bool:
+        return str(getattr(self.qbit_client, "last_error", "") or "").startswith("cache_fallback")
+
+    @staticmethod
+    def _post_patch_qb_accounting_definitive_failure(info: object) -> bool:
+        state = str(getattr(info, "state", "") or "").strip().lower()
+        if "checking" in state or "moving" in state or "allocating" in state or "queued" in state:
+            return False
+        if state in {
+            "error",
+            "missingfiles",
+            "downloading",
+            "stalleddl",
+            "queueddl",
+            "forceddl",
+            "metadl",
+            "pauseddl",
+            "stoppeddl",
+        }:
+            return True
+        try:
+            progress = float(getattr(info, "progress", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        try:
+            amount_left = int(getattr(info, "amount_left", 0) or 0)
+        except (TypeError, ValueError):
+            amount_left = 0
+        return progress < 0.9999 and amount_left > 0
 
     def _validate_qb_content_path(
         self,
@@ -2504,6 +2718,7 @@ class DemotionExecutor:
         *,
         attempts: int = 5,
         delay_seconds: float = 1.0,
+        require_live: bool = False,
     ) -> None:
         """Best-effort qB content-path validation after relocation."""
         import time
@@ -2511,7 +2726,12 @@ class DemotionExecutor:
         warned_missing_field = False
         last_content = ""
         for attempt in range(1, attempts + 1):
-            info = self.qbit_client.get_torrent_info(torrent_hash)
+            info = self._get_torrent_info_with_retry(
+                torrent_hash,
+                attempts=1,
+                delay_seconds=delay_seconds,
+                require_live=require_live,
+            )
             if not info:
                 if attempt < attempts:
                     self._log(

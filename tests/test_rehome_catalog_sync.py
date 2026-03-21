@@ -513,6 +513,230 @@ def test_hardened_fastresume_post_patch_ignores_unpatched_rows(tmp_path, monkeyp
     assert "resume_status" not in rows["hash-skipped"]
 
 
+def test_wait_for_save_path_ignores_cache_fallback_when_live_required(tmp_path, monkeypatch):
+    class CacheFallbackClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__(default_path="/pool/data/media/torrents/seeding/cross-seed/hawke-uno")
+            self.calls = 0
+            self.last_error = ""
+
+        def get_torrent_info(self, torrent_hash: str):
+            self.calls += 1
+            if self.calls < 3:
+                self.last_error = "cache_fallback:Connection reset by peer"
+                return SimpleNamespace(
+                    save_path="/pool/data/media/torrents/seeding/cross-seed/hawke-uno",
+                    state="stoppedUP",
+                    progress=1.0,
+                    amount_left=0,
+                    auto_tmm=False,
+                )
+            self.last_error = ""
+            self.save_paths[torrent_hash] = "/pool/media/torrents/seeding/cross-seed/hawke-uno"
+            return SimpleNamespace(
+                save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+                state="stoppedUP",
+                progress=1.0,
+                amount_left=0,
+                auto_tmm=False,
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = CacheFallbackClient()
+
+    info, actual = executor._wait_for_save_path(
+        "hash-a",
+        Path("/pool/media/torrents/seeding/cross-seed/hawke-uno"),
+        timeout_seconds=0.1,
+        interval_seconds=0.01,
+        require_live=True,
+    )
+
+    assert info is not None
+    assert actual == Path("/pool/media/torrents/seeding/cross-seed/hawke-uno")
+    assert executor.qbit_client.calls >= 3
+
+
+def test_wait_for_post_patch_accounting_waits_for_settle(tmp_path, monkeypatch):
+    class SettlingClient(FakeQbitClient):
+        def __init__(self):
+            super().__init__(default_path="/pool/media/torrents/seeding/cross-seed/hawke-uno")
+            self.calls = 0
+            self.last_error = ""
+
+        def get_torrent_info(self, torrent_hash: str):
+            self.calls += 1
+            completed = 0 if self.calls < 3 else 10
+            return SimpleNamespace(
+                save_path="/pool/media/torrents/seeding/cross-seed/hawke-uno",
+                state="stoppedUP",
+                progress=1.0,
+                amount_left=0,
+                completed=completed,
+                size=10,
+                auto_tmm=False,
+            )
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = SettlingClient()
+
+    info = executor._wait_for_post_patch_accounting(
+        "hash-a",
+        expected_path=Path("/pool/media/torrents/seeding/cross-seed/hawke-uno"),
+        timeout_seconds=0.1,
+        interval_seconds=0.01,
+    )
+
+    assert info is not None
+    assert getattr(info, "completed", 0) == 10
+    assert executor.qbit_client.calls >= 3
+
+
+def test_hardened_fastresume_post_patch_reapplies_location_after_stale_runtime_save_path(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "rows": [
+            {
+                "hash": "hash-patched",
+                "selected": True,
+                "state": "stoppedUP",
+                "verified": False,
+                "old_save_path": "/pool/data/media/torrents/seeding/cross-seed/hawke-uno",
+                "new_save_path": "/pool/media/torrents/seeding/cross-seed/hawke-uno",
+                "content_path": "/pool/data/media/torrents/seeding/cross-seed/hawke-uno/The.West.Wing.S02",
+                "dest_content_path": "/pool/media/torrents/seeding/cross-seed/hawke-uno/The.West.Wing.S02",
+            }
+        ]
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest))
+
+    class FakeController:
+        def __init__(self):
+            self.running = False
+
+        def is_stopped(self):
+            return not self.running
+
+        def start(self):
+            self.running = True
+
+        def stop(self):
+            self.running = False
+
+    class FakeRelocationTool:
+        def __init__(self, path: Path):
+            self.path = path
+            self.controller = FakeController()
+
+        def _ensure_controller(self):
+            return self.controller
+
+        def _wait_for_qb_online(self):
+            return None
+
+        def _load_manifest(self, path: Path):
+            return __import__("json").loads(Path(path).read_text())
+
+        def _checkpoint_manifest(self, path: Path, manifest):
+            Path(path).write_text(__import__("json").dumps(manifest))
+
+        def _pause_selected(self, rows):
+            for row in rows:
+                row["state"] = "stoppedUP"
+
+        def _refresh_rows_from_qb(self, rows):
+            return None
+
+        def verify(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["verified"] = True
+                row["verify_status"] = "verified"
+                row["verify_classification"] = "exact_tree"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def validate(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["actionable"] = True
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+        def patch(self, **kwargs):
+            payload = self._load_manifest(self.path)
+            for row in payload["rows"]:
+                row["patch_status"] = "patched"
+            self._checkpoint_manifest(self.path, payload)
+            return 0
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClient(
+        default_path="/pool/data/media/torrents/seeding/cross-seed/hawke-uno"
+    )
+    executor.resume_after_relocate = False
+    relocation_tool = FakeRelocationTool(manifest_path)
+
+    monkeypatch.setattr(executor, "_relocation_artifact_dir", lambda plan: tmp_path)
+    monkeypatch.setattr(executor, "_build_hardened_relocation_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr(executor, "_build_qb_zfs_relocation_tool", lambda: relocation_tool)
+    monkeypatch.setattr(executor, "_wait_qb_online_after_restart", lambda timeout_seconds=120.0: None)
+    monkeypatch.setattr(executor, "_validate_qb_content_path", lambda *args, **kwargs: None)
+
+    expected = Path("/pool/media/torrents/seeding/cross-seed/hawke-uno")
+    old = Path("/pool/data/media/torrents/seeding/cross-seed/hawke-uno")
+    wait_calls = {"count": 0}
+
+    def fake_wait(_hash, _expected, **_kwargs):
+        wait_calls["count"] += 1
+        if wait_calls["count"] == 1:
+            return SimpleNamespace(save_path=str(old), auto_tmm=False), old
+        return SimpleNamespace(save_path=str(expected), auto_tmm=False), expected
+
+    monkeypatch.setattr(executor, "_wait_for_save_path", fake_wait)
+
+    reapply = {"count": 0}
+
+    def fake_retry(torrent_hash, target_save_path, **_kwargs):
+        if Path(target_save_path) == expected:
+            reapply["count"] += 1
+        executor.qbit_client.save_paths[torrent_hash] = target_save_path
+        return True
+
+    monkeypatch.setattr(executor, "_set_location_with_retry", fake_retry)
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_post_patch_accounting",
+        lambda *args, **kwargs: SimpleNamespace(
+            save_path=str(expected),
+            state="stoppedUP",
+            progress=1.0,
+            amount_left=0,
+            completed=10,
+            size=10,
+            auto_tmm=False,
+        ),
+    )
+
+    phase_times = executor._attach_torrents_via_hardened_fastresume(
+        {"payload_hash": "payload-hash"},
+        TargetDonor(
+            source_path=tmp_path / "src",
+            target_path=tmp_path / "dst",
+            target_device_id=141,
+            acquisition_mode="move",
+        ),
+        relocations=[],
+    )
+
+    assert phase_times["post_patch"] >= 0.0
+    updated = __import__("json").loads(manifest_path.read_text())
+    assert updated["rows"][0]["resume_status"] == "kept_paused"
+    assert reapply["count"] == 1
+
+
 def test_hardened_fastresume_reconcile_subset_filters_plan(tmp_path, monkeypatch):
     manifest_path = tmp_path / "manifest.json"
     manifest = {

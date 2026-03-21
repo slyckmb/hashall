@@ -2,6 +2,27 @@
 
 Last updated: 2026-03-21
 
+## 2026-03-21 qB Runtime Settle Fix
+
+**Version:**
+- `hashall=0.8.8`
+
+**New fix in code:**
+- hardened fastresume post-patch now waits for qB restart/auth settle before runtime verification
+- runtime `save_path` verification now requires live qB API data and ignores cache-fallback reads
+- if runtime `save_path` stays stale after a good fastresume patch, executor retries with an
+  explicit `set_location()` nudge before failing
+- post-patch qB accounting now waits to settle, but still fails fast for clear bad states
+  (`pausedDL`, `stoppedDL`, `downloading`, nonzero `amount_left`)
+
+**Why this was needed:**
+- the prior `West Wing` pilot already proved copy, verify, view build, and sibling relocate
+- the remaining failure was qB runtime handoff after restart, not another data-path problem
+
+**Validation:**
+- rehome regression pack: `81 passed`
+- live dry-run of `out/rehome-plan-west-wing-s02-2026-03-21-v087.json` completed cleanly
+
 ## 2026-03-21 Content-Proofed Reuse + Shining Girls Conflict
 
 **Version:**
