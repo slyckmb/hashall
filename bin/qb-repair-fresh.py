@@ -33,7 +33,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hashall.qbittorrent import QBitFile, QBitTorrent, get_qbittorrent_client
+from hashall.qbittorrent import QBitFile, QBitTorrent, get_qbittorrent_client, get_torrents_from_cache
 from hashall.link_executor import create_hardlink_atomic
 
 
@@ -150,6 +150,18 @@ def parse_args() -> argparse.Namespace:
         "--report-json",
         default="",
         help="Optional JSON report path (default: ~/.logs/hashall/reports/qbit-triage/fresh-repair-<ts>.json)",
+    )
+    parser.add_argument(
+        "--cache",
+        action="store_true",
+        default=False,
+        help="Read full torrent list from shared cache file instead of live API (default: disabled)",
+    )
+    parser.add_argument(
+        "--cache-max-age",
+        type=float,
+        default=30.0,
+        help="Max cache file age in seconds when --cache is set (default: 30)",
     )
     return parser.parse_args()
 
@@ -798,7 +810,14 @@ def main() -> int:
         print(f"ERROR qb_login_failed detail={qb.last_error}")
         return 2
 
-    all_torrents = qb.get_torrents()
+    _cached_payloads = get_torrents_from_cache(max_age_s=args.cache_max_age) if args.cache else None
+    if _cached_payloads is None:
+        if args.cache:
+            print("cache_miss falling_back=live_api")
+        all_torrents = qb.get_torrents()
+    else:
+        print(f"cache_hit count={len(_cached_payloads)} max_age_s={args.cache_max_age}")
+        all_torrents = [qb._torrent_from_payload(p) for p in _cached_payloads]
     by_hash = {str(t.hash or "").lower(): t for t in all_torrents}
     torrents_by_name: Dict[str, List[QBitTorrent]] = defaultdict(list)
     for t in all_torrents:
