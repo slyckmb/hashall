@@ -1009,7 +1009,63 @@ def test_ensure_target_donor_blocks_before_copy_on_conflicting_existing_target_f
         ],
     }
 
-    with pytest.raises(RuntimeError, match="Target family conflict exists before donor copy"):
+    with pytest.raises(RuntimeError, match="Target family conflict exists before apply"):
+        executor._ensure_target_donor(plan)
+
+    assert copy_called["value"] is False
+
+
+def test_execute_reuse_blocks_same_size_different_content_target_family_before_apply(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    executor.qbit_client = FakeQbitClient()
+
+    copy_called = {"value": False}
+
+    def fake_copy(*_args, **_kwargs):
+        copy_called["value"] = True
+
+    monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
+
+    source = tmp_path / "pool-data" / "cross-seed" / "TorrentDay" / "Show.S01"
+    source.mkdir(parents=True)
+    (source / "episode1.mkv").write_bytes(b"payload-a")
+    (source / "episode2.mkv").write_bytes(b"payload-b")
+
+    exact_target = tmp_path / "pool-media" / "cross-seed" / "TorrentDay" / "Show.S01"
+    exact_target.mkdir(parents=True)
+    (exact_target / "episode1.mkv").write_bytes(b"payload-a")
+    (exact_target / "episode2.mkv").write_bytes(b"payload-b")
+
+    conflicting_target = tmp_path / "pool-media" / "cross-seed" / "Aither" / "Show.S01"
+    conflicting_target.mkdir(parents=True)
+    (conflicting_target / "episode1.mkv").write_bytes(b"payload-x")
+    (conflicting_target / "episode2.mkv").write_bytes(b"payload-y")
+
+    plan = {
+        "decision": "REUSE",
+        "source_path": str(source),
+        "target_path": str(exact_target),
+        "payload_hash": "payload_hash_conflict",
+        "file_count": 2,
+        "total_bytes": len(b"payload-a") + len(b"payload-b"),
+        "target_device_id": 44,
+        "view_targets": [
+            {
+                "torrent_hash": "hash_td",
+                "source_save_path": str(source.parent),
+                "target_save_path": str(exact_target.parent),
+                "root_name": "Show.S01",
+            },
+            {
+                "torrent_hash": "hash_ai",
+                "source_save_path": str(source.parent),
+                "target_save_path": str(conflicting_target.parent),
+                "root_name": "Show.S01",
+            },
+        ],
+    }
+
+    with pytest.raises(RuntimeError, match="Target family conflict exists before apply"):
         executor._ensure_target_donor(plan)
 
     assert copy_called["value"] is False

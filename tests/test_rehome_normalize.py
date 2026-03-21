@@ -692,6 +692,60 @@ def test_root_relocation_plan_reuses_existing_target_family_view_when_canonical_
     assert plan["normalization"]["target_family_donor_path"] == str(existing_target)
 
 
+def test_root_relocation_plan_marks_same_size_different_content_target_family_as_conflict(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding"
+    source_path = source_root / "cross-seed" / "Aither (API)" / "Show.S01"
+    conflicting_target = target_root / "cross-seed" / "TorrentLeech" / source_path.name
+
+    source_path.mkdir(parents=True, exist_ok=True)
+    conflicting_target.mkdir(parents=True, exist_ok=True)
+    (source_path / "episode1.mkv").write_bytes(b"aaa")
+    (source_path / "episode2.mkv").write_bytes(b"bbb")
+    (conflicting_target / "episode1.mkv").write_bytes(b"xxx")
+    (conflicting_target / "episode2.mkv").write_bytes(b"yyy")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (41, 'hash41', 231, ?, 2, 6, 'complete')
+        """,
+        (str(source_path),),
+    )
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags)
+        VALUES (?, 41, 231, ?, ?, 'cross-seed', 'cross-seed')
+        """,
+        [
+            ("hash41a", str(source_root / "cross-seed" / "Aither (API)"), source_path.name),
+            ("hash41b", str(source_root / "cross-seed" / "TorrentLeech"), source_path.name),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_root_relocation_batch(
+        catalog_path=db_path,
+        source_device=231,
+        target_device=141,
+        source_root=str(source_root),
+        target_root=str(target_root),
+        flat_only=False,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "MOVE"
+    assert plan["normalization"]["review_required"] is True
+    assert plan["normalization"]["target_family_exact_views"] == 0
+    assert plan["normalization"]["target_family_conflicts"] == 1
+    assert plan["normalization"]["target_family_donor_path"] is None
+
+
 def test_root_relocation_plan_skips_groups_when_all_view_targets_are_already_targeted(tmp_path):
     db_path = tmp_path / "catalog.db"
     source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"

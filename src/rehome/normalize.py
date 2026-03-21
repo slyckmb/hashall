@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import quote
 
 from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias, to_relpath
+from rehome.content_identity import RootContentSnapshot, compare_root_content
 
 
 @dataclass(frozen=True)
@@ -374,9 +375,13 @@ def _inspect_existing_target_family(
     view_targets: Sequence[Dict[str, str]],
     expected_count: int,
     expected_bytes: int,
+    root_content_cache: Optional[Dict[str, RootContentSnapshot]] = None,
+    path_sha_cache: Optional[Dict[Tuple[str, int, int], Optional[str]]] = None,
+    inode_sha_cache: Optional[Dict[Tuple[int, int, int, int], Optional[str]]] = None,
 ) -> Tuple[Optional[Path], List[str], List[str]]:
     candidate_roots: List[Path] = []
     seen: Set[str] = set()
+    source_exists = _canonical(source_path).exists()
 
     def _add(path: Optional[Path]) -> None:
         if path is None:
@@ -407,9 +412,24 @@ def _inspect_existing_target_family(
         if not exists:
             continue
         if int(file_count) == int(expected_count) and int(total_bytes) == int(expected_bytes):
-            exact_roots.append(str(candidate))
-            if donor_path is None:
-                donor_path = candidate
+            if not source_exists:
+                exact_roots.append(str(candidate))
+                if donor_path is None:
+                    donor_path = candidate
+                continue
+            comparison = compare_root_content(
+                source_path,
+                candidate,
+                root_cache=root_content_cache,
+                path_sha_cache=path_sha_cache,
+                inode_sha_cache=inode_sha_cache,
+            )
+            if comparison.matches:
+                exact_roots.append(str(candidate))
+                if donor_path is None:
+                    donor_path = candidate
+            else:
+                conflicting_roots.append(str(candidate))
             continue
         if int(file_count) > 0 or int(total_bytes) > 0:
             conflicting_roots.append(str(candidate))
@@ -535,6 +555,9 @@ def build_root_relocation_batch(
     plans: List[Dict] = []
     skipped: List[NormalizationSkip] = []
     payload_group_cache: Dict[str, List[Dict]] = {}
+    root_content_cache: Dict[str, RootContentSnapshot] = {}
+    path_sha_cache: Dict[Tuple[str, int, int], Optional[str]] = {}
+    inode_sha_cache: Dict[Tuple[int, int, int, int], Optional[str]] = {}
 
     def _source_row_score(row: sqlite3.Row) -> int:
         score = 0
@@ -829,11 +852,14 @@ def build_root_relocation_batch(
                 view_targets=view_targets,
                 expected_count=file_count,
                 expected_bytes=total_bytes,
+                root_content_cache=root_content_cache,
+                path_sha_cache=path_sha_cache,
+                inode_sha_cache=inode_sha_cache,
             )
             if existing_target_donor is not None:
                 target_path = existing_target_donor
             decision = "REUSE" if existing_target_donor is not None else "MOVE"
-            if conflicting_target_views and decision != "REUSE":
+            if conflicting_target_views:
                 review_required = True
             plan = {
                 "version": "1.0",

@@ -1,6 +1,29 @@
 # Operational Run State
 
-Last updated: 2026-03-20
+Last updated: 2026-03-21
+
+## 2026-03-21 Content-Proofed Reuse + Shining Girls Conflict
+
+**Version:**
+- `hashall=0.8.7`
+
+**New fix in code:**
+- target-family reuse is now proven from live file content, not just file count / total bytes
+- planner + executor compute a real payload hash from the current files before treating a target
+  family as reusable
+- same-size same-byte sibling roots that differ by content now block before apply instead of
+  falling through to target-view preflight
+
+**What this exposed:**
+- `Shining.Girls...` on `/pool/media` is a real target-side content conflict
+- `TorrentDay` and `Aither` sibling roots match by counts/bytes but differ by actual content
+- this is a data repair problem, not another planner/apply bug
+
+**Validation:**
+- targeted rehome sim suite: `78 passed`
+- `West Wing` fresh live dry-run on 2026-03-21 remains a clean `MOVE`
+- `Shining Girls` live plan generation is expected to run longer now because it hashes the actual
+  files to prove or reject reuse
 
 ## 2026-03-20 West Wing Rehome Root Cause + Current Dry-Run State
 

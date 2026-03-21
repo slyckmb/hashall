@@ -43,6 +43,7 @@ from rehome.view_builder import (
     build_torrent_view,
     derive_view_layout,
 )
+from rehome.content_identity import RootContentSnapshot, compare_root_content
 from rehome.reality import build_plan_reality_snapshot
 
 
@@ -78,6 +79,7 @@ class TargetFamilyInspection:
     candidate_roots: Tuple[Path, ...]
     exact_roots: Tuple[Path, ...]
     conflicting_roots: Tuple[Path, ...]
+    conflict_details: Tuple[Tuple[str, str], ...] = ()
 
 
 class DemotionExecutor:
@@ -1325,24 +1327,54 @@ class DemotionExecutor:
             if str(plan.get("source_path") or "").strip()
             else None
         )
+        source_exists = bool(source_path and source_path.exists())
         exact_roots: List[Path] = []
         conflicting_roots: List[Path] = []
+        conflict_details: List[Tuple[str, str]] = []
         expected_count = int(plan.get("file_count") or 0)
         expected_bytes = int(plan.get("total_bytes") or 0)
+        root_content_cache: Dict[str, RootContentSnapshot] = {}
+        path_sha_cache: Dict[Tuple[str, int, int], Optional[str]] = {}
+        inode_sha_cache: Dict[Tuple[int, int, int, int], Optional[str]] = {}
 
         for candidate in candidate_roots:
             if source_path is not None and candidate == source_path:
                 continue
             stats = self._path_stats(candidate)
             if self._path_stats_match(stats, expected_count, expected_bytes):
-                exact_roots.append(candidate)
+                if source_path is None or not source_exists:
+                    exact_roots.append(candidate)
+                    continue
+                comparison = compare_root_content(
+                    source_path,
+                    candidate,
+                    root_cache=root_content_cache,
+                    path_sha_cache=path_sha_cache,
+                    inode_sha_cache=inode_sha_cache,
+                )
+                if comparison.matches:
+                    exact_roots.append(candidate)
+                else:
+                    conflicting_roots.append(candidate)
+                    conflict_details.append((str(candidate), comparison.reason))
             elif stats.exists and not self._path_stats_empty(stats):
                 conflicting_roots.append(candidate)
+                conflict_details.append(
+                    (
+                        str(candidate),
+                        self._format_path_stats(
+                            stats,
+                            expected_count=expected_count,
+                            expected_bytes=expected_bytes,
+                        ),
+                    )
+                )
 
         return TargetFamilyInspection(
             candidate_roots=tuple(candidate_roots),
             exact_roots=tuple(exact_roots),
             conflicting_roots=tuple(conflicting_roots),
+            conflict_details=tuple(conflict_details),
         )
 
     def _align_plan_with_existing_target_family(self, plan: Dict) -> TargetFamilyInspection:
@@ -1350,6 +1382,11 @@ class DemotionExecutor:
         normalization = dict(plan.get("normalization") or {})
         normalization["target_family_exact_views"] = len(inspection.exact_roots)
         normalization["target_family_conflicts"] = len(inspection.conflicting_roots)
+        if inspection.conflict_details:
+            normalization["target_family_conflict_examples"] = [
+                {"path": path, "reason": reason}
+                for path, reason in inspection.conflict_details[:3]
+            ]
         current_target = (
             canonicalize_path(Path(str(plan.get("target_path") or "")).resolve())
             if str(plan.get("target_path") or "").strip()
@@ -1376,11 +1413,14 @@ class DemotionExecutor:
             path for path in inspection.conflicting_roots
             if current_target is None or path != current_target
         ]
-        if str(plan.get("decision") or "").upper() == "MOVE" and blocking_conflicts:
+        if blocking_conflicts:
             conflicts = ", ".join(str(path) for path in blocking_conflicts[:3])
+            detail_lookup = dict(inspection.conflict_details)
+            detail = detail_lookup.get(str(blocking_conflicts[0]))
             raise RuntimeError(
-                "Target family conflict exists before donor copy: "
+                "Target family conflict exists before apply: "
                 f"payload={str(plan.get('payload_hash') or '')[:16]} conflicts={conflicts}"
+                + (f" detail={detail}" if detail else "")
             )
 
         plan["normalization"] = normalization

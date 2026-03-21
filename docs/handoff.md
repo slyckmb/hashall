@@ -1,5 +1,46 @@
 # Handoff Notes
 
+## 2026-03-21 Rehome Content Identity Hardening (same branch)
+
+### What changed
+The previous fix set still had one important blind spot: target-family reuse could treat a family
+as reusable when sibling roots matched only by file count and total bytes. That was not enough for
+real-world payloads like `Shining.Girls...`, where two `/pool/media` sibling roots had the same
+shape but different bytes.
+
+### Code fixes in this sub-session
+- `src/rehome/content_identity.py`
+  - new helper that computes a payload hash from the live filesystem bytes with inode-based hash
+    caching, so hardlinked siblings do not get rehashed repeatedly
+- `src/rehome/normalize.py`
+  - planner target-family inspection now compares actual content before choosing `REUSE`
+  - conflicting same-size roots now count as real target-family conflicts
+- `src/rehome/executor.py`
+  - executor target-family inspection now uses the same content proof
+  - apply blocks before any work when alternate target-side siblings are content-divergent
+  - stale-source reuse fallback is preserved when the source root is already gone
+- tests
+  - added regressions for same-size/different-content target roots and reuse-family preflight
+    blocking
+
+### Simulation / dry-run status
+- targeted simulation suite:
+  - `pytest tests/test_rehome_normalize.py tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py -q`
+  - result: `78 passed`
+- compile check:
+  - `python3 -m py_compile src/rehome/content_identity.py src/rehome/normalize.py src/rehome/executor.py`
+  - result: passed
+- live dry-run:
+  - `West Wing S02` remains a clean `MOVE`
+- live plan generation:
+  - `Shining.Girls...` now hashes real files to prove reuse and is therefore materially slower than
+    the old count/byte heuristic
+
+### Operational conclusion
+- `Shining.Girls...` is confirmed as a real target-side content conflict on `/pool/media`, not a
+  planner hallucination
+- `West Wing` is still the best current live `MOVE` pilot for proving the end-to-end rehome lane
+
 ## 2026-03-20 Rehome Planner/Executor Hardening (same branch)
 
 ### Root cause confirmed

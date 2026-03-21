@@ -1,5 +1,25 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-03-21 Rehome Content-Proofed Reuse (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.7`
+- Rehome target-family reuse no longer trusts only file counts / total bytes.
+- Planner + executor now compute a real payload hash from the live files before calling a target
+  family reusable; same-size same-byte roots with different bytes are treated as conflicts.
+- This directly explains the `Shining.Girls...` lane:
+  - `/pool/media` `TorrentDay` and `Aither` sibling roots match by counts/bytes
+  - but they diverge by actual content
+  - the lane should be treated as a real repair conflict, not a reusable family
+- Current code now:
+  - content-proofs target reuse from live filesystem bytes
+  - blocks apply before any work when the target family is internally divergent
+  - still allows stale-source reuse fallback when the source root is already gone
+- Fresh validation on 2026-03-21:
+  - targeted sim suite: `78 passed`
+  - `West Wing` dry-run remains clean `MOVE`
+  - `Shining Girls` live plan generation now hashes real files and is expected to be slower
+    because it is proving content, not assuming it
+
 ## 2026-03-20 Rehome West-Wing Fixes (compact-safe) — UPDATED
 
 - `hashall` is now `0.8.6`
@@ -24,7 +44,8 @@
     earlier buggy run
   - because of that, the fresh `West Wing` plan now correctly shows `target_family_exact_views=0`
     and no longer tries to reuse a donor that is not actually present
-- Next recommended live pilot after this fix set: run the `Shining.Girls...` `REUSE` family first.
+- Historical note: `Shining.Girls...` was the next recommended reuse pilot before content-proofed
+  target-family checks exposed the target-side divergence.
 
 ## 2026-03-19 Migration State (compact-safe) — UPDATED
 
