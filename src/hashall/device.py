@@ -67,6 +67,69 @@ def _devices_columns(cursor: sqlite3.Cursor) -> set[str]:
         return set()
 
 
+def _table_columns(cursor: sqlite3.Cursor, table_name: str) -> set[str]:
+    try:
+        return {
+            row[1]
+            for row in cursor.execute(f"PRAGMA table_info({_quote_ident(table_name)})").fetchall()
+        }
+    except sqlite3.Error:
+        return set()
+
+
+def _remap_identity_table(
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    *,
+    match_fs_uuid: Optional[str],
+    match_device_id: Optional[int],
+    target_fs_uuid: Optional[str],
+    target_device_id: Optional[int],
+) -> int:
+    """Repair persisted identity rows after a device remap.
+
+    The row match is fs_uuid-first when available, with device_id fallback for
+    older/stale rows that never got fs_uuid populated. This keeps fs_uuid as the
+    durable identity while still rescuing legacy rows on reboot.
+    """
+    columns = _table_columns(cursor, table_name)
+    if "device_id" not in columns:
+        return 0
+
+    where_parts: list[str] = []
+    params: list[object] = []
+    match_fs = str(match_fs_uuid or "").strip()
+    if match_fs and "fs_uuid" in columns:
+        where_parts.append("fs_uuid = ?")
+        params.append(match_fs)
+    if match_device_id is not None:
+        where_parts.append("device_id = ?")
+        params.append(int(match_device_id))
+    if not where_parts:
+        return 0
+
+    set_parts: list[str] = []
+    set_params: list[object] = []
+    if target_device_id is not None:
+        set_parts.append("device_id = ?")
+        set_params.append(int(target_device_id))
+    if "fs_uuid" in columns and target_fs_uuid is not None:
+        set_parts.append("fs_uuid = ?")
+        set_params.append(str(target_fs_uuid).strip())
+    if "updated_at" in columns:
+        set_parts.append("updated_at = datetime('now')")
+    if not set_parts:
+        return 0
+
+    sql = (
+        f"UPDATE {_quote_ident(table_name)} "
+        f"SET {', '.join(set_parts)} "
+        f"WHERE ({' OR '.join(where_parts)})"
+    )
+    cursor.execute(sql, (*set_params, *params))
+    return int(cursor.rowcount or 0)
+
+
 def files_table_name_for_fs_uuid(fs_uuid: str) -> str:
     """Return a stable physical files table name for a filesystem UUID."""
     cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(fs_uuid or ""))
@@ -74,6 +137,45 @@ def files_table_name_for_fs_uuid(fs_uuid: str) -> str:
         cleaned = cleaned.replace("__", "_")
     cleaned = cleaned.strip("_") or "unknown"
     return f"files_fs_{cleaned}"
+
+
+def resolve_current_device_row(
+    cursor: sqlite3.Cursor,
+    *,
+    fs_uuid: Optional[str] = None,
+    device_id: Optional[int] = None,
+):
+    """Resolve the current devices row, preferring stable fs_uuid identity."""
+    if not _table_exists(cursor, "devices"):
+        return None
+    device_columns = _devices_columns(cursor)
+    select_cols = [
+        "device_id",
+        "fs_uuid" if "fs_uuid" in device_columns else "NULL AS fs_uuid",
+        "device_alias" if "device_alias" in device_columns else "NULL AS device_alias",
+        "mount_point" if "mount_point" in device_columns else "NULL AS mount_point",
+        (
+            "preferred_mount_point"
+            if "preferred_mount_point" in device_columns
+            else "NULL AS preferred_mount_point"
+        ),
+        "files_table" if "files_table" in device_columns else "NULL AS files_table",
+    ]
+    select_sql = ", ".join(select_cols)
+    fs_text = str(fs_uuid or "").strip()
+    if fs_text:
+        row = cursor.execute(
+            f"SELECT {select_sql} FROM devices WHERE fs_uuid = ?",
+            (fs_text,),
+        ).fetchone()
+        if row is not None:
+            return row
+    if device_id is None:
+        return None
+    return cursor.execute(
+        f"SELECT {select_sql} FROM devices WHERE device_id = ?",
+        (int(device_id),),
+    ).fetchone()
 
 
 def _drop_compat_view(cursor: sqlite3.Cursor, device_id: int) -> None:
@@ -673,6 +775,32 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                     create=True,
                     legacy_device_ids=[device_id, temp_id],
                 )
+                displaced_counts = {
+                    "payloads": _remap_identity_table(
+                        cursor,
+                        "payloads",
+                        match_fs_uuid=colliding_uuid,
+                        match_device_id=device_id,
+                        target_fs_uuid=colliding_uuid,
+                        target_device_id=temp_id,
+                    ),
+                    "torrent_instances": _remap_identity_table(
+                        cursor,
+                        "torrent_instances",
+                        match_fs_uuid=colliding_uuid,
+                        match_device_id=device_id,
+                        target_fs_uuid=colliding_uuid,
+                        target_device_id=temp_id,
+                    ),
+                    "scan_sessions": _remap_identity_table(
+                        cursor,
+                        "scan_sessions",
+                        match_fs_uuid=colliding_uuid,
+                        match_device_id=device_id,
+                        target_fs_uuid=colliding_uuid,
+                        target_device_id=temp_id,
+                    ),
+                }
                 cursor.execute(
                     "UPDATE devices SET device_id = ?, files_table = ?, updated_at = datetime('now') WHERE fs_uuid = ?",
                     (temp_id, colliding_table, colliding_uuid)
@@ -683,15 +811,51 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                     f"⚠️  Parked conflicting device {colliding_uuid[:8]} at temp id {temp_id}"
                     f" (physical files table stays {colliding_table})"
                 )
+                displaced_total = sum(displaced_counts.values())
+                if displaced_total > 0:
+                    details = " ".join(
+                        f"{name}={count}"
+                        for name, count in displaced_counts.items()
+                        if count > 0
+                    )
+                    print(f"   Remapped displaced identity rows: {details}")
 
-            # Migrate payloads to new device_id so catalog stays consistent
-            cursor.execute(
-                "UPDATE payloads SET device_id = ? WHERE device_id = ?",
-                (device_id, old_device_id),
-            )
-            migrated = cursor.rowcount
+            migrated_counts = {
+                "payloads": _remap_identity_table(
+                    cursor,
+                    "payloads",
+                    match_fs_uuid=fs_uuid,
+                    match_device_id=old_device_id,
+                    target_fs_uuid=fs_uuid,
+                    target_device_id=device_id,
+                ),
+                "torrent_instances": _remap_identity_table(
+                    cursor,
+                    "torrent_instances",
+                    match_fs_uuid=fs_uuid,
+                    match_device_id=old_device_id,
+                    target_fs_uuid=fs_uuid,
+                    target_device_id=device_id,
+                ),
+                "scan_sessions": _remap_identity_table(
+                    cursor,
+                    "scan_sessions",
+                    match_fs_uuid=fs_uuid,
+                    match_device_id=old_device_id,
+                    target_fs_uuid=fs_uuid,
+                    target_device_id=device_id,
+                ),
+            }
+            migrated = sum(migrated_counts.values())
             if migrated > 0:
-                print(f"   Migrated {migrated} payload row(s) from device_id {old_device_id} → {device_id}")
+                details = " ".join(
+                    f"{name}={count}"
+                    for name, count in migrated_counts.items()
+                    if count > 0
+                )
+                print(
+                    f"   Migrated identity rows from device_id {old_device_id} → {device_id}: {details}"
+                )
 
             # Update device record with new device_id
             cursor.execute("""
@@ -758,6 +922,32 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                     WHERE device_id = ?
                 """, (fs_uuid, mount_point, mount_point, files_table_name_for_fs_uuid(fs_uuid), device_id))
 
+                corrected_counts = {
+                    "payloads": _remap_identity_table(
+                        cursor,
+                        "payloads",
+                        match_fs_uuid=old_fs_uuid,
+                        match_device_id=device_id,
+                        target_fs_uuid=fs_uuid,
+                        target_device_id=device_id,
+                    ),
+                    "torrent_instances": _remap_identity_table(
+                        cursor,
+                        "torrent_instances",
+                        match_fs_uuid=old_fs_uuid,
+                        match_device_id=device_id,
+                        target_fs_uuid=fs_uuid,
+                        target_device_id=device_id,
+                    ),
+                    "scan_sessions": _remap_identity_table(
+                        cursor,
+                        "scan_sessions",
+                        match_fs_uuid=old_fs_uuid,
+                        match_device_id=device_id,
+                        target_fs_uuid=fs_uuid,
+                        target_device_id=device_id,
+                    ),
+                }
                 for table_name in ("scan_roots", "scan_sessions"):
                     table_exists = cursor.execute("""
                         SELECT 1 FROM sqlite_master WHERE type='table' AND name=?
@@ -767,6 +957,14 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                             f"UPDATE {table_name} SET fs_uuid = ? WHERE fs_uuid = ?",
                             (fs_uuid, old_fs_uuid)
                         )
+                corrected_total = sum(corrected_counts.values())
+                if corrected_total > 0:
+                    details = " ".join(
+                        f"{name}={count}"
+                        for name, count in corrected_counts.items()
+                        if count > 0
+                    )
+                    print(f"   Updated dependent identity rows for fs_uuid correction: {details}")
         else:
             # New device - register it
             alias = suggest_device_alias(Path(mount_point), cursor)

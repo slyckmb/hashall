@@ -356,6 +356,7 @@ def doctor_repair_identity(db, apply, max_actions, allow_bind_alias, report_json
         f"apply={str(bool(apply)).lower()} "
         f"payload_candidates={result.payload_candidates} "
         f"torrent_candidates={result.torrent_candidates} "
+        f"scan_session_candidates={result.scan_session_candidates} "
         f"actions_planned={result.actions_planned} "
         f"actions_applied={result.actions_applied} "
         f"unresolved={result.unresolved_count}"

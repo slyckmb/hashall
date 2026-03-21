@@ -3,7 +3,7 @@ from pathlib import Path
 import orjson
 import sqlite3
 
-from hashall.device import get_files_table_name
+from hashall.device import get_files_table_name, resolve_current_device_row
 
 def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
     conn = sqlite3.connect(str(db_path))
@@ -19,8 +19,9 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
         return {row["name"] for row in conn.execute("PRAGMA table_info(scan_sessions)")}
 
     if root_path:
+        fs_uuid_expr = "fs_uuid" if "fs_uuid" in _scan_session_columns() else "NULL AS fs_uuid"
         cursor = conn.execute(
-            "SELECT id, scan_id, root_path, device_id FROM scan_sessions WHERE root_path = ? ORDER BY started_at DESC LIMIT 1",
+            f"SELECT id, scan_id, root_path, device_id, {fs_uuid_expr} FROM scan_sessions WHERE root_path = ? ORDER BY started_at DESC LIMIT 1",
             (str(root_path),),
         )
         row = cursor.fetchone()
@@ -31,33 +32,53 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
         scan_id = row["scan_id"]
         session_root = Path(row["root_path"])
         session_device_id = row["device_id"] if "device_id" in row.keys() else None
+        session_fs_uuid = row["fs_uuid"] if "fs_uuid" in row.keys() else None
     else:
+        fs_uuid_expr = "fs_uuid" if "fs_uuid" in _scan_session_columns() else "NULL AS fs_uuid"
         cursor = conn.execute(
-            "SELECT id, scan_id, root_path, device_id FROM scan_sessions ORDER BY started_at DESC LIMIT 1"
+            f"SELECT id, scan_id, root_path, device_id, {fs_uuid_expr} FROM scan_sessions ORDER BY started_at DESC LIMIT 1"
         )
         row = cursor.fetchone()
         scan_session_id = row["id"]
         scan_id = row["scan_id"]
         session_root = Path(row["root_path"])
         session_device_id = row["device_id"] if "device_id" in row.keys() else None
+        session_fs_uuid = row["fs_uuid"] if "fs_uuid" in row.keys() else None
 
     files_data = []
 
     # Prefer per-device tables when available
     table_name = None
-    if session_device_id is not None:
+    device_row = None
+    if session_fs_uuid is not None or session_device_id is not None:
+        device_row = resolve_current_device_row(
+            conn.cursor(),
+            fs_uuid=session_fs_uuid,
+            device_id=int(session_device_id) if session_device_id is not None else None,
+        )
+    current_device_id = None
+    if device_row is not None:
+        current_device_id = int(device_row[0])
+        table_name = get_files_table_name(
+            conn.cursor(),
+            fs_uuid=device_row[1],
+            device_id=current_device_id,
+        )
+    elif session_device_id is not None:
         table_name = get_files_table_name(conn.cursor(), device_id=int(session_device_id))
 
     if table_name is not None and _table_exists(table_name):
 
         mount_point = None
-        if _table_exists("devices"):
-            device_row = conn.execute(
+        if device_row is not None:
+            mount_point = Path(str(device_row[4] or device_row[3]))
+        elif _table_exists("devices") and session_device_id is not None:
+            legacy_device_row = conn.execute(
                 "SELECT mount_point FROM devices WHERE device_id = ?",
                 (session_device_id,),
             ).fetchone()
-            if device_row:
-                mount_point = Path(device_row["mount_point"])
+            if legacy_device_row:
+                mount_point = Path(legacy_device_row["mount_point"])
 
         if mount_point is None:
             mount_point = session_root
@@ -100,7 +121,7 @@ def export_json(db_path: Path, root_path: Path = None, out_path: Path = None):
                 "sha1": row["sha1"],
                 "sha256": row["sha256"],
                 "inode": row["inode"],
-                "device_id": session_device_id,
+                "device_id": current_device_id if current_device_id is not None else session_device_id,
             })
 
     elif _table_exists("files"):

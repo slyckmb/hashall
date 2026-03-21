@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote
 
 from hashall.bencode import as_text
+from hashall.device import resolve_current_device_row
 from hashall.fastresume import normalize_save_path, read_fastresume
 from hashall.qbittorrent import QBittorrentClient, QBitTorrent
 from rehome.normalize import DEFAULT_UNIQUE_VIEW_SUBDIR
@@ -21,6 +22,22 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
         for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         if len(row) > 1
     }
+
+
+def _resolve_current_device_id(
+    conn: sqlite3.Connection,
+    *,
+    fs_uuid: Optional[str],
+    device_id: Optional[int],
+) -> int:
+    row = resolve_current_device_row(
+        conn.cursor(),
+        fs_uuid=str(fs_uuid or "").strip() or None,
+        device_id=int(device_id) if device_id not in (None, "") else None,
+    )
+    if row is not None and row[0] is not None:
+        return int(row[0])
+    return int(device_id or 0)
 
 
 def _canonical(path: str | Path) -> Path:
@@ -192,16 +209,24 @@ def _payload_context(
     if conn is None:
         return {"payload_hash": "", "sibling_targets": []}
     ti_columns = _table_columns(conn, "torrent_instances")
+    payload_columns = _table_columns(conn, "payloads")
+    has_ti_fs_uuid = "fs_uuid" in ti_columns
+    has_payload_fs_uuid = "fs_uuid" in payload_columns
     save_path_expr = "ti.save_path" if "save_path" in ti_columns else "''"
     ti_device_expr = "ti.device_id" if "device_id" in ti_columns else "0"
+    ti_fs_uuid_expr = "ti.fs_uuid" if "fs_uuid" in ti_columns else "''"
+    payload_device_expr = "p.device_id" if "device_id" in payload_columns else "0"
+    payload_fs_uuid_expr = "p.fs_uuid" if "fs_uuid" in payload_columns else "''"
     rows = conn.execute(
         f"""
         SELECT p.payload_hash,
                ti.torrent_hash,
                {save_path_expr} AS save_path,
                {ti_device_expr} AS ti_device_id,
+               {ti_fs_uuid_expr} AS ti_fs_uuid,
                p.root_path,
-               p.device_id AS payload_device_id,
+               {payload_device_expr} AS payload_device_id,
+               {payload_fs_uuid_expr} AS payload_fs_uuid,
                p.status
         FROM torrent_instances ti
         JOIN payloads p ON p.payload_id = ti.payload_id
@@ -237,19 +262,31 @@ def _payload_context(
         progress = float(getattr(info, "progress", 0.0) or 0.0) if info is not None else 0.0
         state = str(getattr(info, "state", "") or "") if info is not None else ""
         healthy = progress >= 0.9999 and str(state).strip().lower() not in {"missingfiles", "stoppeddl", "error"}
-        sibling_targets.append(
-            {
-                "torrent_hash": row_hash,
-                "save_path": save_path,
-                "root_path": str(row["root_path"] or ""),
-                "ti_device_id": int(row["ti_device_id"] or 0),
-                "payload_device_id": int(row["payload_device_id"] or 0),
-                "status": str(row["status"] or ""),
-                "qb_state": state,
-                "qb_progress": progress,
-                "healthy": healthy,
-            }
-        )
+        payload_fs_uuid = str(row["payload_fs_uuid"] or "").strip()
+        entry = {
+            "torrent_hash": row_hash,
+            "save_path": save_path,
+            "root_path": str(row["root_path"] or ""),
+            "ti_device_id": _resolve_current_device_id(
+                conn,
+                fs_uuid=str(row["ti_fs_uuid"] or "").strip() or None,
+                device_id=int(row["ti_device_id"] or 0),
+            ),
+            "payload_device_id": _resolve_current_device_id(
+                conn,
+                fs_uuid=payload_fs_uuid or None,
+                device_id=int(row["payload_device_id"] or 0),
+            ),
+            "status": str(row["status"] or ""),
+            "qb_state": state,
+            "qb_progress": progress,
+            "healthy": healthy,
+        }
+        if has_ti_fs_uuid:
+            entry["ti_fs_uuid"] = str(row["ti_fs_uuid"] or "")
+        if has_payload_fs_uuid:
+            entry["payload_fs_uuid"] = payload_fs_uuid
+        sibling_targets.append(entry)
     return {"payload_hash": payload_hash, "sibling_targets": sibling_targets}
 
 
@@ -261,6 +298,9 @@ def _select_sibling_target(
     sibling_targets: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     normalized_target = normalize_save_path(target_root)
+    payload_columns = _table_columns(conn, "payloads")
+    payload_device_expr = "device_id" if "device_id" in payload_columns else "0"
+    payload_fs_uuid_expr = "fs_uuid" if "fs_uuid" in payload_columns else "''"
     candidates: List[Dict[str, Any]] = []
     for target in sibling_targets:
         if not bool(target.get("healthy")):
@@ -271,32 +311,48 @@ def _select_sibling_target(
         if payload_hash:
             row = conn.execute(
                 """
-                SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
+                SELECT payload_id, payload_hash, {payload_device_expr} AS device_id,
+                       {payload_fs_uuid_expr} AS fs_uuid,
+                       root_path, file_count, total_bytes, status
                 FROM payloads
                 WHERE payload_hash = ? AND root_path = ? AND status = 'complete'
                 ORDER BY payload_id
                 LIMIT 1
-                """,
+                """.format(
+                    payload_device_expr=payload_device_expr,
+                    payload_fs_uuid_expr=payload_fs_uuid_expr,
+                ),
                 (payload_hash, root_path),
             ).fetchone()
         else:
             row = conn.execute(
                 """
-                SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
+                SELECT payload_id, payload_hash, {payload_device_expr} AS device_id,
+                       {payload_fs_uuid_expr} AS fs_uuid,
+                       root_path, file_count, total_bytes, status
                 FROM payloads
                 WHERE root_path = ? AND status = 'complete'
                 ORDER BY payload_id
                 LIMIT 1
-                """,
+                """.format(
+                    payload_device_expr=payload_device_expr,
+                    payload_fs_uuid_expr=payload_fs_uuid_expr,
+                ),
                 (root_path,),
             ).fetchone()
         if row is None:
             continue
+        payload_fs_uuid = str(row["fs_uuid"] or "").strip()
         candidates.append(
             {
                 "payload_id": int(row["payload_id"] or 0),
                 "payload_hash": str(row["payload_hash"] or ""),
-                "device_id": int(row["device_id"] or 0),
+                "device_id": _resolve_current_device_id(
+                    conn,
+                    fs_uuid=payload_fs_uuid or None,
+                    device_id=int(row["device_id"] or 0),
+                ),
+                "fs_uuid": payload_fs_uuid,
                 "root_path": str(row["root_path"] or ""),
                 "file_count": int(row["file_count"] or 0),
                 "total_bytes": int(row["total_bytes"] or 0),
@@ -326,6 +382,9 @@ def _select_mapped_target_payload(
     mapped_content_paths: Iterable[str],
 ) -> Optional[Dict[str, Any]]:
     normalized_target = normalize_save_path(target_root)
+    payload_columns = _table_columns(conn, "payloads")
+    payload_device_expr = "device_id" if "device_id" in payload_columns else "0"
+    payload_fs_uuid_expr = "fs_uuid" if "fs_uuid" in payload_columns else "''"
     candidates: List[Dict[str, Any]] = []
     seen_paths: set[str] = set()
     for mapped_path in mapped_content_paths:
@@ -337,22 +396,33 @@ def _select_mapped_target_payload(
             continue
         row = conn.execute(
             """
-            SELECT payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status
+            SELECT payload_id, payload_hash, {payload_device_expr} AS device_id,
+                   {payload_fs_uuid_expr} AS fs_uuid,
+                   root_path, file_count, total_bytes, status
             FROM payloads
             WHERE root_path = ? AND status = 'complete'
             ORDER BY payload_id
             LIMIT 1
-            """,
+            """.format(
+                payload_device_expr=payload_device_expr,
+                payload_fs_uuid_expr=payload_fs_uuid_expr,
+            ),
             (root_path,),
         ).fetchone()
         if row is None:
             continue
         payload_root = str(row["root_path"] or "")
+        payload_fs_uuid = str(row["fs_uuid"] or "").strip()
         candidates.append(
             {
                 "payload_id": int(row["payload_id"] or 0),
                 "payload_hash": str(row["payload_hash"] or ""),
-                "device_id": int(row["device_id"] or 0),
+                "device_id": _resolve_current_device_id(
+                    conn,
+                    fs_uuid=payload_fs_uuid or None,
+                    device_id=int(row["device_id"] or 0),
+                ),
+                "fs_uuid": payload_fs_uuid,
                 "root_path": payload_root,
                 "file_count": int(row["file_count"] or 0),
                 "total_bytes": int(row["total_bytes"] or 0),
@@ -412,16 +482,24 @@ def _fetch_stale_torrent_rows(
     wanted = [str(torrent_hash or "").strip().lower() for torrent_hash in torrent_hashes if str(torrent_hash or "").strip()]
     if not wanted:
         return []
+    ti_columns = _table_columns(conn, "torrent_instances")
+    payload_columns = _table_columns(conn, "payloads")
+    ti_device_expr = "ti.device_id" if "device_id" in ti_columns else "0"
+    ti_fs_uuid_expr = "ti.fs_uuid" if "fs_uuid" in ti_columns else "''"
+    payload_device_expr = "p.device_id" if "device_id" in payload_columns else "0"
+    payload_fs_uuid_expr = "p.fs_uuid" if "fs_uuid" in payload_columns else "''"
     placeholders = ",".join(["?"] * len(wanted))
     return conn.execute(
         f"""
         SELECT ti.torrent_hash,
                ti.payload_id,
-               ti.device_id AS ti_device_id,
+               {ti_device_expr} AS ti_device_id,
+               {ti_fs_uuid_expr} AS ti_fs_uuid,
                ti.save_path,
                ti.root_name,
                p.payload_hash,
-               p.device_id AS payload_device_id,
+               {payload_device_expr} AS payload_device_id,
+               {payload_fs_uuid_expr} AS payload_fs_uuid,
                p.root_path,
                p.file_count,
                p.total_bytes,
@@ -512,6 +590,7 @@ def _synthesize_stale_rows(payload_rows: List[Dict[str, Any]]) -> List[Dict[str,
                 "torrent_hash": torrent_hash,
                 "payload_id": 0,
                 "payload_device_id": 0,
+                "payload_fs_uuid": "",
                 "save_path": str(row.get("save_path") or "").strip(),
                 "root_name": root_name,
                 "root_path": content_path,
@@ -632,7 +711,12 @@ def build_missing_sibling_reconnect_batch(
             source_rows = [
                 {
                     "payload_id": int(row["payload_id"] or 0),
-                    "device_id": int(row["payload_device_id"] or 0),
+                    "device_id": _resolve_current_device_id(
+                        conn,
+                        fs_uuid=str(row["payload_fs_uuid"] or "").strip() or None,
+                        device_id=int(row["payload_device_id"] or 0),
+                    ),
+                    "fs_uuid": str(row["payload_fs_uuid"] or ""),
                     "root_path": str(row["root_path"] or ""),
                     "file_count": int(row["file_count"] or 0),
                     "total_bytes": int(row["total_bytes"] or 0),
@@ -646,6 +730,7 @@ def build_missing_sibling_reconnect_batch(
                     {
                         "payload_id": int(donor["payload_id"] or 0),
                         "device_id": int(donor["device_id"] or 0),
+                        "fs_uuid": str(donor.get("fs_uuid") or ""),
                         "root_path": str(donor["root_path"] or ""),
                         "file_count": int(donor["file_count"] or 0),
                         "total_bytes": int(donor["total_bytes"] or 0),

@@ -12,6 +12,7 @@ import time
 import re
 from typing import Any, Dict, Iterable, Optional
 
+from hashall.device import resolve_current_device_row
 from hashall.qbittorrent import get_qbittorrent_client
 
 
@@ -133,6 +134,30 @@ def _normalize_path(path: Optional[str]) -> str:
         return str(Path(path).resolve())
     except Exception:
         return str(path)
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return False
+    return any(str(row[1] or "") == str(column) for row in rows)
+
+
+def _resolve_current_device_id(
+    conn: sqlite3.Connection,
+    *,
+    fs_uuid: Optional[str],
+    device_id: Optional[int],
+) -> int:
+    row = resolve_current_device_row(
+        conn.cursor(),
+        fs_uuid=str(fs_uuid or "").strip() or None,
+        device_id=int(device_id) if device_id not in (None, "") else None,
+    )
+    if row is not None and row[0] is not None:
+        return int(row[0])
+    return int(device_id or 0)
 
 
 def _alias_variants(path: Optional[str]) -> set[str]:
@@ -412,36 +437,49 @@ def _find_target_payload_row(
     *,
     payload_hash: str,
     target_device: int,
+    target_fs_uuid: Optional[str],
     target_root: str,
 ) -> Optional[sqlite3.Row]:
     if not payload_hash or not target_device or not target_root:
         target_root = ""
+    payload_has_fs_uuid = _table_has_column(conn, "payloads", "fs_uuid")
+    select_cols = "payload_id, device_id, root_path, status"
+    fs_predicate = ""
+    params_base: list[Any] = [payload_hash]
+    if payload_has_fs_uuid:
+        select_cols = "payload_id, device_id, fs_uuid, root_path, status"
+        target_fs = str(target_fs_uuid or "").strip()
+        if target_fs:
+            fs_predicate = " AND fs_uuid = ?"
+            params_base.append(target_fs)
     exact = conn.execute(
-        """
-        SELECT payload_id, device_id, root_path, status
+        f"""
+        SELECT {select_cols}
         FROM payloads
         WHERE payload_hash = ?
+          {fs_predicate}
           AND device_id = ?
           AND root_path = ?
           AND status = 'complete'
         ORDER BY payload_id
         LIMIT 1
         """,
-        (payload_hash, target_device, target_root),
+        (*params_base, target_device, target_root),
     ).fetchone()
     if exact:
         return exact
     return conn.execute(
-        """
-        SELECT payload_id, device_id, root_path, status
+        f"""
+        SELECT {select_cols}
         FROM payloads
         WHERE payload_hash = ?
+          {fs_predicate}
           AND device_id = ?
           AND status = 'complete'
         ORDER BY payload_id
         LIMIT 1
         """,
-        (payload_hash, target_device),
+        (*params_base, target_device),
     ).fetchone()
 
 
@@ -667,6 +705,8 @@ def run_followup(
         payload_keys = sorted(payload_candidates.keys())
         if limit and limit > 0:
             payload_keys = payload_keys[:limit]
+        torrent_has_fs_uuid = _table_has_column(conn, "torrent_instances", "fs_uuid")
+        payload_has_fs_uuid = _table_has_column(conn, "payloads", "fs_uuid")
 
         entries: list[dict[str, Any]] = []
         groups_ok = 0
@@ -687,13 +727,15 @@ def run_followup(
             group = payload_candidates[payload_hash]
             candidate_hashes = sorted(group["torrent_hashes"])
             db_rows = conn.execute(
-                """
+                f"""
                 SELECT ti.torrent_hash,
                        ti.device_id AS ti_device_id,
+                       {"ti.fs_uuid AS ti_fs_uuid," if torrent_has_fs_uuid else "'' AS ti_fs_uuid,"}
                        ti.save_path AS ti_save_path,
                        ti.tags AS ti_tags,
                        p.payload_id,
                        p.device_id AS payload_device_id,
+                       {"p.fs_uuid AS payload_fs_uuid," if payload_has_fs_uuid else "'' AS payload_fs_uuid,"}
                        p.root_path,
                        p.status
                 FROM torrent_instances ti
@@ -707,27 +749,59 @@ def run_followup(
             candidate_rows = [row_by_hash[h] for h in candidate_hashes if h in row_by_hash]
 
             device_counts: dict[int, int] = {}
+            target_fs_counts: dict[str, int] = {}
             for row in candidate_rows:
-                device_id = int(row["ti_device_id"] or 0)
+                device_id = _resolve_current_device_id(
+                    conn,
+                    fs_uuid=row["ti_fs_uuid"],
+                    device_id=row["ti_device_id"],
+                )
                 device_counts[device_id] = device_counts.get(device_id, 0) + 1
+                row_fs_uuid = str(row["ti_fs_uuid"] or row["payload_fs_uuid"] or "").strip()
+                if row_fs_uuid:
+                    target_fs_counts[row_fs_uuid] = target_fs_counts.get(row_fs_uuid, 0) + 1
             target_device = 0
             if device_counts:
                 target_device = sorted(device_counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+            target_fs_uuid = ""
+            if target_fs_counts:
+                target_fs_uuid = sorted(
+                    target_fs_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[0][0]
 
             source_rows = [
                 row for row in conn.execute(
-                    """
-                    SELECT payload_id, device_id, root_path, file_count, total_bytes, status
+                    f"""
+                    SELECT payload_id,
+                           device_id,
+                           {"fs_uuid," if payload_has_fs_uuid else "'' AS fs_uuid,"}
+                           root_path,
+                           file_count,
+                           total_bytes,
+                           status
                     FROM payloads
                     WHERE payload_hash = ? AND status = 'complete'
                     ORDER BY payload_id
                     """,
                     (payload_hash,),
                 ).fetchall()
-                if int(row["device_id"] or 0) != target_device
+                if _resolve_current_device_id(
+                    conn,
+                    fs_uuid=row["fs_uuid"] if payload_has_fs_uuid else None,
+                    device_id=row["device_id"],
+                ) != target_device
             ]
 
-            source_device = int(source_rows[0]["device_id"]) if source_rows else 0
+            source_device = (
+                _resolve_current_device_id(
+                    conn,
+                    fs_uuid=source_rows[0]["fs_uuid"] if payload_has_fs_uuid else None,
+                    device_id=source_rows[0]["device_id"],
+                )
+                if source_rows
+                else 0
+            )
             source_save_prefixes = _source_save_prefixes(source_rows)
 
             qb_checks: list[dict[str, Any]] = []
@@ -789,23 +863,40 @@ def run_followup(
                 )
 
                 reconciled_row = row
+                row_ti_device = _resolve_current_device_id(
+                    conn,
+                    fs_uuid=row["ti_fs_uuid"],
+                    device_id=row["ti_device_id"],
+                )
+                row_payload_device = _resolve_current_device_id(
+                    conn,
+                    fs_uuid=row["payload_fs_uuid"],
+                    device_id=row["payload_device_id"],
+                )
                 if target_device and gate.ok and (
-                    int(row["ti_device_id"] or 0) != target_device
-                    or int(row["payload_device_id"] or 0) != target_device
+                    row_ti_device != target_device
+                    or row_payload_device != target_device
                 ):
                     target_root = _derive_target_root(row, expected_save)
                     target_payload = _find_target_payload_row(
                         conn,
                         payload_hash=payload_hash,
                         target_device=target_device,
+                        target_fs_uuid=target_fs_uuid,
                         target_root=target_root,
                     )
                     if target_payload:
+                        target_payload_fs_uuid = (
+                            str(target_payload["fs_uuid"] or "").strip()
+                            if payload_has_fs_uuid and "fs_uuid" in target_payload.keys()
+                            else ""
+                        )
                         conn.execute(
-                            """
+                            f"""
                             UPDATE torrent_instances
                             SET payload_id = ?,
                                 device_id = ?,
+                                {"fs_uuid = ?," if torrent_has_fs_uuid else ""}
                                 save_path = ?,
                                 last_seen_at = CURRENT_TIMESTAMP
                             WHERE torrent_hash = ?
@@ -813,18 +904,21 @@ def run_followup(
                             (
                                 int(target_payload["payload_id"] or 0),
                                 target_device,
+                                *((target_payload_fs_uuid,) if torrent_has_fs_uuid else ()),
                                 expected_save,
                                 torrent_hash,
                             ),
                         )
                         reconciled_row = conn.execute(
-                            """
+                            f"""
                             SELECT ti.torrent_hash,
                                    ti.device_id AS ti_device_id,
+                                   {"ti.fs_uuid AS ti_fs_uuid," if torrent_has_fs_uuid else "'' AS ti_fs_uuid,"}
                                    ti.save_path AS ti_save_path,
                                    ti.tags AS ti_tags,
                                    p.payload_id,
                                    p.device_id AS payload_device_id,
+                                   {"p.fs_uuid AS payload_fs_uuid," if payload_has_fs_uuid else "'' AS payload_fs_uuid,"}
                                    p.root_path,
                                    p.status
                             FROM torrent_instances ti
@@ -835,9 +929,19 @@ def run_followup(
                         ).fetchone() or row
                         row_by_hash[torrent_hash] = reconciled_row
 
-                if target_device and int(reconciled_row["ti_device_id"] or 0) != target_device:
+                reconciled_ti_device = _resolve_current_device_id(
+                    conn,
+                    fs_uuid=reconciled_row["ti_fs_uuid"],
+                    device_id=reconciled_row["ti_device_id"],
+                )
+                reconciled_payload_device = _resolve_current_device_id(
+                    conn,
+                    fs_uuid=reconciled_row["payload_fs_uuid"],
+                    device_id=reconciled_row["payload_device_id"],
+                )
+                if target_device and reconciled_ti_device != target_device:
                     db_reasons.append(f"torrent_device_not_target:{torrent_hash[:12]}")
-                if target_device and int(reconciled_row["payload_device_id"] or 0) != target_device:
+                if target_device and reconciled_payload_device != target_device:
                     db_reasons.append(f"payload_device_not_target:{torrent_hash[:12]}")
                 qb_reasons.extend(gate.reasons)
                 qb_checks.append(gate.__dict__)

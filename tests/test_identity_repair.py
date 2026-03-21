@@ -40,6 +40,13 @@ def _create_identity_db(tmp_path: Path) -> Path:
             save_path TEXT,
             updated_at TEXT
         );
+
+        CREATE TABLE scan_sessions (
+            scan_id TEXT PRIMARY KEY,
+            device_id INTEGER,
+            fs_uuid TEXT,
+            root_path TEXT
+        );
         """
     )
     conn.commit()
@@ -229,3 +236,58 @@ def test_max_actions_limit_is_enforced(tmp_path):
     fixed = conn.execute("SELECT COUNT(*) FROM payloads WHERE fs_uuid = 'fs-stash'").fetchone()[0]
     conn.close()
     assert fixed == 1
+
+
+def test_repairs_scan_session_from_current_fs_uuid(tmp_path):
+    db_path = _create_identity_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
+        VALUES (53, 'fs-stash', '/stash/media', '/stash/media');
+
+        INSERT INTO scan_sessions (scan_id, device_id, fs_uuid, root_path)
+        VALUES ('scan-rebooted', 52, 'fs-stash', '/stash/media');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    result = run_identity_repair(db_path, apply_mode=False)
+
+    assert result.scan_session_candidates == 1
+    assert result.actions_planned == 1
+    assert result.reason_counts.get("scan_session_current_fs_uuid") == 1
+    action = result.actions[0]
+    assert action.table == "scan_sessions"
+    assert action.key == "scan-rebooted"
+    assert action.target_device_id == 53
+    assert action.target_fs_uuid == "fs-stash"
+
+
+def test_apply_updates_scan_session_rows(tmp_path):
+    db_path = _create_identity_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point)
+        VALUES (50, 'fs-stash', '/stash/media', '/stash/media');
+
+        INSERT INTO scan_sessions (scan_id, device_id, fs_uuid, root_path)
+        VALUES ('scan-fixme', NULL, NULL, '/stash/media');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    result = run_identity_repair(db_path, apply_mode=True)
+    assert result.scan_session_candidates == 1
+    assert result.actions_applied == 1
+
+    conn = sqlite3.connect(db_path)
+    scan_row = conn.execute(
+        "SELECT device_id, fs_uuid FROM scan_sessions WHERE scan_id = 'scan-fixme'"
+    ).fetchone()
+    conn.close()
+
+    assert scan_row == (50, "fs-stash")

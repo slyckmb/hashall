@@ -672,6 +672,161 @@ def test_update_device_changed_device_id(mock_get_fs_type, mock_get_zfs_metadata
     assert data[1] == 100
 
 
+@patch('hashall.fs_utils.get_zfs_metadata')
+@patch('hashall.device._get_fs_type')
+def test_update_device_changed_device_id_remaps_payload_and_torrent_rows(
+    mock_get_fs_type,
+    mock_get_zfs_metadata,
+    test_db,
+):
+    cursor = test_db
+    mock_get_fs_type.return_value = 'zfs'
+    mock_get_zfs_metadata.return_value = {}
+
+    register_or_update_device(
+        cursor,
+        fs_uuid='zfs-remap-1',
+        device_id=52,
+        mount_point='/stash/media',
+    )
+    cursor.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status, fs_uuid)
+        VALUES (1, 'payload-remap', 52, '/stash/media/Show', 1, 10, 'complete', 'zfs-remap-1')
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status, fs_uuid)
+        VALUES (2, 'payload-remap-legacy', 52, '/stash/media/Legacy', 1, 10, 'complete', NULL)
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, fs_uuid)
+        VALUES ('tor-remap', 1, 52, '/stash/media/seeding', 'Show', 'zfs-remap-1')
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, fs_uuid)
+        VALUES ('tor-remap-legacy', 2, 52, '/stash/media/seeding', 'Legacy', NULL)
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO scan_sessions (scan_id, fs_uuid, device_id, root_path, status)
+        VALUES ('scan-remap', 'zfs-remap-1', 52, '/stash/media', 'completed')
+        """
+    )
+    cursor.connection.commit()
+
+    register_or_update_device(
+        cursor,
+        fs_uuid='zfs-remap-1',
+        device_id=53,
+        mount_point='/stash/media',
+    )
+
+    payload_rows = cursor.execute(
+        "SELECT payload_id, device_id, fs_uuid FROM payloads ORDER BY payload_id"
+    ).fetchall()
+    assert [tuple(row) for row in payload_rows] == [
+        (1, 53, 'zfs-remap-1'),
+        (2, 53, 'zfs-remap-1'),
+    ]
+
+    torrent_rows = cursor.execute(
+        "SELECT torrent_hash, device_id, fs_uuid FROM torrent_instances ORDER BY torrent_hash"
+    ).fetchall()
+    assert [tuple(row) for row in torrent_rows] == [
+        ('tor-remap', 53, 'zfs-remap-1'),
+        ('tor-remap-legacy', 53, 'zfs-remap-1'),
+    ]
+
+    scan_row = cursor.execute(
+        "SELECT device_id, fs_uuid FROM scan_sessions WHERE scan_id = 'scan-remap'"
+    ).fetchone()
+    assert tuple(scan_row) == (53, 'zfs-remap-1')
+
+
+@patch('hashall.fs_utils.get_zfs_metadata')
+@patch('hashall.device._get_fs_type')
+def test_register_device_collision_parks_displaced_dependents(
+    mock_get_fs_type,
+    mock_get_zfs_metadata,
+    test_db,
+):
+    cursor = test_db
+    mock_get_fs_type.return_value = 'zfs'
+    mock_get_zfs_metadata.return_value = {}
+
+    register_or_update_device(cursor, fs_uuid='fs-pool-media', device_id=46, mount_point='/pool/media')
+    register_or_update_device(cursor, fs_uuid='fs-stash', device_id=47, mount_point='/stash/media')
+
+    cursor.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status, fs_uuid)
+        VALUES
+          (1, 'payload-pool-media', 46, '/pool/media/torrents/seeding/ShowA', 1, 10, 'complete', 'fs-pool-media'),
+          (2, 'payload-stash', 47, '/stash/media/ShowB', 1, 10, 'complete', 'fs-stash')
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, fs_uuid)
+        VALUES
+          ('tor-pool-media', 1, 46, '/pool/media/torrents/seeding', 'ShowA', 'fs-pool-media'),
+          ('tor-stash', 2, 47, '/stash/media/torrents/seeding', 'ShowB', 'fs-stash')
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO scan_sessions (scan_id, fs_uuid, device_id, root_path, status)
+        VALUES
+          ('scan-pool-media', 'fs-pool-media', 46, '/pool/media', 'completed'),
+          ('scan-stash', 'fs-stash', 47, '/stash/media', 'completed')
+        """
+    )
+    cursor.connection.commit()
+
+    register_or_update_device(cursor, fs_uuid='fs-stash', device_id=46, mount_point='/stash/media')
+
+    stash_device_id = cursor.execute(
+        "SELECT device_id FROM devices WHERE fs_uuid = 'fs-stash'"
+    ).fetchone()[0]
+    pool_media_device_id = cursor.execute(
+        "SELECT device_id FROM devices WHERE fs_uuid = 'fs-pool-media'"
+    ).fetchone()[0]
+
+    assert stash_device_id == 46
+    assert pool_media_device_id < 0
+
+    payload_rows = cursor.execute(
+        "SELECT payload_hash, device_id, fs_uuid FROM payloads ORDER BY payload_id"
+    ).fetchall()
+    assert [tuple(row) for row in payload_rows] == [
+        ('payload-pool-media', pool_media_device_id, 'fs-pool-media'),
+        ('payload-stash', 46, 'fs-stash'),
+    ]
+
+    torrent_rows = cursor.execute(
+        "SELECT torrent_hash, device_id, fs_uuid FROM torrent_instances ORDER BY torrent_hash"
+    ).fetchall()
+    assert [tuple(row) for row in torrent_rows] == [
+        ('tor-pool-media', pool_media_device_id, 'fs-pool-media'),
+        ('tor-stash', 46, 'fs-stash'),
+    ]
+
+    scan_rows = cursor.execute(
+        "SELECT scan_id, device_id, fs_uuid FROM scan_sessions ORDER BY scan_id"
+    ).fetchall()
+    assert [tuple(row) for row in scan_rows] == [
+        ('scan-pool-media', pool_media_device_id, 'fs-pool-media'),
+        ('scan-stash', 46, 'fs-stash'),
+    ]
+
+
 def test_get_files_table_name_prefers_devices_binding(test_db):
     cursor = test_db
     cursor.execute(

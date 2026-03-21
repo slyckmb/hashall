@@ -3,7 +3,7 @@ import sqlite3
 from hashlib import sha256
 from pathlib import Path
 
-from hashall.device import get_files_table_name
+from hashall.device import get_files_table_name, resolve_current_device_row
 
 def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
     """
@@ -18,6 +18,10 @@ def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
             (name,),
         ).fetchone() is not None
+
+    scan_session_columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(scan_sessions)").fetchall()
+    }
 
     rows = []
 
@@ -38,17 +42,28 @@ def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
         rows = cursor.fetchall()
 
     else:
+        fs_uuid_expr = "fs_uuid" if "fs_uuid" in scan_session_columns else "NULL AS fs_uuid"
         session = cursor.execute(
-            "SELECT id, device_id, root_path FROM scan_sessions WHERE scan_id = ?",
+            f"SELECT id, device_id, {fs_uuid_expr}, root_path FROM scan_sessions WHERE scan_id = ?",
             (scan_id,),
         ).fetchone()
         if not session:
             conn.close()
             raise ValueError(f"Scan session not found: {scan_id}")
 
-        device_id = session[1]
-        root_path = Path(session[2])
-        table_name = get_files_table_name(cursor, device_id=device_id)
+        session_device_id = session[1]
+        session_fs_uuid = session[2]
+        root_path = Path(session[3])
+        device = resolve_current_device_row(
+            cursor,
+            fs_uuid=session_fs_uuid,
+            device_id=session_device_id,
+        )
+        if not device:
+            conn.close()
+            raise ValueError("Current device mapping not found for treehash")
+        device_id = int(device[0])
+        table_name = get_files_table_name(cursor, fs_uuid=device[1], device_id=device_id)
         if not table_name:
             conn.close()
             raise ValueError(f"Missing device table for device_id={device_id}")
@@ -56,19 +71,7 @@ def compute_treehash(scan_id: str, db_path: str, commit: bool = False) -> str:
             conn.close()
             raise ValueError(f"Missing device table: {table_name}")
 
-        device_columns = {row[1] for row in cursor.execute("PRAGMA table_info(devices)").fetchall()}
-        if "preferred_mount_point" in device_columns:
-            device = cursor.execute(
-                "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
-                (device_id,),
-            ).fetchone()
-            mount_point = Path(device[1] or device[0]) if device else None
-        else:
-            device = cursor.execute(
-                "SELECT mount_point FROM devices WHERE device_id = ?",
-                (device_id,),
-            ).fetchone()
-            mount_point = Path(device[0]) if device else None
+        mount_point = Path(device[4] or device[3]) if device else None
 
         if not mount_point:
             conn.close()

@@ -25,7 +25,7 @@ import threading
 import time
 from typing import Optional
 
-from hashall.device import get_files_table_name
+from hashall.device import get_files_table_name, resolve_current_device_row
 from hashall.fs_utils import get_filesystem_uuid, get_mount_source
 from hashall.model import connect_db
 from hashall.payload_completion import load_completed_torrent_hashes
@@ -118,18 +118,22 @@ def _resolve_root_context(conn: sqlite3.Connection, root: str) -> RootContext:
     root_input = str(Path(root))
     root_resolved = Path(root).resolve()
     root_canonical = canonicalize_path(root_resolved)
-    device_id = os.stat(root_canonical).st_dev
+    runtime_device_id = os.stat(root_canonical).st_dev
+    fs_uuid = get_filesystem_uuid(str(root_canonical))
 
-    row = conn.execute(
-        "SELECT device_alias, mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
-        (device_id,),
-    ).fetchone()
+    row = resolve_current_device_row(
+        conn.cursor(),
+        fs_uuid=fs_uuid,
+        device_id=runtime_device_id,
+    )
 
     if row:
-        device_alias = str(row[0] or device_id)
-        current_mount = Path(str(row[1]))
-        preferred_mount = Path(str(row[2] or row[1]))
+        device_id = int(row[0])
+        device_alias = str(row[2] or device_id)
+        current_mount = Path(str(row[3]))
+        preferred_mount = Path(str(row[4] or row[3]))
     else:
+        device_id = int(runtime_device_id)
         device_alias = str(device_id)
         current_mount = Path(root_canonical.anchor if root_canonical.anchor else "/")
         preferred_mount = current_mount
@@ -165,7 +169,7 @@ def _resolve_root_context(conn: sqlite3.Connection, root: str) -> RootContext:
         device_alias=device_alias,
         rel_root=rel_root,
         root_kind=_classify_root(root_input),
-        fs_uuid=get_filesystem_uuid(str(root_canonical)),
+        fs_uuid=fs_uuid,
         scan_last_scanned_at=str(scan_row[0]) if scan_row and scan_row[0] else None,
     )
 

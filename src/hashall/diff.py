@@ -4,7 +4,7 @@
 # ✅ Corrected import of DiffReport
 
 from hashall.model import DiffReport, DiffReportEntry
-from hashall.device import get_files_table_name
+from hashall.device import get_files_table_name, resolve_current_device_row
 from pathlib import Path
 
 
@@ -63,6 +63,9 @@ def diff_sessions(src_files, dest_files):
 def diff_scan_sessions(conn, src_session_id, dst_session_id):
     """Diffs two scan sessions and returns report object."""
     cursor = conn.cursor()
+    scan_session_columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(scan_sessions)").fetchall()
+    }
 
     def table_exists(name: str) -> bool:
         row = cursor.execute(
@@ -110,29 +113,24 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
         return files
 
     def load_from_device_table(session_id: int):
+        fs_uuid_expr = "fs_uuid" if "fs_uuid" in scan_session_columns else "NULL AS fs_uuid"
         session = cursor.execute(
-            "SELECT device_id, root_path FROM scan_sessions WHERE id = ?",
+            f"SELECT device_id, {fs_uuid_expr}, root_path FROM scan_sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
         if not session:
             return {}
 
-        device_id = session[0]
-        root_path = Path(session[1])
-
-        device_columns = {row[1] for row in cursor.execute("PRAGMA table_info(devices)").fetchall()}
-        if "preferred_mount_point" in device_columns:
-            device = cursor.execute(
-                "SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?",
-                (device_id,),
-            ).fetchone()
-            mount_point = Path(device[1] or device[0]) if device else None
-        else:
-            device = cursor.execute(
-                "SELECT mount_point FROM devices WHERE device_id = ?",
-                (device_id,),
-            ).fetchone()
-            mount_point = Path(device[0]) if device else None
+        session_device_id = session[0]
+        session_fs_uuid = session[1]
+        root_path = Path(session[2])
+        device = resolve_current_device_row(
+            cursor,
+            fs_uuid=session_fs_uuid,
+            device_id=session_device_id,
+        )
+        device_id = int(device[0]) if device else session_device_id
+        mount_point = Path(device[4] or device[3]) if device else None
         if not mount_point:
             return {}
         try:
@@ -141,7 +139,11 @@ def diff_scan_sessions(conn, src_session_id, dst_session_id):
             return {}
 
         rel_root_str = str(rel_root)
-        table_name = get_files_table_name(cursor, device_id=device_id)
+        table_name = get_files_table_name(
+            cursor,
+            fs_uuid=device[1] if device else None,
+            device_id=device_id,
+        )
         if not table_name:
             return {}
         if not table_exists(table_name):
