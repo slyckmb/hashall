@@ -90,7 +90,8 @@ Use this for:
 
 ## Explicit Non-Goals
 
-- Do not copy the old qbitui cache implementation into your repo.
+- Do not copy the old `qbitui` cache implementation into your repo.
+  `qbitui` is the former name of the external repo now called `silo`.
 - Do not create another raw `curl "$QBIT_URL/api/v2/torrents/info"` polling loop.
 - Do not invent a second qB compatibility layer.
 
@@ -102,6 +103,6 @@ Do not patch around it locally in a second helper.
 
 ## Current Limitation
 
-`qbitui` external dashboard alignment is still separate follow-up work.
+`silo` external dashboard alignment is still separate follow-up work.
 
-If you are working in `qbitui`, the right direction is to align it to the `hashall` helper/cache contract, not to fork the contract again.
+If you are working in `silo` (formerly `qbitui`), the right direction is to align it to the `hashall` helper/cache contract, not to fork the contract again.

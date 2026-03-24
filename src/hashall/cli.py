@@ -3,6 +3,7 @@
 # ✅ Minimal fix: Added --no-export, fixed missing arg to verify_trees
 
 import click
+import hashlib
 import time
 import os
 import re
@@ -32,6 +33,62 @@ _RUN_HEADER_EMITTED = False
 _PIPE_BROKEN = False
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _payload_sync_upgrade_state_dir() -> Path:
+    return Path.home() / ".hashall" / "payload-sync-upgrade-state"
+
+
+def _payload_sync_upgrade_scope(
+    *,
+    db_path: Path,
+    path_prefixes: list[Path],
+    category: str | None,
+    tag: str | None,
+    limit: int,
+    upgrade_order: str,
+    upgrade_root_limit: int,
+) -> str:
+    payload = {
+        "db_path": str(db_path.expanduser().resolve()),
+        "path_prefixes": [str(Path(p)) for p in path_prefixes],
+        "category": str(category or ""),
+        "tag": str(tag or ""),
+        "limit": int(limit or 0),
+        "upgrade_order": str(upgrade_order or "small-first").lower(),
+        "upgrade_root_limit": int(upgrade_root_limit or 0),
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _payload_sync_upgrade_root_key(item: dict) -> str:
+    return f"{int(item.get('device_id') or 0)}::{str(item.get('root_path') or '')}"
+
+
+def _payload_sync_upgrade_state_path(scope: str) -> Path:
+    safe_scope = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(scope or "").strip()) or "default"
+    return _payload_sync_upgrade_state_dir() / f"{safe_scope}.json"
+
+
+def _load_payload_sync_upgrade_state(state_path: Path) -> dict:
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"completed_roots": {}}
+    except Exception:
+        return {"completed_roots": {}}
+    completed = data.get("completed_roots")
+    if not isinstance(completed, dict):
+        completed = {}
+    return {"completed_roots": dict(completed)}
+
+
+def _write_payload_sync_upgrade_state(state_path: Path, state: dict) -> None:
+    _payload_sync_upgrade_state_dir().mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(state_path)
 
 
 def _apply_low_priority() -> None:
@@ -466,7 +523,7 @@ def payload_sync(
     from hashall.qbittorrent import get_qbittorrent_client
     from hashall.payload import (
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
-        upgrade_payload_missing_sha256, prune_orphan_payloads,
+        upgrade_payload_missing_sha256, prune_orphan_payloads, count_missing_sha256_for_path,
     )
     from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
 
@@ -697,6 +754,30 @@ def payload_sync(
             conn.commit()
             write_batch_ops = 0
 
+        upgrade_scope = _payload_sync_upgrade_scope(
+            db_path=Path(db),
+            path_prefixes=prefix_paths,
+            category=category,
+            tag=tag,
+            limit=limit,
+            upgrade_order=order_mode,
+            upgrade_root_limit=upgrade_root_limit,
+        )
+        upgrade_state_path = _payload_sync_upgrade_state_path(upgrade_scope)
+        upgrade_state = _load_payload_sync_upgrade_state(upgrade_state_path)
+        completed_roots = upgrade_state["completed_roots"]
+        skipped_resumed = 0
+        pending_queue_items = []
+        for item in queue_items:
+            root_key = _payload_sync_upgrade_root_key(item)
+            root_path = str(item.get("root_path") or "")
+            device_id = int(item.get("device_id") or 0)
+            if root_key in completed_roots and count_missing_sha256_for_path(conn, device_id, root_path) == 0:
+                skipped_resumed += 1
+                continue
+            pending_queue_items.append(item)
+        queue_items = pending_queue_items
+
         total_upgrade_roots = len(queue_items)
         total_upgrade_bytes = sum(max(0, int(item.get("total_bytes") or 0)) for item in queue_items)
         print(
@@ -706,6 +787,11 @@ def payload_sync(
         )
         if upgrade_root_limit > 0:
             print(f"   upgrade root limit applied: {upgrade_root_limit}")
+        if skipped_resumed:
+            print(
+                f"   resume checkpoint: skipped already-complete roots={skipped_resumed} "
+                f"state={upgrade_state_path}"
+            )
 
         for root_idx, item in enumerate(queue_items, start=1):
             root_path = str(item.get("root_path") or "")
@@ -822,6 +908,13 @@ def payload_sync(
 
             if refreshed.status == "complete":
                 upgrade_completed += 1
+                completed_roots[_payload_sync_upgrade_root_key(item)] = {
+                    "root_path": root_path,
+                    "device_id": int(item.get("device_id") or 0),
+                    "completed_at": int(time.time()),
+                    "payload_hash": str(refreshed.payload_hash or ""),
+                }
+                _write_payload_sync_upgrade_state(upgrade_state_path, upgrade_state)
                 print(
                     f"   ✅ Upgrade complete: groups={upgraded_groups} "
                     f"payload_hash={str(refreshed.payload_hash or '')[:16]}"
@@ -834,6 +927,11 @@ def payload_sync(
             f"queued={total_upgrade_roots} started={upgrade_started} "
             f"completed={upgrade_completed} failed={upgrade_failed} elapsed_s={upgrade_elapsed}"
         )
+        if upgrade_failed == 0 and total_upgrade_roots == upgrade_completed:
+            try:
+                upgrade_state_path.unlink()
+            except FileNotFoundError:
+                pass
         print("------------------------------------------------------------")
 
     if not dry_run and write_batch_ops:
@@ -3294,18 +3392,20 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
             click.echo(f"💡 Review errors: hashall link show-plan {plan_id}")
 
         conn.close()
-        return 0 if result.actions_failed == 0 else 1
+        if result.actions_failed == 0:
+            return 0
+        raise click.exceptions.Exit(1)
 
     except ValueError as e:
         click.echo(f"❌ Error: {e}", err=True)
         conn.close()
-        return 1
+        raise click.exceptions.Exit(1)
     except Exception as e:
         click.echo(f"❌ Unexpected error: {e}", err=True)
         import traceback
         traceback.print_exc()
         conn.close()
-        return 1
+        raise click.exceptions.Exit(1)
 
 
 # Devices command group

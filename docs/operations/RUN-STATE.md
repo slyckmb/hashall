@@ -177,6 +177,10 @@ Last updated: 2026-03-21
    hashall refresh --verbose 2>&1 | tail -20
    ```
 
+**Cross-repo naming note:**
+- The external dashboard/cache repo previously referenced in older notes as `qbitui` is now `silo`.
+- Treat `silo` as canonical. Any `qbit-*` names in that repo are compatibility shims, not the preferred integration target.
+
 **Phase 0 → Phase 1 resumption workflow:**
 ```bash
 # Phase 0: clear blockers (operator)
@@ -225,7 +229,7 @@ Last updated: 2026-03-13 (historical section below)
     - `src/hashall/qb_cache.py`
     - `bin/qb-cache-agent.py`
     - `bin/qb-cache-daemon.py`
-  - the cache now uses the shared qB client, not qbitui’s separate raw-API implementation
+  - the cache now uses the shared qB client, not silo’s legacy pre-refactor raw-API implementation
   - `src/hashall/qbittorrent.py` now detects and caches a qB server profile:
     - `app_version`
     - `webapi_version`
@@ -244,7 +248,7 @@ Last updated: 2026-03-13 (historical section below)
     - triage step scripts
     - `qb-repair-batch` list discovery reads
   - important limit:
-    - qbitui’s external dashboard/cache path has not been updated in this repo; treat that as separate follow-up work if cross-repo alignment is still wanted
+    - silo’s external dashboard/cache path has not been updated in this repo; treat that as separate follow-up work if cross-repo alignment is still wanted
 - Active docs are now intentionally minimal and stub-free:
   - canonical active docs:
     - `README.md`

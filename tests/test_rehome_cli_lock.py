@@ -68,3 +68,35 @@ def test_acquire_refresh_lock_reports_existing_holder_metadata(tmp_path, monkeyp
     err = capsys.readouterr().err
     assert "Another hashall refresh is already running" in err
     assert "pid=5150" in err
+
+
+def test_acquire_refresh_lock_rejects_live_refresh_even_after_lock_recreated(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rehome.cli.fcntl.flock", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "rehome.cli._iter_other_refresh_holders",
+        lambda: [
+            {
+                "pid": 203069,
+                "cwd": "/home/michael/dev/work/hashall/.agent/worktrees/cr-hashall-20260319-130301-codex",
+                "cmdline": [
+                    "/home/michael/.venvs/hashall/bin/python",
+                    "/home/michael/.venvs/hashall/bin/hashall",
+                    "refresh",
+                    "--verbose",
+                ],
+            }
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        cli_mod._acquire_refresh_lock()
+
+    err = capsys.readouterr().err
+    assert "Another hashall refresh process is already running" in err
+    assert "pid=203069" in err
+    assert "hashall refresh --verbose" in err

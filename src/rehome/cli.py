@@ -274,6 +274,57 @@ def _acquire_named_lock(lock_filename: str, description: str) -> "file":
     return lock_fh
 
 
+def _looks_like_refresh_command(cmdline: list[str]) -> bool:
+    if not cmdline:
+        return False
+    joined = " ".join(str(part) for part in cmdline if part)
+    lowered = joined.lower()
+    if " refresh" not in f" {lowered}":
+        return False
+    return (
+        " hashall " in f" {lowered} "
+        or lowered.endswith("/hashall refresh")
+        or " -m rehome.cli refresh" in lowered
+        or " -m hashall.cli refresh" in lowered
+    )
+
+
+def _iter_other_refresh_holders() -> list[dict[str, object]]:
+    holders: list[dict[str, object]] = []
+    self_pid = os.getpid()
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return holders
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == self_pid:
+            continue
+        try:
+            raw_cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw_cmdline:
+            continue
+        cmdline = [part for part in raw_cmdline.decode("utf-8", errors="ignore").split("\x00") if part]
+        if not _looks_like_refresh_command(cmdline):
+            continue
+        cwd = ""
+        try:
+            cwd = os.readlink(entry / "cwd")
+        except OSError:
+            cwd = ""
+        holders.append(
+            {
+                "pid": pid,
+                "cwd": cwd,
+                "cmdline": cmdline,
+            }
+        )
+    return holders
+
+
 def _acquire_rehome_lock() -> "file":
     """
     Acquire an exclusive process-level lock for rehome apply operations.
@@ -288,7 +339,23 @@ def _acquire_rehome_lock() -> "file":
 
 def _acquire_refresh_lock() -> "file":
     """Acquire an exclusive process-level lock for refresh operations."""
-    return _acquire_named_lock("refresh.lock", "hashall refresh")
+    lock_fh = _acquire_named_lock("refresh.lock", "hashall refresh")
+    other_holders = _iter_other_refresh_holders()
+    if other_holders:
+        lock_fh.close()
+        holder = other_holders[0]
+        holder_cmd = " ".join(str(part) for part in holder.get("cmdline", []))
+        holder_cwd = str(holder.get("cwd") or "")
+        cwd_suffix = f" cwd={holder_cwd}" if holder_cwd else ""
+        click.echo(
+            "❌ Another hashall refresh process is already running "
+            f"(pid={holder.get('pid')}{cwd_suffix} cmd={holder_cmd}). "
+            "This usually means a live refresh survived after refresh.lock was deleted. "
+            "Aborting.",
+            err=True,
+        )
+        raise SystemExit(1)
+    return lock_fh
 
 
 def _emit_banner() -> None:

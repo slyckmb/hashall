@@ -170,6 +170,10 @@ Test added: `test_daemon_once_resets_consecutive_failures_on_success`.
 - Migration scripts: `bin/migrate-pool-data-to-media.sh` ready for Phase 1 plan generation
 - Next step: run Phase 0→1 workflow (see RUN-STATE.md "2026-03-19 Migration Analysis")
 
+### Cross-repo naming note
+- Historical references in this repo to `qbitui` mean the external dashboard/cache repo now named `silo`.
+- Treat `silo` as the canonical external repo name; treat `qbitui` and `qbit-*` script names as migration-era compatibility terminology only.
+
 ---
 
 ## 2026-03-19 Migration Analysis (same branch)
@@ -282,7 +286,7 @@ Five bugs found; five fixed across two commits. Tests written for all fixes. No 
     - `src/hashall/qb_cache.py`
     - `bin/qb-cache-agent.py`
     - `bin/qb-cache-daemon.py`
-  - the local cache no longer depends on qbitui’s external raw-API cache scripts
+  - the local cache no longer depends on silo’s legacy pre-refactor raw-API cache scripts
   - qB server/profile detection now lives in `src/hashall/qbittorrent.py`
   - current normalized compatibility contract:
     - probe `app/version`
@@ -307,7 +311,7 @@ Five bugs found; five fixed across two commits. Tests written for all fixes. No 
     - `bin/qb-repair-batch.sh` discovery/no-ramp list reads
   - operator implication:
     - multiple list/status views should now share one cache daemon instead of each polling qB directly
-    - qbitui dashboard remains an external follow-up if you want the same compatibility/cache contract there
+    - silo dashboard remains an external follow-up if you want the same compatibility/cache contract there
 - Active docs are now intentionally minimal and stub-free:
   - canonical active set:
     - `README.md`

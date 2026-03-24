@@ -19,7 +19,8 @@ Prompt-critical context (2026-03-12):
     - `pausedDL` / `stoppedDL` -> `stoppedDL`
     - `pausedUP` / `stoppedUP` -> `stoppedUP`
   - read-heavy hashall qB scripts now prefer the local cache by default
-  - external qbitui dashboard/cache alignment remains separate follow-up work
+  - external silo dashboard/cache alignment remains separate follow-up work
+    - historical note: this external repo was formerly named `qbitui`
 
 - New qB relocation tooling now exists and is the preferred next design/test path for dataset moves:
   - `bin/qb-zfs-relocate.py` (`v0.1.8`)
