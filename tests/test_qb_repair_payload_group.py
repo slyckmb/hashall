@@ -11,6 +11,7 @@ from hashall.qb_repair_payload_group import (
     CatalogLookup,
     build_repair_plan,
     can_reuse_good_save_path_directly,
+    choose_repair_save_paths,
     ensure_same_payload_group,
     load_payload_pair,
     parse_args,
@@ -258,6 +259,31 @@ def test_patch_fastresume_with_journal_uses_shared_backup(tmp_path: Path) -> Non
     logged = json.loads(journal_path.read_text(encoding="utf-8").strip())
     assert logged["action"] == "fastresume_patch"
     assert logged["backup_path"] == entry["backup_path"]
+
+
+def test_choose_repair_save_paths_rejects_broken_runtime_drift_to_tmp() -> None:
+    result = choose_repair_save_paths(
+        good_runtime_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+        broken_runtime_save_path="/tmp",
+        good_catalog_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+        broken_catalog_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+    )
+
+    assert result["good_effective_save_path"] == "/data/media/torrents/seeding/cross-seed/TorrentLeech"
+    assert result["broken_effective_save_path"] == "/data/media/torrents/seeding/cross-seed/TorrentLeech"
+    assert result["broken_reason"] == "catalog_broken_save_path_fallback"
+
+
+def test_choose_repair_save_paths_prefers_catalog_when_good_runtime_drifts() -> None:
+    result = choose_repair_save_paths(
+        good_runtime_save_path="/pool/media/torrents/seeding/cross-seed/TorrentLeech",
+        broken_runtime_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+        good_catalog_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+        broken_catalog_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+    )
+
+    assert result["good_effective_save_path"] == "/data/media/torrents/seeding/cross-seed/TorrentLeech"
+    assert result["good_reason"] == "catalog_good_save_path_fallback"
 
 
 def test_parse_args_defaults_log_path_to_empty_string() -> None:

@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from hashall.device import get_files_table_name
-from hashall.fastresume import patch_fastresume_file
+from hashall.fastresume import normalize_save_path, patch_fastresume_file
 from hashall.link_executor import create_hardlink_atomic
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
@@ -96,6 +96,68 @@ class RepairPlanItem:
     broken_qhash: Optional[str]
     good_qhash: Optional[str]
     same_inode: bool
+
+
+def _normalize_or_empty(path: str) -> str:
+    try:
+        return normalize_save_path(path)
+    except Exception:
+        return ""
+
+
+def choose_repair_save_paths(
+    *,
+    good_runtime_save_path: str,
+    broken_runtime_save_path: str,
+    good_catalog_save_path: str,
+    broken_catalog_save_path: str,
+) -> Dict[str, str]:
+    """Choose safe save-path anchors for repair work.
+
+    Repair is allowed to trust a known-good donor runtime path, but must not
+    blindly persist the broken torrent's current runtime path. The broken side
+    is anchored to catalog state unless runtime matches that known path.
+    """
+
+    good_runtime = _normalize_or_empty(good_runtime_save_path)
+    broken_runtime = _normalize_or_empty(broken_runtime_save_path)
+    good_catalog = _normalize_or_empty(good_catalog_save_path)
+    broken_catalog = _normalize_or_empty(broken_catalog_save_path)
+
+    if not good_catalog:
+        raise RuntimeError("good_catalog_save_path_missing")
+    if not broken_catalog:
+        raise RuntimeError("broken_catalog_save_path_missing")
+
+    if good_runtime and good_runtime != good_catalog:
+        good_effective = good_catalog
+        good_reason = "catalog_good_save_path_fallback"
+    elif good_runtime:
+        good_effective = good_runtime
+        good_reason = "validated_good_runtime_save_path"
+    else:
+        good_effective = good_catalog
+        good_reason = "catalog_good_save_path_missing_runtime"
+
+    if broken_runtime and broken_runtime == broken_catalog:
+        broken_effective = broken_runtime
+        broken_reason = "validated_broken_runtime_save_path"
+    else:
+        broken_effective = broken_catalog
+        broken_reason = (
+            "catalog_broken_save_path_fallback" if broken_runtime else "catalog_broken_save_path_missing_runtime"
+        )
+
+    return {
+        "good_effective_save_path": good_effective,
+        "good_reason": good_reason,
+        "broken_effective_save_path": broken_effective,
+        "broken_reason": broken_reason,
+        "good_runtime_save_path": good_runtime,
+        "broken_runtime_save_path": broken_runtime,
+        "good_catalog_save_path": good_catalog,
+        "broken_catalog_save_path": broken_catalog,
+    }
 
 
 class RunLogger:
@@ -763,8 +825,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.line(f"  good   state={state_progress_line(good_info)} save={good_info.save_path}")
         logger.line(f"  broken state={state_progress_line(broken_info)} save={broken_info.save_path}")
 
-        good_device = catalog.resolve_file_table(good_info.save_path + "/.placeholder")
-        broken_device = catalog.resolve_file_table(broken_info.save_path + "/.placeholder")
+        save_paths = choose_repair_save_paths(
+            good_runtime_save_path=good_info.save_path,
+            broken_runtime_save_path=broken_info.save_path,
+            good_catalog_save_path=good_identity.save_path,
+            broken_catalog_save_path=broken_identity.save_path,
+        )
+        good_effective_save_path = save_paths["good_effective_save_path"]
+        broken_effective_save_path = save_paths["broken_effective_save_path"]
+        logger.line(
+            "  good_target_save_path={target} reason={reason} runtime={runtime} catalog={catalog}".format(
+                target=good_effective_save_path,
+                reason=save_paths["good_reason"],
+                runtime=save_paths["good_runtime_save_path"] or "-",
+                catalog=save_paths["good_catalog_save_path"],
+            )
+        )
+        logger.line(
+            "  broken_target_save_path={target} reason={reason} runtime={runtime} catalog={catalog}".format(
+                target=broken_effective_save_path,
+                reason=save_paths["broken_reason"],
+                runtime=save_paths["broken_runtime_save_path"] or "-",
+                catalog=save_paths["broken_catalog_save_path"],
+            )
+        )
+
+        good_device = catalog.resolve_file_table(good_effective_save_path + "/.placeholder")
+        broken_device = catalog.resolve_file_table(broken_effective_save_path + "/.placeholder")
         same_fs = bool(good_device and broken_device and good_device[0].fs_uuid == broken_device[0].fs_uuid)
         logger.line(f"  same_fs={same_fs}")
 
@@ -794,8 +881,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_json(good_files_path, good_files)
         write_json(broken_files_path, broken_files)
         plan = build_repair_plan(
-            good_save=good_info.save_path,
-            broken_save=broken_info.save_path,
+            good_save=good_effective_save_path,
+            broken_save=broken_effective_save_path,
             good_files=good_files,
             broken_files=broken_files,
             quick_hash_lookup=catalog.quick_hash,
@@ -813,23 +900,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise RuntimeError("repair_plan_blocked ambiguous_or_missing_matches")
 
         logger.line(f"▸ P3 hardlink rebuild same_fs={same_fs}")
-        target_save_path = broken_info.save_path
+        target_save_path = broken_effective_save_path
+        target_reason = save_paths["broken_reason"]
         reuse_good_save_path = can_reuse_good_save_path_directly(plan)
         if reuse_good_save_path:
-            target_save_path = good_info.save_path
-            logger.line(f"  donor-reuse fallback target={target_save_path}")
+            target_save_path = good_effective_save_path
+            target_reason = save_paths["good_reason"]
+            logger.line(f"  donor-reuse fallback target={target_save_path} reason={target_reason}")
         if args.apply:
             if same_fs and not reuse_good_save_path:
                 execute_same_fs_rebuild(plan=plan, journal_path=work_journal, logger=logger)
             else:
-                target_save_path = good_info.save_path
-                logger.line(f"  setLocation-only target={target_save_path}")
+                target_save_path = good_effective_save_path
+                target_reason = save_paths["good_reason"]
+                logger.line(f"  setLocation-only target={target_save_path} reason={target_reason}")
         else:
             if same_fs and not reuse_good_save_path:
                 logger.line("  [dry-run] would rebuild hardlinks for garbage/missing; dup_copy stays in place")
             else:
-                logger.line(f"  [dry-run] would setLocation broken -> {good_info.save_path}")
-                target_save_path = good_info.save_path
+                logger.line(
+                    f"  [dry-run] would setLocation broken -> {good_effective_save_path} "
+                    f"reason={save_paths['good_reason']}"
+                )
+                target_save_path = good_effective_save_path
+                target_reason = save_paths["good_reason"]
 
         logger.line("▸ P4 qB fix")
         fastresume_path = fastresume_dir / f"{broken_hash}.fastresume"
@@ -839,7 +933,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ok = qb.set_location(broken_hash, target_save_path)
                 if not ok:
                     raise RuntimeError(f"set_location_failed error={qb.last_error or 'unknown'}")
-                logger.line(f"  setLocation ok target={target_save_path}")
+                logger.line(f"  setLocation ok target={target_save_path} reason={target_reason}")
             else:
                 logger.line("  setLocation skipped save_path already correct")
 
