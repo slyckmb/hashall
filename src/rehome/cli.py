@@ -327,6 +327,33 @@ def _iter_other_refresh_holders() -> list[dict[str, object]]:
     return holders
 
 
+def _read_lock_metadata(lock_filename: str) -> tuple[Path, dict[str, str]]:
+    lock_path = Path.home() / ".hashall" / lock_filename
+    metadata: dict[str, str] = {}
+    if not lock_path.exists():
+        return lock_path, metadata
+    try:
+        for line in lock_path.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = str(key).strip()
+            value = str(value).strip()
+            if key:
+                metadata[key] = value
+    except Exception:
+        return lock_path, {}
+    return lock_path, metadata
+
+
+def _pid_is_live(pid_text: str) -> bool:
+    try:
+        pid = int(str(pid_text).strip())
+    except Exception:
+        return False
+    return Path(f"/proc/{pid}").exists()
+
+
 def _acquire_rehome_lock() -> "file":
     """
     Acquire an exclusive process-level lock for rehome apply operations.
@@ -2181,6 +2208,53 @@ def refresh_dashboard_cmd(log_path: Optional[Path]) -> None:
         click.echo("❌ No refresh log found.", err=True)
         raise click.exceptions.Exit(1)
     click.echo(_render_refresh_dashboard(chosen))
+
+
+@cli.command("refresh-status")
+def refresh_status_cmd() -> None:
+    """Show refresh lock/owner status and the latest refresh log path."""
+    lock_path, metadata = _read_lock_metadata("refresh.lock")
+    holders = _iter_other_refresh_holders()
+    latest_log = _latest_refresh_log_path()
+
+    click.echo("🔎 Refresh status")
+    click.echo(f"   lock_path: {lock_path}")
+    if metadata:
+        pid_text = metadata.get("pid", "")
+        click.echo(f"   lock_metadata: present")
+        if pid_text:
+            click.echo(f"   lock_pid: {pid_text}")
+            click.echo(f"   lock_pid_live: {'yes' if _pid_is_live(pid_text) else 'no'}")
+        if metadata.get("host"):
+            click.echo(f"   lock_host: {metadata['host']}")
+        if metadata.get("started_at"):
+            click.echo(f"   lock_started_at: {metadata['started_at']}")
+        if metadata.get("cwd"):
+            click.echo(f"   lock_cwd: {metadata['cwd']}")
+    else:
+        click.echo("   lock_metadata: missing")
+
+    click.echo(f"   live_refresh_holders: {len(holders)}")
+    for idx, holder in enumerate(holders, start=1):
+        cmdline = " ".join(str(part) for part in holder.get("cmdline", []))
+        click.echo(
+            f"   holder[{idx}]: pid={holder.get('pid')} "
+            f"cwd={holder.get('cwd') or '-'} cmd={cmdline}"
+        )
+
+    if holders:
+        click.echo("   status: active_refresh_running")
+    elif metadata and metadata.get("pid") and _pid_is_live(metadata["pid"]):
+        click.echo("   status: lock_pid_live_no_holder_match")
+    elif metadata:
+        click.echo("   status: stale_lock_metadata_only")
+    else:
+        click.echo("   status: idle")
+
+    if latest_log is not None:
+        click.echo(f"   latest_refresh_log: {latest_log}")
+    else:
+        click.echo("   latest_refresh_log: -")
 
 
 @cli.command("qb-missing-audit")

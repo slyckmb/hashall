@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 from rehome import cli as cli_mod
 
@@ -100,3 +101,35 @@ def test_acquire_refresh_lock_rejects_live_refresh_even_after_lock_recreated(
     assert "Another hashall refresh process is already running" in err
     assert "pid=203069" in err
     assert "hashall refresh --verbose" in err
+
+
+def test_refresh_status_reports_live_holder(tmp_path, monkeypatch):
+    lock_dir = tmp_path / ".hashall"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    (lock_dir / "refresh.lock").write_text(
+        "pid=5150\nhost=testbox\nstarted_at=2026-03-13T13:00:00-04:00\ncwd=/tmp/run\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rehome.cli._pid_is_live", lambda _pid: False)
+    monkeypatch.setattr(
+        "rehome.cli._iter_other_refresh_holders",
+        lambda: [
+            {
+                "pid": 203069,
+                "cwd": "/worktree",
+                "cmdline": ["/venv/bin/hashall", "refresh", "--verbose"],
+            }
+        ],
+    )
+    monkeypatch.setattr("rehome.cli._latest_refresh_log_path", lambda: Path("/tmp/latest-refresh.log"))
+
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.cli, ["refresh-status"])
+
+    assert result.exit_code == 0
+    assert "lock_metadata: present" in result.output
+    assert "live_refresh_holders: 1" in result.output
+    assert "status: active_refresh_running" in result.output
+    assert "latest_refresh_log: /tmp/latest-refresh.log" in result.output

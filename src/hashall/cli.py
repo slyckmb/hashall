@@ -4032,11 +4032,13 @@ from rehome.cli import (
     cli as rehome_cli,
     refresh_cmd as rehome_refresh_cmd,
     refresh_dashboard_cmd as rehome_refresh_dashboard_cmd,
+    refresh_status_cmd as rehome_refresh_status_cmd,
 )
 
 cli.add_command(rehome_cli, name="rehome")
 cli.add_command(rehome_refresh_cmd, name="refresh")
 cli.add_command(rehome_refresh_dashboard_cmd, name="refresh-dashboard")
+cli.add_command(rehome_refresh_status_cmd, name="refresh-status")
 
 
 if __name__ == "__main__":
