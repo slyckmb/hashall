@@ -1,6 +1,125 @@
 # Operational Run State
 
-Last updated: 2026-03-21
+Last updated: 2026-03-25
+
+## 2026-03-25 Repair Fastresume Root Corruption Audit
+
+**Finding:**
+- The external report at `/mnt/config/docker/.agent/worktrees/cr-docker-20260323-114236-codex/docs/hashall-bug-9a731a-fastresume-root-corruption-20260325.md`
+  identified a real current bug in `hashall` repair logic.
+- `src/hashall/qb_repair_payload_group.py` was anchoring repair to `broken_info.save_path`
+  from the live qB runtime and could persist that path into fastresume.
+- If qB runtime had already drifted to a bad root such as `/tmp`, repair could cement that bad
+  root into:
+  - `save_path`
+  - `qBt-savePath`
+
+**What was fixed:**
+- Repair target-save-path selection is now anchored to catalog state rather than blindly trusting
+  the broken torrent's current runtime save path.
+- The repair path now logs:
+  - old runtime save path
+  - chosen target save path
+  - reason for the choice
+- This specifically closes the `/tmp` persistence path described in the external report.
+
+**Scope assessment:**
+- The confirmed bug was in the repair flow, not in the normal guarded rehome apply path.
+- Rehome already chooses target paths from planner/output state rather than from the broken
+  torrent's current runtime `save_path`.
+
+**Validation:**
+- `pytest -q tests/test_qb_repair_payload_group.py`
+- result: `13 passed`
+
+## 2026-03-25 Non-qB Tree Scan Coverage Audit
+
+**Finding:**
+- The `/pool/data` coverage gap is real, but it is primarily a product-model gap, not a failed
+  scan.
+- Current code and requirements define a payload as:
+  - "the on-disk content tree a torrent points to"
+- Current refresh behavior is therefore:
+  1. `hashall scan` populates per-device `files_*` tables for scanned filesystems
+  2. `hashall payload sync` connects to qB and materializes `payloads` only for qB torrent roots
+- That explains the current mismatch:
+  - `scan /pool/data` ran successfully
+  - current catalog still shows:
+    - `0` payload rows under `/pool/data/orphaned_data`
+    - `17` under `/pool/data/cross-seed-link`
+    - `6` under `/pool/data/cross-seed`
+    - `43` under `/pool/data/media`
+    - `21` under `/pool/data/seeds`
+    - `87` total under `/pool/data`
+  - only `26` `torrent_instances` currently point anywhere under `/pool/data`
+
+**Assessment:**
+- This does not match the operator intent of hashing as much content as possible for:
+  - `cross-seed`
+  - `jdupes`
+  - `hashall`
+  - pool-space analysis / reclaim planning
+- But it does match the current qB-centric payload model in the requirements and code.
+
+**Recommended remedy:**
+- Do **not** silently redefine `payloads` to mean "all scanned content."
+- Keep `payloads` as qB/torrent-root inventory.
+- Add a second durable content-inventory layer for non-qB trees under managed scan roots.
+  - inputs: `files_*` + selected managed roots
+  - outputs: canonical non-qB content roots / content groups for archive, orphan, and donor trees
+  - consumers:
+    - cross-seed donor analysis
+    - jdupes / dedup planning
+    - reclaim / orphan policy analysis
+    - future operator reporting
+- If that broader inventory is not desired, then the requirements must explicitly state that
+  non-qB managed-tree coverage is out of scope so operators do not assume whole-tree DB coverage.
+
+## 2026-03-25 Pool Headroom Snapshot
+
+**Current state:**
+- `df -h` now shows the pool datasets effectively full again:
+  - `/pool/data`: `27G` free
+  - `/pool/media`: `27G` free
+
+**Top-level `/pool/data` usage snapshot:**
+- `/pool/data/orphaned_data`: `2.3T`
+- `/pool/data/seeds`: `1.2T`
+- `/pool/data/media`: `567G`
+- `/pool/data/cross-seed-link`: `413G`
+- `/pool/data/cross-seed`: `68G`
+- `/pool/data/RecycleBin`: `690M`
+
+**Largest immediate policy/reclaim candidates:**
+1. `/pool/data/orphaned_data` (`2.3T`)
+   - largest space opportunity by far
+   - but still configured as `cross-seed` donor input today
+   - subtrees:
+     - `shows` `693G`
+     - `movies` `609G`
+     - `cross-seed` `463G`
+     - `books` `213G`
+     - `_flat` `139G`
+2. `/pool/data/seeds` (`1.2T`)
+   - likely highest-value next audit zone after orphan policy
+   - notable subtrees:
+     - `cross-seed` `458G`
+     - `_qbm_recycle` `319G`
+     - `_qb-unique-repair` `180G`
+     - `RecycleBin` `140G`
+3. `/pool/data/cross-seed-link` (`413G`)
+   - should not be bulk-deleted blindly
+   - current catalog/qB only see a small active subset there, but broader non-qB visibility is
+     incomplete under the current model
+
+**Recommended reclaim order:**
+1. Decide orphan-donor policy first.
+   - If orphaned data is no longer meant to feed `cross-seed`, remove it from `cross-seed`
+     `dataDirs` and reclaim there first.
+2. Audit `/pool/data/seeds` next, especially `_qbm_recycle`, `RecycleBin`, and
+   `_qb-unique-repair`.
+3. Only then consider broader cleanup under `/pool/data/cross-seed-link` / `cross-seed`, because
+   current catalog coverage there is not enough to support blind deletion.
 
 ## 2026-03-21 Fastresume Rollback Fix
 
@@ -600,23 +719,28 @@ Last updated: 2026-03-13 (historical section below)
      - or add a durable non-qB content inventory layer with clear refresh/prune semantics
    - If the current qB-centric behavior is intentional, document that requirement explicitly so operators do not assume whole-tree coverage.
 6. Develop a concrete plan to increase headroom on `pool`.
-   - Current state after the pilot and batch 2 cleanup is still only about `99G` free on both `/pool/data` and `/pool/media`.
+   - Current state is now tighter again: about `27G` free on both `/pool/data` and `/pool/media`.
    - Recent relocation work is not improving reported free space enough to justify continuing blindly.
    - Produce ranked reclaim options with estimated GiB impact, dependency notes, and operational risk.
 7. Re-validate the `West Wing` lane on current code before using it as a normal migration example if that lane is still pending.
    - Earlier bugs and rollback behavior changed the donor/view state enough that old assumptions are not trustworthy without a fresh check.
+8. Review the external fastresume corruption report, investigate, and report findings.
+   - Report path:
+     - `/mnt/config/docker/.agent/worktrees/cr-docker-20260323-114236-codex/docs/hashall-bug-9a731a-fastresume-root-corruption-20260325.md`
+   - Determine whether the report describes:
+     - a current `hashall` bug still present in this branch
+     - behavior already fixed by the recent fastresume / rollback / qB-settle work
+     - or a cross-repo / deployment-specific integration issue outside this worktree
+   - Produce a concrete finding with impact, affected code path, and required remediation if any.
 
 ### Proposals
 
-1. Add a `hashall refresh status` or similar lock-inspection helper.
-   - Goal: make the live-owner / stale-lock distinction explicit without manual tmux + `/proc` inspection.
-2. Improve refresh lock-holder diagnostics further.
-   - Current code now rejects a second refresh even if `refresh.lock` was deleted and recreated while a live owner survived.
-   - A dedicated operator-facing status command would still be clearer.
-3. Add lightweight operator docs for payload-sync resume state.
-   - Explain the per-scope state files under `~/.hashall/payload-sync-upgrade-state/`.
-   - Explain when they are removed automatically and when an interrupted run may resume from them.
-4. If cross-repo alignment work is reopened, update the external `silo` repo to follow the current `hashall` qB helper/cache contract.
+1. Improve refresh lock-holder diagnostics further if `hashall refresh-status` still leaves operator ambiguity.
+   - Current code now exposes:
+     - `hashall refresh-status`
+     - live holder PIDs/cmdlines
+     - lock metadata vs stale-lock state
+2. If cross-repo alignment work is reopened, update the external `silo` repo to follow the current `hashall` qB helper/cache contract.
    - Treat this as separate from required migration execution work in this repo.
 
 ## Immediate Checklist

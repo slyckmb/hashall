@@ -1,5 +1,42 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-03-25 Active Findings (compact-safe) — UPDATED
+
+- External report `hashall-bug-9a731a-fastresume-root-corruption-20260325.md` was correct about a
+  current bug in the repair path:
+  - `src/hashall/qb_repair_payload_group.py` could trust `broken_info.save_path`
+  - that bad runtime path could then be written into fastresume
+  - example failure mode: `/tmp` becomes persisted `save_path` / `qBt-savePath`
+- Current code now:
+  - anchors repair target-save-path selection to catalog state instead of the broken torrent's
+    live runtime save path
+  - logs chosen target save path plus the reason it was selected
+  - regression coverage includes the `/tmp` drift case
+- Key design finding on `/pool/data` coverage:
+  - the scan itself is not the missing piece
+  - `scan /pool/data` populates `files_*`
+  - `payload sync` then materializes `payloads` only for qB torrent roots
+  - that matches the current definition of payloads as "the on-disk content tree a torrent points
+    to"
+  - it does **not** match the broader operator intent of indexing as much content as possible
+- Recommended remedy for that gap:
+  - keep `payloads` qB/torrent-root scoped
+  - add a separate durable non-qB content inventory layer for managed scan roots such as
+    `/pool/data/orphaned_data`
+  - if that broader inventory is not desired, update requirements/docs explicitly so operators do
+    not assume whole-tree coverage
+- Current pool headroom reality has tightened again:
+  - `/pool/data`: `27G` free
+  - `/pool/media`: `27G` free
+  - largest reclaim/policy targets currently visible:
+    - `/pool/data/orphaned_data`: `2.3T`
+    - `/pool/data/seeds`: `1.2T`
+    - `/pool/data/cross-seed-link`: `413G`
+- Recommended reclaim order:
+  1. decide orphan-donor policy first
+  2. audit `/pool/data/seeds`, especially `_qbm_recycle`, `RecycleBin`, `_qb-unique-repair`
+  3. only then consider broader cleanup under `cross-seed-link` / `cross-seed`
+
 ## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
 
 - `hashall` is now `0.8.9`
@@ -390,7 +427,13 @@ Historical snapshot:
     - current state after pilot + batch 2: `/pool/data` ≈ `99G` free, `/pool/media` ≈ `99G` free
     - current relocation batches are not increasing reported free space enough to justify continuing blindly
     - produce ranked reclaim options with estimated GiB impact and operational risk
+  - review the external fastresume corruption report, investigate, and report findings
+    - report path: `/mnt/config/docker/.agent/worktrees/cr-docker-20260323-114236-codex/docs/hashall-bug-9a731a-fastresume-root-corruption-20260325.md`
+    - determine whether it describes:
+      - a current `hashall` bug already present in this branch
+      - a stale behavior already fixed here
+      - or a new cross-repo / deployment-specific integration issue
+    - produce a concrete finding with impact, affected code path, and required remediation if any
 - Proposals:
-  - add a refresh status / lock-inspection helper
-  - document payload-sync resume checkpoints for operators
+  - improve refresh lock-holder diagnostics further if `refresh-status` still leaves operator ambiguity
   - do any future cross-repo qB helper alignment against `silo`, not the old `qbitui` identity

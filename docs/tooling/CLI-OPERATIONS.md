@@ -1,6 +1,6 @@
 # Hashall CLI Operations (Canonical)
 
-Last updated: 2026-02-28
+Last updated: 2026-03-25
 Status: canonical
 
 ## Purpose
@@ -54,10 +54,27 @@ hashall payload siblings <torrent_hash>
 ```bash
 hashall refresh --verbose --scan-hash-mode fast --drift-policy quick
 hashall refresh --verbose --scan-hash-mode full --drift-policy full
+hashall refresh-status
+hashall refresh-dashboard
 hashall sha256-backfill --device pool --dry-run
 hashall sha256-backfill --device pool
 hashall sha256-verify --device pool
 ```
+
+Guidance:
+
+- `hashall refresh-status` is the fast operator check for:
+  - current `refresh.lock` metadata
+  - whether the lock PID is still live
+  - any other live refresh holder processes detected from `/proc`
+  - the latest refresh log path
+- `hashall refresh-dashboard` renders the phase/task view for the latest refresh log by default.
+- `hashall payload sync --upgrade-missing` now writes per-scope resume checkpoints under:
+  - `~/.hashall/payload-sync-upgrade-state/`
+- Those checkpoint files are:
+  - reused automatically on the next matching upgrade scope
+  - ignored when the checkpoint is stale relative to current DB state
+  - removed automatically when the upgrade stage completes cleanly
 
 ### qB Cache / Compatibility
 
@@ -104,6 +121,7 @@ Root names remain as compatibility wrappers.
 - If content drift is suspected, do not trust metadata-only scans; rerun scan/refresh with `--drift-policy quick` or `--drift-policy full`.
 - If plan conflicts with live qB state, rebuild the plan.
 - If a command appears hung, check process and DB lock status.
+- For refresh-specific triage, run `hashall refresh-status` before deleting `~/.hashall/refresh.lock`.
 
 ## Related Canonical Docs
 
