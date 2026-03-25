@@ -4454,6 +4454,12 @@ class DemotionExecutor:
             return False
         if not donor_root.exists():
             return False
+        if donor_root.is_file():
+            self._log(
+                "  cleanup_unused_target_donor_skipped "
+                "reason=file_target_requires_manual_review",
+            )
+            return False
 
         try:
             if donor_root.is_dir():

@@ -4027,10 +4027,16 @@ def devices_preferred_mount(device, mount_point, db):
 # Canonical CLI surface:
 # - `hashall rehome ...` exposes the full rehome command tree
 # - `hashall refresh` is a direct top-level alias for the rehome refresh flow
-from rehome.cli import cli as rehome_cli, refresh_cmd as rehome_refresh_cmd
+# - `hashall refresh-dashboard` exposes the refresh task status view directly
+from rehome.cli import (
+    cli as rehome_cli,
+    refresh_cmd as rehome_refresh_cmd,
+    refresh_dashboard_cmd as rehome_refresh_dashboard_cmd,
+)
 
 cli.add_command(rehome_cli, name="rehome")
 cli.add_command(rehome_refresh_cmd, name="refresh")
+cli.add_command(rehome_refresh_dashboard_cmd, name="refresh-dashboard")
 
 
 if __name__ == "__main__":

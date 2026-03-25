@@ -358,3 +358,15 @@ If context is compacted, recover with this sequence:
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`
+
+## 2026-03-24 Current TODO Split
+
+- Must do:
+  - let the current tmux `%61` refresh finish; do not start another refresh concurrently
+  - generate a fresh `/pool/data -> /pool/media/torrents/seeding` relocate plan after that refresh completes
+  - keep `Alien Romulus` and `Shining.Girls...` out of plain migration batches
+  - re-check the `West Wing` lane on current code before treating it as a normal migration slice
+- Proposals:
+  - add a refresh status / lock-inspection helper
+  - document payload-sync resume checkpoints for operators
+  - do any future cross-repo qB helper alignment against `silo`, not the old `qbitui` identity

@@ -6,13 +6,14 @@ import click
 import fcntl
 import json
 import os
+import re
 import socket
 import sqlite3
 import subprocess
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -35,6 +36,7 @@ from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
 
 DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
+DEFAULT_REFRESH_LOG_DIR = Path.home() / ".logs" / "hashall" / "rehome" / "refresh"
 
 
 def _debug_enabled() -> bool:
@@ -362,6 +364,347 @@ def _emit_banner() -> None:
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
     script = Path(sys.argv[0]).name
     print(f"🧾 {script} v{__version__} @ {timestamp}", flush=True)
+
+
+def _fmt_seconds_brief(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "-"
+    total = max(0, int(round(float(seconds))))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _fmt_dt(value: Optional[datetime]) -> str:
+    if value is None:
+        return "-"
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_elapsed_seconds(text: str) -> Optional[int]:
+    value = str(text or "").strip()
+    if not value:
+        return None
+    total = 0
+    matched = False
+    for amount, unit in re.findall(r"(\d+)([hms])", value):
+        matched = True
+        n = int(amount)
+        if unit == "h":
+            total += n * 3600
+        elif unit == "m":
+            total += n * 60
+        elif unit == "s":
+            total += n
+    if matched:
+        return total
+    return None
+
+
+def _parse_refresh_started_at(lines: list[str]) -> Optional[datetime]:
+    for line in lines:
+        if line.startswith("Rehome Refresh  "):
+            value = line[len("Rehome Refresh  "):].strip()
+            try:
+                return datetime.strptime(value, "%Y-%m-%d %H:%M")
+            except ValueError:
+                return None
+    return None
+
+
+def _latest_refresh_log_path(log_dir: Path = DEFAULT_REFRESH_LOG_DIR) -> Optional[Path]:
+    candidates = sorted(log_dir.glob("*.log"))
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
+def _parse_refresh_roots_from_log(lines: list[str]) -> list[tuple[str, str, str]]:
+    roots: list[tuple[str, str, str]] = []
+    in_roots = False
+    for line in lines:
+        if line.startswith("  Scan roots ("):
+            in_roots = True
+            continue
+        if in_roots:
+            if not line.startswith("    ["):
+                break
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                alias = parts[1]
+                role = parts[2]
+                path = " ".join(parts[3:])
+                roots.append((path, alias, role))
+    return roots
+
+
+def _parse_refresh_dedup_mode(lines: list[str]) -> str:
+    for line in lines:
+        if line.startswith("  dedup"):
+            return line.split()[-1].strip().lower()
+    return "execute"
+
+
+def _build_refresh_phase_plan(lines: list[str]) -> list[str]:
+    roots = _parse_refresh_roots_from_log(lines)
+    dedup_mode = _parse_refresh_dedup_mode(lines)
+    phases = ["doctor preflight"]
+    active_root = roots[0][0] if roots else ""
+    dest_root = roots[1][0] if len(roots) > 1 and roots[1][2] == "dest" else active_root
+    active_alias = roots[0][1] if roots else "active"
+    dest_alias = roots[1][1] if len(roots) > 1 and roots[1][2] == "dest" else active_alias
+
+    phases.append(f"scan active_root ({active_root})")
+    if dest_root != active_root:
+        phases.append(f"scan dest_root ({dest_root})")
+    phases.append(f"dupes auto-upgrade (active={active_alias})")
+    phases.append(f"dupes auto-upgrade (dest={dest_alias})")
+
+    managed = [(path, alias) for path, alias, role in roots if role == "managed"]
+    for managed_path, managed_alias in managed:
+        phases.append(f"scan managed root ({managed_path})")
+        phases.append(f"dupes auto-upgrade (managed={managed_alias})")
+        if dedup_mode != "off":
+            phases.append(f"link plan ({managed_alias})")
+            phases.append(f"link execute ({managed_alias})")
+
+    if dedup_mode != "off":
+        for alias in (active_alias, dest_alias):
+            phases.append(f"link plan ({alias})")
+            phases.append(f"link execute ({alias})")
+
+    phases.append("payload sync --upgrade-missing")
+    return phases
+
+
+def _normalize_refresh_label(label: str) -> str:
+    label = label.strip()
+    if label.startswith("link execute plan_id="):
+        open_paren = label.rfind("(")
+        close_paren = label.rfind(")")
+        if open_paren != -1 and close_paren > open_paren:
+            alias = label[open_paren + 1:close_paren].strip()
+            return f"link execute ({alias})"
+    return label
+
+
+def _parse_refresh_started_labels(lines: list[str]) -> list[str]:
+    labels: list[str] = []
+    for line in lines:
+        if line.startswith("[refresh] "):
+            labels.append(_normalize_refresh_label(line[len("[refresh] "):]))
+    return labels
+
+
+def _parse_refresh_step_results(lines: list[str]) -> dict[str, tuple[str, str, Optional[int]]]:
+    results: dict[str, tuple[str, str, Optional[int]]] = {}
+    current_label: Optional[str] = None
+    current_block: list[str] = []
+    error_markers = ("Traceback", "OperationalError", "Unexpected error", "❌", "FAILED", "Aborting")
+    for line in lines:
+        if line.startswith("[refresh] "):
+            current_block = []
+            current_label = _normalize_refresh_label(line[len("[refresh] "):])
+            continue
+        if current_label is None:
+            continue
+        current_block.append(line)
+        stripped = line.strip()
+        if stripped.startswith("elapsed "):
+            tail = stripped[len("elapsed "):]
+            if "  " in tail:
+                elapsed_text, status_text = tail.split("  ", 1)
+            else:
+                parts = tail.rsplit(" ", 1)
+                elapsed_text = parts[0]
+                status_text = parts[1] if len(parts) > 1 else ""
+            status = status_text.strip()
+            if status == "OK" and any(marker in block_line for block_line in current_block for marker in error_markers):
+                status = "WARN"
+            elapsed_text = elapsed_text.strip()
+            results[current_label] = (elapsed_text, status, _parse_elapsed_seconds(elapsed_text))
+            current_label = None
+            current_block = []
+    return results
+
+
+def _parse_refresh_in_progress_elapsed_seconds(lines: list[str], label: str) -> Optional[int]:
+    current_label: Optional[str] = None
+    latest_elapsed: Optional[int] = None
+    heartbeat_pat = re.compile(r"\[refresh\] still running elapsed=(\d+)s")
+    for line in lines:
+        if line.startswith("[refresh] "):
+            current_label = _normalize_refresh_label(line[len("[refresh] "):])
+            continue
+        if current_label != label:
+            continue
+        m = heartbeat_pat.search(line)
+        if m:
+            latest_elapsed = int(m.group(1))
+            continue
+        if line.strip().startswith("elapsed "):
+            break
+    return latest_elapsed
+
+
+def _estimate_payload_sync_eta(lines: list[str]) -> str:
+    progress_pat = re.compile(r"upgrade_progress roots_done=(\d+)/(\d+) completed=(\d+) failed=(\d+)")
+    heartbeat_pat = re.compile(r"\[refresh\] still running elapsed=(\d+)s")
+    points: list[tuple[int, int]] = []
+    for i, line in enumerate(lines):
+        m = progress_pat.search(line)
+        if not m:
+            continue
+        elapsed = None
+        for j in range(i, max(-1, i - 60), -1):
+            h = heartbeat_pat.search(lines[j])
+            if h:
+                elapsed = int(h.group(1))
+                break
+        if elapsed is None:
+            continue
+        roots_done = int(m.group(1))
+        total_roots = int(m.group(2))
+        points.append((elapsed, roots_done))
+    if len(points) < 2:
+        return "ETA unavailable"
+    window = points[-40:] if len(points) >= 40 else points
+    elapsed_delta = window[-1][0] - window[0][0]
+    roots_delta = window[-1][1] - window[0][1]
+    if elapsed_delta <= 0 or roots_delta <= 0:
+        return "ETA unavailable"
+    rate = roots_delta / elapsed_delta
+    latest_elapsed, latest_roots = window[-1]
+    total_roots = int(progress_pat.search(next(line for line in reversed(lines) if progress_pat.search(line))).group(2))
+    remaining = max(0, total_roots - latest_roots)
+    eta_seconds = remaining / rate if rate > 0 else None
+    percent = 0.0 if total_roots <= 0 else (100.0 * latest_roots / total_roots)
+    return f"{latest_roots}/{total_roots} ({percent:.0f}%) eta={_fmt_seconds_brief(eta_seconds)}"
+
+
+def _estimate_payload_sync_remaining_seconds(lines: list[str]) -> Optional[int]:
+    progress_pat = re.compile(r"upgrade_progress roots_done=(\d+)/(\d+) completed=(\d+) failed=(\d+)")
+    heartbeat_pat = re.compile(r"\[refresh\] still running elapsed=(\d+)s")
+    points: list[tuple[int, int, int]] = []
+    for i, line in enumerate(lines):
+        m = progress_pat.search(line)
+        if not m:
+            continue
+        elapsed = None
+        for j in range(i, max(-1, i - 60), -1):
+            h = heartbeat_pat.search(lines[j])
+            if h:
+                elapsed = int(h.group(1))
+                break
+        if elapsed is None:
+            continue
+        points.append((elapsed, int(m.group(1)), int(m.group(2))))
+    if len(points) < 2:
+        return None
+    window = points[-40:] if len(points) >= 40 else points
+    elapsed_delta = window[-1][0] - window[0][0]
+    roots_delta = window[-1][1] - window[0][1]
+    if elapsed_delta <= 0 or roots_delta <= 0:
+        return None
+    rate = roots_delta / elapsed_delta
+    latest_elapsed, latest_roots, total_roots = window[-1]
+    remaining = max(0, total_roots - latest_roots)
+    if rate <= 0:
+        return None
+    return int(round(remaining / rate))
+
+
+def _render_refresh_dashboard(log_path: Path) -> str:
+    lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    phases = _build_refresh_phase_plan(lines)
+    started = _parse_refresh_started_labels(lines)
+    results = _parse_refresh_step_results(lines)
+    started_set = set(started)
+    current_label = None
+    for label in reversed(started):
+        if label not in results:
+            current_label = label
+            break
+
+    started_at = _parse_refresh_started_at(lines)
+    cursor_dt = started_at
+    rows: list[tuple[str, str, str, str, str]] = []
+    for phase in phases:
+        if phase in results:
+            elapsed_text, status_text, elapsed_seconds = results[phase]
+            if status_text == "OK":
+                state = "done"
+            elif status_text == "WARN":
+                state = "warning"
+            else:
+                state = "failed"
+            start_dt = cursor_dt
+            stop_dt = (start_dt + timedelta(seconds=elapsed_seconds)) if (start_dt and elapsed_seconds is not None) else None
+            rows.append((phase, state, _fmt_dt(start_dt), _fmt_dt(stop_dt), elapsed_text))
+            cursor_dt = stop_dt or cursor_dt
+        elif phase == current_label:
+            elapsed_seconds = _parse_refresh_in_progress_elapsed_seconds(lines, phase)
+            estimated_remaining_seconds = (
+                _estimate_payload_sync_remaining_seconds(lines)
+                if phase == "payload sync --upgrade-missing"
+                else None
+            )
+            estimated_total_seconds = None
+            if elapsed_seconds is not None:
+                estimated_total_seconds = elapsed_seconds + (estimated_remaining_seconds or 0)
+            elapsed_text = f"({_fmt_seconds_brief(estimated_total_seconds)})" if estimated_total_seconds is not None else "-"
+            start_dt = cursor_dt
+            stop_dt = (
+                _fmt_dt(start_dt + timedelta(seconds=estimated_total_seconds))
+                if (start_dt and estimated_total_seconds is not None)
+                else "-"
+            )
+            rows.append((phase, "in_progress", _fmt_dt(start_dt), stop_dt, elapsed_text))
+        elif phase in started_set:
+            start_dt = cursor_dt
+            rows.append((phase, "in_progress", _fmt_dt(start_dt), "-", "-"))
+        else:
+            rows.append((phase, "todo", "-", "-", "-"))
+
+    task_w = max(len("TASK"), max(len(task) for task, _, _, _, _ in rows))
+    state_w = max(len("STATUS"), max(len(state) for _, state, _, _, _ in rows))
+    start_w = max(len("START"), max(len(text) for _, _, text, _, _ in rows))
+    stop_w = max(len("STOP"), max(len(text) for _, _, _, text, _ in rows))
+    duration_w = max(len("DURATION"), max(len(text) for _, _, _, _, text in rows))
+
+    def style_status(text: str) -> str:
+        if text == "done":
+            return click.style(text, fg="green")
+        if text == "warning":
+            return click.style(text, fg="yellow")
+        if text == "failed":
+            return click.style(text, fg="red")
+        if text == "in_progress":
+            return click.style(text, fg="cyan")
+        if text == "todo":
+            return click.style(text, fg="bright_black")
+        return text
+
+    out = [
+        f"Refresh dashboard: {log_path}",
+        f"{'TASK':<{task_w}}  {'STATUS':<{state_w}}  {'START':<{start_w}}  {'STOP':<{stop_w}}  {'DURATION':<{duration_w}}",
+        f"{'-' * task_w}  {'-' * state_w}  {'-' * start_w}  {'-' * stop_w}  {'-' * duration_w}",
+    ]
+    for task, state, start_text, stop_text, duration_text in rows:
+        out.append(
+            f"{task:<{task_w}}  "
+            f"{style_status(state):<{state_w + 9}}  "
+            f"{start_text:<{start_w}}  "
+            f"{stop_text:<{stop_w}}  "
+            f"{duration_text:<{duration_w}}"
+        )
+    out.append("")
+    out.append("Note: START/STOP timestamps are inferred from run start + phase durations, not native per-line log timestamps.")
+    return "\n".join(out)
 
 
 def _build_payload_sync_command(
@@ -1821,6 +2164,23 @@ def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debu
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
+
+
+@cli.command("refresh-dashboard")
+@click.option(
+    "--log",
+    "log_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Refresh log to inspect (defaults to latest under ~/.logs/hashall/rehome/refresh/).",
+)
+def refresh_dashboard_cmd(log_path: Optional[Path]) -> None:
+    """Show a task/status dashboard for the latest refresh run."""
+    chosen = log_path or _latest_refresh_log_path()
+    if chosen is None:
+        click.echo("❌ No refresh log found.", err=True)
+        raise click.exceptions.Exit(1)
+    click.echo(_render_refresh_dashboard(chosen))
 
 
 @cli.command("qb-missing-audit")

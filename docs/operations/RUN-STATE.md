@@ -556,6 +556,35 @@ Last updated: 2026-03-13 (historical section below)
 - `~/.logs/hashall/rehome/auto/`
 - `~/.logs/hashall/reports/qbit-triage/`
 
+## 2026-03-24 Current Must-Do vs Proposal Split
+
+### Must Do
+
+1. Let the live `hashall refresh --verbose` run finish before starting any other refresh.
+   - A concurrent second refresh on 2026-03-23 failed with `sqlite3.OperationalError: database is locked`.
+   - Current live owner was verified in tmux pane `%61`.
+   - Treat parallel refresh as an operationally unsafe action.
+2. After the live refresh completes, generate a fresh relocation plan for the active `/pool/data -> /pool/media/torrents/seeding` lane.
+   - Do not trust older plan output after the in-flight refresh changes catalog freshness.
+3. Keep the known carve-outs out of plain migration batches:
+   - `Alien Romulus`
+   - `Shining.Girls...`
+4. Re-validate the `West Wing` lane on current code before using it as a normal migration example if that lane is still pending.
+   - Earlier bugs and rollback behavior changed the donor/view state enough that old assumptions are not trustworthy without a fresh check.
+
+### Proposals
+
+1. Add a `hashall refresh status` or similar lock-inspection helper.
+   - Goal: make the live-owner / stale-lock distinction explicit without manual tmux + `/proc` inspection.
+2. Improve refresh lock-holder diagnostics further.
+   - Current code now rejects a second refresh even if `refresh.lock` was deleted and recreated while a live owner survived.
+   - A dedicated operator-facing status command would still be clearer.
+3. Add lightweight operator docs for payload-sync resume state.
+   - Explain the per-scope state files under `~/.hashall/payload-sync-upgrade-state/`.
+   - Explain when they are removed automatically and when an interrupted run may resume from them.
+4. If cross-repo alignment work is reopened, update the external `silo` repo to follow the current `hashall` qB helper/cache contract.
+   - Treat this as separate from required migration execution work in this repo.
+
 ## Immediate Checklist
 
 1. The `West Wing S07` cross-device `REUSE` pilot is now proven end-to-end:

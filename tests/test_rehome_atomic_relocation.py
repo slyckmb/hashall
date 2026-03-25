@@ -343,6 +343,28 @@ def test_cleanup_unused_target_donor_keeps_single_file_direct_target(tmp_path):
     assert "cleanup_unused_target_donor" not in plan
 
 
+def test_cleanup_unused_target_donor_keeps_file_target_without_plan_metadata(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+
+    donor_file = tmp_path / "pool-media" / "tracker" / "movie.mkv"
+    donor_file.parent.mkdir(parents=True, exist_ok=True)
+    donor_file.write_bytes(b"movie")
+
+    plan = {
+        "_reality_snapshot_pre": {"summary": {"out_of_plan_siblings": 0}},
+        "constructed_payload_roots": {"hash-a": str(tmp_path / "pool-media" / "_rehome-unique" / "hash-a")},
+    }
+
+    removed = executor._cleanup_unused_target_donor(
+        plan,
+        SimpleNamespace(target_path=donor_file),
+    )
+
+    assert removed is False
+    assert donor_file.exists()
+    assert "cleanup_unused_target_donor" not in plan
+
+
 def test_atomic_relocation_rollback_uses_qb_runtime_source_path(tmp_path, monkeypatch):
     class AliasQbitClient(FakeQbitClient):
         def __init__(self):
