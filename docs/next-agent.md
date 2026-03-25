@@ -366,6 +366,10 @@ Historical snapshot:
   - generate a fresh `/pool/data -> /pool/media/torrents/seeding` relocate plan after that refresh completes
   - keep `Alien Romulus` and `Shining.Girls...` out of plain migration batches
   - re-check the `West Wing` lane on current code before treating it as a normal migration slice
+  - investigate why `hashall refresh` scanned `/pool/data` but the catalog still does not cover the whole `/pool/data` tree
+    - confirmed current catalog counts: `0` rows under `/pool/data/orphaned_data`, `17` under `/pool/data/cross-seed-link`, `23` under `/pool/data/cross-seed`, `87` total under `/pool/data`
+    - this conflicts with the operator expectation that the whole `/pool/data` tree would be represented after `scan /pool/data`
+    - determine whether scan coverage, payload construction, or a pruning/materialization rule is filtering most of `/pool/data`
 - Proposals:
   - add a refresh status / lock-inspection helper
   - document payload-sync resume checkpoints for operators

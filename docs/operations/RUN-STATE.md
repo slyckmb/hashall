@@ -569,7 +569,16 @@ Last updated: 2026-03-13 (historical section below)
 3. Keep the known carve-outs out of plain migration batches:
    - `Alien Romulus`
    - `Shining.Girls...`
-4. Re-validate the `West Wing` lane on current code before using it as a normal migration example if that lane is still pending.
+4. Investigate why `hashall refresh` scanned `/pool/data` but the catalog does not represent the full `/pool/data` tree.
+   - The completed 2026-03-22 refresh log explicitly ran `scan /pool/data`.
+   - Current catalog counts show:
+     - `0` payload rows under `/pool/data/orphaned_data`
+     - `17` under `/pool/data/cross-seed-link`
+     - `23` under `/pool/data/cross-seed`
+     - `87` total under `/pool/data`
+   - This does not match the operator expectation that all of `/pool/data` would be in the DB.
+   - Determine whether `scan` is filtering, `payloads` only materializes certain roots, or later pruning drops most of the scanned tree.
+5. Re-validate the `West Wing` lane on current code before using it as a normal migration example if that lane is still pending.
    - Earlier bugs and rollback behavior changed the donor/view state enough that old assumptions are not trustworthy without a fresh check.
 
 ### Proposals

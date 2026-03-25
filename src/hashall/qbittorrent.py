@@ -320,22 +320,34 @@ class QBittorrentClient:
         Returns:
             True if authentication successful, False otherwise
         """
-        try:
-            response = self.session.post(
-                f"{self.base_url}/api/v2/auth/login",
-                data={"username": self.username, "password": self.password},
-                timeout=self.request_timeout,
-            )
-            if response.text == "Ok.":
-                self._authenticated = True
-                self.last_error = None
-                return True
-            self.last_error = f"login failed: {response.text}"
-            return False
-        except requests.RequestException as e:
-            self.last_error = str(e)
-            print(f"⚠️ qBittorrent login failed: {e}")
-            return False
+        last_exception: Optional[requests.RequestException] = None
+        for attempt in range(1, self.request_retries + 1):
+            try:
+                response = self.session.post(
+                    f"{self.base_url}/api/v2/auth/login",
+                    data={"username": self.username, "password": self.password},
+                    timeout=self.request_timeout,
+                )
+                if response.text == "Ok.":
+                    self._authenticated = True
+                    self.last_error = None
+                    return True
+                self.last_error = f"login failed: {response.text}"
+                self._authenticated = False
+                return False
+            except requests.RequestException as e:
+                last_exception = e
+                self.last_error = str(e)
+                self._authenticated = False
+                if attempt < self.request_retries:
+                    time.sleep(self._retry_delay_seconds(attempt))
+                    continue
+                print(f"⚠️ qBittorrent login failed: {e}")
+                return False
+        if last_exception is not None:
+            self.last_error = str(last_exception)
+            print(f"⚠️ qBittorrent login failed: {last_exception}")
+        return False
 
     def is_reachable(self) -> bool:
         """

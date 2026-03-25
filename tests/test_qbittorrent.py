@@ -170,6 +170,57 @@ def test_is_reachable_uses_login_when_not_authenticated(monkeypatch):
     assert calls["count"] == 1
 
 
+def test_login_retries_transient_connection_failures(monkeypatch):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.request_retries = 3
+    client.retry_backoff_base = 0.25
+    client.retry_backoff_cap = 8.0
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    class FakeResponse:
+        text = "Ok."
+
+    calls = {"count": 0}
+
+    def fake_post(_url, data=None, timeout=None):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise requests.ConnectionError("temporary login reset")
+        assert data == {"username": "u", "password": "p"}
+        return FakeResponse()
+
+    monkeypatch.setattr(client.session, "post", fake_post)
+
+    assert client.login() is True
+    assert client._authenticated is True
+    assert client.last_error is None
+    assert calls["count"] == 3
+    assert sleeps == [0.25, 0.5]
+
+
+def test_login_prints_warning_only_after_retry_exhaustion(monkeypatch, capsys):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.request_retries = 2
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    calls = {"count": 0}
+
+    def fake_post(_url, data=None, timeout=None):
+        calls["count"] += 1
+        raise requests.ConnectionError("still unavailable")
+
+    monkeypatch.setattr(client.session, "post", fake_post)
+
+    assert client.login() is False
+    assert client._authenticated is False
+    assert calls["count"] == 2
+    captured = capsys.readouterr()
+    assert captured.out.count("qBittorrent login failed") == 1
+    assert "still unavailable" in client.last_error
+
+
 def test_is_reachable_reauthenticates_on_forbidden(monkeypatch):
     client = QBittorrentClient(base_url="http://example", username="u", password="p")
     client._authenticated = True
