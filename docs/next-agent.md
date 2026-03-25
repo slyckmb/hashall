@@ -369,7 +369,27 @@ Historical snapshot:
   - investigate why `hashall refresh` scanned `/pool/data` but the catalog still does not cover the whole `/pool/data` tree
     - confirmed current catalog counts: `0` rows under `/pool/data/orphaned_data`, `17` under `/pool/data/cross-seed-link`, `23` under `/pool/data/cross-seed`, `87` total under `/pool/data`
     - this conflicts with the operator expectation that the whole `/pool/data` tree would be represented after `scan /pool/data`
-    - determine whether scan coverage, payload construction, or a pruning/materialization rule is filtering most of `/pool/data`
+    - important current finding: `scan /pool/data` populates per-device `files_*` tables, but `payloads` are materialized later by `build_payload()`
+    - in the refresh flow, those `build_payload()` calls come from `payload sync`, which iterates qB torrents, so non-qB trees like `/pool/data/orphaned_data` may never become payload rows
+    - determine whether that is the intended model or a real gap in coverage/documentation
+  - evaluate requirements and design gaps around non-qB tree scans, and propose a remedy
+    - operator intent is to hash as much content as possible, not only qB-backed roots
+    - goal is to let `cross-seed`, `jdupes`, and `hashall` reason over the same broader content surface and manage seed data correctly
+    - specifically assess whether non-qB trees under managed scan roots should also materialize into `payloads`, or whether a second content-index layer is needed
+    - produce a concrete recommendation covering schema, refresh behavior, pruning, and operator expectations
+    - treat this as a likely product gap unless the requirements explicitly say non-qB trees are out of scope
+    - compare the intended model against actual behavior for:
+      - managed scan roots such as `/pool/data`
+      - non-qB subtrees such as `/pool/data/orphaned_data`
+      - downstream consumers: `cross-seed`, `jdupes`, `hashall` planning, and future space-reclaim analysis
+    - remedy proposal must say which layer owns broad content coverage:
+      - expand `payload` materialization beyond qB roots
+      - or add a separate durable content-index / inventory layer for non-qB trees
+    - document any resulting requirement change explicitly if the current qB-centric design is intentional
+  - develop a concrete plan to increase headroom on `pool`
+    - current state after pilot + batch 2: `/pool/data` ≈ `99G` free, `/pool/media` ≈ `99G` free
+    - current relocation batches are not increasing reported free space enough to justify continuing blindly
+    - produce ranked reclaim options with estimated GiB impact and operational risk
 - Proposals:
   - add a refresh status / lock-inspection helper
   - document payload-sync resume checkpoints for operators

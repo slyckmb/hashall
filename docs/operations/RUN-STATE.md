@@ -577,8 +577,33 @@ Last updated: 2026-03-13 (historical section below)
      - `23` under `/pool/data/cross-seed`
      - `87` total under `/pool/data`
    - This does not match the operator expectation that all of `/pool/data` would be in the DB.
-   - Determine whether `scan` is filtering, `payloads` only materializes certain roots, or later pruning drops most of the scanned tree.
-5. Re-validate the `West Wing` lane on current code before using it as a normal migration example if that lane is still pending.
+   - Important current finding:
+     - `scan /pool/data` populates the per-device `files_*` tables.
+     - `payloads` are only created when `build_payload()` is called for a specific root path.
+     - In the refresh flow, those materialization calls are coming from `payload sync`, which iterates qB torrents rather than every scanned subtree.
+   - Determine whether this is intended behavior, a documentation gap, or a real coverage bug.
+5. Evaluate requirements and design gaps for non-qB tree scans, and propose a remedy.
+   - Stated operator intent: hash as much content as possible, not only qB-backed roots.
+   - Reason: `cross-seed`, `jdupes`, and `hashall` all benefit from a broader shared content inventory, including non-qB trees such as orphan/archive areas.
+   - Review whether the current design is too qB-centric at payload-materialization time.
+   - Produce a recommendation that covers:
+     - whether non-qB subtrees under managed scan roots should become `payloads`
+     - whether a separate content-index abstraction is needed
+     - how orphan pruning and refresh semantics should change if broader coverage is intended
+   - Treat this as a likely requirements/design gap unless non-qB trees are intentionally out of scope.
+   - Compare intended behavior vs actual behavior for:
+     - managed scan roots such as `/pool/data`
+     - non-qB subtrees such as `/pool/data/orphaned_data`
+     - downstream consumers: `cross-seed`, `jdupes`, `hashall` planning, and pool-space analysis
+   - The remedy must name the ownership boundary:
+     - broaden `payload` materialization beyond qB roots
+     - or add a durable non-qB content inventory layer with clear refresh/prune semantics
+   - If the current qB-centric behavior is intentional, document that requirement explicitly so operators do not assume whole-tree coverage.
+6. Develop a concrete plan to increase headroom on `pool`.
+   - Current state after the pilot and batch 2 cleanup is still only about `99G` free on both `/pool/data` and `/pool/media`.
+   - Recent relocation work is not improving reported free space enough to justify continuing blindly.
+   - Produce ranked reclaim options with estimated GiB impact, dependency notes, and operational risk.
+7. Re-validate the `West Wing` lane on current code before using it as a normal migration example if that lane is still pending.
    - Earlier bugs and rollback behavior changed the donor/view state enough that old assumptions are not trustworthy without a fresh check.
 
 ### Proposals
