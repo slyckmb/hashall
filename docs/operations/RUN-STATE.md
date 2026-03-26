@@ -31,6 +31,27 @@ Last updated: 2026-03-26
 - Several failed-ish rows still map back to complete `/stash/...` catalog payload roots, which is a
   strong sign of stale runtime / fastresume metadata rather than a cleanly modeled migrated state.
 
+**Migration triage ranking:**
+1. Repair-first before using related migration batches:
+   - `20555...` `Bottle.Shock...`
+   - `e2ae...` `River.Monsters.S06...`
+   - `7daf...` `Queen - Queen II...`
+   - `5feb...` `Spider-Man...`
+   - `c8f013...` `The.Matrix.Reloaded...`
+   These are `stoppedDL 0%` with missing content on disk and are the clearest stale-runtime /
+   fastresume drift cases.
+2. Repair if those payload families become migration-adjacent; otherwise do not let them block
+   unrelated pool migration:
+   - `5c862...` `Spider-Man...`
+   This is also `stoppedDL 0%` with missing content, but it overlaps the same family as `5feb...`
+   and should be handled as part of that family repair instead of as a separate migration blocker.
+3. Monitor only; do not let these near-complete rows block general pool migration batching:
+   - `96d896...` `Transformers.Rise.of.the.Beasts...`
+   - `127c383...` `River Monsters S07...`
+   - `5caca88...` `The.Diary.of.a.Teenage.Girl...`
+   These are `stalledDL` with content present on disk and look more like settle / qB accounting
+   drift than broken-missing content.
+
 **Skip-check investigation:**
 - Current qB tags / categories / names show `0` explicit `skip-check` / `skip_check` /
   `skipcheck` markers.

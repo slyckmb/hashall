@@ -60,6 +60,19 @@
   - runtime points at `/data/media/torrents/seeding/movies/...`
   - content missing on disk
   - catalog payload row is effectively empty (`payload_hash=NULL`, `file_count=0`, `total_bytes=0`)
+- Current migration triage:
+  1. repair-first:
+     - `20555...`
+     - `e2ae...`
+     - `7daf...`
+     - `5feb...`
+     - `c8f013...`
+  2. same-family repair with `5feb...`, but not its own separate migration blocker:
+     - `5c862...`
+  3. monitor only; do not let these near-complete rows block general pool migration:
+     - `96d896...`
+     - `127c383...`
+     - `5caca88...`
 
 ## 2026-03-26 Historical Carve-Out Recheck (compact-safe)
 
