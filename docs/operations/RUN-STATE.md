@@ -91,6 +91,42 @@ Last updated: 2026-03-26
   - no current live qB match by name/save path
   - keep as historical proving-lane context, not as the current live migration blocker
 
+## 2026-03-26 Read-Only Duplicate Reclaim Report
+
+**New tool:**
+- `hashall content reclaim-report`
+- Purpose:
+  - use exact duplicate tree hashes from the `hashall` DB to produce a ranked `keep` / `purge`
+    candidate report across filesystems
+  - feed a later review/apply script instead of deleting blindly
+
+**Current live result:**
+- Example run:
+  - `hashall content reclaim-report --db ~/.hashall/catalog.db --root /pool/data/seeds --root /pool/data/orphaned_data --root /pool/media/torrents/seeding --limit 10`
+- Top-10 exact duplicate groups report `3,563,147,846,965` bytes of candidate reclaim.
+
+**Important safety caveat:**
+- This is a candidate feed, not a deletion plan.
+- The current top groups include many duplicates entirely inside active `/pool/media` seeding trees,
+  especially:
+  - `_rehome-unique`
+  - `cross-seed/*`
+- So the immediate value is:
+  - find high-value duplicate families quickly
+  - feed an evaluation script that also checks qB liveliness / active ownership / policy
+- The immediate value is **not**:
+  - purge those reported paths directly
+
+**Operational meaning:**
+- Yes, the `hashall` DB is now good enough to generate duplicate-candidate feeds across
+  filesystems.
+- No, the current report alone is not sufficient to auto-delete.
+- The next layer should enrich these candidate groups with:
+  - live qB ownership
+  - whether the path is the only currently seeded copy
+  - whether the path is inside known active seeding or unique-view trees
+  - operator policy for donor/archive trees
+
 ## 2026-03-26 Migration Pivot Sitrep
 
 **Priority reset:**

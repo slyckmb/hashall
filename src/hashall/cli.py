@@ -1711,6 +1711,67 @@ def content_donors_cmd(db, torrent_hash, base_roots, json_output):
     for item in report["candidate_non_qb_donors"][:10]:
         print(f"      - {item.root_path} ({item.status} {item.root_kind})")
 
+
+@content.command("reclaim-report")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--root",
+    "base_roots",
+    multiple=True,
+    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+)
+@click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
+@click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit groups shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, json_output):
+    """Rank exact duplicate non-qB roots into keep/purge candidates."""
+    from hashall.content_inventory import (
+        discover_content_roots,
+        duplicate_content_roots,
+        filter_duplicate_groups,
+        rank_reclaim_groups,
+    )
+    from hashall.model import connect_db
+
+    roots = list(base_roots) or _default_content_base_roots()
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    groups = duplicate_content_roots(discover_content_roots(conn, roots))
+    conn.close()
+    groups = filter_duplicate_groups(groups, path_contains=path_contains, min_bytes=min_bytes)
+    ranked = rank_reclaim_groups(groups)
+    if limit > 0:
+        ranked = ranked[:limit]
+
+    if json_output:
+        payload = [
+            {
+                "tree_hash": group.tree_hash,
+                "file_count": group.file_count,
+                "total_bytes": group.total_bytes,
+                "reclaimable_bytes": sum(item.total_bytes for item in group.purge),
+                "keep": group.keep.__dict__,
+                "purge": [item.__dict__ for item in group.purge],
+            }
+            for group in ranked
+        ]
+        print(json.dumps(payload, indent=2))
+        return
+
+    total_reclaimable = sum(sum(item.total_bytes for item in group.purge) for group in ranked)
+    print("🧹 Duplicate reclaim report (read-only)")
+    print(f"   groups: {len(ranked)}")
+    print(f"   reclaimable_bytes: {total_reclaimable:,}")
+    for idx, group in enumerate(ranked, start=1):
+        reclaimable = sum(item.total_bytes for item in group.purge)
+        print(
+            f"   [{idx}] files={group.file_count} bytes={group.total_bytes:,} "
+            f"reclaimable={reclaimable:,} tree_hash={group.tree_hash[:16]}"
+        )
+        print(f"      keep:  {group.keep.root_path} ({group.keep.reason})")
+        for item in group.purge:
+            print(f"      purge: {item.root_path}")
+
 @payload.command("collisions")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option(

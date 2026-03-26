@@ -26,6 +26,13 @@ def _init_db(db_path: Path) -> None:
             sha256 TEXT,
             status TEXT
         );
+        CREATE TABLE files_pool_media (
+            path TEXT PRIMARY KEY,
+            size INTEGER,
+            quick_hash TEXT,
+            sha256 TEXT,
+            status TEXT
+        );
         CREATE TABLE payloads (
             payload_id INTEGER PRIMARY KEY,
             payload_hash TEXT,
@@ -55,6 +62,13 @@ def _init_db(db_path: Path) -> None:
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         ("fs-pool-data", 44, "pool-data", "/pool", "/pool/data", "files_pool_data"),
+    )
+    conn.execute(
+        """
+        INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point, files_table)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("fs-pool-media", 53, "pool-media", "/pool", "/pool/media", "files_pool_media"),
     )
     conn.executemany(
         "INSERT INTO files_pool_data (path, size, quick_hash, sha256, status) VALUES (?, ?, ?, ?, 'active')",
@@ -88,6 +102,13 @@ def _init_db(db_path: Path) -> None:
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
         """,
         ("abcd1234", 1, 44, "fs-pool-data", "/pool/data/media/torrents/seeding", "example", "", "",),
+    )
+    conn.executemany(
+        "INSERT INTO files_pool_media (path, size, quick_hash, sha256, status) VALUES (?, ?, ?, ?, 'active')",
+        [
+            ("torrents/seeding/cross-seed-link/FileList.io/Release.One/file1.mkv", 8, "qcs1m", "scs1"),
+            ("torrents/seeding/cross-seed-link/FileList.io/Release.One/file2.srt", 1, "qcs2m", "scs2"),
+        ],
     )
     conn.commit()
     conn.close()
@@ -218,3 +239,32 @@ def test_content_donors_json_includes_ranked_candidates(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert len(payload["ranked_candidates"]) >= 2
     assert payload["ranked_candidates"][0]["confidence"] == "strong"
+
+
+def test_content_reclaim_report_ranks_keep_and_purge(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.db"
+    _init_db(db_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "content",
+            "reclaim-report",
+            "--db",
+            str(db_path),
+            "--root",
+            "/pool/data/seeds",
+            "--root",
+            "/pool/media/torrents/seeding",
+            "--json-output",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    group = payload[0]
+    assert group["keep"]["root_path"] == "/pool/media/torrents/seeding/cross-seed-link/FileList.io/Release.One"
+    assert group["purge"][0]["root_path"] == "/pool/data/seeds/cross-seed/tracker-one/Release.One"
+    assert group["reclaimable_bytes"] == 9

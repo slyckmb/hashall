@@ -62,6 +62,7 @@ Current read-only CLI in this area:
 - `hashall content inventory`
 - `hashall content duplicates`
 - `hashall content donors --torrent <hash>`
+- `hashall content reclaim-report`
 
 Current status:
 
@@ -78,6 +79,23 @@ Current status:
   - `hashall content inventory --status complete --min-bytes 1000000000`
   - `hashall content duplicates --path-contains west.wing --limit 10`
   - `hashall content duplicates --sort count`
+  - `hashall content reclaim-report --root /pool/data/seeds --root /pool/media/torrents/seeding --min-bytes 1000000000`
+
+Reclaim-report guidance:
+
+- `hashall content reclaim-report` is read-only and exact-match-only.
+- It ranks duplicate non-qB roots into:
+  - one preferred `keep` path
+  - one or more `purge` candidates
+- Current path preference is conservative:
+  - prefer `/pool/media/...`
+  - then `_rehome-unique`
+  - then `/pool/data/cross-seed-link`
+  - then `/pool/data/cross-seed`
+  - then `/pool/data/seeds`
+  - then `/pool/data/orphaned_data`
+  - then `/pool/data/RecycleBin`
+- Use it to feed a separate review/apply script; do not treat it as a blind deletion command.
 
 ### Maintenance
 

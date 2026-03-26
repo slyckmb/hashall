@@ -38,6 +38,27 @@ class RankedDonorCandidate:
     tree_hash: Optional[str]
 
 
+@dataclass(frozen=True)
+class ReclaimCandidate:
+    root_path: str
+    root_kind: str
+    fs_uuid: Optional[str]
+    device_id: Optional[int]
+    total_bytes: int
+    status: str
+    recommendation: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ReclaimGroup:
+    tree_hash: str
+    file_count: int
+    total_bytes: int
+    keep: ReclaimCandidate
+    purge: tuple[ReclaimCandidate, ...]
+
+
 def _quote_ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
@@ -348,6 +369,78 @@ def sort_duplicate_groups(groups: Iterable[list[ContentRootSummary]], *, sort_by
     if sort_by == "path":
         return sorted(groups, key=lambda group: group[0].root_path)
     return sorted(groups, key=lambda group: (-group[0].total_bytes, -len(group), group[0].root_path))
+
+
+def _path_rank_for_reclaim(path: str) -> tuple[int, str]:
+    normalized = str(path or "")
+    lowered = normalized.lower()
+    if normalized.startswith("/pool/media/"):
+        return (0, lowered)
+    if "/_rehome-unique/" in lowered:
+        return (1, lowered)
+    if normalized.startswith("/pool/data/cross-seed-link/"):
+        return (2, lowered)
+    if normalized.startswith("/pool/data/cross-seed/"):
+        return (3, lowered)
+    if normalized.startswith("/pool/data/seeds/"):
+        return (4, lowered)
+    if normalized.startswith("/pool/data/orphaned_data/"):
+        return (5, lowered)
+    if normalized.startswith("/pool/data/RecycleBin/"):
+        return (6, lowered)
+    if normalized.startswith("/pool/data/"):
+        return (7, lowered)
+    return (8, lowered)
+
+
+def rank_reclaim_groups(groups: Iterable[list[ContentRootSummary]]) -> list[ReclaimGroup]:
+    ranked_groups: list[ReclaimGroup] = []
+    for group in groups:
+        if len(group) < 2:
+            continue
+        ordered = sorted(group, key=lambda item: _path_rank_for_reclaim(item.root_path))
+        keep_item = ordered[0]
+        purge_items = ordered[1:]
+        keep = ReclaimCandidate(
+            root_path=keep_item.root_path,
+            root_kind=keep_item.root_kind,
+            fs_uuid=keep_item.fs_uuid,
+            device_id=keep_item.device_id,
+            total_bytes=keep_item.total_bytes,
+            status=keep_item.status,
+            recommendation="keep",
+            reason="preferred_path_rank",
+        )
+        purge = tuple(
+            ReclaimCandidate(
+                root_path=item.root_path,
+                root_kind=item.root_kind,
+                fs_uuid=item.fs_uuid,
+                device_id=item.device_id,
+                total_bytes=item.total_bytes,
+                status=item.status,
+                recommendation="purge_candidate",
+                reason=f"duplicate_of:{keep_item.root_path}",
+            )
+            for item in purge_items
+        )
+        ranked_groups.append(
+            ReclaimGroup(
+                tree_hash=str(keep_item.tree_hash or ""),
+                file_count=keep_item.file_count,
+                total_bytes=keep_item.total_bytes,
+                keep=keep,
+                purge=purge,
+            )
+        )
+    ranked_groups.sort(
+        key=lambda group: (
+            -sum(item.total_bytes for item in group.purge),
+            -group.total_bytes,
+            group.keep.root_path,
+        )
+    )
+    return ranked_groups
 
 
 def rank_donor_candidates_for_torrent(conn: sqlite3.Connection, torrent_hash: str, items: Iterable[ContentRootSummary]) -> dict:
