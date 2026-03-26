@@ -1,17 +1,17 @@
 # Operational Run State
 
-Last updated: 2026-03-25
+Last updated: 2026-03-26
 
-## 2026-03-26 Non-qB Upgrade Scan In Progress
+## 2026-03-26 Non-qB Upgrade Scan Complete
 
-**Active work:**
-- A non-qB upgrade scan was started in tmux session `hashall-nonqb-scan` to improve full-hash
+**Completed work:**
+- A non-qB upgrade scan completed in tmux session `hashall-nonqb-scan` to improve full-hash
   coverage for donor / duplicate-tree analysis.
 - Command sequence:
   - `hashall scan /pool/data/orphaned_data --hash-mode upgrade --drift-policy quick`
   - `hashall scan /pool/data/seeds --hash-mode upgrade --drift-policy quick`
   - `hashall scan /pool/data/RecycleBin --hash-mode upgrade --drift-policy quick`
-- Monitor:
+- Log:
   - `~/.logs/hashall/nonqb-scan-20260326.log`
 
 **Why this is the right scan shape:**
@@ -20,31 +20,42 @@ Last updated: 2026-03-25
 - This upgrade pass improves exact duplicate-tree / donor discovery without first redesigning the
   qB-scoped `payloads` model.
 
-**Interim sitrep during the run:**
+**Final coverage after completion:**
 - `/pool/data/orphaned_data`
   - `19134` files
   - `2.49T`
   - quick-hash coverage: `19134/19134`
-  - SHA256 coverage is now `19134/19134` for this tree
+  - SHA256 coverage: `19134/19134`
 - `/pool/data/seeds`
-  - `1209` files
-  - `3.57T`
-  - quick-hash coverage: `1209/1209`
-  - SHA256 coverage currently `1018/1209`
+  - `1255` files
+  - `3.70T`
+  - quick-hash coverage: `1255/1255`
+  - SHA256 coverage: `1255/1255`
+- `/pool/data/RecycleBin`
+  - `63` files
+  - `690.4M`
+  - quick-hash coverage: `63/63`
+  - SHA256 coverage: `63/63`
 - `/pool/data/cross-seed-link`
   - `1327/1327` files already had SHA256
 - `/pool/data/cross-seed`
   - `14/14` files already had SHA256
 
-**Largest remaining non-qB SHA256 gaps visible after `orphaned_data` completion:**
-- `seeds/_qbm_recycle`: `6/114`
-- `seeds/RecycleBin`: `0/274`
-- `seeds/movies`: `1/39`
-- `seeds/privatehd`: `0/12`
+**First inventory milestone after the scan:**
+- `hashall content inventory` now provides a read-only report over canonical non-qB roots derived
+  from `files_*`.
+- Current live discovery across `orphaned_data`, `seeds`, and `RecycleBin` finds `23` canonical
+  roots.
+- Major discovered roots now visible to operators include:
+  - `/pool/data/seeds/cross-seed`
+  - `/pool/data/seeds/_qb-unique-repair`
+  - `/pool/data/orphaned_data/books`
+  - `/pool/data/orphaned_data/shows`
+  - `/pool/data/RecycleBin/library_books`
 
-**Immediate next implementation targets once this scan stage settles:**
-1. Build a read-only non-qB inventory report from `files_*` grouped into canonical folder trees.
-2. Define a durable non-qB content inventory schema / CLI surface.
+**Immediate next implementation targets after this scan stage:**
+1. Refine canonical root-discovery rules so large archive/orphan trees are grouped the right way.
+2. Expand the new read-only `content` reporting into a durable non-qB content inventory layer.
 3. Add exact duplicate folder-tree lookup and donor lookup for qB repair/recovery workflows.
 
 ## 2026-03-25 Repair Fastresume Root Corruption Audit

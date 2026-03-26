@@ -1559,6 +1559,128 @@ def payload_siblings(torrent_hash, db):
             print(f"      Root: {torrent.root_name}")
             print()
 
+
+@cli.group()
+def content():
+    """Read-only inventory/reporting for non-qB content roots."""
+    pass
+
+
+def _default_content_base_roots() -> list[str]:
+    return [
+        "/pool/data/orphaned_data",
+        "/pool/data/seeds",
+        "/pool/data/RecycleBin",
+    ]
+
+
+@content.command("inventory")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--root",
+    "base_roots",
+    multiple=True,
+    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+)
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def content_inventory_cmd(db, base_roots, json_output):
+    """Discover canonical non-qB content roots from scanned files_* metadata."""
+    from hashall.content_inventory import discover_content_roots
+    from hashall.model import connect_db
+
+    roots = list(base_roots) or _default_content_base_roots()
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    items = discover_content_roots(conn, roots)
+    conn.close()
+
+    if json_output:
+        print(json.dumps([item.__dict__ for item in items], indent=2))
+        return
+
+    print("🗂️  Content inventory (read-only)")
+    print(f"   base_roots: {len(roots)}")
+    print(f"   discovered_roots: {len(items)}")
+    for item in items:
+        print(
+            f"   {item.root_kind:8s} {item.status:10s} "
+            f"files={item.file_count:<6d} sha256={item.files_with_sha256}/{item.file_count} "
+            f"bytes={item.total_bytes:,} root={item.root_path}"
+        )
+
+
+@content.command("duplicates")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--root",
+    "base_roots",
+    multiple=True,
+    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+)
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def content_duplicates_cmd(db, base_roots, json_output):
+    """List exact duplicate non-qB content roots."""
+    from hashall.content_inventory import discover_content_roots, duplicate_content_roots
+    from hashall.model import connect_db
+
+    roots = list(base_roots) or _default_content_base_roots()
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    groups = duplicate_content_roots(discover_content_roots(conn, roots))
+    conn.close()
+
+    if json_output:
+        print(json.dumps([[item.__dict__ for item in group] for group in groups], indent=2))
+        return
+
+    print("🔁 Exact duplicate content roots")
+    print(f"   groups: {len(groups)}")
+    for idx, group in enumerate(groups, start=1):
+        first = group[0]
+        print(
+            f"   [{idx}] files={first.file_count} bytes={first.total_bytes:,} "
+            f"tree_hash={str(first.tree_hash or '')[:16]}"
+        )
+        for item in group:
+            print(f"      - {item.root_path}")
+
+
+@content.command("donors")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--torrent", "torrent_hash", required=True, help="Torrent hash to find donor roots for.")
+@click.option(
+    "--root",
+    "base_roots",
+    multiple=True,
+    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+)
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def content_donors_cmd(db, torrent_hash, base_roots, json_output):
+    """Find non-qB donor candidates for a qB payload/torrent."""
+    from hashall.content_inventory import discover_content_roots, donors_for_torrent
+    from hashall.model import connect_db
+
+    roots = list(base_roots) or _default_content_base_roots()
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    report = donors_for_torrent(conn, torrent_hash, discover_content_roots(conn, roots))
+    conn.close()
+
+    if json_output:
+        payload = dict(report)
+        payload["exact_non_qb_donors"] = [item.__dict__ for item in report["exact_non_qb_donors"]]
+        payload["candidate_non_qb_donors"] = [item.__dict__ for item in report["candidate_non_qb_donors"]]
+        print(json.dumps(payload, indent=2))
+        return
+
+    print(f"🩹 Donor candidates for {report['torrent_hash']}")
+    print(f"   root_path: {report['root_path']}")
+    print(f"   payload_hash: {report['payload_hash'] or '(incomplete)'}")
+    print(f"   files={report['file_count']} bytes={report['total_bytes']:,}")
+    print(f"   exact_non_qb_donors: {len(report['exact_non_qb_donors'])}")
+    for item in report["exact_non_qb_donors"]:
+        print(f"      - {item.root_path} ({item.root_kind})")
+    print(f"   candidate_non_qb_donors: {len(report['candidate_non_qb_donors'])}")
+    for item in report["candidate_non_qb_donors"][:10]:
+        print(f"      - {item.root_path} ({item.status} {item.root_kind})")
+
 @payload.command("collisions")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option(

@@ -57,12 +57,19 @@ Important scope note:
 - Broader duplicate folder-tree / donor discovery for non-qB roots is a separate inventory feature
   requirement, not a side effect of `payload sync`.
 
-Planned follow-up CLI in this area:
+Current read-only CLI in this area:
 
-- `hashall content inventory build`
+- `hashall content inventory`
 - `hashall content duplicates`
 - `hashall content donors --torrent <hash>`
-- `hashall content show --path <root>`
+
+Current status:
+
+- These commands read existing `files_*`, `payloads`, and `torrent_instances` metadata only.
+- They do not yet materialize a durable non-qB `content_roots` table.
+- Current root discovery is intentionally simple: immediate children under selected base roots such
+  as `/pool/data/orphaned_data`, `/pool/data/seeds`, and `/pool/data/RecycleBin`.
+- The next step is to refine canonical root discovery before adding durable inventory writes.
 
 ### Maintenance
 

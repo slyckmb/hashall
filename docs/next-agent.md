@@ -45,35 +45,32 @@
 
 ## 2026-03-26 Non-qB Scan Sitrep (compact-safe) — UPDATED
 
-- A long-running non-qB upgrade scan is active in tmux session `hashall-nonqb-scan`.
-- Active sequence:
+- The non-qB upgrade scan in tmux session `hashall-nonqb-scan` completed.
+- Completed sequence:
   - `/pool/data/orphaned_data`
   - `/pool/data/seeds`
   - `/pool/data/RecycleBin`
-- It is using:
+- It used:
   - `--hash-mode upgrade`
   - `--drift-policy quick`
 - Rationale:
   - quick hashes already existed broadly
   - the main missing value for duplicate-tree / donor analysis was SHA256 coverage
-- Interim state captured during the run:
-  - `orphaned_data`: `19134` files, `2.49T`, SHA256 now `19134/19134`
-  - `seeds`: `1209` files, `3.57T`, SHA256 now `1018/1209`
+- Final state after the run:
+  - `orphaned_data`: `19134` files, `2.49T`, SHA256 `19134/19134`
+  - `seeds`: `1255` files, `3.70T`, SHA256 `1255/1255`
+  - `RecycleBin`: `63` files, `690.4M`, SHA256 `63/63`
   - `cross-seed-link`: already `1327/1327` SHA256-complete
   - `cross-seed`: already `14/14` SHA256-complete
-- Biggest remaining hot spots after this stage are expected to be:
-  - `seeds/_qbm_recycle`
-  - `seeds/RecycleBin`
-- The next feature step after scan completion is not more scanning; it is:
-  - build a read-only non-qB inventory report from `files_*`
+- The first concrete feature step after scan completion is now in code:
+  - read-only `hashall content inventory`
+  - read-only `hashall content duplicates`
+  - read-only `hashall content donors --torrent <hash>`
+- Current live `hashall content inventory` output discovers `23` canonical non-qB roots across
+  `orphaned_data`, `seeds`, and `RecycleBin`.
+- The next feature step is not more scanning; it is:
+  - refine canonical root-discovery rules
   - then define the durable non-qB content inventory / duplicate-tree lookup layer
-  - first concrete proposal now documented in requirements:
-    - `content_roots`-style durable inventory layer
-    - CLI surface:
-      - `hashall content inventory build`
-      - `hashall content duplicates`
-      - `hashall content donors --torrent <hash>`
-      - `hashall content show --path <root>`
 
 ## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
 
