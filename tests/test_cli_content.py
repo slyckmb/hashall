@@ -62,8 +62,14 @@ def _init_db(db_path: Path) -> None:
             ("orphaned_data/A/file2.srt", 1, "q2", "s2"),
             ("orphaned_data/B/file1.mkv", 10, "q1b", "s1"),
             ("orphaned_data/B/file2.srt", 1, "q2b", "s2"),
+            ("orphaned_data/movies/Movie.One.2024.mkv", 12, "qm1", "sm1"),
+            ("orphaned_data/movies/Movie.Two.2024.mkv", 13, "qm2", "sm2"),
+            ("orphaned_data/books/B/Book One.epub", 2, "qb1", "sb1"),
+            ("orphaned_data/books/B/Book Two.epub", 3, "qb2", "sb2"),
             ("seeds/C/track1.flac", 5, "q3", "s3"),
             ("seeds/C/track2.flac", 6, "q4", None),
+            ("seeds/cross-seed/tracker-one/Release.One/file1.mkv", 8, "qcs1", "scs1"),
+            ("seeds/cross-seed/tracker-one/Release.One/file2.srt", 1, "qcs2", "scs2"),
             ("RecycleBin/D.bin", 7, "q5", "s5"),
         ],
     )
@@ -101,6 +107,10 @@ def test_content_inventory_lists_roots(tmp_path: Path) -> None:
     assert "/pool/data/orphaned_data/A" in result.output
     assert "/pool/data/orphaned_data/B" in result.output
     assert "/pool/data/seeds/C" in result.output
+    assert "/pool/data/orphaned_data/movies/Movie.One.2024.mkv" in result.output
+    assert "/pool/data/orphaned_data/books/B/Book One.epub" in result.output
+    assert "/pool/data/seeds/cross-seed/tracker-one/Release.One" in result.output
+    assert "root=/pool/data/orphaned_data/movies\n" not in result.output
 
 
 def test_content_duplicates_finds_exact_duplicate_roots(tmp_path: Path) -> None:

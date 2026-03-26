@@ -66,11 +66,14 @@
   - read-only `hashall content inventory`
   - read-only `hashall content duplicates`
   - read-only `hashall content donors --torrent <hash>`
-- Current live `hashall content inventory` output discovers `23` canonical non-qB roots across
-  `orphaned_data`, `seeds`, and `RecycleBin`.
+- Root discovery was then refined to stop treating broad container dirs as single content roots.
+- Current live `hashall content inventory` output now discovers `14030` canonical non-qB roots
+  across `orphaned_data`, `seeds`, and `RecycleBin`, in about `1.3s`.
+- Current live `hashall content duplicates` reports `23` exact duplicate groups at this refined
+  root-discovery level.
 - The next feature step is not more scanning; it is:
-  - refine canonical root-discovery rules
-  - then define the durable non-qB content inventory / duplicate-tree lookup layer
+  - define the durable non-qB content inventory / duplicate-tree lookup layer
+  - add filtering/ranking so the larger root set is operator-usable
 
 ## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
 

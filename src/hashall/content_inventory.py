@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
+from collections import defaultdict
 from typing import Iterable, Optional
 
 from hashall.pathing import canonicalize_path
@@ -87,11 +89,32 @@ def _relpath_for_device(path: Path, mount_point: str | None, preferred_mount: st
     return None
 
 
+def _prefer_file_roots(root_kind: str, rel_root: str) -> bool:
+    parent = Path(rel_root).parent.name
+    name = Path(rel_root).name
+    if root_kind == "orphan":
+        if name in {"books", "movies", "shows"}:
+            return True
+        if parent == "books" and len(name) == 1:
+            return True
+    if root_kind == "recovery" and name in {"public", "private", "bluraytracker", "abtorrents"}:
+        return True
+    return False
+
+
+def _candidate_abs_path(base_root: Path, rel_root: str, candidate_rel: str) -> str:
+    if rel_root == ".":
+        relative = Path(candidate_rel)
+    else:
+        relative = Path(candidate_rel).relative_to(Path(rel_root))
+    return str(base_root / relative)
+
+
 def _iter_candidate_roots(
     conn: sqlite3.Connection,
     *,
     base_root: Path,
-) -> Iterable[tuple[sqlite3.Row, str, str]]:
+) -> Iterable[tuple[sqlite3.Row, str, str, list[sqlite3.Row]]]:
     device_row = _device_row_for_path(conn, base_root)
     if device_row is None:
         return []
@@ -115,45 +138,84 @@ def _iter_candidate_roots(
         f"SELECT path FROM {table_ident} WHERE {status_clause} path LIKE ? ORDER BY path",
         (like_pattern,),
     ).fetchall()
-    seen: set[str] = set()
-    out: list[tuple[sqlite3.Row, str, str]] = []
+    detail_rows = conn.execute(
+        f"""
+        SELECT path, size, sha256, quick_hash
+        FROM {table_ident}
+        WHERE {status_clause} path LIKE ?
+        ORDER BY path
+        """,
+        (like_pattern,),
+    ).fetchall()
+    out: list[tuple[sqlite3.Row, str, str, list[sqlite3.Row]]] = []
     base_text = str(base_root)
-    prefix = rel_root.rstrip("/") + "/" if rel_root != "." else ""
-    for row in rows:
-        rel_path = str(row["path"] or "")
-        remainder = rel_path[len(prefix):] if prefix and rel_path.startswith(prefix) else rel_path
-        if not remainder:
+    all_paths = [str(row["path"] or "") for row in rows if str(row["path"] or "").strip()]
+    if not all_paths:
+        return []
+    row_by_path = {str(row["path"] or ""): row for row in detail_rows}
+    direct_files_by_dir: dict[str, set[str]] = defaultdict(set)
+    child_dirs_by_dir: dict[str, set[str]] = defaultdict(set)
+    rel_root_path = Path(rel_root) if rel_root != "." else None
+
+    for rel_path in all_paths:
+        rel_path_obj = Path(rel_path)
+        try:
+            rel_under_base = rel_path_obj.relative_to(rel_root_path) if rel_root_path else rel_path_obj
+        except Exception:
             continue
-        head, _, _tail = remainder.partition("/")
-        candidate_rel = f"{prefix}{head}" if prefix else head
-        if candidate_rel in seen:
-            continue
-        seen.add(candidate_rel)
-        out.append((device_row, candidate_rel, str((base_root / head).resolve() if base_root.exists() else Path(base_text) / head)))
+        current_rel = rel_root
+        parts = rel_under_base.parts
+        for part in parts[:-1]:
+            child_dirs_by_dir[current_rel].add(part)
+            current_rel = f"{current_rel.rstrip('/')}/{part}" if current_rel != "." else part
+        direct_files_by_dir[current_rel].add(rel_path)
+
+    @lru_cache(maxsize=None)
+    def _collect_subtree_paths(current_rel: str) -> tuple[str, ...]:
+        direct_paths = tuple(sorted(direct_files_by_dir.get(current_rel, set())))
+        out_paths = list(direct_paths)
+        for child in sorted(child_dirs_by_dir.get(current_rel, set())):
+            child_rel = f"{current_rel.rstrip('/')}/{child}" if current_rel != "." else child
+            out_paths.extend(_collect_subtree_paths(child_rel))
+        return tuple(out_paths)
+
+    def add_candidate(candidate_rel: str) -> None:
+        candidate_abs = _candidate_abs_path(Path(base_text), rel_root, candidate_rel)
+        if candidate_rel in row_by_path:
+            candidate_rows = [row_by_path[candidate_rel]]
+        else:
+            candidate_rows = [row_by_path[path] for path in _collect_subtree_paths(candidate_rel) if path in row_by_path]
+        out.append((device_row, candidate_rel, candidate_abs, candidate_rows))
+
+    def walk_dir(current_rel: str) -> None:
+        direct_files = direct_files_by_dir.get(current_rel, set())
+        child_dirs = child_dirs_by_dir.get(current_rel, set())
+        if not direct_files and not child_dirs:
+            return
+
+        if direct_files and (child_dirs or _prefer_file_roots(_kind_for_base(base_root), current_rel)):
+            for rel_file in sorted(direct_files):
+                add_candidate(rel_file)
+        elif direct_files:
+            add_candidate(current_rel)
+            return
+
+        for child in sorted(child_dirs):
+            child_rel = f"{current_rel.rstrip('/')}/{child}" if current_rel != "." else child
+            walk_dir(child_rel)
+
+    walk_dir(rel_root)
     return out
 
 
 def _build_summary_for_rel_root(
-    conn: sqlite3.Connection,
     *,
     device_row: sqlite3.Row,
     candidate_rel_root: str,
     candidate_abs_root: str,
     root_kind: str,
+    rows: list[sqlite3.Row],
 ) -> ContentRootSummary:
-    table_name = str(device_row["files_table"] or "").strip()
-    table_ident = _quote_ident(table_name)
-    status_clause = "status='active' AND " if _table_has_column(conn, table_name, "status") else ""
-    pattern = candidate_rel_root.rstrip("/") + "/%"
-    rows = conn.execute(
-        f"""
-        SELECT path, size, sha256, quick_hash
-        FROM {table_ident}
-        WHERE {status_clause} (path = ? OR path LIKE ?)
-        ORDER BY path
-        """,
-        (candidate_rel_root, pattern),
-    ).fetchall()
     file_count = len(rows)
     total_bytes = sum(int(row["size"] or 0) for row in rows)
     files_with_sha256 = sum(1 for row in rows if str(row["sha256"] or "").strip())
@@ -193,14 +255,14 @@ def discover_content_roots(conn: sqlite3.Connection, base_roots: Iterable[str]) 
     for raw_root in base_roots:
         base_root = canonicalize_path(Path(raw_root))
         root_kind = _kind_for_base(base_root)
-        for device_row, rel_root, abs_root in _iter_candidate_roots(conn, base_root=base_root):
+        for device_row, rel_root, abs_root, rows in _iter_candidate_roots(conn, base_root=base_root):
             results.append(
                 _build_summary_for_rel_root(
-                    conn,
                     device_row=device_row,
                     candidate_rel_root=rel_root,
                     candidate_abs_root=abs_root,
                     root_kind=root_kind,
+                    rows=rows,
                 )
             )
     results.sort(key=lambda item: (item.root_kind, item.root_path))

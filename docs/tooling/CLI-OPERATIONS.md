@@ -67,9 +67,12 @@ Current status:
 
 - These commands read existing `files_*`, `payloads`, and `torrent_instances` metadata only.
 - They do not yet materialize a durable non-qB `content_roots` table.
-- Current root discovery is intentionally simple: immediate children under selected base roots such
-  as `/pool/data/orphaned_data`, `/pool/data/seeds`, and `/pool/data/RecycleBin`.
-- The next step is to refine canonical root discovery before adding durable inventory writes.
+- Current root discovery now prefers payload-like leaf content roots:
+  - recurse through broad container dirs
+  - treat loose files as single-file roots where appropriate
+  - keep real leaf directories grouped
+- This is good enough for first donor/duplicate reporting, but still needs durable inventory writes
+  and stronger filtering/ranking.
 
 ### Maintenance
 

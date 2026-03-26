@@ -44,18 +44,22 @@ Last updated: 2026-03-26
 **First inventory milestone after the scan:**
 - `hashall content inventory` now provides a read-only report over canonical non-qB roots derived
   from `files_*`.
-- Current live discovery across `orphaned_data`, `seeds`, and `RecycleBin` finds `23` canonical
-  roots.
-- Major discovered roots now visible to operators include:
-  - `/pool/data/seeds/cross-seed`
-  - `/pool/data/seeds/_qb-unique-repair`
-  - `/pool/data/orphaned_data/books`
-  - `/pool/data/orphaned_data/shows`
-  - `/pool/data/RecycleBin/library_books`
+- Root discovery was then refined to stop treating broad container directories as single roots.
+- Current live discovery across `orphaned_data`, `seeds`, and `RecycleBin` now finds `14030`
+  canonical roots in about `1.3s` on the live catalog.
+- Current live `hashall content duplicates` reports `23` exact duplicate groups at this refined
+  root-discovery level.
+- Representative discovered roots now visible to operators include:
+  - `/pool/data/seeds/_qb-unique-repair/ce2445dd26a9f1db43057dceb91f928267060689/The.West.Wing.S02.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+  - `/pool/data/seeds/_qbm_recycle/PrivateHD/River.Monsters.S04.1080p.AMZN.WEB-DL.DDP2.0.H.264-NTb`
+  - `/pool/data/seeds/RecycleBin/public/Doraemon.1979.S01.ITA.SD.TvRip.AC3.XviD`
+  - loose single-file roots under `/pool/data/orphaned_data/movies`
+  - loose single-file roots under `/pool/data/orphaned_data/shows`
+  - per-file roots under `/pool/data/orphaned_data/books/*`
 
 **Immediate next implementation targets after this scan stage:**
-1. Refine canonical root-discovery rules so large archive/orphan trees are grouped the right way.
-2. Expand the new read-only `content` reporting into a durable non-qB content inventory layer.
+1. Expand the new read-only `content` reporting into a durable non-qB content inventory layer.
+2. Add operator-friendly filtering/ranking so `14030` roots are explorable without raw full dumps.
 3. Add exact duplicate folder-tree lookup and donor lookup for qB repair/recovery workflows.
 
 ## 2026-03-25 Repair Fastresume Root Corruption Audit
