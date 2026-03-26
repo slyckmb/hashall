@@ -25,20 +25,18 @@ Last updated: 2026-03-25
   - `19134` files
   - `2.49T`
   - quick-hash coverage: `19134/19134`
-  - SHA256 coverage has improved from `60/19134` before the run to `15032/19134` during the run
+  - SHA256 coverage is now `19134/19134` for this tree
 - `/pool/data/seeds`
   - `1209` files
   - `3.57T`
   - quick-hash coverage: `1209/1209`
-  - SHA256 coverage currently `716/1209`
+  - SHA256 coverage currently `1018/1209`
 - `/pool/data/cross-seed-link`
   - `1327/1327` files already had SHA256
 - `/pool/data/cross-seed`
   - `14/14` files already had SHA256
 
-**Largest remaining non-qB SHA256 gaps visible during the run:**
-- `orphaned_data/_flat`: `17/3582`
-- `orphaned_data/cross-seed`: `15/41`
+**Largest remaining non-qB SHA256 gaps visible after `orphaned_data` completion:**
 - `seeds/_qbm_recycle`: `6/114`
 - `seeds/RecycleBin`: `0/274`
 - `seeds/movies`: `1/39`

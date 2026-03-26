@@ -57,18 +57,23 @@
   - quick hashes already existed broadly
   - the main missing value for duplicate-tree / donor analysis was SHA256 coverage
 - Interim state captured during the run:
-  - `orphaned_data`: `19134` files, `2.49T`, SHA256 improved to `15032/19134`
-  - `seeds`: `1209` files, `3.57T`, SHA256 `716/1209`
+  - `orphaned_data`: `19134` files, `2.49T`, SHA256 now `19134/19134`
+  - `seeds`: `1209` files, `3.57T`, SHA256 now `1018/1209`
   - `cross-seed-link`: already `1327/1327` SHA256-complete
   - `cross-seed`: already `14/14` SHA256-complete
 - Biggest remaining hot spots after this stage are expected to be:
-  - `orphaned_data/_flat`
-  - `orphaned_data/cross-seed`
   - `seeds/_qbm_recycle`
   - `seeds/RecycleBin`
 - The next feature step after scan completion is not more scanning; it is:
   - build a read-only non-qB inventory report from `files_*`
   - then define the durable non-qB content inventory / duplicate-tree lookup layer
+  - first concrete proposal now documented in requirements:
+    - `content_roots`-style durable inventory layer
+    - CLI surface:
+      - `hashall content inventory build`
+      - `hashall content duplicates`
+      - `hashall content donors --torrent <hash>`
+      - `hashall content show --path <root>`
 
 ## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
 

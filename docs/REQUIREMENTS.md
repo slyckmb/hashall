@@ -395,6 +395,36 @@ A torrent's data is **eligible to move to `/pool`** if:
 
 **Current gap:** The existing implementation has the raw `files_*` scan data needed for this, but it does not yet materialize non-qB folder-tree inventory as a first-class concept.
 
+**First implementation shape:**
+- Add a durable `content_roots` inventory layer with records such as:
+  - `content_root_id`
+  - `fs_uuid`
+  - `root_path`
+  - `root_kind` (`qb_payload`, `orphan`, `archive`, `recovery`, `staging`, `other`)
+  - `tree_hash`
+  - `file_count`
+  - `total_bytes`
+  - `status` (`complete`, `incomplete`)
+  - `last_built_at`
+- Add `content_root_files` or equivalent mapping for stable file membership as needed for explainability and diff/report output.
+- Keep `payloads` and `torrent_instances` unchanged as the qB-facing model.
+
+**First CLI surface expected:**
+- `hashall content inventory build`
+  - materialize/update non-qB content roots from selected managed scan roots
+- `hashall content duplicates`
+  - list exact duplicate folder trees by `tree_hash`
+- `hashall content donors --torrent <hash>`
+  - list non-qB and qB donor candidates for a live/broken torrent payload
+- `hashall content show --path <root>`
+  - inspect one scanned folder tree and its identity/completeness
+
+**Ranking / safety expectations for donor lookup:**
+1. Exact `tree_hash` match first
+2. Complete-hash matches before incomplete/quick-hash-only candidates
+3. qB payload donors and non-qB donors may both be surfaced
+4. Path names alone must never be treated as proof of donor equivalence
+
 ### 4.3 External Consumer Detection
 
 **Definition:** A file has an **external consumer** if any hardlink points to a path outside the seeding domain.

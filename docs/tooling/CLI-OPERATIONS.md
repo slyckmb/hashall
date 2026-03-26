@@ -57,6 +57,13 @@ Important scope note:
 - Broader duplicate folder-tree / donor discovery for non-qB roots is a separate inventory feature
   requirement, not a side effect of `payload sync`.
 
+Planned follow-up CLI in this area:
+
+- `hashall content inventory build`
+- `hashall content duplicates`
+- `hashall content donors --torrent <hash>`
+- `hashall content show --path <root>`
+
 ### Maintenance
 
 ```bash
