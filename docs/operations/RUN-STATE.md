@@ -2,6 +2,34 @@
 
 Last updated: 2026-03-26
 
+## 2026-03-26 Migration Pivot Sitrep
+
+**Priority reset:**
+- Repair/content follow-up work is paused at a good-enough stop point.
+- Active priority is back on `pool/data -> pool/media` migration.
+
+**Current blocker:**
+- Live `df -h` now shows both target datasets full:
+  - `/pool/data`: `0` available
+  - `/pool/media`: `0` available
+- This is the immediate reason migration cannot resume.
+
+**Current migration-side catalog picture:**
+- `26` qB rows still save under `/pool/data`
+- `361` qB rows save under `/pool/media`
+- `87` payload rows still root under `/pool/data`
+- `242` payload rows root under `/pool/media`
+
+**Known carve-outs remain unchanged:**
+- `Alien Romulus`
+- `Shining.Girls...`
+- `West Wing` should not be reused casually as a normal plain-batch example without a fresh lane check
+
+**Immediate next actions:**
+1. Reclaim pool headroom.
+2. Reassess the remaining clean migration candidates after reclaim.
+3. Generate the next carve-out-safe `pool/data -> pool/media` batch.
+
 ## 2026-03-26 Non-qB Upgrade Scan Complete
 
 **Completed work:**

@@ -2,6 +2,23 @@
 
 ## 2026-03-25 Active Findings (compact-safe) — UPDATED
 
+- Pivot priority is now back on `pool/data -> pool/media` migration.
+- Current operational blocker is headroom, not repair/tooling:
+  - live `df -h` now shows `0` available on both `/pool/data` and `/pool/media`
+  - current catalog still shows:
+    - `26` qB rows under `/pool/data`
+    - `361` qB rows under `/pool/media`
+  - migration should not resume until space is reclaimed
+- Recent repair/content follow-up work is complete enough to pause:
+  - invalid qB save-path guards are in
+  - donor-style repair mismatch handling is in
+  - non-qB inventory scanning and read-only reporting are in
+  - shared donor ranking is partially wired into repair planning
+- The immediate next migration action is therefore:
+  1. reclaim pool headroom
+  2. re-evaluate carve-outs (`Alien Romulus`, `Shining.Girls...`)
+  3. then generate the next safe `pool/data -> pool/media` batch
+
 - External report `hashall-bug-9a731a-fastresume-root-corruption-20260325.md` was correct about a
   current bug in the repair path:
   - `src/hashall/qb_repair_payload_group.py` could trust `broken_info.save_path`
