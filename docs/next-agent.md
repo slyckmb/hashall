@@ -43,6 +43,33 @@
   2. audit `/pool/data/seeds`, especially `_qbm_recycle`, `RecycleBin`, `_qb-unique-repair`
   3. only then consider broader cleanup under `cross-seed-link` / `cross-seed`
 
+## 2026-03-26 Non-qB Scan Sitrep (compact-safe) — UPDATED
+
+- A long-running non-qB upgrade scan is active in tmux session `hashall-nonqb-scan`.
+- Active sequence:
+  - `/pool/data/orphaned_data`
+  - `/pool/data/seeds`
+  - `/pool/data/RecycleBin`
+- It is using:
+  - `--hash-mode upgrade`
+  - `--drift-policy quick`
+- Rationale:
+  - quick hashes already existed broadly
+  - the main missing value for duplicate-tree / donor analysis was SHA256 coverage
+- Interim state captured during the run:
+  - `orphaned_data`: `19134` files, `2.49T`, SHA256 improved to `15032/19134`
+  - `seeds`: `1209` files, `3.57T`, SHA256 `716/1209`
+  - `cross-seed-link`: already `1327/1327` SHA256-complete
+  - `cross-seed`: already `14/14` SHA256-complete
+- Biggest remaining hot spots after this stage are expected to be:
+  - `orphaned_data/_flat`
+  - `orphaned_data/cross-seed`
+  - `seeds/_qbm_recycle`
+  - `seeds/RecycleBin`
+- The next feature step after scan completion is not more scanning; it is:
+  - build a read-only non-qB inventory report from `files_*`
+  - then define the durable non-qB content inventory / duplicate-tree lookup layer
+
 ## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
 
 - `hashall` is now `0.8.9`

@@ -2,6 +2,53 @@
 
 Last updated: 2026-03-25
 
+## 2026-03-26 Non-qB Upgrade Scan In Progress
+
+**Active work:**
+- A non-qB upgrade scan was started in tmux session `hashall-nonqb-scan` to improve full-hash
+  coverage for donor / duplicate-tree analysis.
+- Command sequence:
+  - `hashall scan /pool/data/orphaned_data --hash-mode upgrade --drift-policy quick`
+  - `hashall scan /pool/data/seeds --hash-mode upgrade --drift-policy quick`
+  - `hashall scan /pool/data/RecycleBin --hash-mode upgrade --drift-policy quick`
+- Monitor:
+  - `~/.logs/hashall/nonqb-scan-20260326.log`
+
+**Why this is the right scan shape:**
+- Quick hashes already existed for the major non-qB trees.
+- The missing value was mostly SHA256 coverage, not basic filesystem discovery.
+- This upgrade pass improves exact duplicate-tree / donor discovery without first redesigning the
+  qB-scoped `payloads` model.
+
+**Interim sitrep during the run:**
+- `/pool/data/orphaned_data`
+  - `19134` files
+  - `2.49T`
+  - quick-hash coverage: `19134/19134`
+  - SHA256 coverage has improved from `60/19134` before the run to `15032/19134` during the run
+- `/pool/data/seeds`
+  - `1209` files
+  - `3.57T`
+  - quick-hash coverage: `1209/1209`
+  - SHA256 coverage currently `716/1209`
+- `/pool/data/cross-seed-link`
+  - `1327/1327` files already had SHA256
+- `/pool/data/cross-seed`
+  - `14/14` files already had SHA256
+
+**Largest remaining non-qB SHA256 gaps visible during the run:**
+- `orphaned_data/_flat`: `17/3582`
+- `orphaned_data/cross-seed`: `15/41`
+- `seeds/_qbm_recycle`: `6/114`
+- `seeds/RecycleBin`: `0/274`
+- `seeds/movies`: `1/39`
+- `seeds/privatehd`: `0/12`
+
+**Immediate next implementation targets once this scan stage settles:**
+1. Build a read-only non-qB inventory report from `files_*` grouped into canonical folder trees.
+2. Define a durable non-qB content inventory schema / CLI surface.
+3. Add exact duplicate folder-tree lookup and donor lookup for qB repair/recovery workflows.
+
 ## 2026-03-25 Repair Fastresume Root Corruption Audit
 
 **Finding:**
