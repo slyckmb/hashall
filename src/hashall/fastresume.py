@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 from hashall.bencode import BencodeDecoder, as_text, bencode_decode, bencode_encode
 
@@ -53,6 +53,44 @@ def normalize_save_path(path: str) -> str:
     return normalized
 
 
+def _path_is_same_or_child(path: str, root: str) -> bool:
+    return path == root or path.startswith(root + "/")
+
+
+def validate_qb_target_save_path(
+    target_save_path: str,
+    *,
+    approved_roots: Iterable[str],
+) -> str:
+    """Validate a qB target save path before setLocation or fastresume patching."""
+
+    normalized = normalize_save_path(target_save_path)
+    if normalized == "/tmp" or normalized.startswith("/tmp/"):
+        raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
+    if normalized == "/var/tmp" or normalized.startswith("/var/tmp/"):
+        raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
+
+    roots = []
+    seen = set()
+    for raw_root in approved_roots:
+        root = str(raw_root or "").strip()
+        if not root:
+            continue
+        normalized_root = normalize_save_path(root)
+        if normalized_root in seen:
+            continue
+        seen.add(normalized_root)
+        roots.append(normalized_root)
+    if not roots:
+        raise ValueError("qb_target_save_path_no_approved_roots")
+    if not any(_path_is_same_or_child(normalized, root) for root in roots):
+        raise ValueError(
+            "qb_target_save_path_outside_approved_roots "
+            f"path={normalized} approved_roots={','.join(roots)}"
+        )
+    return normalized
+
+
 def read_fastresume(path: Path) -> Dict[bytes, Any]:
     """Read and decode a fastresume payload."""
 
@@ -74,7 +112,7 @@ def patch_fastresume_file(path: Path, target_save_path: str, backup_suffix: str)
     old_download_path = as_text(doc.get(b"qBt-downloadPath", b"")).strip()
 
     changed = False
-    target_text = normalize_save_path(target_save_path)
+    target_text = validate_qb_target_save_path(target_save_path, approved_roots=[target_save_path])
     target_b = target_text.encode("utf-8")
     if doc.get(b"save_path") != target_b:
         doc[b"save_path"] = target_b

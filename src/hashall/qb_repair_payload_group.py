@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from hashall.device import get_files_table_name
-from hashall.fastresume import normalize_save_path, patch_fastresume_file
+from hashall.fastresume import normalize_save_path, patch_fastresume_file, validate_qb_target_save_path
 from hashall.link_executor import create_hardlink_atomic
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
@@ -98,6 +98,13 @@ class RepairPlanItem:
     same_inode: bool
 
 
+@dataclass(frozen=True)
+class PayloadRelationship:
+    allowed: bool
+    reason: str
+    detail: str
+
+
 def _normalize_or_empty(path: str) -> str:
     try:
         return normalize_save_path(path)
@@ -158,6 +165,51 @@ def choose_repair_save_paths(
         "good_catalog_save_path": good_catalog,
         "broken_catalog_save_path": broken_catalog,
     }
+
+
+def classify_payload_relationship(
+    good: PayloadIdentity,
+    broken: PayloadIdentity,
+    *,
+    good_files: Sequence[Dict[str, Any]],
+    broken_files: Sequence[Dict[str, Any]],
+    force_identical: bool = False,
+) -> PayloadRelationship:
+    payload_group_match = bool(good.payload_hash) and good.payload_hash == broken.payload_hash
+    file_tree_match = qbtree_evidence_matches(good_files, broken_files)
+    identity_match = payload_identity_evidence_matches(good, broken)
+
+    if payload_group_match:
+        return PayloadRelationship(True, "catalog_payload_hash_match", "")
+    if identity_match and file_tree_match:
+        return PayloadRelationship(
+            True,
+            "catalog_payload_mismatch_identical_evidence",
+            f"good_payload={good.payload_hash[:16]} broken_payload={broken.payload_hash[:16]}",
+        )
+    if not broken.payload_hash and file_tree_match:
+        return PayloadRelationship(
+            True,
+            "broken_payload_hash_missing_file_tree_match",
+            f"good_payload={good.payload_hash[:16]} broken_payload=",
+        )
+    if force_identical and file_tree_match:
+        return PayloadRelationship(
+            True,
+            "force_identical_file_tree_match",
+            f"good_payload={good.payload_hash[:16]} broken_payload={broken.payload_hash[:16]}",
+        )
+    if not broken.payload_hash:
+        return PayloadRelationship(
+            False,
+            "broken_payload_hash_missing",
+            "action=refresh_payload_sync_or_use_content_donors",
+        )
+    return PayloadRelationship(
+        False,
+        "payload_group_mismatch",
+        f"good_payload={good.payload_hash[:16]} broken_payload={broken.payload_hash[:16]}",
+    )
 
 
 class RunLogger:
@@ -858,26 +910,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.line("▸ P2 content analysis")
         good_files = [{"name": row.name, "size": row.size} for row in qb.get_torrent_files(good_hash)]
         broken_files = [{"name": row.name, "size": row.size} for row in qb.get_torrent_files(broken_hash)]
-        payload_group_match = bool(good_identity.payload_hash) and good_identity.payload_hash == broken_identity.payload_hash
-        file_tree_match = qbtree_evidence_matches(good_files, broken_files)
-        identity_match = payload_identity_evidence_matches(good_identity, broken_identity)
-        if payload_group_match:
+        relationship = classify_payload_relationship(
+            good_identity,
+            broken_identity,
+            good_files=good_files,
+            broken_files=broken_files,
+            force_identical=bool(args.force_identical),
+        )
+        if relationship.reason == "catalog_payload_hash_match":
             logger.line(f"  payload_hash={good_identity.payload_hash[:16]}...")
-        elif identity_match and file_tree_match:
-            logger.line(
-                "  WARN catalog_payload_mismatch tolerated=identical_evidence "
-                f"good_payload={good_identity.payload_hash[:16]} broken_payload={broken_identity.payload_hash[:16]}"
-            )
-        elif args.force_identical and file_tree_match:
-            logger.line(
-                "  WARN catalog_payload_mismatch tolerated=force_identical "
-                f"good_payload={good_identity.payload_hash[:16]} broken_payload={broken_identity.payload_hash[:16]}"
-            )
+        elif relationship.allowed:
+            logger.line(f"  WARN {relationship.reason} {relationship.detail}".rstrip())
         else:
-            raise RuntimeError(
-                "payload_group_mismatch "
-                f"good_payload={good_identity.payload_hash[:16]} broken_payload={broken_identity.payload_hash[:16]}"
-            )
+            raise RuntimeError(f"{relationship.reason} {relationship.detail}".rstrip())
         write_json(good_files_path, good_files)
         write_json(broken_files_path, broken_files)
         plan = build_repair_plan(
@@ -924,6 +969,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 target_save_path = good_effective_save_path
                 target_reason = save_paths["good_reason"]
+
+        logger.line(
+            "  target_save_path_validation "
+            f"old_qb_save_path={broken_info.save_path} "
+            f"chosen_target_save_path={target_save_path} "
+            f"reason={target_reason}"
+        )
+        target_save_path = validate_qb_target_save_path(
+            target_save_path,
+            approved_roots=[good_identity.save_path, broken_identity.save_path],
+        )
 
         logger.line("▸ P4 qB fix")
         fastresume_path = fastresume_dir / f"{broken_hash}.fastresume"

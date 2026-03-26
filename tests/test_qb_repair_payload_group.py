@@ -6,11 +6,12 @@ from pathlib import Path
 import pytest
 
 from hashall.bencode import bencode_encode
-from hashall.fastresume import read_fastresume
+from hashall.fastresume import read_fastresume, validate_qb_target_save_path
 from hashall.qb_repair_payload_group import (
     CatalogLookup,
     build_repair_plan,
     can_reuse_good_save_path_directly,
+    classify_payload_relationship,
     choose_repair_save_paths,
     ensure_same_payload_group,
     load_payload_pair,
@@ -19,6 +20,7 @@ from hashall.qb_repair_payload_group import (
     payload_identity_evidence_matches,
     qbtree_evidence_matches,
 )
+from hashall.qb_repair_payload_group import PayloadIdentity
 
 
 def _init_catalog(db_path: Path) -> None:
@@ -284,6 +286,52 @@ def test_choose_repair_save_paths_prefers_catalog_when_good_runtime_drifts() -> 
 
     assert result["good_effective_save_path"] == "/data/media/torrents/seeding/cross-seed/TorrentLeech"
     assert result["good_reason"] == "catalog_good_save_path_fallback"
+
+
+def test_validate_qb_target_save_path_rejects_tmp() -> None:
+    with pytest.raises(ValueError, match="qb_target_save_path_disallowed"):
+        validate_qb_target_save_path(
+            "/tmp",
+            approved_roots=["/data/media/torrents/seeding", "/pool/media/torrents/seeding"],
+        )
+
+
+def test_validate_qb_target_save_path_rejects_outside_approved_roots() -> None:
+    with pytest.raises(ValueError, match="qb_target_save_path_outside_approved_roots"):
+        validate_qb_target_save_path(
+            "/elsewhere/root",
+            approved_roots=["/data/media/torrents/seeding", "/pool/media/torrents/seeding"],
+        )
+
+
+def test_classify_payload_relationship_allows_missing_broken_payload_when_file_tree_matches() -> None:
+    good = PayloadIdentity(
+        torrent_hash="goodhash",
+        payload_hash="payload-a",
+        root_path="/pool/media/Show.Good",
+        save_path="/pool/media/torrents/seeding",
+        root_name="Show.Good",
+        file_count=1,
+        total_bytes=10,
+    )
+    broken = PayloadIdentity(
+        torrent_hash="brokenhash",
+        payload_hash="",
+        root_path="/pool/data/Show Bad",
+        save_path="/pool/data/torrents/seeding",
+        root_name="Show Bad",
+        file_count=1,
+        total_bytes=10,
+    )
+    relationship = classify_payload_relationship(
+        good,
+        broken,
+        good_files=[{"name": "Show.Good/episode01.mkv", "size": 10}],
+        broken_files=[{"name": "Show Bad/episode01.mkv", "size": 10}],
+    )
+
+    assert relationship.allowed is True
+    assert relationship.reason == "broken_payload_hash_missing_file_tree_match"
 
 
 def test_parse_args_defaults_log_path_to_empty_string() -> None:
