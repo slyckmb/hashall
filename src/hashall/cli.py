@@ -1582,16 +1582,32 @@ def _default_content_base_roots() -> list[str]:
     multiple=True,
     help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
 )
+@click.option("--kind", "root_kind", type=click.Choice(["archive", "orphan", "recovery", "other"]), help="Filter by root kind.")
+@click.option("--status", type=click.Choice(["complete", "incomplete"]), help="Filter by hash-completeness status.")
+@click.option("--path-contains", help="Only include roots whose path contains this substring.")
+@click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include roots at or above this size.")
+@click.option("--sort", "sort_by", type=click.Choice(["bytes", "files", "path"]), default="bytes", show_default=True, help="Sort order.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
-def content_inventory_cmd(db, base_roots, json_output):
+def content_inventory_cmd(db, base_roots, root_kind, status, path_contains, min_bytes, sort_by, limit, json_output):
     """Discover canonical non-qB content roots from scanned files_* metadata."""
-    from hashall.content_inventory import discover_content_roots
+    from hashall.content_inventory import discover_content_roots, filter_content_roots, sort_content_roots
     from hashall.model import connect_db
 
     roots = list(base_roots) or _default_content_base_roots()
     conn = connect_db(Path(db), read_only=True, apply_migrations=False)
     items = discover_content_roots(conn, roots)
     conn.close()
+    items = filter_content_roots(
+        items,
+        root_kind=root_kind,
+        status=status,
+        path_contains=path_contains,
+        min_bytes=min_bytes,
+    )
+    items = sort_content_roots(items, sort_by=sort_by)
+    if limit > 0:
+        items = items[:limit]
 
     if json_output:
         print(json.dumps([item.__dict__ for item in items], indent=2))
@@ -1616,16 +1632,29 @@ def content_inventory_cmd(db, base_roots, json_output):
     multiple=True,
     help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
 )
+@click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
+@click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
+@click.option("--sort", "sort_by", type=click.Choice(["bytes", "count", "path"]), default="bytes", show_default=True, help="Sort order.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit groups shown; 0 means no limit.")
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
-def content_duplicates_cmd(db, base_roots, json_output):
+def content_duplicates_cmd(db, base_roots, path_contains, min_bytes, sort_by, limit, json_output):
     """List exact duplicate non-qB content roots."""
-    from hashall.content_inventory import discover_content_roots, duplicate_content_roots
+    from hashall.content_inventory import (
+        discover_content_roots,
+        duplicate_content_roots,
+        filter_duplicate_groups,
+        sort_duplicate_groups,
+    )
     from hashall.model import connect_db
 
     roots = list(base_roots) or _default_content_base_roots()
     conn = connect_db(Path(db), read_only=True, apply_migrations=False)
     groups = duplicate_content_roots(discover_content_roots(conn, roots))
     conn.close()
+    groups = filter_duplicate_groups(groups, path_contains=path_contains, min_bytes=min_bytes)
+    groups = sort_duplicate_groups(groups, sort_by=sort_by)
+    if limit > 0:
+        groups = groups[:limit]
 
     if json_output:
         print(json.dumps([[item.__dict__ for item in group] for group in groups], indent=2))

@@ -73,6 +73,11 @@ Current status:
   - keep real leaf directories grouped
 - This is good enough for first donor/duplicate reporting, but still needs durable inventory writes
   and stronger filtering/ranking.
+- Current operator-friendly filters include:
+  - `hashall content inventory --kind orphan --path-contains movies --sort bytes --limit 20`
+  - `hashall content inventory --status complete --min-bytes 1000000000`
+  - `hashall content duplicates --path-contains west.wing --limit 10`
+  - `hashall content duplicates --sort count`
 
 ### Maintenance
 

@@ -279,6 +279,64 @@ def duplicate_content_roots(items: Iterable[ContentRootSummary]) -> list[list[Co
     return groups
 
 
+def filter_content_roots(
+    items: Iterable[ContentRootSummary],
+    *,
+    root_kind: str | None = None,
+    status: str | None = None,
+    path_contains: str | None = None,
+    min_bytes: int = 0,
+) -> list[ContentRootSummary]:
+    filtered = []
+    needle = str(path_contains or "").strip().lower()
+    for item in items:
+        if root_kind and item.root_kind != root_kind:
+            continue
+        if status and item.status != status:
+            continue
+        if min_bytes and item.total_bytes < min_bytes:
+            continue
+        if needle and needle not in item.root_path.lower():
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def sort_content_roots(items: Iterable[ContentRootSummary], *, sort_by: str = "bytes") -> list[ContentRootSummary]:
+    if sort_by == "path":
+        return sorted(items, key=lambda item: item.root_path)
+    if sort_by == "files":
+        return sorted(items, key=lambda item: (-item.file_count, -item.total_bytes, item.root_path))
+    return sorted(items, key=lambda item: (-item.total_bytes, -item.file_count, item.root_path))
+
+
+def filter_duplicate_groups(
+    groups: Iterable[list[ContentRootSummary]],
+    *,
+    path_contains: str | None = None,
+    min_bytes: int = 0,
+) -> list[list[ContentRootSummary]]:
+    needle = str(path_contains or "").strip().lower()
+    filtered: list[list[ContentRootSummary]] = []
+    for group in groups:
+        if not group:
+            continue
+        if min_bytes and group[0].total_bytes < min_bytes:
+            continue
+        if needle and not any(needle in item.root_path.lower() for item in group):
+            continue
+        filtered.append(group)
+    return filtered
+
+
+def sort_duplicate_groups(groups: Iterable[list[ContentRootSummary]], *, sort_by: str = "bytes") -> list[list[ContentRootSummary]]:
+    if sort_by == "count":
+        return sorted(groups, key=lambda group: (-len(group), -group[0].total_bytes, group[0].root_path))
+    if sort_by == "path":
+        return sorted(groups, key=lambda group: group[0].root_path)
+    return sorted(groups, key=lambda group: (-group[0].total_bytes, -len(group), group[0].root_path))
+
+
 def donors_for_torrent(conn: sqlite3.Connection, torrent_hash: str, items: Iterable[ContentRootSummary]) -> dict:
     row = conn.execute(
         """

@@ -71,9 +71,12 @@
   across `orphaned_data`, `seeds`, and `RecycleBin`, in about `1.3s`.
 - Current live `hashall content duplicates` reports `23` exact duplicate groups at this refined
   root-discovery level.
+- Operator-friendly filtering/ranking is now in place for the read-only reports:
+  - inventory filters: `--kind`, `--status`, `--path-contains`, `--min-bytes`, `--sort`, `--limit`
+  - duplicate filters: `--path-contains`, `--min-bytes`, `--sort`, `--limit`
 - The next feature step is not more scanning; it is:
   - define the durable non-qB content inventory / duplicate-tree lookup layer
-  - add filtering/ranking so the larger root set is operator-usable
+  - extend donor workflows and reporting on top of the filtered root set
 
 ## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
 

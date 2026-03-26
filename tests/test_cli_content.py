@@ -129,6 +129,64 @@ def test_content_duplicates_finds_exact_duplicate_roots(tmp_path: Path) -> None:
     assert "/pool/data/orphaned_data/B" in result.output
 
 
+def test_content_inventory_supports_filters_and_limit(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.db"
+    _init_db(db_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "content",
+            "inventory",
+            "--db",
+            str(db_path),
+            "--root",
+            "/pool/data/orphaned_data",
+            "--kind",
+            "orphan",
+            "--path-contains",
+            "movies",
+            "--sort",
+            "path",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "/pool/data/orphaned_data/movies/Movie.One.2024.mkv" in result.output
+    assert "/pool/data/orphaned_data/movies/Movie.Two.2024.mkv" not in result.output
+    assert "/pool/data/orphaned_data/A" not in result.output
+
+
+def test_content_duplicates_supports_filters_and_limit(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.db"
+    _init_db(db_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "content",
+            "duplicates",
+            "--db",
+            str(db_path),
+            "--root",
+            "/pool/data/orphaned_data",
+            "--path-contains",
+            "orphaned_data",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "groups: 1" in result.output
+    assert "/pool/data/orphaned_data/A" in result.output
+    assert "/pool/data/orphaned_data/B" in result.output
+
+
 def test_content_donors_reports_exact_non_qb_matches(tmp_path: Path) -> None:
     db_path = tmp_path / "catalog.db"
     _init_db(db_path)
