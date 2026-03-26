@@ -16,8 +16,66 @@
   - shared donor ranking is partially wired into repair planning
 - The immediate next migration action is therefore:
   1. reclaim pool headroom
-  2. re-evaluate carve-outs (`Alien Romulus`, `Shining.Girls...`)
+  2. re-evaluate the current live qB failure cluster rather than relying on stale carve-out shorthand
   3. then generate the next safe `pool/data -> pool/media` batch
+
+## 2026-03-26 Live qB Failed-ish Set (compact-safe)
+
+- Current live qB failed-ish set is `9` items:
+  - `6` `stoppedDL`
+  - `3` `stalledDL`
+- Current hashes:
+  - `20555f704e0ae477dce28844c95c626fcf78a261`
+  - `e2ae560a5d51186e2160099aa56d63687a25def1`
+  - `5c86280a99d1007104452b2f72d0d686e092e2f8`
+  - `96d896ca35f42d93e4a4bdee92e8ac90adc34b54`
+  - `7dafdd61e6b9d58d9721c12d8a3da2cde40fc776`
+  - `127c38342cfedaf4016b8079be13c5f7883b9cfe`
+  - `5feb771c9b7f75fe09205204b367c88efa993031`
+  - `5caca88d29e64de495a47b53a466f7cadcb3ce02`
+  - `c8f01321b9fe0697c19c9aa450b570b59548eb15`
+- Live shape of this cluster:
+  - mostly `/data/media/torrents/seeding/...` runtime drift / missing-content fallout
+  - not evidence of a current explicit `skip-check` flag
+  - all inspected fastresume rows currently have `sequential_download=0`
+  - explicit qB tag/category/name search found `0` `skip-check` / `skip_check` / `skipcheck` matches
+- Most actionable split:
+  - missing-content `stoppedDL 0%` rows:
+    - `20555...`
+    - `e2ae...`
+    - `5c862...`
+    - `7daf...`
+    - `5feb...`
+    - `c8f013...`
+  - near-complete `stalledDL` rows with content still present:
+    - `96d896...`
+    - `127c383...`
+    - `5caca88...`
+- `5feb...` is the clearest metadata-drift example:
+  - runtime `save_path=/data/media/torrents/seeding/movies`
+  - runtime `content_path=/incomplete_torrents/...`
+  - fastresume `save_path=/incomplete_torrents`
+  - fastresume `qBt-savePath=/data/media/torrents/seeding/movies`
+- `c8f013...` remains the donor-looking broken-payload case:
+  - runtime points at `/data/media/torrents/seeding/movies/...`
+  - content missing on disk
+  - catalog payload row is effectively empty (`payload_hash=NULL`, `file_count=0`, `total_bytes=0`)
+
+## 2026-03-26 Historical Carve-Out Recheck (compact-safe)
+
+- `Alien Romulus`
+  - no current live qB match by name/save path
+  - keep as historical special-case context only
+- `Shining Girls`
+  - one current live qB match:
+    - `57c38fa86c83c211a6233c8302afde1bd14c6ace`
+    - state `stoppedUP`
+    - path `/pool/media/torrents/seeding/cross-seed/TorrentDay`
+  - not currently part of the failed-ish qB set
+  - keep as historical content-conflict context, not as the current live blocker
+- `West Wing`
+  - no current live qB match by name/save path
+  - keep as historical proving-lane context, not as the current live blocker
 
 - External report `hashall-bug-9a731a-fastresume-root-corruption-20260325.md` was correct about a
   current bug in the repair path:

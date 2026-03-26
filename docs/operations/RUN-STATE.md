@@ -2,6 +2,74 @@
 
 Last updated: 2026-03-26
 
+## 2026-03-26 Live qB Failure Cluster + Carve-Out Recheck
+
+**Current live qB failed-ish set:**
+- There are currently `9` live qB items in a failed-ish state:
+  - `6` `stoppedDL`
+  - `3` `stalledDL`
+- Current hashes:
+  - `20555f704e0ae477dce28844c95c626fcf78a261` `Bottle.Shock...`
+  - `e2ae560a5d51186e2160099aa56d63687a25def1` `River.Monsters.S06...`
+  - `5c86280a99d1007104452b2f72d0d686e092e2f8` `Spider-Man.Into.the.Spider-Verse...`
+  - `96d896ca35f42d93e4a4bdee92e8ac90adc34b54` `Transformers.Rise.of.the.Beasts...`
+  - `7dafdd61e6b9d58d9721c12d8a3da2cde40fc776` `Queen - Queen II...`
+  - `127c38342cfedaf4016b8079be13c5f7883b9cfe` `River Monsters S07...`
+  - `5feb771c9b7f75fe09205204b367c88efa993031` `Spider-Man.Into.the.Spider-Verse...`
+  - `5caca88d29e64de495a47b53a466f7cadcb3ce02` `The.Diary.of.a.Teenage.Girl...`
+  - `c8f01321b9fe0697c19c9aa450b570b59548eb15` `The.Matrix.Reloaded...`
+
+**Failure-shape assessment:**
+- This cluster is mostly `/data/media/torrents/seeding/...` runtime drift and missing-content fallout,
+  not evidence of a new pool migration planner bug.
+- `6` rows are `stoppedDL 0%`; of those, `5` have a missing `content_path` while the parent
+  `save_path` still exists.
+- `3` rows are `stalledDL` but still have content on disk and are near complete:
+  - `96d896...` progress `0.999907`
+  - `127c383...` progress `0.999236`
+  - `5caca88...` progress `0.984191`
+- Several failed-ish rows still map back to complete `/stash/...` catalog payload roots, which is a
+  strong sign of stale runtime / fastresume metadata rather than a cleanly modeled migrated state.
+
+**Skip-check investigation:**
+- Current qB tags / categories / names show `0` explicit `skip-check` / `skip_check` /
+  `skipcheck` markers.
+- The failed-ish cluster also does not show a skip-check signature in fastresume:
+  - all inspected rows currently have `sequential_download=0`
+- Current evidence points to stale or tainted qB + fastresume metadata, not to an explicit
+  skip-check flag being set.
+
+**Notable metadata drift examples:**
+- `5feb771c...` `Spider-Man...`
+  - runtime `save_path=/data/media/torrents/seeding/movies`
+  - runtime `content_path=/incomplete_torrents/...`
+  - fastresume `save_path=/incomplete_torrents`
+  - fastresume `qBt-savePath=/data/media/torrents/seeding/movies`
+  - catalog payload remains incomplete and still points back to `/stash/...`
+- `c8f01321...` `The.Matrix.Reloaded...`
+  - runtime `save_path=/data/media/torrents/seeding/movies`
+  - runtime `content_path` missing on disk
+  - catalog payload row is effectively empty:
+    - `payload_hash=NULL`
+    - `file_count=0`
+    - `total_bytes=0`
+    - `status=incomplete`
+  - this is the same donor-looking repair case now handled by the updated repair classifier
+
+**Historical carve-outs vs current live state:**
+- `Alien Romulus`
+  - no current live qB match by name/save path
+  - keep as historical special-case context, but do not treat it as the current live blocker
+- `Shining Girls`
+  - current live qB match exists on `/pool/media`:
+    - `57c38fa86c83c211a6233c8302afde1bd14c6ace`
+    - state `stoppedUP`
+    - path `/pool/media/torrents/seeding/cross-seed/TorrentDay`
+  - this is not part of the current failed-ish qB cluster, but it remains historical content-conflict context
+- `West Wing`
+  - no current live qB match by name/save path
+  - keep as historical proving-lane context, not as the current live migration blocker
+
 ## 2026-03-26 Migration Pivot Sitrep
 
 **Priority reset:**
@@ -20,14 +88,14 @@ Last updated: 2026-03-26
 - `87` payload rows still root under `/pool/data`
 - `242` payload rows root under `/pool/media`
 
-**Known carve-outs remain unchanged:**
-- `Alien Romulus`
-- `Shining.Girls...`
-- `West Wing` should not be reused casually as a normal plain-batch example without a fresh lane check
+**Historical carve-out notes need to be read carefully:**
+- `Alien Romulus` and `West Wing` are not current live qB blockers by name/save path.
+- `Shining.Girls...` still exists live on `/pool/media`, but it is not currently in the failed-ish qB set.
+- Current live qB attention should be on the 9-item failed-ish cluster above, not on stale carve-out shorthand.
 
 **Immediate next actions:**
 1. Reclaim pool headroom.
-2. Reassess the remaining clean migration candidates after reclaim.
+2. Reassess the remaining clean migration candidates after reclaim, using the current 9-item failed-ish qB cluster instead of the older carve-out shorthand.
 3. Generate the next carve-out-safe `pool/data -> pool/media` batch.
 
 ## 2026-03-26 Non-qB Upgrade Scan Complete
