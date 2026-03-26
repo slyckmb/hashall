@@ -109,8 +109,6 @@ class PayloadRelationship:
     allowed: bool
     reason: str
     detail: str
-
-
 def _normalize_or_empty(path: str) -> str:
     try:
         return normalize_save_path(path)
@@ -216,8 +214,6 @@ def classify_payload_relationship(
         "payload_group_mismatch",
         f"good_payload={good.payload_hash[:16]} broken_payload={broken.payload_hash[:16]}",
     )
-
-
 class RunLogger:
     def __init__(self, log_path: Path):
         self.log_path = log_path
@@ -1000,7 +996,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 target_save_path = good_effective_save_path
                 target_reason = save_paths["good_reason"]
-
         logger.line(
             "  target_save_path_validation "
             f"old_qb_save_path={broken_info.save_path} "

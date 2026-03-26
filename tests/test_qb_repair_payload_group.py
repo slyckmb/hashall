@@ -287,7 +287,6 @@ def test_choose_repair_save_paths_prefers_catalog_when_good_runtime_drifts() -> 
     assert result["good_effective_save_path"] == "/data/media/torrents/seeding/cross-seed/TorrentLeech"
     assert result["good_reason"] == "catalog_good_save_path_fallback"
 
-
 def test_validate_qb_target_save_path_rejects_tmp() -> None:
     with pytest.raises(ValueError, match="qb_target_save_path_disallowed"):
         validate_qb_target_save_path(
@@ -332,8 +331,6 @@ def test_classify_payload_relationship_allows_missing_broken_payload_when_file_t
 
     assert relationship.allowed is True
     assert relationship.reason == "broken_payload_hash_missing_file_tree_match"
-
-
 def test_parse_args_defaults_log_path_to_empty_string() -> None:
     args = parse_args(["--good", "goodhash", "--broken", "brokenhash"])
     assert args.log_path == ""
