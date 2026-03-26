@@ -1723,13 +1723,15 @@ def content_donors_cmd(db, torrent_hash, base_roots, json_output):
 @click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
 @click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit groups shown; 0 means no limit.")
+@click.option("--include-fully-protected", is_flag=True, help="Include duplicate groups where every root is protected by live qB ownership.")
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
-def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, json_output):
+def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, include_fully_protected, json_output):
     """Rank exact duplicate non-qB roots into keep/purge candidates."""
     from hashall.content_inventory import (
         discover_content_roots,
         duplicate_content_roots,
         filter_duplicate_groups,
+        live_qb_root_paths,
         rank_reclaim_groups,
     )
     from hashall.model import connect_db
@@ -1737,9 +1739,14 @@ def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, 
     roots = list(base_roots) or _default_content_base_roots()
     conn = connect_db(Path(db), read_only=True, apply_migrations=False)
     groups = duplicate_content_roots(discover_content_roots(conn, roots))
+    protected_qb_roots = live_qb_root_paths(conn)
     conn.close()
     groups = filter_duplicate_groups(groups, path_contains=path_contains, min_bytes=min_bytes)
-    ranked = rank_reclaim_groups(groups)
+    ranked = rank_reclaim_groups(
+        groups,
+        protected_qb_roots=protected_qb_roots,
+        include_fully_protected=include_fully_protected,
+    )
     if limit > 0:
         ranked = ranked[:limit]
 
@@ -1762,6 +1769,7 @@ def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, 
     print("🧹 Duplicate reclaim report (read-only)")
     print(f"   groups: {len(ranked)}")
     print(f"   reclaimable_bytes: {total_reclaimable:,}")
+    print(f"   protected_qb_roots: {len(protected_qb_roots)}")
     for idx, group in enumerate(ranked, start=1):
         reclaimable = sum(item.total_bytes for item in group.purge)
         print(

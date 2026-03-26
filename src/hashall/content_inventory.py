@@ -371,6 +371,24 @@ def sort_duplicate_groups(groups: Iterable[list[ContentRootSummary]], *, sort_by
     return sorted(groups, key=lambda group: (-group[0].total_bytes, -len(group), group[0].root_path))
 
 
+def live_qb_root_paths(conn: sqlite3.Connection) -> frozenset[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT p.root_path
+        FROM torrent_instances ti
+        JOIN payloads p ON p.payload_id = ti.payload_id
+        WHERE p.root_path IS NOT NULL AND trim(p.root_path) != ''
+        """
+    ).fetchall()
+    normalized: list[str] = []
+    for row in rows:
+        try:
+            normalized.append(str(canonicalize_path(Path(str(row["root_path"] or "")))))
+        except Exception:
+            continue
+    return frozenset(normalized)
+
+
 def _path_rank_for_reclaim(path: str) -> tuple[int, str]:
     normalized = str(path or "")
     lowered = normalized.lower()
@@ -393,14 +411,33 @@ def _path_rank_for_reclaim(path: str) -> tuple[int, str]:
     return (8, lowered)
 
 
-def rank_reclaim_groups(groups: Iterable[list[ContentRootSummary]]) -> list[ReclaimGroup]:
+def _is_protected_by_live_qb(item: ContentRootSummary, protected_qb_roots: frozenset[str]) -> bool:
+    candidate = str(canonicalize_path(Path(item.root_path)))
+    return candidate in protected_qb_roots
+
+
+def rank_reclaim_groups(
+    groups: Iterable[list[ContentRootSummary]],
+    *,
+    protected_qb_roots: frozenset[str] = frozenset(),
+    include_fully_protected: bool = False,
+) -> list[ReclaimGroup]:
     ranked_groups: list[ReclaimGroup] = []
     for group in groups:
         if len(group) < 2:
             continue
-        ordered = sorted(group, key=lambda item: _path_rank_for_reclaim(item.root_path))
-        keep_item = ordered[0]
-        purge_items = ordered[1:]
+        protected = [item for item in group if _is_protected_by_live_qb(item, protected_qb_roots)]
+        if protected:
+            keep_item = sorted(protected, key=lambda item: _path_rank_for_reclaim(item.root_path))[0]
+            purge_items = [item for item in group if item.root_path != keep_item.root_path and item not in protected]
+            keep_reason = "live_qb_payload_root"
+        else:
+            ordered = sorted(group, key=lambda item: _path_rank_for_reclaim(item.root_path))
+            keep_item = ordered[0]
+            purge_items = ordered[1:]
+            keep_reason = "preferred_path_rank"
+        if not purge_items and not include_fully_protected:
+            continue
         keep = ReclaimCandidate(
             root_path=keep_item.root_path,
             root_kind=keep_item.root_kind,
@@ -409,7 +446,7 @@ def rank_reclaim_groups(groups: Iterable[list[ContentRootSummary]]) -> list[Recl
             total_bytes=keep_item.total_bytes,
             status=keep_item.status,
             recommendation="keep",
-            reason="preferred_path_rank",
+            reason=keep_reason,
         )
         purge = tuple(
             ReclaimCandidate(

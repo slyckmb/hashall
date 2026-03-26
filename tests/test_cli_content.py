@@ -103,6 +103,29 @@ def _init_db(db_path: Path) -> None:
         """,
         ("abcd1234", 1, 44, "fs-pool-data", "/pool/data/media/torrents/seeding", "example", "", "",),
     )
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, fs_uuid, root_path, file_count, total_bytes, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            2,
+            "duplicate-release-one",
+            53,
+            "fs-pool-media",
+            "/pool/media/torrents/seeding/cross-seed-link/FileList.io/Release.One",
+            2,
+            9,
+            "complete",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, fs_uuid, save_path, root_name, category, tags, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+        """,
+        ("media111", 2, 53, "fs-pool-media", "/pool/media/torrents/seeding/cross-seed-link/FileList.io", "Release.One", "", "",),
+    )
     conn.executemany(
         "INSERT INTO files_pool_media (path, size, quick_hash, sha256, status) VALUES (?, ?, ?, ?, 'active')",
         [
@@ -266,5 +289,6 @@ def test_content_reclaim_report_ranks_keep_and_purge(tmp_path: Path) -> None:
     assert len(payload) == 1
     group = payload[0]
     assert group["keep"]["root_path"] == "/pool/media/torrents/seeding/cross-seed-link/FileList.io/Release.One"
+    assert group["keep"]["reason"] == "live_qb_payload_root"
     assert group["purge"][0]["root_path"] == "/pool/data/seeds/cross-seed/tracker-one/Release.One"
     assert group["reclaimable_bytes"] == 9

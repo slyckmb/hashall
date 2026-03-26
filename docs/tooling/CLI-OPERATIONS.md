@@ -87,6 +87,10 @@ Reclaim-report guidance:
 - It ranks duplicate non-qB roots into:
   - one preferred `keep` path
   - one or more `purge` candidates
+- It now protects live qB payload roots by default:
+  - if a duplicate root overlaps a live qB payload root, that root becomes the `keep` target
+  - fully protected duplicate groups are hidden by default
+  - use `--include-fully-protected` to audit those groups explicitly
 - Current path preference is conservative:
   - prefer `/pool/media/...`
   - then `_rehome-unique`
