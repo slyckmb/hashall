@@ -18,6 +18,23 @@
   1. reclaim pool headroom
   2. re-evaluate the current live qB failure cluster rather than relying on stale carve-out shorthand
   3. then generate the next safe `pool/data -> pool/media` batch
+- That next-safe batch is now ready:
+  - plan: `out/rehome-plan-pool-data-to-media-nextsafe-2026-03-26.json`
+  - dry-run: passed cleanly
+  - contents:
+    - `The.Substance.2024...` dir root
+    - `The.Substance.2024...` file root
+    - `The.Edge.of.Sleep.S01...`
+    - `The Last Stop in Yuma County...`
+    - `UEFA.Europa.Conference.League...`
+  - excluded on purpose:
+    - current failed-ish movie-family rows
+    - `Alien Romulus`
+    - `Shining Girls`
+    - `Transformers.One`
+  - total planned bytes: `34,821,012,982`
+  - current reason it is not yet applied:
+    - live `df -h` still shows `0` available on both `/pool/data` and `/pool/media`
 
 ## 2026-03-26 Live qB Failed-ish Set (compact-safe)
 

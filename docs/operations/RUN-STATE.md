@@ -119,6 +119,29 @@ Last updated: 2026-03-26
 2. Reassess the remaining clean migration candidates after reclaim, using the current 9-item failed-ish qB cluster instead of the older carve-out shorthand.
 3. Generate the next carve-out-safe `pool/data -> pool/media` batch.
 
+**Current next-safe batch artifact:**
+- A fresh targeted batch plan is ready at:
+  - `out/rehome-plan-pool-data-to-media-nextsafe-2026-03-26.json`
+- It deliberately excludes:
+  - the current failed-ish qB movie-family rows
+  - `Alien Romulus`
+  - `Shining Girls`
+  - `Transformers.One`
+- Included payloads:
+  - `The.Substance.2024...` directory root
+  - `The.Substance.2024...` single-file root
+  - `The.Edge.of.Sleep.S01...`
+  - `The Last Stop in Yuma County...`
+  - `UEFA.Europa.Conference.League...`
+- Dry-run status:
+  - `hashall rehome apply out/rehome-plan-pool-data-to-media-nextsafe-2026-03-26.json --dryrun`
+  - passed cleanly with `5` `MOVE` plans and no planner/executor surprises
+- Batch size:
+  - `34,821,012,982` bytes total (`~32.4 GiB`)
+- Current blocker remains capacity:
+  - live `df -h` still shows `0` available on both `/pool/data` and `/pool/media`
+  - so this batch is ready but not yet safe to execute for real
+
 ## 2026-03-26 Non-qB Upgrade Scan Complete
 
 **Completed work:**
