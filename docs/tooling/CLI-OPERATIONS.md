@@ -49,6 +49,14 @@ hashall payload show <torrent_hash>
 hashall payload siblings <torrent_hash>
 ```
 
+Important scope note:
+
+- `payload` commands describe qB/torrent-root content only.
+- Scanning non-qB trees improves the `files_*` inventory and hash coverage, but does not by itself
+  create non-qB `payloads` under the current model.
+- Broader duplicate folder-tree / donor discovery for non-qB roots is a separate inventory feature
+  requirement, not a side effect of `payload sync`.
+
 ### Maintenance
 
 ```bash

@@ -25,6 +25,12 @@
     `/pool/data/orphaned_data`
   - if that broader inventory is not desired, update requirements/docs explicitly so operators do
     not assume whole-tree coverage
+- Intent clarification:
+  - the operator goal is to hash folder trees broadly and find duplicate folder trees quickly
+  - those duplicate/non-qB trees should be usable as donor candidates for qB repair and runtime
+    drift remediation
+  - the desired feature is therefore broader than "scan everything"; it is "scan and make folder
+    trees comparable/searchable outside qB roots"
 - Current pool headroom reality has tightened again:
   - `/pool/data`: `27G` free
   - `/pool/media`: `27G` free

@@ -350,6 +350,11 @@ A torrent's data is **eligible to move to `/pool`** if:
 - Single-file torrent → that file
 - Multi-file torrent → directory tree
 
+**Scope note:** `payloads` are qB/torrent-root inventory, not the complete set of scanned folder trees on a filesystem.
+- `hashall scan` records filesystem truth in `files_*`
+- `hashall payload sync` maps qB torrents onto that scanned truth and materializes `payloads`
+- therefore a fully scanned managed tree can still contain large non-qB areas that are not represented in `payloads`
+
 **Payload Hash:** SHA256 of sorted `(path, size, sha256)` tuples
 - Uniquely identifies content independent of torrent metadata
 - Multiple torrents can share the same payload_hash (siblings)
@@ -365,6 +370,30 @@ A torrent's data is **eligible to move to `/pool`** if:
 - This system works per-payload (all siblings rehomed together)
 - More efficient than moving siblings individually
 - Prevents partial moves (some siblings on stash, others on pool)
+
+### 4.2.1 Broader Content Inventory Requirement
+
+**Intent:** The system should also be able to reason over scanned non-qB folder trees so operators can:
+- find duplicate folder trees
+- discover donor content for qB repair/remediation
+- compare archived/orphaned trees against live qB payloads
+- make reclaim decisions with real content identity instead of only path names
+
+**Important distinction:**
+- `payloads` remain the qB/torrent-root model
+- broader scanned content should be represented by a separate inventory/content-roots layer rather than silently redefining `payloads`
+
+**Minimum capability expected from that broader layer:**
+1. Group scanned files into canonical folder-tree identities under managed non-qB roots
+2. Compute deterministic tree identity from the same underlying file hash inputs used by payload identity
+3. Detect exact duplicate folder trees across:
+   - qB seeding roots
+   - orphan/archive trees
+   - recovery / staging areas
+4. Support donor lookup for a known qB payload or broken torrent root
+5. Support operator reporting for reclaim candidates and duplicate-byte opportunities
+
+**Current gap:** The existing implementation has the raw `files_*` scan data needed for this, but it does not yet materialize non-qB folder-tree inventory as a first-class concept.
 
 ### 4.3 External Consumer Detection
 
@@ -760,9 +789,10 @@ Choose `--scan-hash-mode fast --drift-policy metadata` for routine rescans. Choo
 **Operational Lanes:**
 1. **Scan lane** — maintain filesystem truth via `hashall scan` / `hashall refresh`
 2. **Payload sync lane** — map qB torrents to payload state via `hashall payload sync`
-3. **Link lane** — same-device hardlink dedup planning + execution
-4. **Rehome lane** — guarded stash/pool relocation with verification and per-item payload-tree instantiation
-5. **Recovery lane** — classify and prune recovered non-seeding data; triage `stoppedDL`/`missingFiles` cohorts; repair fastresume/location drift
+3. **Content inventory lane** — build/query broader non-qB folder-tree identity for archive, orphan, donor, and staging trees
+4. **Link lane** — same-device hardlink dedup planning + execution
+5. **Rehome lane** — guarded stash/pool relocation with verification and per-item payload-tree instantiation
+6. **Recovery lane** — classify and prune recovered non-seeding data; triage `stoppedDL`/`missingFiles` cohorts; repair fastresume/location drift
 
 **Architecture:** Plan → Review → Apply workflow with mandatory dry-run before force-apply.
 

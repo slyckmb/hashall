@@ -75,6 +75,16 @@ Last updated: 2026-03-25
 - If that broader inventory is not desired, then the requirements must explicitly state that
   non-qB managed-tree coverage is out of scope so operators do not assume whole-tree DB coverage.
 
+**Intent clarification:**
+- The operator goal is not just "scan more paths."
+- The intended end state is:
+  - hash folder trees broadly
+  - find exact duplicate folder trees quickly
+  - surface non-qB donor trees that may repair qB runtime / fastresume drift
+  - compare archived/orphaned content against live qB payload families
+- A broader non-qB inventory layer is therefore the preferred model; blind expansion of `payloads`
+  is not.
+
 ## 2026-03-25 Pool Headroom Snapshot
 
 **Current state:**
