@@ -59,8 +59,12 @@ Last updated: 2026-03-26
 
 **Immediate next implementation targets after this scan stage:**
 1. Expand the new read-only `content` reporting into a durable non-qB content inventory layer.
-2. Add operator-friendly filtering/ranking so `14030` roots are explorable without raw full dumps.
-3. Add exact duplicate folder-tree lookup and donor lookup for qB repair/recovery workflows.
+2. Keep `content donors --torrent` wired into repair as a ranked planner input, but do not
+   auto-select donors yet.
+   - current known limitation: fully empty broken qB payload rows (`payload_hash=NULL`,
+     `file_count=0`, `total_bytes=0`) can still evade generic donor ranking
+3. Pivot priority back to `pool/data -> pool/media` migration once the durable inventory plan is
+   documented.
 
 ## 2026-03-25 Repair Fastresume Root Corruption Audit
 

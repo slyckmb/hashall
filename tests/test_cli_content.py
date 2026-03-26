@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 
@@ -201,3 +202,19 @@ def test_content_donors_reports_exact_non_qb_matches(tmp_path: Path) -> None:
     assert "exact_non_qb_donors:" in result.output
     assert "/pool/data/orphaned_data/A" in result.output
     assert "/pool/data/orphaned_data/B" in result.output
+
+
+def test_content_donors_json_includes_ranked_candidates(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.db"
+    _init_db(db_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["content", "donors", "--db", str(db_path), "--torrent", "abcd1234", "--root", "/pool/data/orphaned_data", "--json-output"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload["ranked_candidates"]) >= 2
+    assert payload["ranked_candidates"][0]["confidence"] == "strong"

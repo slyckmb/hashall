@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from hashall.device import get_files_table_name
+from hashall.content_inventory import discover_content_roots, rank_donor_candidates_for_torrent
 from hashall.fastresume import normalize_save_path, patch_fastresume_file, validate_qb_target_save_path
 from hashall.link_executor import create_hardlink_atomic
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
@@ -31,6 +32,11 @@ DEFAULT_QB_URL = "http://localhost:9003"
 DEFAULT_LOG_DIR = Path.home() / ".logs" / "hashall" / "reports" / "qbit-triage"
 DEFAULT_OUT_DIR = Path("out") / "qb-repair-payload-group"
 DEFAULT_SUCCESS_FILE = DEFAULT_LOG_DIR / "repair-consecutive-successes.txt"
+DEFAULT_CONTENT_BASE_ROOTS = (
+    "/pool/data/orphaned_data",
+    "/pool/data/seeds",
+    "/pool/data/RecycleBin",
+)
 GOOD_DONOR_STATES = {"stalledup", "stoppedup", "pausedup", "queuedup", "uploading", "forcedup"}
 BROKEN_EXPECTED_STATES = {
     "stoppeddl",
@@ -907,6 +913,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         same_fs = bool(good_device and broken_device and good_device[0].fs_uuid == broken_device[0].fs_uuid)
         logger.line(f"  same_fs={same_fs}")
 
+        donor_report = rank_donor_candidates_for_torrent(
+            catalog.conn,
+            broken_hash,
+            discover_content_roots(catalog.conn, DEFAULT_CONTENT_BASE_ROOTS),
+        )
+        top_candidates = donor_report["ranked_candidates"][:3]
+        if top_candidates:
+            logger.line("  donor_candidates_top:")
+            for candidate in top_candidates:
+                logger.line(
+                    "    {confidence:9s} {reason:28s} {root}".format(
+                        confidence=candidate.confidence,
+                        reason=candidate.reason,
+                        root=candidate.root_path,
+                    )
+                )
+        else:
+            logger.line("  donor_candidates_top: none")
+
         logger.line("▸ P2 content analysis")
         good_files = [{"name": row.name, "size": row.size} for row in qb.get_torrent_files(good_hash)]
         broken_files = [{"name": row.name, "size": row.size} for row in qb.get_torrent_files(broken_hash)]
@@ -922,7 +947,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif relationship.allowed:
             logger.line(f"  WARN {relationship.reason} {relationship.detail}".rstrip())
         else:
-            raise RuntimeError(f"{relationship.reason} {relationship.detail}".rstrip())
+            suffix = relationship.detail
+            if top_candidates:
+                suffix = (suffix + " " if suffix else "") + (
+                    f"top_donor={top_candidates[0].root_path} "
+                    f"top_confidence={top_candidates[0].confidence}"
+                )
+            raise RuntimeError(f"{relationship.reason} {suffix}".rstrip())
         write_json(good_files_path, good_files)
         write_json(broken_files_path, broken_files)
         plan = build_repair_plan(

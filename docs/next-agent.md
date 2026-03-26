@@ -74,9 +74,17 @@
 - Operator-friendly filtering/ranking is now in place for the read-only reports:
   - inventory filters: `--kind`, `--status`, `--path-contains`, `--min-bytes`, `--sort`, `--limit`
   - duplicate filters: `--path-contains`, `--min-bytes`, `--sort`, `--limit`
+- `content donors --torrent` is now partially integrated into repair planning as a ranked planner
+  input:
+  - repair logs the top ranked donor candidates from the shared donor planner
+  - hard-fail mismatch output can now include the top donor and confidence
+  - repair still requires explicit `--good`; it does not auto-pick donors yet
+  - current limitation: if the broken qB payload row is effectively empty (`payload_hash=NULL`,
+    `file_count=0`, `total_bytes=0`), generic donor ranking may return no candidates even when the
+    explicit donor-driven repair path can still proceed
 - The next feature step is not more scanning; it is:
   - define the durable non-qB content inventory / duplicate-tree lookup layer
-  - extend donor workflows and reporting on top of the filtered root set
+  - then pivot priority back to `pool/data -> pool/media` migration
 
 ## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
 

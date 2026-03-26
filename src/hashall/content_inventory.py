@@ -25,6 +25,19 @@ class ContentRootSummary:
     status: str
 
 
+@dataclass(frozen=True)
+class RankedDonorCandidate:
+    donor_type: str
+    confidence: str
+    reason: str
+    root_path: str
+    root_kind: str
+    file_count: int
+    total_bytes: int
+    status: str
+    tree_hash: Optional[str]
+
+
 def _quote_ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
@@ -337,7 +350,7 @@ def sort_duplicate_groups(groups: Iterable[list[ContentRootSummary]], *, sort_by
     return sorted(groups, key=lambda group: (-group[0].total_bytes, -len(group), group[0].root_path))
 
 
-def donors_for_torrent(conn: sqlite3.Connection, torrent_hash: str, items: Iterable[ContentRootSummary]) -> dict:
+def rank_donor_candidates_for_torrent(conn: sqlite3.Connection, torrent_hash: str, items: Iterable[ContentRootSummary]) -> dict:
     row = conn.execute(
         """
         SELECT ti.torrent_hash, ti.save_path, ti.root_name, p.payload_hash, p.root_path, p.file_count, p.total_bytes
@@ -350,27 +363,95 @@ def donors_for_torrent(conn: sqlite3.Connection, torrent_hash: str, items: Itera
     ).fetchone()
     if row is None:
         raise RuntimeError(f"torrent_not_found hash={torrent_hash}")
+
     payload_hash = str(row["payload_hash"] or "").strip() or None
-    exact_non_qb = []
-    partial_non_qb = []
+    file_count = int(row["file_count"] or 0)
+    total_bytes = int(row["total_bytes"] or 0)
+    ranked: list[RankedDonorCandidate] = []
+
     for item in items:
         if payload_hash and item.tree_hash == payload_hash:
-            exact_non_qb.append(item)
-        elif (
-            item.file_count == int(row["file_count"] or 0)
-            and item.total_bytes == int(row["total_bytes"] or 0)
-        ):
-            partial_non_qb.append(item)
-    exact_non_qb.sort(key=lambda item: item.root_path)
-    partial_non_qb.sort(key=lambda item: (item.status != "complete", item.root_path))
+            ranked.append(
+                RankedDonorCandidate(
+                    donor_type="non_qb",
+                    confidence="exact",
+                    reason="tree_hash_match",
+                    root_path=item.root_path,
+                    root_kind=item.root_kind,
+                    file_count=item.file_count,
+                    total_bytes=item.total_bytes,
+                    status=item.status,
+                    tree_hash=item.tree_hash,
+                )
+            )
+            continue
+        if item.file_count == file_count and item.total_bytes == total_bytes:
+            confidence = "strong" if item.status == "complete" else "candidate"
+            reason = "file_count_total_bytes_match"
+            ranked.append(
+                RankedDonorCandidate(
+                    donor_type="non_qb",
+                    confidence=confidence,
+                    reason=reason,
+                    root_path=item.root_path,
+                    root_kind=item.root_kind,
+                    file_count=item.file_count,
+                    total_bytes=item.total_bytes,
+                    status=item.status,
+                    tree_hash=item.tree_hash,
+                )
+            )
+
+    confidence_rank = {"exact": 0, "strong": 1, "candidate": 2}
+    ranked.sort(
+        key=lambda item: (
+            confidence_rank.get(item.confidence, 9),
+            -item.total_bytes,
+            item.root_path,
+        )
+    )
     return {
         "torrent_hash": str(row["torrent_hash"]),
         "save_path": str(row["save_path"] or ""),
         "root_name": str(row["root_name"] or ""),
         "payload_hash": payload_hash,
         "root_path": str(row["root_path"] or ""),
-        "file_count": int(row["file_count"] or 0),
-        "total_bytes": int(row["total_bytes"] or 0),
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+        "ranked_candidates": ranked,
+    }
+
+
+def donors_for_torrent(conn: sqlite3.Connection, torrent_hash: str, items: Iterable[ContentRootSummary]) -> dict:
+    ranked_report = rank_donor_candidates_for_torrent(conn, torrent_hash, items)
+    exact_non_qb = []
+    partial_non_qb = []
+    for candidate in ranked_report["ranked_candidates"]:
+        item = ContentRootSummary(
+            root_path=candidate.root_path,
+            root_kind=candidate.root_kind,
+            fs_uuid=None,
+            device_id=None,
+            file_count=candidate.file_count,
+            total_bytes=candidate.total_bytes,
+            files_with_sha256=0,
+            files_with_quick=0,
+            tree_hash=candidate.tree_hash,
+            status=candidate.status,
+        )
+        if candidate.confidence == "exact":
+            exact_non_qb.append(item)
+        else:
+            partial_non_qb.append(item)
+    return {
+        "torrent_hash": ranked_report["torrent_hash"],
+        "save_path": ranked_report["save_path"],
+        "root_name": ranked_report["root_name"],
+        "payload_hash": ranked_report["payload_hash"],
+        "root_path": ranked_report["root_path"],
+        "file_count": ranked_report["file_count"],
+        "total_bytes": ranked_report["total_bytes"],
         "exact_non_qb_donors": exact_non_qb,
         "candidate_non_qb_donors": partial_non_qb,
+        "ranked_candidates": ranked_report["ranked_candidates"],
     }

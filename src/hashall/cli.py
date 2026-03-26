@@ -1696,6 +1696,7 @@ def content_donors_cmd(db, torrent_hash, base_roots, json_output):
         payload = dict(report)
         payload["exact_non_qb_donors"] = [item.__dict__ for item in report["exact_non_qb_donors"]]
         payload["candidate_non_qb_donors"] = [item.__dict__ for item in report["candidate_non_qb_donors"]]
+        payload["ranked_candidates"] = [item.__dict__ for item in report.get("ranked_candidates", [])]
         print(json.dumps(payload, indent=2))
         return
 
