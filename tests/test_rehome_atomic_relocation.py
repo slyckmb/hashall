@@ -287,6 +287,47 @@ def test_ensure_target_donor_reuses_exact_preexisting_target(tmp_path, monkeypat
     assert donor.target_preexisting is True
 
 
+def test_ensure_target_donor_repairs_nested_single_file_target_path(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    monkeypatch.setattr(executor, "_spot_check_payload", lambda *args, **kwargs: None)
+
+    release = "UEFA.Europa.Conference.League.CFR.Cluj.vs.Neman.Grodno.25.07.2024.1080i.HDTV.MPA2.0.H.264-playTV"
+    source = tmp_path / "pool-data" / "cross-seed-link" / "Tracker" / release / release
+    source.mkdir(parents=True, exist_ok=True)
+    source_file = source / f"{release}.mkv"
+    payload = b"payload"
+    source_file.write_bytes(payload)
+
+    original_target = tmp_path / "pool-media" / "cross-seed-link" / "Tracker" / release / release
+    copied_to = {"path": None}
+
+    def fake_copy(src: Path, dst: Path):
+        copied_to["path"] = Path(dst)
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(Path(src).read_bytes())
+
+    monkeypatch.setattr(executor, "_copy_with_rsync_progress", fake_copy)
+
+    plan = {
+        "decision": "MOVE",
+        "source_path": str(source_file),
+        "target_path": str(original_target),
+        "file_count": 1,
+        "total_bytes": len(payload),
+        "target_device_id": 44,
+    }
+
+    donor = executor._ensure_target_donor(plan)
+
+    expected_target = original_target / source_file.name
+    assert copied_to["path"] == expected_target
+    assert donor.target_path == expected_target
+    assert donor.moved_payload is True
+
+    execute_plan = executor._build_execute_plan_for_donor(plan, donor)
+    assert execute_plan["target_path"] == str(expected_target)
+
+
 def test_cleanup_unused_target_donor_removes_intermediate_root(tmp_path):
     executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
 

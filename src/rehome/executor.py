@@ -1674,6 +1674,26 @@ class DemotionExecutor:
         return roots
 
     @staticmethod
+    def _normalize_nested_single_file_target_path(source_path: Path, target_path: Path) -> Path:
+        """
+        Repair single-file MOVE targets that still carry a wrapper directory name.
+
+        Example:
+        - source: .../Release/Release/Release.mkv
+        - planned target: .../Release/Release
+        - corrected target: .../Release/Release/Release.mkv
+        """
+        source_path = Path(source_path).resolve()
+        target_path = Path(target_path).resolve()
+        if not source_path.is_file():
+            return target_path
+        if target_path.name == source_path.name:
+            return target_path
+        if source_path.parent.name != target_path.name:
+            return target_path
+        return target_path / source_path.name
+
+    @staticmethod
     def _derive_target_save_path_for_torrent(target_path: Path, files: List[object]) -> Path:
         """
         Derive the qB save_path for a target payload using the torrent's file layout.
@@ -4272,6 +4292,17 @@ class DemotionExecutor:
         if decision != "MOVE":
             raise RuntimeError(f"unsupported donor acquisition decision: {decision}")
 
+        corrected_target_path = self._normalize_nested_single_file_target_path(
+            source_path,
+            target_path,
+        )
+        if corrected_target_path != target_path:
+            self._log(
+                "step=normalize_target_path "
+                f"reason=nested_single_file_source_shape old={target_path} new={corrected_target_path}"
+            )
+            target_path = corrected_target_path
+
         self._log(f"step=verify_source path={source_path}")
         moved_payload = False
         move_strategy = "rsync_copy_first"
@@ -4352,6 +4383,7 @@ class DemotionExecutor:
 
     def _build_execute_plan_for_donor(self, plan: Dict, donor: TargetDonor) -> Dict:
         execute_plan = dict(plan)
+        execute_plan["target_path"] = str(donor.target_path)
         if str(plan.get("decision") or "").upper() == "MOVE":
             filtered_view_targets = self._filter_move_view_targets(plan, donor.source_path)
             execute_plan["view_targets"] = filtered_view_targets
