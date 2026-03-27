@@ -1,6 +1,28 @@
 # Operational Run State
 
-Last updated: 2026-03-26
+Last updated: 2026-03-27
+
+## 2026-03-27 Dual-Client Drift Handoff
+
+New dedicated handoff:
+- `docs/operations/RT-QB-DRIFT-HANDOFF.md`
+
+New default operating rule:
+- treat seeded data as dual-client sensitive by default
+- do not assume qB-only unless explicitly proven
+
+Current sweep result:
+- `4522` hashes found in both clients
+- `55` hashes with real rt/qB path drift after normalization
+- none of the still-remaining `/pool/data` migration items are drifted between rt and qB
+
+Highest-priority cleanup bucket:
+- `19` rows where qB is already on `/pool/media` but rt still points at an older path
+- these should be repointed in rt before considering those migration items fully normalized
+
+Important design instruction:
+- migration, repair, and reclaim code should be updated to be dual-client sensitive going forward
+- qB-only path protection is no longer sufficient for cleanup safety
 
 ## 2026-03-26 Live qB Failure Cluster + Carve-Out Recheck
 

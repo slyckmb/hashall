@@ -1,5 +1,21 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-03-27 Dual-Client Default + Drift Cleanup
+
+- New handoff doc:
+  - `docs/operations/RT-QB-DRIFT-HANDOFF.md`
+- Going forward, assume seeded data is dual-client sensitive by default.
+- Do not treat qB-only status as the default assumption.
+- Current refined drift sweep:
+  - `4522` hashes exist in both clients
+  - `55` have real rt/qB path drift after normalization
+  - none of the still-remaining `/pool/data` migration items are currently drifted between rt and qB
+- Highest-priority cleanup is the `19` rows where qB already points at `/pool/media` but rt still points elsewhere.
+- Code follow-up required:
+  1. make migration success checks dual-client aware
+  2. make reclaim protection rt-aware as well as qB-aware
+  3. stop assuming path normalization is complete when only qB has moved
+
 ## 2026-03-25 Active Findings (compact-safe) — UPDATED
 
 - Pivot priority is now back on `pool/data -> pool/media` migration.
