@@ -1567,6 +1567,12 @@ def content():
     pass
 
 
+@cli.group()
+def rt():
+    """Read-only rtorrent session inspection."""
+    pass
+
+
 def _default_content_base_roots() -> list[str]:
     return [
         "/pool/data/orphaned_data",
@@ -1784,6 +1790,54 @@ def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, 
         print(f"      keep:  {group.keep.root_path} ({group.keep.reason})")
         for item in group.purge:
             print(f"      purge: {item.root_path}")
+
+
+@rt.command("session-audit")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--path-contains", help="Only include session rows whose directory contains this substring.")
+@click.option("--missing-only", is_flag=True, help="Only include rows whose current rt session path is missing on disk.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def rt_session_audit_cmd(session_dir, path_contains, missing_only, limit, json_output):
+    """Audit current rtorrent session roots for missing/existing paths."""
+    from hashall.rtorrent import load_rt_session_directories
+
+    rows = list(load_rt_session_directories(Path(session_dir).expanduser()).values())
+    needle = str(path_contains or "").strip().lower()
+    filtered = []
+    for row in rows:
+        if missing_only and row.path_exists:
+            continue
+        if needle and needle not in row.directory.lower():
+            continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: (row.path_exists, row.directory.lower(), row.torrent_hash))
+    if limit > 0:
+        filtered = filtered[:limit]
+
+    summary = {
+        "session_dir": str(Path(session_dir).expanduser()),
+        "total_rows": len(rows),
+        "missing_rows": sum(1 for row in rows if not row.path_exists),
+        "existing_rows": sum(1 for row in rows if row.path_exists),
+    }
+
+    if json_output:
+        payload = {
+            "summary": summary,
+            "rows": [row.__dict__ for row in filtered],
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
+    print("🧭 rt session audit")
+    print(f"   session_dir: {summary['session_dir']}")
+    print(f"   total_rows: {summary['total_rows']}")
+    print(f"   missing_rows: {summary['missing_rows']}")
+    print(f"   existing_rows: {summary['existing_rows']}")
+    for row in filtered:
+        state = "exists" if row.path_exists else "missing"
+        print(f"   {state:7s} {row.torrent_hash[:16]} {row.directory}")
 
 @payload.command("collisions")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")

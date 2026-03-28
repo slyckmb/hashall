@@ -14,6 +14,7 @@ DEFAULT_RT_SESSION_DIR = Path("/dump/docker/gluetun_qbit/rtorrent_vpn/.session")
 class RTSessionEntry:
     torrent_hash: str
     directory: str
+    path_exists: bool
 
 
 def rt_path_aligned(
@@ -65,7 +66,11 @@ def load_rt_session_directories(session_dir: Path = DEFAULT_RT_SESSION_DIR) -> d
             directory = str(canonicalize_path(Path(raw_dir.decode("utf-8", "ignore"))))
         except Exception:
             directory = raw_dir.decode("utf-8", "ignore")
-        out[stem] = RTSessionEntry(torrent_hash=stem, directory=directory)
+        out[stem] = RTSessionEntry(
+            torrent_hash=stem,
+            directory=directory,
+            path_exists=bool(directory and Path(directory).exists()),
+        )
     return out
 
 

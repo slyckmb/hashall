@@ -331,3 +331,33 @@ def test_content_reclaim_report_protects_live_rt_session_roots(tmp_path: Path) -
     assert group["keep"]["root_path"] == "/pool/media/torrents/seeding/cross-seed-link/FileList.io/Release.One"
     assert group["keep"]["reason"] == "live_qb_payload_root"
     assert group["purge"] == []
+
+
+def test_rt_session_audit_reports_missing_and_existing(tmp_path: Path) -> None:
+    session_dir = tmp_path / "rt-session"
+    session_dir.mkdir()
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    bencode_dump(
+        session_dir / "AAA111.torrent.rtorrent",
+        {b"directory": str(existing).encode("utf-8")},
+    )
+    bencode_dump(
+        session_dir / "BBB222.torrent.rtorrent",
+        {b"directory": b"/missing/path"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["rt", "session-audit", "--session-dir", str(session_dir), "--json-output"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output[result.output.find("{"):])
+    assert payload["summary"]["total_rows"] == 2
+    assert payload["summary"]["missing_rows"] == 1
+    assert payload["summary"]["existing_rows"] == 1
+    rows = {row["torrent_hash"]: row for row in payload["rows"]}
+    assert rows["aaa111"]["path_exists"] is True
+    assert rows["bbb222"]["path_exists"] is False
