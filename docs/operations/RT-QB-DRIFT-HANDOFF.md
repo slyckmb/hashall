@@ -56,6 +56,8 @@ Most important finding:
 - the former `fix_now_repoint_rt_to_pool_media` bucket is now the cleanest rt repair lane
 - all `19` of those items still have valid `/pool/media` content on disk
 - so they should be treated as straight rt repoint candidates, not as donor/rebuild cases
+- as of the latest live reevaluation, that former Wave 1 bucket is now fully `aligned_now`
+- current remainder is down to `6` unresolved rows; see `docs/operations/RT-REPAIR-REMAINING-CHECKLIST.md`
 
 ## Default Rule Going Forward
 
