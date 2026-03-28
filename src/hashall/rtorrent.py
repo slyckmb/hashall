@@ -181,6 +181,11 @@ def normalize_rt_target_directory(
     if not text:
         return ""
     path = Path(text)
+    if torrent_meta and not torrent_meta.is_multi_file:
+        # rTorrent expects d.directory to point at the containing directory for
+        # single-file torrents, not the file path itself.
+        if path.suffix or path.exists() and path.is_file():
+            path = path.parent
     if torrent_meta and torrent_meta.is_multi_file and torrent_meta.info_name:
         if path.name == torrent_meta.info_name and path.parent != path:
             path = path.parent

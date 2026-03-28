@@ -587,6 +587,15 @@ def test_normalize_rt_target_directory_uses_parent_for_multi_file_content_root(t
     assert normalized == str(target_dir.parent)
 
 
+def test_normalize_rt_target_directory_uses_parent_for_single_file_path(tmp_path: Path) -> None:
+    target_file = tmp_path / "movies" / "Movie.mkv"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("x", encoding="utf-8")
+    meta = RTTorrentMeta(torrent_hash="aaa111", info_name="Movie.mkv", is_multi_file=False)
+    normalized = normalize_rt_target_directory(str(target_file), meta)
+    assert normalized == str(target_file.parent)
+
+
 def test_rt_repair_apply_dry_run_uses_target_directory(tmp_path: Path) -> None:
     session_dir = tmp_path / "rt-session"
     session_dir.mkdir()
@@ -637,7 +646,7 @@ def test_rt_repair_apply_dry_run_uses_target_directory(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "candidates: 1" in result.output
-    assert str(target_dir) in result.output
+    assert str(target_dir.parent) in result.output
     assert "apply: False" in result.output
 
 
