@@ -1932,6 +1932,44 @@ def rt_recheck_cmd(hash_filters, rpc_url, do_apply):
         print(f"      completed: {completed}")
 
 
+@rt.command("session-reset")
+@click.option("--hash", "hash_filters", multiple=True, required=True, help="Torrent hash(es) to reset from session.")
+@click.option("--target-directory", required=True, help="Desired content root to restore after reload.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session files.")
+@click.option("--backup-root", type=click.Path(file_okay=False), default="out/rt-session-reset", show_default=True, help="Backup directory for copied session files.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute the session reset. Default is dry-run.")
+def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_root, rpc_url, do_apply):
+    """Rebuild one or more rt torrents from .torrent plus existing data."""
+    from hashall.rtorrent import rt_reset_torrent_session
+
+    hashes = [str(item).strip().lower() for item in hash_filters if str(item).strip()]
+    session_path = Path(session_dir).expanduser()
+    backup_path = Path(backup_root).expanduser()
+    print("♻️  rt session reset")
+    print(f"   session_dir: {session_path}")
+    print(f"   backup_root: {backup_path}")
+    print(f"   target_directory: {target_directory}")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    print(f"   hashes: {len(hashes)}")
+    for torrent_key in hashes:
+        print(f"   hash: {torrent_key}")
+        if not do_apply:
+            continue
+        result = rt_reset_torrent_session(
+            torrent_key,
+            target_directory=target_directory,
+            session_dir=session_path,
+            backup_root=backup_path,
+            rpc_url=rpc_url,
+        )
+        print(f"      backup_dir: {result['backup_dir']}")
+        if result["normalized_target_directory"] != target_directory:
+            print(f"      normalized_target_directory: {result['normalized_target_directory']}")
+        print(f"      completed: {result['completed']}")
+
+
 def _build_rt_repair_rows(report_path: str, session_dir: str, action_bucket: str | None) -> tuple[list[dict], list[dict]]:
     from hashall.rtorrent import (
         derive_rt_target_directory,

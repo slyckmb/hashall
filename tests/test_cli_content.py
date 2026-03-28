@@ -7,6 +7,7 @@ from hashall.bencode import bencode_dump
 from hashall.rtorrent import (
     RTTorrentMeta,
     derive_rt_target_directory,
+    map_rt_runtime_path,
     normalize_rt_target_directory,
 )
 
@@ -587,6 +588,15 @@ def test_normalize_rt_target_directory_uses_parent_for_multi_file_content_root(t
     assert normalized == str(target_dir.parent)
 
 
+def test_normalize_rt_target_directory_uses_grandparent_for_multi_file_nested_file(tmp_path: Path) -> None:
+    target_file = tmp_path / "movies" / "Release.One" / "movie.mkv"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("x", encoding="utf-8")
+    meta = RTTorrentMeta(torrent_hash="aaa111", info_name="Release.One", is_multi_file=True)
+    normalized = normalize_rt_target_directory(str(target_file), meta)
+    assert normalized == str(target_file.parent.parent)
+
+
 def test_normalize_rt_target_directory_uses_parent_for_single_file_path(tmp_path: Path) -> None:
     target_file = tmp_path / "movies" / "Movie.mkv"
     target_file.parent.mkdir(parents=True)
@@ -594,6 +604,21 @@ def test_normalize_rt_target_directory_uses_parent_for_single_file_path(tmp_path
     meta = RTTorrentMeta(torrent_hash="aaa111", info_name="Movie.mkv", is_multi_file=False)
     normalized = normalize_rt_target_directory(str(target_file), meta)
     assert normalized == str(target_file.parent)
+
+
+def test_normalize_rt_target_directory_maps_stash_prefix_to_data(tmp_path: Path) -> None:
+    stash_target = Path("/stash/media/torrents/seeding/books/Book.epub")
+    data_target = Path("/data/media/torrents/seeding/books/Book.epub")
+    data_target.parent.mkdir(parents=True, exist_ok=True)
+    data_target.write_text("x", encoding="utf-8")
+    meta = RTTorrentMeta(torrent_hash="aaa111", info_name="Book.epub", is_multi_file=False)
+    normalized = normalize_rt_target_directory(str(stash_target), meta)
+    assert normalized == str(data_target.parent)
+
+
+def test_map_rt_runtime_path_translates_known_prefixes() -> None:
+    assert map_rt_runtime_path("/stash/media/torrents/seeding/books/Book.epub") == "/data/media/torrents/seeding/books/Book.epub"
+    assert map_rt_runtime_path("/dump/docker/gluetun_qbit/rtorrent_vpn/.session/ABC123.torrent") == "/config/.session/ABC123.torrent"
 
 
 def test_rt_repair_apply_dry_run_uses_target_directory(tmp_path: Path) -> None:
@@ -703,6 +728,29 @@ def test_rt_state_audit_bad_only(monkeypatch) -> None:
 def test_rt_recheck_dry_run_lists_hashes() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["rt", "recheck", "--hash", "aaa111", "--hash", "bbb222"])
+
+    assert result.exit_code == 0
+    assert "hashes: 2" in result.output
+    assert "hash: aaa111" in result.output
+    assert "hash: bbb222" in result.output
+    assert "apply: False" in result.output
+
+
+def test_rt_session_reset_dry_run_lists_hashes() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "session-reset",
+            "--hash",
+            "aaa111",
+            "--hash",
+            "bbb222",
+            "--target-directory",
+            "/data/media/torrents/seeding/movies",
+        ],
+    )
 
     assert result.exit_code == 0
     assert "hashes: 2" in result.output
