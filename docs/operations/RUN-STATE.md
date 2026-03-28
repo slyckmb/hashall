@@ -23,6 +23,9 @@ Highest-priority cleanup bucket:
 Important design instruction:
 - migration, repair, and reclaim code should be updated to be dual-client sensitive going forward
 - qB-only path protection is no longer sufficient for cleanup safety
+- current code now reflects that in two concrete places:
+  - `hashall content reclaim-report` protects live rt session roots as well as live qB payload roots
+  - `hashall rehome drift-audit` reports `rt_drift_rows` so a qB-aligned plan can still surface rt path drift
 
 ## 2026-03-26 Live qB Failure Cluster + Carve-Out Recheck
 

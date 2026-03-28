@@ -20,6 +20,7 @@ from hashall.verify_trees import verify_trees
 from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 from hashall.device import get_files_table_name
+from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, live_rt_root_paths
 from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
@@ -1724,8 +1725,9 @@ def content_donors_cmd(db, torrent_hash, base_roots, json_output):
 @click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit groups shown; 0 means no limit.")
 @click.option("--include-fully-protected", is_flag=True, help="Include duplicate groups where every root is protected by live qB ownership.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory used to protect live rt-owned roots.")
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
-def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, include_fully_protected, json_output):
+def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, include_fully_protected, rt_session_dir, json_output):
     """Rank exact duplicate non-qB roots into keep/purge candidates."""
     from hashall.content_inventory import (
         discover_content_roots,
@@ -1740,11 +1742,13 @@ def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, 
     conn = connect_db(Path(db), read_only=True, apply_migrations=False)
     groups = duplicate_content_roots(discover_content_roots(conn, roots))
     protected_qb_roots = live_qb_root_paths(conn)
+    protected_rt_roots = live_rt_root_paths(Path(rt_session_dir).expanduser())
     conn.close()
     groups = filter_duplicate_groups(groups, path_contains=path_contains, min_bytes=min_bytes)
     ranked = rank_reclaim_groups(
         groups,
         protected_qb_roots=protected_qb_roots,
+        protected_rt_roots=protected_rt_roots,
         include_fully_protected=include_fully_protected,
     )
     if limit > 0:
@@ -1770,6 +1774,7 @@ def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, 
     print(f"   groups: {len(ranked)}")
     print(f"   reclaimable_bytes: {total_reclaimable:,}")
     print(f"   protected_qb_roots: {len(protected_qb_roots)}")
+    print(f"   protected_rt_roots: {len(protected_rt_roots)}")
     for idx, group in enumerate(ranked, start=1):
         reclaimable = sum(item.total_bytes for item in group.purge)
         print(

@@ -34,6 +34,7 @@ from rehome.reality import DEFAULT_FASTRESUME_DIR, build_plan_reality_snapshot
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
+from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_session_directories, rt_path_aligned
 
 DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
 DEFAULT_REFRESH_LOG_DIR = Path.home() / ".logs" / "hashall" / "rehome" / "refresh"
@@ -2458,8 +2459,15 @@ def qb_missing_remediate_cmd(
     show_default=True,
     help="Directory containing qB .fastresume files",
 )
+@click.option(
+    "--rt-session-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=str(DEFAULT_RT_SESSION_DIR),
+    show_default=True,
+    help="Directory containing rtorrent .torrent.rtorrent session files",
+)
 @click.option("--output", "-o", type=click.Path(), help="Optional JSON report output path")
-def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
+def drift_audit_cmd(plan_path, catalog, fastresume_dir, rt_session_dir, output):
     """Compare a rehome plan to live qB, fastresume, filesystem, and catalog state."""
     from hashall.qbittorrent import get_qbittorrent_client
 
@@ -2490,11 +2498,13 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
         )
         for plan in plans
     ]
+    rt_sessions = load_rt_session_directories(Path(rt_session_dir).expanduser())
 
     group_states: dict[str, int] = {}
     total_rows = 0
     blocked_rows = 0
     out_of_plan_groups = 0
+    rt_drift_rows = 0
     for snapshot in snapshots:
         state = str(snapshot.get("group_state") or "unknown")
         group_states[state] = group_states.get(state, 0) + 1
@@ -2504,6 +2514,19 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
         for row in snapshot.get("rows") or []:
             if str(row.get("classification") or "") not in {"aligned_target", "catalog_drift_already_targeted"}:
                 blocked_rows += 1
+            torrent_hash = str(row.get("torrent_hash") or "").strip().lower()
+            rt_entry = rt_sessions.get(torrent_hash)
+            qb_save_path = str(row.get("runtime_save_path") or "")
+            qb_content_path = str(row.get("runtime_content_path") or "")
+            if rt_entry and not rt_path_aligned(rt_entry.directory, qb_save_path=qb_save_path, qb_content_path=qb_content_path):
+                row["rt_directory"] = rt_entry.directory
+                row["rt_alignment"] = "drift"
+                rt_drift_rows += 1
+            elif rt_entry:
+                row["rt_directory"] = rt_entry.directory
+                row["rt_alignment"] = "aligned"
+            else:
+                row["rt_alignment"] = "unknown"
 
     report = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -2516,6 +2539,7 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
             "group_states": group_states,
             "attention_rows": blocked_rows,
             "plans_with_out_of_plan_siblings": out_of_plan_groups,
+            "rt_drift_rows": rt_drift_rows,
         },
         "plans": snapshots,
     }
@@ -2535,6 +2559,7 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
         "   plans_with_out_of_plan_siblings: "
         f"{report['summary']['plans_with_out_of_plan_siblings']}"
     )
+    click.echo(f"   rt_drift_rows: {report['summary']['rt_drift_rows']}")
     if group_states:
         click.echo("   group_states:")
         for state, count in sorted(group_states.items(), key=lambda item: (-int(item[1]), str(item[0]))):
@@ -2544,13 +2569,15 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
     for snapshot in snapshots:
         for row in snapshot.get("rows") or []:
             classification = str(row.get("classification") or "")
-            if classification in {"aligned_target", "catalog_drift_already_targeted"}:
+            rt_alignment = str(row.get("rt_alignment") or "")
+            if classification in {"aligned_target", "catalog_drift_already_targeted"} and rt_alignment != "drift":
                 continue
             click.echo(
                 "     "
                 f"{str(row.get('torrent_hash') or '')[:16]} "
                 f"group={snapshot.get('group_state')} "
                 f"class={classification} "
+                f"rt={rt_alignment} "
                 f"reason={row.get('operator_reason')}"
             )
             printed += 1

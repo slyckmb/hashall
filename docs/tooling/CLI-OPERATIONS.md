@@ -91,6 +91,10 @@ Reclaim-report guidance:
   - if a duplicate root overlaps a live qB payload root, that root becomes the `keep` target
   - fully protected duplicate groups are hidden by default
   - use `--include-fully-protected` to audit those groups explicitly
+- It now also protects live rt session roots by default:
+  - pass `--rt-session-dir` when you need to point at a non-default rt session tree
+  - if one duplicate root is still referenced by rt, that path will not be emitted as a purge candidate
+  - if qB and rt each protect different roots in the same duplicate group, the report keeps the preferred path and emits no purge rows for that fully protected group unless `--include-fully-protected` is set
 - Current path preference is conservative:
   - prefer `/pool/media/...`
   - then `_rehome-unique`
@@ -100,6 +104,12 @@ Reclaim-report guidance:
   - then `/pool/data/orphaned_data`
   - then `/pool/data/RecycleBin`
 - Use it to feed a separate review/apply script; do not treat it as a blind deletion command.
+
+Drift-audit guidance:
+
+- `hashall rehome drift-audit` is no longer qB-only.
+- It now accepts `--rt-session-dir` and reports `rt_drift_rows` in the summary.
+- Rows that are otherwise qB-aligned but still drifted in rt remain visible in the sample output as `rt=drift`.
 
 ### Maintenance
 

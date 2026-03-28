@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from click.testing import CliRunner
+from hashall.bencode import bencode_dump
 
 from hashall.cli import cli
 
@@ -292,3 +293,41 @@ def test_content_reclaim_report_ranks_keep_and_purge(tmp_path: Path) -> None:
     assert group["keep"]["reason"] == "live_qb_payload_root"
     assert group["purge"][0]["root_path"] == "/pool/data/seeds/cross-seed/tracker-one/Release.One"
     assert group["reclaimable_bytes"] == 9
+
+
+def test_content_reclaim_report_protects_live_rt_session_roots(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.db"
+    _init_db(db_path)
+    session_dir = tmp_path / "rt-session"
+    session_dir.mkdir()
+    bencode_dump(
+        session_dir / "deadbeef.torrent.rtorrent",
+        {b"directory": b"/pool/data/seeds/cross-seed/tracker-one/Release.One"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "content",
+            "reclaim-report",
+            "--db",
+            str(db_path),
+            "--root",
+            "/pool/data/seeds",
+            "--root",
+            "/pool/media/torrents/seeding",
+            "--rt-session-dir",
+            str(session_dir),
+            "--include-fully-protected",
+            "--json-output",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output[result.output.find("["):])
+    assert len(payload) == 1
+    group = payload[0]
+    assert group["keep"]["root_path"] == "/pool/media/torrents/seeding/cross-seed-link/FileList.io/Release.One"
+    assert group["keep"]["reason"] == "live_qb_payload_root"
+    assert group["purge"] == []

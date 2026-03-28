@@ -5,7 +5,7 @@ import sqlite3
 
 from click.testing import CliRunner
 
-from hashall.bencode import bencode_encode
+from hashall.bencode import bencode_dump, bencode_encode
 from rehome.cli import cli
 from rehome.reality import build_plan_reality_snapshot
 
@@ -302,6 +302,74 @@ def test_drift_audit_cli_prints_group_state(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "ready_repoint_or_reconcile" in result.output
     assert "stale_runtime_and_fastresume_root" in result.output
+
+
+def test_drift_audit_cli_reports_rt_drift(tmp_path, monkeypatch):
+    source_root = tmp_path / "pool-data" / "cross-seed" / "seedpool (API)" / "Movie.mkv"
+    target_root = tmp_path / "pool-media" / "cross-seed" / "seedpool (API)" / "Movie.mkv"
+    source_root.parent.mkdir(parents=True, exist_ok=True)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    source_root.write_bytes(b"old")
+    target_root.write_bytes(b"new")
+
+    catalog = tmp_path / "catalog.db"
+    _make_catalog(catalog, payload_root=str(source_root), save_path=str(source_root.parent))
+
+    fastresume_dir = tmp_path / "BT_backup"
+    fastresume_dir.mkdir()
+    _write_fastresume(
+        fastresume_dir / "abc123.fastresume",
+        save_path=str(source_root.parent),
+        qbt_save_path=str(source_root.parent),
+    )
+
+    rt_session_dir = tmp_path / "rt-session"
+    rt_session_dir.mkdir()
+    bencode_dump(
+        rt_session_dir / "ABC123.torrent.rtorrent",
+        {b"directory": str(source_root.parent).encode("utf-8")},
+    )
+
+    plan = _make_plan(source_root, target_root)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps({"plans": [plan]}), encoding="utf-8")
+
+    qb = FakeQBClient(
+        [
+            SimpleNamespace(
+                hash="abc123",
+                name="Movie.mkv",
+                state="stalledUP",
+                progress=1.0,
+                save_path=str(target_root.parent),
+                content_path=str(target_root),
+            )
+        ]
+    )
+
+    monkeypatch.setattr("rehome.cli.get_qbittorrent_client", lambda: qb, raising=False)
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", lambda: qb)
+    monkeypatch.setattr("rehome.cli._wait_for_qb_ready", lambda qbit: None)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "drift-audit",
+            "--plan",
+            str(plan_path),
+            "--catalog",
+            str(catalog),
+            "--fastresume-dir",
+            str(fastresume_dir),
+            "--rt-session-dir",
+            str(rt_session_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rt_drift_rows: 1" in result.output
+    assert "rt=drift" in result.output
 
 
 def test_build_plan_reality_snapshot_classifies_move_source_only(tmp_path):

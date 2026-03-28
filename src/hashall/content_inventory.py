@@ -411,26 +411,36 @@ def _path_rank_for_reclaim(path: str) -> tuple[int, str]:
     return (8, lowered)
 
 
-def _is_protected_by_live_qb(item: ContentRootSummary, protected_qb_roots: frozenset[str]) -> bool:
+def _is_protected(item: ContentRootSummary, protected_roots: frozenset[str]) -> bool:
     candidate = str(canonicalize_path(Path(item.root_path)))
-    return candidate in protected_qb_roots
+    return candidate in protected_roots
 
 
 def rank_reclaim_groups(
     groups: Iterable[list[ContentRootSummary]],
     *,
     protected_qb_roots: frozenset[str] = frozenset(),
+    protected_rt_roots: frozenset[str] = frozenset(),
     include_fully_protected: bool = False,
 ) -> list[ReclaimGroup]:
     ranked_groups: list[ReclaimGroup] = []
     for group in groups:
         if len(group) < 2:
             continue
-        protected = [item for item in group if _is_protected_by_live_qb(item, protected_qb_roots)]
+        protected_qb = [item for item in group if _is_protected(item, protected_qb_roots)]
+        protected_rt = [item for item in group if _is_protected(item, protected_rt_roots)]
+        protected = list({item.root_path: item for item in protected_qb + protected_rt}.values())
         if protected:
             keep_item = sorted(protected, key=lambda item: _path_rank_for_reclaim(item.root_path))[0]
             purge_items = [item for item in group if item.root_path != keep_item.root_path and item not in protected]
-            keep_reason = "live_qb_payload_root"
+            keep_is_qb = _is_protected(keep_item, protected_qb_roots)
+            keep_is_rt = _is_protected(keep_item, protected_rt_roots)
+            if keep_is_qb and keep_is_rt:
+                keep_reason = "live_dual_client_root"
+            elif keep_is_qb:
+                keep_reason = "live_qb_payload_root"
+            else:
+                keep_reason = "live_rt_session_root"
         else:
             ordered = sorted(group, key=lambda item: _path_rank_for_reclaim(item.root_path))
             keep_item = ordered[0]
