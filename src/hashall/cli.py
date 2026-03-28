@@ -1845,9 +1845,10 @@ def rt_session_audit_cmd(session_dir, path_contains, missing_only, limit, json_o
 @click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
 @click.option("--action-bucket", help="Only include rows from this action bucket.")
 @click.option("--ready-only", is_flag=True, help="Only include rows that are immediately ready for direct repoint.")
+@click.option("--unresolved-only", is_flag=True, help="Only include rows that are not already aligned now.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
-def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, limit, json_output):
+def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, unresolved_only, limit, json_output):
     """Reevaluate historical rt repair rows against the live rt session and on-disk targets."""
     from hashall.rtorrent import load_rt_session_directories, rt_path_aligned
 
@@ -1899,6 +1900,8 @@ def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, li
         else:
             repair_status = "missing_target_info"
         if ready_only and not repair_status.startswith("ready_repoint_"):
+            continue
+        if unresolved_only and repair_status == "aligned_now":
             continue
         rows.append(
             {

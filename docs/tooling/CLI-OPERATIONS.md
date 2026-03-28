@@ -126,10 +126,13 @@ rt session/repair guidance:
   - `--session-dir`
   - `--action-bucket`
   - `--ready-only`
+  - `--unresolved-only`
   - `--limit`
   - `--json-output`
 - For the current rt-only Wave 1 scope, use:
   - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --action-bucket fix_now_repoint_rt_to_pool_media --ready-only`
+- To focus on remaining work after a wave has been partially or fully cleaned up, use:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --unresolved-only`
 
 ### Maintenance
 
