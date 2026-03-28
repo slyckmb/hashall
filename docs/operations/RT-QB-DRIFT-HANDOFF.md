@@ -1,6 +1,6 @@
 # RT/qB Drift Cleanup Handoff
 
-Last updated: 2026-03-27
+Last updated: 2026-03-28
 
 ## Purpose
 
@@ -31,6 +31,31 @@ Normalization used for "aligned":
 Important migration conclusion:
 - none of the still-remaining `/pool/data` migration items are currently drifted between rt and qB
 - the remaining `pool/data -> pool/media` blocker is space / carve-out handling, not rt-vs-qB drift
+
+## 2026-03-28 Reassessment: qB Is Gone, rt Is The Only Live Client
+
+Current live client state:
+- `rtorrent_vpn`: up and healthy
+- `gluetun`: up and healthy
+- `qbittorrent_vpn`: not running
+
+Operational meaning:
+- the old qB-vs-rt drift reports are now seed lists for rt cleanup, not live two-client status
+- `qb_state` values in those reports are historical context only
+- repair and normalization work should now be framed as rt-only remediation
+
+Current rt session baseline:
+- rt session entries: `5251`
+- prior drift-derived action rows: `55`
+
+Current path-existence reassessment of those `55` rows:
+- `42` rt session roots are now missing on disk
+- `13` rt session roots still exist on disk
+
+Most important finding:
+- the former `fix_now_repoint_rt_to_pool_media` bucket is now the cleanest rt repair lane
+- all `19` of those items still have valid `/pool/media` content on disk
+- so they should be treated as straight rt repoint candidates, not as donor/rebuild cases
 
 ## Default Rule Going Forward
 
@@ -69,10 +94,16 @@ Required action:
 - verify rt sees the moved data cleanly
 - only then consider the old `/pool/data` side fully retired
 
-### 2. Repair Lane, Not Main Migration Blocker
+2026-03-28 note:
+- all `19` of these currently still have the `/pool/media` target content present on disk
+- this is the best immediate rt-only repair wave
 
-These are mostly broken or incomplete qB rows that also still point rt at old download roots.
-Let the repair lane own them unless they become directly relevant to a migration batch.
+### 2. Repair Lane, Now The Main Broken-rt Set
+
+These are the clearest real broken rt rows now.
+They still point at old download roots that are missing on disk.
+These are no longer just "keep out of migration"; they are the main rt repair queue after the
+easy `/pool/media` repoints.
 
 Representative items:
 - `20555f70...` `Bottle Shock...`
@@ -85,8 +116,9 @@ Count:
 - `11`
 
 Required action:
-- do not block broad `pool/data -> pool/media` migration on these
-- repair or normalize them in the docker/repair lane
+- repair or rebuild these in the docker/repair lane
+- prefer exact existing donor content where available
+- work by family, not by isolated hash, when siblings overlap
 
 ### 3. Normalize Old rt Download Paths
 
@@ -103,6 +135,10 @@ Count:
 
 Required action:
 - normalize rt paths after the urgent migration-adjacent drift is cleaned up
+
+2026-03-28 note:
+- all `6` of these now point rt at missing `/downloads/complete/...` roots
+- they are lower priority than the `19` direct `/pool/media` repoints, but they still need real action
 
 ### 4. Normalize Generic rt Staging Paths
 
@@ -122,6 +158,11 @@ Required action:
 - lower priority than the `qB on /pool/media, rt still elsewhere` bucket
 - normalize when doing broader rt path cleanup
 
+2026-03-28 note:
+- split this bucket operationally:
+  - `11` staging paths are now missing and need real repair/repoint work
+  - `6` staging paths still exist and can be treated as lower-priority normalization
+
 ### 5. Investigate Shape-Specific Drift
 
 These are path-shape mismatches that should be reviewed manually before bulk normalization.
@@ -139,46 +180,56 @@ Required action:
 
 ## Cleanup Execution Plan
 
-### Phase A: Fix The 19 Migration-Adjacent rt Drifts
+### Phase A: Repoint The 19 Existing `/pool/media` Targets
 
 Goal:
-- make rt agree with qB for items already moved to `/pool/media`
+- move the easiest rt cases onto already-good `/pool/media` content
 
 Steps:
 1. work from `out/rt-qb-savepath-drift-action-plan-2026-03-27.json`
 2. take only rows where `action_bucket == fix_now_repoint_rt_to_pool_media`
 3. for each row:
-   - confirm qB content exists at the `/pool/media` target
+   - confirm the `/pool/media` target exists on disk
    - confirm rt still points at the older non-`/pool/media` path
-   - repoint rt to the qB path
+   - repoint rt to the `/pool/media` path
    - verify rt now resolves the same content root
 4. after the whole tranche:
-   - re-run the drift sweep
+   - re-run an rt-only path-alignment check
    - expect this bucket to drop toward zero
 
 Suggested completion criteria:
-- rt and qB paths agree for all 19 rows
+- rt points at `/pool/media` for all 19 rows
 - no item in this bucket regresses to missing-content state
 
-### Phase B: Keep Repair-Lane Rows Out Of Main Migration
+### Phase B: Repair The 11 Broken Missing-Root Rows
 
 Goal:
-- do not let broken qB rows dominate the `pool/data -> pool/media` critical path
+- repair the clearly broken rt items that still point at missing old download roots
 
 Steps:
-1. leave `repair_lane_not_migration_blocker` rows to the docker/repair workflow
-2. keep them excluded from plain migration batches
-3. only pull one back into mainline work if a migration family directly depends on it
+1. take only rows where `action_bucket == repair_lane_not_migration_blocker`
+2. group by family first:
+   - `Spider-Man...`
+   - `E.T...`
+   - `The Matrix Reloaded...`
+   - etc.
+3. prefer exact existing donor content where available
+4. repair one family at a time
+5. recheck each repaired hash in rt before moving on
 
-### Phase C: Normalize The Remaining rt Legacy Paths
+### Phase C: Normalize The Remaining Missing Legacy Paths
 
 Goal:
-- clean up historical rt path drift once migration-adjacent items are stable
+- clean up the remaining rt rows that are not in the main broken set but still point at dead legacy paths
 
 Order:
 1. `normalize_rt_old_download_path`
 2. `normalize_rt_generic_staging_path`
 3. `investigate_shape_specific_drift`
+
+Operational split for `normalize_rt_generic_staging_path`:
+- missing staging root: treat as repair/repoint
+- existing staging root: treat as normalization only
 
 ## Code Changes Required Going Forward
 
@@ -236,11 +287,11 @@ Any future migration “success” check should verify:
 
 ## Immediate Recommended Next Move
 
-1. execute Phase A for the `19` migration-adjacent drift rows
-2. re-run the drift sweep
-3. then return to the remaining `pool/data -> pool/media` carve-out work
+1. execute Phase A for the `19` items whose `/pool/media` targets already exist
+2. execute Phase B for the `11` broken missing-root rows
+3. then work the `6` missing old-download-path rows
+4. then split and normalize the generic-staging bucket
 
 The main point is:
-- the remaining plain migration lane is not blocked by current rt/qB drift on the still-unmoved
-  `/pool/data` items
-- but completed migration work is not truly complete until rt is repointed too
+- with qB gone, the remaining plain migration lane is no longer blocked by live two-client drift
+- but there is now a concrete rt-only repair backlog that should be worked in the order above
