@@ -111,6 +111,26 @@ Drift-audit guidance:
 - It now accepts `--rt-session-dir` and reports `rt_drift_rows` in the summary.
 - Rows that are otherwise qB-aligned but still drifted in rt remain visible in the sample output as `rt=drift`.
 
+rt session/repair guidance:
+
+- `hashall rt session-audit` audits live rt session roots from `.torrent.rtorrent` files.
+- It supports:
+  - `--session-dir`
+  - `--missing-only`
+  - `--path-contains`
+  - `--limit`
+  - `--json-output`
+- `hashall rt repair-report` reevaluates a historical drift/repair JSON report against the live rt session and current on-disk targets.
+- It supports:
+  - `--report`
+  - `--session-dir`
+  - `--action-bucket`
+  - `--ready-only`
+  - `--limit`
+  - `--json-output`
+- For the current rt-only Wave 1 scope, use:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --action-bucket fix_now_repoint_rt_to_pool_media --ready-only`
+
 ### Maintenance
 
 ```bash

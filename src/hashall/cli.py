@@ -1839,6 +1839,124 @@ def rt_session_audit_cmd(session_dir, path_contains, missing_only, limit, json_o
         state = "exists" if row.path_exists else "missing"
         print(f"   {state:7s} {row.torrent_hash[:16]} {row.directory}")
 
+
+@rt.command("repair-report")
+@click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False), required=True, help="Historical drift/repair action-plan JSON to reevaluate against the live rt session.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--action-bucket", help="Only include rows from this action bucket.")
+@click.option("--ready-only", is_flag=True, help="Only include rows that are immediately ready for direct repoint.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, limit, json_output):
+    """Reevaluate historical rt repair rows against the live rt session and on-disk targets."""
+    from hashall.rtorrent import load_rt_session_directories, rt_path_aligned
+
+    report = json.loads(Path(report_path).expanduser().read_text(encoding="utf-8"))
+    source_rows = list(report.get("rows") or [])
+    session_rows = load_rt_session_directories(Path(session_dir).expanduser())
+    bucket_filter = str(action_bucket or "").strip()
+    rows = []
+    for row in source_rows:
+        if bucket_filter and row.get("action_bucket") != bucket_filter:
+            continue
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        if not torrent_hash:
+            continue
+        session_entry = session_rows.get(torrent_hash)
+        current_rt_directory = (
+            session_entry.directory if session_entry else str(row.get("rt_directory") or "").strip()
+        )
+        current_rt_exists = session_entry.path_exists if session_entry else bool(
+            current_rt_directory and Path(current_rt_directory).exists()
+        )
+        candidate_targets = []
+        for raw in (row.get("qb_content_path"), row.get("qb_save_path")):
+            text = str(raw or "").strip()
+            if text and text not in candidate_targets:
+                candidate_targets.append(text)
+        preferred_target = ""
+        preferred_target_exists = False
+        for target in candidate_targets:
+            if Path(target).exists():
+                preferred_target = target
+                preferred_target_exists = True
+                break
+        if not preferred_target and candidate_targets:
+            preferred_target = candidate_targets[0]
+        aligned_now = rt_path_aligned(
+            current_rt_directory,
+            qb_save_path=row.get("qb_save_path"),
+            qb_content_path=row.get("qb_content_path"),
+        ) and current_rt_exists
+        if aligned_now:
+            repair_status = "aligned_now"
+        elif preferred_target_exists and current_rt_exists:
+            repair_status = "ready_repoint_drifted_rt_root"
+        elif preferred_target_exists:
+            repair_status = "ready_repoint_missing_rt_root"
+        elif candidate_targets:
+            repair_status = "blocked_missing_target"
+        else:
+            repair_status = "missing_target_info"
+        if ready_only and not repair_status.startswith("ready_repoint_"):
+            continue
+        rows.append(
+            {
+                "hash": torrent_hash,
+                "name": row.get("name"),
+                "action_bucket": row.get("action_bucket"),
+                "repair_status": repair_status,
+                "current_rt_directory": current_rt_directory,
+                "current_rt_exists": current_rt_exists,
+                "preferred_target": preferred_target,
+                "preferred_target_exists": preferred_target_exists,
+                "qb_save_path": row.get("qb_save_path"),
+                "qb_content_path": row.get("qb_content_path"),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            row["repair_status"],
+            row["action_bucket"] or "",
+            str(row["name"] or "").lower(),
+            row["hash"],
+        )
+    )
+    if limit > 0:
+        rows = rows[:limit]
+
+    summary = {
+        "report_path": str(Path(report_path).expanduser()),
+        "session_dir": str(Path(session_dir).expanduser()),
+        "source_rows": len(source_rows),
+        "rows": len(rows),
+        "repair_status_counts": {},
+        "action_bucket_counts": {},
+    }
+    for row in rows:
+        summary["repair_status_counts"][row["repair_status"]] = (
+            summary["repair_status_counts"].get(row["repair_status"], 0) + 1
+        )
+        summary["action_bucket_counts"][row["action_bucket"]] = (
+            summary["action_bucket_counts"].get(row["action_bucket"], 0) + 1
+        )
+
+    if json_output:
+        print(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        return
+
+    print("🩺 rt repair report")
+    print(f"   report_path: {summary['report_path']}")
+    print(f"   session_dir: {summary['session_dir']}")
+    print(f"   source_rows: {summary['source_rows']}")
+    print(f"   rows: {summary['rows']}")
+    print(f"   repair_status_counts: {summary['repair_status_counts']}")
+    for row in rows:
+        print(
+            f"   {row['repair_status']:27s} {row['hash'][:16]} "
+            f"{row['name']} :: rt={row['current_rt_directory']} -> target={row['preferred_target']}"
+        )
+
 @payload.command("collisions")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option(

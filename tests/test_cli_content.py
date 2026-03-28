@@ -361,3 +361,73 @@ def test_rt_session_audit_reports_missing_and_existing(tmp_path: Path) -> None:
     rows = {row["torrent_hash"]: row for row in payload["rows"]}
     assert rows["aaa111"]["path_exists"] is True
     assert rows["bbb222"]["path_exists"] is False
+
+
+def test_rt_repair_report_classifies_ready_and_aligned_rows(tmp_path: Path) -> None:
+    session_dir = tmp_path / "rt-session"
+    session_dir.mkdir()
+    target_dir = tmp_path / "pool" / "media" / "release-one"
+    target_dir.mkdir(parents=True)
+    target_file = target_dir / "movie.mkv"
+    target_file.write_text("x", encoding="utf-8")
+    aligned_dir = tmp_path / "pool" / "media" / "release-two"
+    aligned_dir.mkdir(parents=True)
+    report_path = tmp_path / "repair-report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "hash": "aaa111",
+                        "name": "Release One",
+                        "action_bucket": "fix_now_repoint_rt_to_pool_media",
+                        "qb_save_path": str(target_dir),
+                        "qb_content_path": str(target_file),
+                        "rt_directory": "/old/path/release-one",
+                    },
+                    {
+                        "hash": "bbb222",
+                        "name": "Release Two",
+                        "action_bucket": "fix_now_repoint_rt_to_pool_media",
+                        "qb_save_path": str(aligned_dir),
+                        "qb_content_path": str(aligned_dir / "folder"),
+                        "rt_directory": str(aligned_dir),
+                    },
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    bencode_dump(
+        session_dir / "AAA111.torrent.rtorrent",
+        {b"directory": b"/old/path/release-one"},
+    )
+    bencode_dump(
+        session_dir / "BBB222.torrent.rtorrent",
+        {b"directory": str(aligned_dir).encode("utf-8")},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "repair-report",
+            "--report",
+            str(report_path),
+            "--session-dir",
+            str(session_dir),
+            "--json-output",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output[result.output.find("{"):])
+    assert payload["summary"]["repair_status_counts"]["ready_repoint_missing_rt_root"] == 1
+    assert payload["summary"]["repair_status_counts"]["aligned_now"] == 1
+    rows = {row["hash"]: row for row in payload["rows"]}
+    assert rows["aaa111"]["preferred_target"] == str(target_file)
+    assert rows["aaa111"]["preferred_target_exists"] is True
+    assert rows["aaa111"]["repair_status"] == "ready_repoint_missing_rt_root"
+    assert rows["bbb222"]["repair_status"] == "aligned_now"
