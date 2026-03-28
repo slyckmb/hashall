@@ -16,6 +16,19 @@
   2. make reclaim protection rt-aware as well as qB-aware
   3. stop assuming path normalization is complete when only qB has moved
 
+## 2026-03-28 rt-only cleanup status
+
+- qB is gone; rt is the only live client.
+- `hashall rt repair-report` is now the live reevaluation command for the old drift action-plan JSON.
+- The former Wave 1 bucket (`fix_now_repoint_rt_to_pool_media`) now evaluates as fully `aligned_now`.
+- Current live remainder is `6` rows total:
+  - `4` straightforward `normalize_rt_old_download_path` repoints
+  - `2` shape-specific review rows
+- Live checklist command:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --unresolved-only --markdown-output`
+- Canonical current handoff:
+  - `docs/operations/RT-REPAIR-REMAINING-CHECKLIST.md`
+
 ## 2026-03-25 Active Findings (compact-safe) — UPDATED
 
 - Pivot priority is now back on `pool/data -> pool/media` migration.

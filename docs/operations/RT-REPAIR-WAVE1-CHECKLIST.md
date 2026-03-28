@@ -1,17 +1,28 @@
 # RT Repair Wave 1 Checklist
 
+Status: completed / historical reference
+
 Last updated: 2026-03-28
 
 ## Scope
 
-This checklist is the first rt-only repair wave after qB shutdown.
+This checklist was the first rt-only repair wave after qB shutdown.
 
-Use it for the `19` items where:
+It covered the `19` items where:
 - rt is the only live client now
 - the session path is still wrong
 - the good `/pool/media` target already exists on disk
 
-These are direct repoint candidates, not donor/rebuild cases.
+These were direct repoint candidates, not donor/rebuild cases.
+
+Current note:
+
+- this wave now evaluates as fully `aligned_now`
+- do not use this file as the active work queue
+- use live state instead:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --unresolved-only --markdown-output`
+- current remaining queue is documented in:
+  - `docs/operations/RT-REPAIR-REMAINING-CHECKLIST.md`
 
 Reference:
 - `docs/operations/RT-QB-DRIFT-HANDOFF.md`

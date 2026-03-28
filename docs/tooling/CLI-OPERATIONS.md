@@ -130,8 +130,9 @@ rt session/repair guidance:
   - `--limit`
   - `--json-output`
   - `--markdown-output`
-- For the current rt-only Wave 1 scope, use:
-  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --action-bucket fix_now_repoint_rt_to_pool_media --ready-only`
+- The former rt-only Wave 1 scope is now historical; that bucket currently evaluates as fully aligned.
+- To verify that historical bucket explicitly, use:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --action-bucket fix_now_repoint_rt_to_pool_media`
 - To focus on remaining work after a wave has been partially or fully cleaned up, use:
   - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --unresolved-only`
 - To regenerate an operator checklist from live state, use:
