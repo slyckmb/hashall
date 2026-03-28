@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import base64
 import shutil
 import requests
 import re
@@ -166,11 +167,24 @@ def _xml_escape(value: str) -> str:
     return text
 
 
+def rt_build_load_cmd(method: str, value: str) -> str:
+    return f"{method}={str(value)}"
+
+
 def rt_xmlrpc_call(method: str, *args: str, rpc_url: str = DEFAULT_RT_RPC_URL, timeout: int = 20) -> str:
-    params = "".join(
-        f"<param><value><string>{_xml_escape(arg)}</string></value></param>"
-        for arg in args
-    )
+    params_parts: list[str] = []
+    for arg in args:
+        if isinstance(arg, bytes):
+            params_parts.append(
+                f"<param><value><base64>{base64.b64encode(arg).decode()}</base64></value></param>"
+            )
+        elif isinstance(arg, int):
+            params_parts.append(f"<param><value><i8>{arg}</i8></value></param>")
+        else:
+            params_parts.append(
+                f"<param><value><string>{_xml_escape(str(arg))}</string></value></param>"
+            )
+    params = "".join(params_parts)
     body = (
         '<?xml version="1.0"?>'
         f"<methodCall><methodName>{method}</methodName><params>{params}</params></methodCall>"
@@ -398,12 +412,13 @@ def rt_reset_torrent_session(
         completed.append("session.torrent.restore")
 
     runtime_torrent_path = map_rt_runtime_path(session_files.torrent_file)
-    rt_xmlrpc_call("load.normal", runtime_torrent_path, rpc_url=rpc_url)
-    completed.append("load.normal")
+    torrent_bytes = session_files.torrent_file.read_bytes()
+    inline_dir_cmd = rt_build_load_cmd("d.directory.set", normalized_target)
+    rt_xmlrpc_call("load.raw_start", "", torrent_bytes, inline_dir_cmd, rpc_url=rpc_url)
+    completed.append("load.raw_start")
     if not rt_wait_for_hash_present(torrent_hash, rpc_url=rpc_url):
         raise RuntimeError(f"torrent_not_reloaded hash={torrent_hash}")
 
-    completed.extend(rt_apply_directory_repoint(torrent_hash, normalized_target, rpc_url=rpc_url))
     completed.extend(rt_recheck_torrent(torrent_hash, rpc_url=rpc_url))
     return {
         "hash": str(torrent_hash).strip().lower(),

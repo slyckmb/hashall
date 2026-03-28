@@ -10,6 +10,7 @@ from hashall.rtorrent import (
     derive_rt_target_directory,
     map_rt_runtime_path,
     normalize_rt_target_directory,
+    rt_build_load_cmd,
     rt_xmlrpc_call,
 )
 
@@ -623,6 +624,12 @@ def test_map_rt_runtime_path_translates_known_prefixes() -> None:
     assert map_rt_runtime_path("/dump/docker/gluetun_qbit/rtorrent_vpn/.session/ABC123.torrent") == "/config/.session/ABC123.torrent"
 
 
+def test_rt_build_load_cmd_formats_assignment() -> None:
+    assert rt_build_load_cmd("d.directory.set", "/data/media/torrents/seeding/books") == (
+        "d.directory.set=/data/media/torrents/seeding/books"
+    )
+
+
 def test_rt_xmlrpc_call_raises_on_fault(monkeypatch) -> None:
     class FakeResponse:
         text = (
@@ -639,6 +646,26 @@ def test_rt_xmlrpc_call_raises_on_fault(monkeypatch) -> None:
     monkeypatch.setattr(rtorrent_mod.requests, "post", lambda *args, **kwargs: FakeResponse())
     with pytest.raises(RuntimeError, match="rt_xmlrpc_fault"):
         rt_xmlrpc_call("load.normal", "/config/.session/ABC123.torrent")
+
+
+def test_rt_xmlrpc_call_base64_encodes_bytes(monkeypatch) -> None:
+    class FakeResponse:
+        text = "<?xml version='1.0'?><methodResponse><params><param><value><i8>0</i8></value></param></params></methodResponse>"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    captured = {}
+
+    import hashall.rtorrent as rtorrent_mod
+
+    def fake_post(url, data, headers, timeout):
+        captured["data"] = data
+        return FakeResponse()
+
+    monkeypatch.setattr(rtorrent_mod.requests, "post", fake_post)
+    rt_xmlrpc_call("load.raw_start", "", b"abc")
+    assert "<base64>YWJj</base64>" in captured["data"]
 
 
 def test_rt_repair_apply_dry_run_uses_target_directory(tmp_path: Path) -> None:
