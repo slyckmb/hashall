@@ -498,3 +498,55 @@ def test_rt_repair_report_unresolved_only_filters_aligned_rows(tmp_path: Path) -
     assert payload["summary"]["rows"] == 1
     assert payload["summary"]["repair_status_counts"] == {"ready_repoint_missing_rt_root": 1}
     assert payload["rows"][0]["hash"] == "aaa111"
+
+
+def test_rt_repair_report_markdown_output(tmp_path: Path) -> None:
+    session_dir = tmp_path / "rt-session"
+    session_dir.mkdir()
+    target_dir = tmp_path / "pool" / "media" / "release-one"
+    target_dir.mkdir(parents=True)
+    target_file = target_dir / "movie.mkv"
+    target_file.write_text("x", encoding="utf-8")
+    report_path = tmp_path / "repair-report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "hash": "aaa111",
+                        "name": "Release One",
+                        "action_bucket": "wave1",
+                        "qb_save_path": str(target_dir),
+                        "qb_content_path": str(target_file),
+                        "rt_directory": "/old/path/release-one",
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    bencode_dump(
+        session_dir / "AAA111.torrent.rtorrent",
+        {b"directory": b"/old/path/release-one"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "repair-report",
+            "--report",
+            str(report_path),
+            "--session-dir",
+            str(session_dir),
+            "--markdown-output",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "# RT Repair Report" in result.output
+    assert "## wave1" in result.output
+    assert "### 1. Release One" in result.output
+    assert "- repair_status: `ready_repoint_missing_rt_root`" in result.output

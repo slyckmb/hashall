@@ -1848,7 +1848,8 @@ def rt_session_audit_cmd(session_dir, path_contains, missing_only, limit, json_o
 @click.option("--unresolved-only", is_flag=True, help="Only include rows that are not already aligned now.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
-def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, unresolved_only, limit, json_output):
+@click.option("--markdown-output", is_flag=True, help="Emit a markdown checklist.")
+def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, unresolved_only, limit, json_output, markdown_output):
     """Reevaluate historical rt repair rows against the live rt session and on-disk targets."""
     from hashall.rtorrent import load_rt_session_directories, rt_path_aligned
 
@@ -1946,6 +1947,33 @@ def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, un
 
     if json_output:
         print(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        return
+
+    if markdown_output:
+        print("# RT Repair Report")
+        print()
+        print(f"- report_path: `{summary['report_path']}`")
+        print(f"- session_dir: `{summary['session_dir']}`")
+        print(f"- source_rows: `{summary['source_rows']}`")
+        print(f"- rows: `{summary['rows']}`")
+        print(f"- repair_status_counts: `{summary['repair_status_counts']}`")
+        print()
+        current_bucket = None
+        for idx, row in enumerate(rows, start=1):
+            bucket = str(row.get("action_bucket") or "(none)")
+            if bucket != current_bucket:
+                current_bucket = bucket
+                print(f"## {current_bucket}")
+                print()
+            print(f"### {idx}. {row.get('name')}")
+            print()
+            print(f"- hash: `{row['hash']}`")
+            print(f"- repair_status: `{row['repair_status']}`")
+            print(f"- current_rt_directory: `{row['current_rt_directory']}`")
+            print(f"- current_rt_exists: `{row['current_rt_exists']}`")
+            print(f"- preferred_target: `{row['preferred_target']}`")
+            print(f"- preferred_target_exists: `{row['preferred_target_exists']}`")
+            print()
         return
 
     print("🩺 rt repair report")
