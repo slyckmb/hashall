@@ -167,8 +167,13 @@ def _xml_escape(value: str) -> str:
     return text
 
 
+def rt_script_quote(value: str) -> str:
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
 def rt_build_load_cmd(method: str, value: str) -> str:
-    return f"{method}={str(value)}"
+    return f"{method}={rt_script_quote(value)}"
 
 
 def rt_xmlrpc_call(method: str, *args: str, rpc_url: str = DEFAULT_RT_RPC_URL, timeout: int = 20) -> str:

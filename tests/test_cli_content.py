@@ -626,7 +626,13 @@ def test_map_rt_runtime_path_translates_known_prefixes() -> None:
 
 def test_rt_build_load_cmd_formats_assignment() -> None:
     assert rt_build_load_cmd("d.directory.set", "/data/media/torrents/seeding/books") == (
-        "d.directory.set=/data/media/torrents/seeding/books"
+        'd.directory.set="/data/media/torrents/seeding/books"'
+    )
+
+
+def test_rt_build_load_cmd_quotes_spaces() -> None:
+    assert rt_build_load_cmd("d.directory.set", "/data/media/torrents/seeding/OnlyEncodes (API)") == (
+        'd.directory.set="/data/media/torrents/seeding/OnlyEncodes (API)"'
     )
 
 
