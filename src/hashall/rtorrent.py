@@ -182,6 +182,10 @@ def rt_xmlrpc_call(method: str, *args: str, rpc_url: str = DEFAULT_RT_RPC_URL, t
         timeout=timeout,
     )
     response.raise_for_status()
+    if "<fault>" in response.text:
+        match = re.search(r"<name>faultString</name><value><string>(.*?)</string>", response.text, re.DOTALL)
+        detail = match.group(1) if match else response.text
+        raise RuntimeError(f"rt_xmlrpc_fault method={method} detail={detail}")
     return response.text
 
 
@@ -386,6 +390,12 @@ def rt_reset_torrent_session(
     if session_files.libtorrent_resume_file.exists():
         session_files.libtorrent_resume_file.unlink()
         completed.append("session.libtorrent_resume.unlink")
+    if not session_files.torrent_file.exists():
+        backup_torrent = backup_dir / session_files.torrent_file.name
+        if not backup_torrent.exists():
+            raise FileNotFoundError(f"missing_backup_torrent path={backup_torrent}")
+        shutil.copy2(backup_torrent, session_files.torrent_file)
+        completed.append("session.torrent.restore")
 
     runtime_torrent_path = map_rt_runtime_path(session_files.torrent_file)
     rt_xmlrpc_call("load.normal", runtime_torrent_path, rpc_url=rpc_url)

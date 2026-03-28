@@ -2,6 +2,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 from hashall.bencode import bencode_dump
 from hashall.rtorrent import (
@@ -9,6 +10,7 @@ from hashall.rtorrent import (
     derive_rt_target_directory,
     map_rt_runtime_path,
     normalize_rt_target_directory,
+    rt_xmlrpc_call,
 )
 
 from hashall.cli import cli
@@ -619,6 +621,24 @@ def test_normalize_rt_target_directory_maps_stash_prefix_to_data(tmp_path: Path)
 def test_map_rt_runtime_path_translates_known_prefixes() -> None:
     assert map_rt_runtime_path("/stash/media/torrents/seeding/books/Book.epub") == "/data/media/torrents/seeding/books/Book.epub"
     assert map_rt_runtime_path("/dump/docker/gluetun_qbit/rtorrent_vpn/.session/ABC123.torrent") == "/config/.session/ABC123.torrent"
+
+
+def test_rt_xmlrpc_call_raises_on_fault(monkeypatch) -> None:
+    class FakeResponse:
+        text = (
+            "<?xml version='1.0'?><methodResponse><fault><value><struct>"
+            "<member><name>faultString</name><value><string>boom</string></value></member>"
+            "</struct></value></fault></methodResponse>"
+        )
+
+        def raise_for_status(self) -> None:
+            return None
+
+    import hashall.rtorrent as rtorrent_mod
+
+    monkeypatch.setattr(rtorrent_mod.requests, "post", lambda *args, **kwargs: FakeResponse())
+    with pytest.raises(RuntimeError, match="rt_xmlrpc_fault"):
+        rt_xmlrpc_call("load.normal", "/config/.session/ABC123.torrent")
 
 
 def test_rt_repair_apply_dry_run_uses_target_directory(tmp_path: Path) -> None:
