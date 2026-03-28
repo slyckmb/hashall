@@ -20,7 +20,7 @@ from hashall.verify_trees import verify_trees
 from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 from hashall.device import get_files_table_name
-from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, live_rt_root_paths
+from hashall.rtorrent import DEFAULT_RT_RPC_URL, DEFAULT_RT_SESSION_DIR, live_rt_root_paths
 from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
@@ -1840,22 +1840,111 @@ def rt_session_audit_cmd(session_dir, path_contains, missing_only, limit, json_o
         print(f"   {state:7s} {row.torrent_hash[:16]} {row.directory}")
 
 
-@rt.command("repair-report")
-@click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False), required=True, help="Historical drift/repair action-plan JSON to reevaluate against the live rt session.")
-@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
-@click.option("--action-bucket", help="Only include rows from this action bucket.")
-@click.option("--ready-only", is_flag=True, help="Only include rows that are immediately ready for direct repoint.")
-@click.option("--unresolved-only", is_flag=True, help="Only include rows that are not already aligned now.")
+@rt.command("state-audit")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--state", "state_filters", multiple=True, help="Only include rows in these derived states.")
+@click.option("--bad-only", is_flag=True, help="Only include rows not already in uploading/stalledUP/stoppedUP.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
-@click.option("--markdown-output", is_flag=True, help="Emit a markdown checklist.")
-def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, unresolved_only, limit, json_output, markdown_output):
-    """Reevaluate historical rt repair rows against the live rt session and on-disk targets."""
-    from hashall.rtorrent import load_rt_session_directories, rt_path_aligned
+def rt_state_audit_cmd(rpc_url, state_filters, bad_only, limit, json_output):
+    """Audit current rtorrent torrent states from live XMLRPC."""
+    from hashall.rtorrent import fetch_rt_status_rows
+
+    rows = fetch_rt_status_rows(rpc_url=rpc_url)
+    wanted = {str(item).strip() for item in state_filters if str(item).strip()}
+    if bad_only:
+        rows = [row for row in rows if row["state"] not in {"uploading", "stalledUP", "stoppedUP"}]
+    if wanted:
+        rows = [row for row in rows if row["state"] in wanted]
+    rows.sort(key=lambda row: (row["state"], row["name"].lower(), row["hash"]))
+    if limit > 0:
+        rows = rows[:limit]
+
+    summary = {
+        "rpc_url": rpc_url,
+        "rows": len(rows),
+        "state_counts": {},
+    }
+    for row in rows:
+        summary["state_counts"][row["state"]] = summary["state_counts"].get(row["state"], 0) + 1
+
+    if json_output:
+        print(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        return
+
+    print("📊 rt state audit")
+    print(f"   rpc_url: {summary['rpc_url']}")
+    print(f"   rows: {summary['rows']}")
+    print(f"   state_counts: {summary['state_counts']}")
+    for row in rows:
+        print(f"   {row['state']:10s} {row['hash'][:16]} {row['name']} :: {row['directory']}")
+
+
+@rt.command("repoint")
+@click.option("--hash", "torrent_hash", required=True, help="Torrent hash to repoint.")
+@click.option("--target-directory", required=True, help="Directory to write via d.directory.set.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute the repoint. Default is dry-run.")
+def rt_repoint_cmd(torrent_hash, target_directory, rpc_url, do_apply):
+    """Directly repoint a single rtorrent hash to a new directory."""
+    from hashall.rtorrent import (
+        DEFAULT_RT_SESSION_DIR,
+        load_rt_torrent_meta,
+        normalize_rt_target_directory,
+        rt_apply_directory_repoint,
+    )
+
+    torrent_key = str(torrent_hash).strip().lower()
+    torrent_meta = load_rt_torrent_meta(DEFAULT_RT_SESSION_DIR, torrent_key)
+    normalized_target = normalize_rt_target_directory(target_directory, torrent_meta)
+
+    print("↪️  rt repoint")
+    print(f"   hash: {torrent_key}")
+    print(f"   target_directory: {target_directory}")
+    if normalized_target != target_directory:
+        print(f"   normalized_target_directory: {normalized_target}")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    if not do_apply:
+        return
+    completed = rt_apply_directory_repoint(torrent_key, normalized_target, rpc_url=rpc_url)
+    print(f"   completed: {completed}")
+
+
+@rt.command("recheck")
+@click.option("--hash", "hash_filters", multiple=True, required=True, help="Torrent hash(es) to recheck.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute the recheck. Default is dry-run.")
+def rt_recheck_cmd(hash_filters, rpc_url, do_apply):
+    """Force rtorrent to hash-check and restart one or more torrents."""
+    from hashall.rtorrent import rt_recheck_torrent
+
+    hashes = [str(item).strip().lower() for item in hash_filters if str(item).strip()]
+    print("🔁 rt recheck")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    print(f"   hashes: {len(hashes)}")
+    for torrent_key in hashes:
+        print(f"   hash: {torrent_key}")
+        if not do_apply:
+            continue
+        completed = rt_recheck_torrent(torrent_key, rpc_url=rpc_url)
+        print(f"      completed: {completed}")
+
+
+def _build_rt_repair_rows(report_path: str, session_dir: str, action_bucket: str | None) -> tuple[list[dict], list[dict]]:
+    from hashall.rtorrent import (
+        derive_rt_target_directory,
+        load_rt_session_directories,
+        load_rt_torrent_meta,
+        normalize_rt_target_directory,
+        rt_path_aligned,
+    )
 
     report = json.loads(Path(report_path).expanduser().read_text(encoding="utf-8"))
     source_rows = list(report.get("rows") or [])
-    session_rows = load_rt_session_directories(Path(session_dir).expanduser())
+    session_path = Path(session_dir).expanduser()
+    session_rows = load_rt_session_directories(session_path)
     bucket_filter = str(action_bucket or "").strip()
     rows = []
     for row in source_rows:
@@ -1885,6 +1974,14 @@ def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, un
                 break
         if not preferred_target and candidate_targets:
             preferred_target = candidate_targets[0]
+        torrent_meta = load_rt_torrent_meta(session_path, torrent_hash)
+        target_directory = derive_rt_target_directory(
+            qb_save_path=row.get("qb_save_path"),
+            qb_content_path=row.get("qb_content_path"),
+            torrent_meta=torrent_meta,
+        )
+        target_directory = normalize_rt_target_directory(target_directory, torrent_meta)
+        target_directory_exists = bool(target_directory and Path(target_directory).exists())
         aligned_now = rt_path_aligned(
             current_rt_directory,
             qb_save_path=row.get("qb_save_path"),
@@ -1900,10 +1997,6 @@ def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, un
             repair_status = "blocked_missing_target"
         else:
             repair_status = "missing_target_info"
-        if ready_only and not repair_status.startswith("ready_repoint_"):
-            continue
-        if unresolved_only and repair_status == "aligned_now":
-            continue
         rows.append(
             {
                 "hash": torrent_hash,
@@ -1914,8 +2007,12 @@ def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, un
                 "current_rt_exists": current_rt_exists,
                 "preferred_target": preferred_target,
                 "preferred_target_exists": preferred_target_exists,
+                "target_directory": target_directory,
+                "target_directory_exists": target_directory_exists,
                 "qb_save_path": row.get("qb_save_path"),
                 "qb_content_path": row.get("qb_content_path"),
+                "info_name": torrent_meta.info_name if torrent_meta else "",
+                "is_multi_file": torrent_meta.is_multi_file if torrent_meta else None,
             }
         )
     rows.sort(
@@ -1926,6 +2023,29 @@ def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, un
             row["hash"],
         )
     )
+    return source_rows, rows
+
+
+@rt.command("repair-report")
+@click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False), required=True, help="Historical drift/repair action-plan JSON to reevaluate against the live rt session.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--action-bucket", help="Only include rows from this action bucket.")
+@click.option("--ready-only", is_flag=True, help="Only include rows that are immediately ready for direct repoint.")
+@click.option("--unresolved-only", is_flag=True, help="Only include rows that are not already aligned now.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+@click.option("--markdown-output", is_flag=True, help="Emit a markdown checklist.")
+def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, unresolved_only, limit, json_output, markdown_output):
+    """Reevaluate historical rt repair rows against the live rt session and on-disk targets."""
+    source_rows, rows = _build_rt_repair_rows(report_path, session_dir, action_bucket)
+    filtered = []
+    for row in rows:
+        if ready_only and not row["repair_status"].startswith("ready_repoint_"):
+            continue
+        if unresolved_only and row["repair_status"] == "aligned_now":
+            continue
+        filtered.append(row)
+    rows = filtered
     if limit > 0:
         rows = rows[:limit]
 
@@ -1973,6 +2093,8 @@ def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, un
             print(f"- current_rt_exists: `{row['current_rt_exists']}`")
             print(f"- preferred_target: `{row['preferred_target']}`")
             print(f"- preferred_target_exists: `{row['preferred_target_exists']}`")
+            print(f"- target_directory: `{row['target_directory']}`")
+            print(f"- target_directory_exists: `{row['target_directory_exists']}`")
             print()
         return
 
@@ -1985,8 +2107,68 @@ def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, un
     for row in rows:
         print(
             f"   {row['repair_status']:27s} {row['hash'][:16]} "
-            f"{row['name']} :: rt={row['current_rt_directory']} -> target={row['preferred_target']}"
+            f"{row['name']} :: rt={row['current_rt_directory']} -> target={row['target_directory'] or row['preferred_target']}"
         )
+
+
+@rt.command("repair-apply")
+@click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False), required=True, help="Historical drift/repair action-plan JSON to reevaluate and apply against the live rt session.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--action-bucket", help="Only include rows from this action bucket.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict apply to specific torrent hash(es).")
+@click.option("--include-drifted-existing", is_flag=True, help="Also apply rows where the current rt root exists but should still be repointed.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows applied; 0 means no limit.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute rt repoints. Default is dry-run.")
+def rt_repair_apply_cmd(report_path, session_dir, rpc_url, action_bucket, hash_filters, include_drifted_existing, limit, do_apply):
+    """Apply live rt repair-report rows that are ready for direct repoint."""
+    from hashall.rtorrent import rt_apply_directory_repoint
+
+    _, rows = _build_rt_repair_rows(report_path, session_dir, action_bucket)
+    hash_set = {str(item).strip().lower() for item in hash_filters if str(item).strip()}
+    selected = []
+    for row in rows:
+        if row["repair_status"] == "ready_repoint_missing_rt_root":
+            pass
+        elif include_drifted_existing and row["repair_status"] == "ready_repoint_drifted_rt_root":
+            pass
+        else:
+            continue
+        if hash_set and row["hash"] not in hash_set:
+            continue
+        if not row["target_directory"]:
+            continue
+        selected.append(row)
+    if limit > 0:
+        selected = selected[:limit]
+
+    print("🛠️  rt repair apply")
+    print(f"   report_path: {Path(report_path).expanduser()}")
+    print(f"   session_dir: {Path(session_dir).expanduser()}")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    print(f"   candidates: {len(selected)}")
+    if not selected:
+        return
+
+    applied = 0
+    errors = 0
+    for row in selected:
+        print(
+            f"   {row['repair_status']:27s} {row['hash'][:16]} "
+            f"{row['name']} :: {row['current_rt_directory']} -> {row['target_directory']}"
+        )
+        if not do_apply:
+            continue
+        try:
+            rt_apply_directory_repoint(row["hash"], row["target_directory"], rpc_url=rpc_url)
+            applied += 1
+            print("      result: OK")
+        except Exception as exc:
+            errors += 1
+            print(f"      result: ERROR {exc}")
+    print(f"   applied: {applied}")
+    print(f"   errors: {errors}")
 
 @payload.command("collisions")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")

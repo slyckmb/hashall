@@ -4,6 +4,11 @@ from pathlib import Path
 
 from click.testing import CliRunner
 from hashall.bencode import bencode_dump
+from hashall.rtorrent import (
+    RTTorrentMeta,
+    derive_rt_target_directory,
+    normalize_rt_target_directory,
+)
 
 from hashall.cli import cli
 
@@ -550,3 +555,148 @@ def test_rt_repair_report_markdown_output(tmp_path: Path) -> None:
     assert "## wave1" in result.output
     assert "### 1. Release One" in result.output
     assert "- repair_status: `ready_repoint_missing_rt_root`" in result.output
+
+
+def test_derive_rt_target_directory_for_single_file_wrapper() -> None:
+    meta = RTTorrentMeta(torrent_hash="aaa111", info_name="movie.mkv", is_multi_file=False)
+    target = derive_rt_target_directory(
+        qb_save_path="/data/media/torrents/seeding/movies",
+        qb_content_path="/data/media/torrents/seeding/movies/Movie.Release/movie.mkv",
+        torrent_meta=meta,
+    )
+    assert target == "/data/media/torrents/seeding/movies/Movie.Release"
+
+
+def test_derive_rt_target_directory_for_multi_file_existing_dir(tmp_path: Path) -> None:
+    root_dir = tmp_path / "tv" / "Release.One"
+    root_dir.mkdir(parents=True)
+    meta = RTTorrentMeta(torrent_hash="aaa111", info_name="Release.One", is_multi_file=True)
+    target = derive_rt_target_directory(
+        qb_save_path=str(tmp_path / "tv"),
+        qb_content_path=str(root_dir),
+        torrent_meta=meta,
+    )
+    assert target == str(root_dir)
+
+
+def test_normalize_rt_target_directory_uses_parent_for_multi_file_content_root(tmp_path: Path) -> None:
+    target_dir = tmp_path / "tv" / "Release.One"
+    target_dir.mkdir(parents=True)
+    meta = RTTorrentMeta(torrent_hash="aaa111", info_name="Release.One", is_multi_file=True)
+    normalized = normalize_rt_target_directory(str(target_dir), meta)
+    assert normalized == str(target_dir.parent)
+
+
+def test_rt_repair_apply_dry_run_uses_target_directory(tmp_path: Path) -> None:
+    session_dir = tmp_path / "rt-session"
+    session_dir.mkdir()
+    target_dir = tmp_path / "pool" / "media" / "Release.One"
+    target_dir.mkdir(parents=True)
+    target_file = target_dir / "movie.mkv"
+    target_file.write_text("x", encoding="utf-8")
+    report_path = tmp_path / "repair-report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "hash": "aaa111",
+                        "name": "Release One",
+                        "action_bucket": "wave1",
+                        "qb_save_path": str(tmp_path / "pool" / "media"),
+                        "qb_content_path": str(target_file),
+                        "rt_directory": "/old/path/release-one",
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    bencode_dump(
+        session_dir / "AAA111.torrent.rtorrent",
+        {b"directory": b"/old/path/release-one"},
+    )
+    bencode_dump(
+        session_dir / "AAA111.torrent",
+        {b"info": {b"name": b"movie.mkv", b"length": 1}},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "repair-apply",
+            "--report",
+            str(report_path),
+            "--session-dir",
+            str(session_dir),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "candidates: 1" in result.output
+    assert str(target_dir) in result.output
+    assert "apply: False" in result.output
+
+
+def test_rt_repoint_dry_run_shows_normalized_target_for_multi_file(tmp_path: Path, monkeypatch) -> None:
+    from hashall import rtorrent as rtorrent_mod
+
+    session_dir = tmp_path / "rt-session"
+    session_dir.mkdir()
+    content_root = tmp_path / "tv" / "Release.One"
+    content_root.mkdir(parents=True)
+    monkeypatch.setattr(rtorrent_mod, "DEFAULT_RT_SESSION_DIR", session_dir)
+    bencode_dump(
+        session_dir / "AAA111.torrent",
+        {b"info": {b"name": b"Release.One", b"files": [{b"path": [b"episode1.mkv"], b"length": 1}]}},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "repoint",
+            "--hash",
+            "aaa111",
+            "--target-directory",
+            str(content_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert f"normalized_target_directory: {content_root.parent}" in result.output
+
+
+def test_rt_state_audit_bad_only(monkeypatch) -> None:
+    from hashall import rtorrent as rtorrent_mod
+
+    def fake_fetch(rpc_url: str):
+        return [
+            {"hash": "aaa111", "name": "Healthy", "directory": "/ok", "state": "stalledUP", "message": ""},
+            {"hash": "bbb222", "name": "Broken", "directory": "/bad", "state": "stoppedDL", "message": ""},
+        ]
+
+    monkeypatch.setattr(rtorrent_mod, "fetch_rt_status_rows", fake_fetch)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["rt", "state-audit", "--bad-only", "--json-output"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output[result.output.find("{"):])
+    assert payload["summary"]["rows"] == 1
+    assert payload["summary"]["state_counts"] == {"stoppedDL": 1}
+    assert payload["rows"][0]["hash"] == "bbb222"
+
+
+def test_rt_recheck_dry_run_lists_hashes() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["rt", "recheck", "--hash", "aaa111", "--hash", "bbb222"])
+
+    assert result.exit_code == 0
+    assert "hashes: 2" in result.output
+    assert "hash: aaa111" in result.output
+    assert "hash: bbb222" in result.output
+    assert "apply: False" in result.output
