@@ -9,15 +9,90 @@ import os
 import requests
 import shutil
 import time
+from urllib.parse import parse_qs, urlsplit
 from typing import Any, List, Dict, Optional, Iterable
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+from hashall.bencode import as_text, bencode_decode
 
 
 DEFAULT_QB_CACHE_DIR = Path.home() / ".cache" / "hashall-qb"
 DEFAULT_QB_CACHE_FILE = DEFAULT_QB_CACHE_DIR / "torrents-info.json"
 DEFAULT_QB_CACHE_META_FILE = DEFAULT_QB_CACHE_DIR / "torrents-info.meta.json"
 DEFAULT_QB_BT_BACKUP_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
+
+
+def _dedupe_preserve_order(values: Iterable[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for raw in values:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _tracker_urls_from_magnet_uri(magnet_uri: str) -> List[str]:
+    magnet = str(magnet_uri or "").strip()
+    if not magnet:
+        return []
+    try:
+        query = parse_qs(urlsplit(magnet).query, keep_blank_values=False)
+    except Exception:
+        return []
+    return _dedupe_preserve_order(query.get("tr", []))
+
+
+def _flatten_tracker_values(value: Any) -> List[str]:
+    if isinstance(value, bytes):
+        text = as_text(value).strip()
+        return [text] if text else []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, list):
+        out: List[str] = []
+        for item in value:
+            out.extend(_flatten_tracker_values(item))
+        return out
+    return []
+
+
+def _tracker_urls_from_fastresume(path: Path) -> List[str]:
+    try:
+        doc = bencode_decode(path.read_bytes())
+    except Exception:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    return _dedupe_preserve_order(_flatten_tracker_values(doc.get(b"trackers")))
+
+
+def _tracker_domains(urls: Iterable[str]) -> List[str]:
+    domains: List[str] = []
+    for url in urls:
+        try:
+            host = (urlsplit(url).hostname or "").strip().lower()
+        except Exception:
+            host = ""
+        if host:
+            domains.append(host)
+    return _dedupe_preserve_order(domains)
+
+
+def _http_tracker_urls(urls: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    for url in urls:
+        try:
+            scheme = (urlsplit(url).scheme or "").lower()
+        except Exception:
+            scheme = ""
+        if scheme in {"http", "https"}:
+            out.append(url)
+    return out
 
 
 def get_torrents_from_cache(
@@ -246,7 +321,62 @@ class QBittorrentClient:
         payload["downloaded"] = int(payload.get("downloaded", 0) or 0)
         payload["completion_on"] = int(payload.get("completion_on", 0) or 0)
         payload["added_on"] = int(payload.get("added_on", 0) or 0)
+        payload["tracker"] = str(payload.get("tracker", "") or "")
+        payload["trackers_count"] = int(payload.get("trackers_count", 0) or 0)
         return payload
+
+    def _fastresume_path(self, torrent_hash: str) -> Path:
+        return self.bt_backup_dir / f"{str(torrent_hash or '').strip().lower()}.fastresume"
+
+    def enrich_torrent_payload_with_trackers(self, torrent_data: Dict[str, Any]) -> Dict[str, Any]:
+        payload = self._normalize_torrent_payload(torrent_data)
+        tracker_urls = _tracker_urls_from_magnet_uri(str(payload.get("magnet_uri", "") or ""))
+        source = "magnet_uri" if tracker_urls else "none"
+        expected_count = int(payload.get("trackers_count", 0) or 0)
+
+        if not tracker_urls or (expected_count > 0 and len(tracker_urls) < expected_count):
+            fastresume_urls = _tracker_urls_from_fastresume(self._fastresume_path(payload.get("hash", "")))
+            if len(fastresume_urls) > len(tracker_urls):
+                tracker_urls = fastresume_urls
+                source = "fastresume"
+
+        tracker_field = str(payload.get("tracker", "") or "").strip()
+        if tracker_field and tracker_field not in tracker_urls:
+            tracker_urls = _dedupe_preserve_order([tracker_field, *tracker_urls])
+            if source == "none":
+                source = "tracker_field"
+
+        tracker_urls_http = _http_tracker_urls(tracker_urls)
+        primary_tracker = tracker_field or (tracker_urls_http[0] if tracker_urls_http else (tracker_urls[0] if tracker_urls else ""))
+        payload["tracker_urls"] = tracker_urls
+        payload["tracker_urls_http"] = tracker_urls_http
+        payload["primary_tracker"] = primary_tracker
+        payload["trackers_count"] = expected_count if expected_count > 0 else len(tracker_urls)
+        payload["real_trackers_count"] = len(tracker_urls)
+        payload["tracker_domains"] = _tracker_domains(tracker_urls)
+        payload["tracker_enrichment_source"] = source
+        return payload
+
+    def enrich_torrents_payload_with_trackers(
+        self,
+        torrents_data: Iterable[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        enriched: List[Dict[str, Any]] = []
+        source_counts: Dict[str, int] = {}
+        fallback_rows = 0
+        for row in torrents_data:
+            payload = self.enrich_torrent_payload_with_trackers(row)
+            enriched.append(payload)
+            source = str(payload.get("tracker_enrichment_source", "none") or "none")
+            source_counts[source] = source_counts.get(source, 0) + 1
+            if source != "magnet_uri":
+                fallback_rows += 1
+        summary = {
+            "sources": source_counts,
+            "fallback_rows": fallback_rows,
+            "mode": "magnet_uri_with_fastresume_fallback",
+        }
+        return enriched, summary
 
     def _cached_payloads(
         self,

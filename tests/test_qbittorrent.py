@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import requests
 
+from hashall.bencode import bencode_dump
 from hashall.qbittorrent import (
     DEFAULT_QB_CACHE_FILE,
     QBittorrentClient,
@@ -430,3 +431,70 @@ def test_get_torrents_normalizes_pause_alias_and_derives_content_path(monkeypatc
     assert torrent.state_raw == "pausedDL"
     assert torrent.content_path == "/pool/media/torrents/seeding/site/Movie.mkv"
     assert torrent.added_on == 123
+
+
+def test_enrich_torrent_payload_with_trackers_uses_magnet_uri():
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+
+    payload = client.enrich_torrent_payload_with_trackers(
+        {
+            "hash": "abc123",
+            "name": "Movie.mkv",
+            "save_path": "/pool/media/site",
+            "content_path": "/pool/media/site/Movie.mkv",
+            "tracker": "http://tracker.example:8080/announce",
+            "trackers_count": 2,
+            "magnet_uri": (
+                "magnet:?xt=urn:btih:abc123"
+                "&tr=http%3A%2F%2Ftracker.example%3A8080%2Fannounce"
+                "&tr=https%3A%2F%2Fbackup.example%2Fannounce"
+            ),
+        }
+    )
+
+    assert payload["tracker_urls"] == [
+        "http://tracker.example:8080/announce",
+        "https://backup.example/announce",
+    ]
+    assert payload["tracker_urls_http"] == payload["tracker_urls"]
+    assert payload["primary_tracker"] == "http://tracker.example:8080/announce"
+    assert payload["trackers_count"] == 2
+    assert payload["real_trackers_count"] == 2
+    assert payload["tracker_domains"] == ["tracker.example", "backup.example"]
+    assert payload["tracker_enrichment_source"] == "magnet_uri"
+
+
+def test_enrich_torrent_payload_with_trackers_falls_back_to_fastresume(tmp_path):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.bt_backup_dir = tmp_path / "BT_backup"
+    client.bt_backup_dir.mkdir()
+    bencode_dump(
+        client.bt_backup_dir / "abc123.fastresume",
+        {
+            b"save_path": b"/pool/media/site",
+            b"trackers": [[
+                b"http://tracker.example:8080/announce",
+                b"https://backup.example/announce",
+            ]],
+        },
+    )
+
+    payload = client.enrich_torrent_payload_with_trackers(
+        {
+            "hash": "abc123",
+            "name": "Movie.mkv",
+            "save_path": "/pool/media/site",
+            "content_path": "/pool/media/site/Movie.mkv",
+            "tracker": "http://tracker.example:8080/announce",
+            "trackers_count": 2,
+            "magnet_uri": "",
+        }
+    )
+
+    assert payload["tracker_urls"] == [
+        "http://tracker.example:8080/announce",
+        "https://backup.example/announce",
+    ]
+    assert payload["real_trackers_count"] == 2
+    assert payload["tracker_domains"] == ["tracker.example", "backup.example"]
+    assert payload["tracker_enrichment_source"] == "fastresume"
