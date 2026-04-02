@@ -2,6 +2,56 @@
 
 Last updated: 2026-04-02
 
+## 2026-04-02 Pool Migration Maintenance Loop
+
+**New ops doc:**
+- `docs/operations/POOL-MIGRATION-MAINTENANCE-LOOP-2026-04-02.md`
+
+**New helper:**
+- `bin/run-pool-migration-maintenance-loop.sh`
+
+**Purpose:**
+- continue the post-`pool/data -> pool/media` cleanup lane with minimal operator input
+- recover the payload-sync tail if qB / RT are degraded
+- prune a tiny reviewed set of stale `/pool/data` residue
+- reconcile the catalog
+- then auto-apply stash -> pool-media rounds only when the batch is all `REUSE`
+
+**Current reviewed cleanup scope in the loop:**
+- `/pool/data/cross-seed-link/SpeedCD/How It's Made S01-S32 480p DVDRip 1080p WEBRip AAC 2.0 x264-MIXED`
+- `/pool/data/cross-seed-link/TorrentDay/How It's Made S01-S32 480p DVDRip 1080p WEBRip AAC 2.0 x264-MIXED`
+
+**Current observed live state:**
+- both reviewed stale `How It's Made` roots are now gone from `/pool/data`
+- qB is healthy
+- RT is healthy
+- space remains healthy:
+  - `/pool/data`: about `3.7T` free
+  - `/pool/media`: about `3.7T` free
+  - `/stash/media`: about `12T` free
+
+**Current migration residue posture:**
+- only `10` torrent rows still save under `/pool/data`
+- `379` torrent rows save under `/pool/media`
+- `0` torrent rows save under `/stash`
+- the remaining `/pool/data` set is a carve-out / residue set, not a bulk move queue
+
+**Current observed loop progress:**
+- payload-sync recovery succeeded
+- stale residue cleanup succeeded for the reviewed `How It's Made` roots
+- `/pool/data` reconcile scan ran
+- the loop advanced into stash reuse rounds
+- observed round state:
+  - one stash reuse wave advanced into verify on `/pool/media`
+  - a later dry-run surfaced another all-`REUSE` stash batch (`3` groups)
+
+**Important constraint:**
+- qB must remain online while this loop runs
+- `payload sync` and `rehome apply` are still qB-backed in `hashall`
+
+**Source of truth while the loop is live:**
+- newest log under `~/.logs/hashall/pool-migration-loop/`
+
 ## 2026-04-02 RT Cache Alignment + Refresh Failure Recovery
 
 **Cross-repo coordination hydrated from Docker repo:**

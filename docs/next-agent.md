@@ -1,5 +1,38 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-04-02 Pool migration cleanup / stash restart automation
+
+- New helper:
+  - `bin/run-pool-migration-maintenance-loop.sh`
+- New ops doc:
+  - `docs/operations/POOL-MIGRATION-MAINTENANCE-LOOP-2026-04-02.md`
+- The loop is intentionally narrow:
+  1. recover payload sync via `bin/run-hashall-upgrade-scans.sh --payload-sync-only`
+  2. delete only two exact reviewed stale `How It's Made` roots on `/pool/data`
+  3. rescan `/pool/data`
+  4. rerun payload sync
+  5. auto-apply stash -> pool-media rounds only when the batch is all `REUSE`
+- Fail-closed conditions:
+  - any non-`REUSE` plan decision
+  - any apply / verify failure
+  - qB / RT recovery failure
+  - reviewed stale roots still referenced by qB or RT
+- Current observed live state:
+  - both stale `How It's Made` roots under `SpeedCD` and `TorrentDay` are already gone
+  - qB and RT are healthy
+  - the loop has already progressed into stash reuse verification
+  - a later dry-run showed another all-`REUSE` stash batch with `3` groups
+- Current migration residue counts:
+  - `10` torrent rows still rooted on `/pool/data`
+  - `379` rooted on `/pool/media`
+  - `0` rooted on `/stash`
+- Current free space:
+  - `/pool/data`: about `3.7T`
+  - `/pool/media`: about `3.7T`
+  - `/stash/media`: about `12T`
+- While the loop is still running, the newest source of truth is:
+  - `~/.logs/hashall/pool-migration-loop/`
+
 ## 2026-04-02 RT cache + refresh recovery
 
 - New canonical docs:
