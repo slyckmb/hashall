@@ -1,6 +1,6 @@
 # Torrent Client Agnostic Plan
 
-Last updated: 2026-04-01
+Last updated: 2026-04-02
 
 ## Goal
 
@@ -40,10 +40,17 @@ Current rt commands include:
 These are enough for:
 
 - reading rt session state
-- auditing live rt state via XMLRPC
+- auditing live rt state
 - repointing rt directory roots
 - forcing rt hash checks
 - rebuilding broken rt session state
+
+Read-side note:
+
+- as of `2026-04-02`, ordinary RT monitoring reads are now aligned to the shared cache contract
+- `hashall rt state-audit` defaults to shared silo RT cache rather than live XMLRPC
+- explicit live XMLRPC remains available only via `--live`
+- mutation / repair commands still use direct XMLRPC intentionally
 
 ### What still depends on qBittorrent
 

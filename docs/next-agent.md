@@ -1,5 +1,41 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-04-02 RT cache + refresh recovery
+
+- New canonical docs:
+  - `docs/operations/RT-CACHE-ALIGNMENT-2026-04-02.md`
+  - `docs/operations/RT-CACHE-AGENT-COMMS-2026-04-02.md`
+  - `docs/operations/REFRESH-RECOVERY-2026-04-02.md`
+- `hashall rt state-audit` is now shared-cache-backed by default.
+- Default mode uses:
+  - `~/.cache/silo-rt/torrents.json`
+  - `~/.cache/silo-rt/torrents.meta.json`
+- No silent live fallback:
+  - stale/degraded cache state is reported
+  - `--live` is explicit diagnostics only
+- Direct RT XMLRPC remains intentional only for mutation / repair:
+  - `rt repoint`
+  - `rt recheck`
+  - `rt session-reset`
+  - `rt repair-apply`
+- Overnight full refresh failure was **not** a scan failure.
+  - all 4 scans finished
+  - failure was final `payload sync --upgrade-missing`
+  - qB auth reset with `Connection reset by peer`
+- Recovery / hardening now exists in:
+  - `bin/run-hashall-upgrade-scans.sh`
+- New behavior:
+  - preflight qB + RT health before payload sync
+  - restart whole `gluetun_qbit` stack if degraded
+  - retry payload sync once after restart
+  - `--payload-sync-only` to resume a failed overnight run without rescanning
+- Recommended next operator command after this exact failure:
+  - `bin/run-hashall-upgrade-scans.sh --payload-sync-only`
+- This recovery path was already exercised successfully once:
+  - stack restart succeeded
+  - payload sync completed
+  - no scan rerun was needed
+
 ## 2026-04-01 Refresh + Client Transition State
 
 - New design/ops doc:

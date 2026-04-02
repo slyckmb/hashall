@@ -1,6 +1,68 @@
 # Operational Run State
 
-Last updated: 2026-04-01
+Last updated: 2026-04-02
+
+## 2026-04-02 RT Cache Alignment + Refresh Failure Recovery
+
+**Cross-repo coordination hydrated from Docker repo:**
+- `/mnt/config/docker/.agent/worktrees/cr-docker-20260329-175737-codex/docs/agent-prompts/silo-rt-cache-hardening-prompt-2026-04-02.md`
+- `/mnt/config/docker/.agent/worktrees/cr-docker-20260329-175737-codex/docs/agent-prompts/hashall-rt-cache-alignment-prompt-2026-04-02.md`
+- `/mnt/config/docker/.agent/worktrees/cr-docker-20260329-175737-codex/docs/rt-arr-qb-path-handoff-2026-04-01.md`
+
+**New docs in this repo:**
+- `docs/operations/RT-CACHE-ALIGNMENT-2026-04-02.md`
+- `docs/operations/RT-CACHE-AGENT-COMMS-2026-04-02.md`
+- `docs/operations/REFRESH-RECOVERY-2026-04-02.md`
+
+**RT cache alignment outcome:**
+- `hashall rt state-audit` is now shared-cache-backed by default.
+- Default read source:
+  - `~/.cache/silo-rt/torrents.json`
+  - `~/.cache/silo-rt/torrents.meta.json`
+- Default behavior is fail-closed:
+  - stale or degraded cache state is surfaced to operators
+  - no silent fallback to live RT XMLRPC
+- Live RT remains explicit-only for diagnostics:
+  - `hashall rt state-audit --live`
+
+**Already-compliant RT read paths:**
+- `hashall content reclaim-report`
+- `hashall rehome drift-audit`
+- `hashall rt session-audit`
+- `hashall rt repair-report`
+
+**Still-intentional direct RT mutation paths:**
+- `hashall rt repoint`
+- `hashall rt recheck`
+- `hashall rt session-reset`
+- `hashall rt repair-apply`
+
+**Overnight full refresh failure assessment:**
+- The 4 scan phases completed.
+- Failure was in the final step only:
+  - `python -m hashall.cli payload sync --upgrade-missing`
+- Logged failure shape:
+  - qB auth reset during `test_connection()`
+  - `ConnectionResetError(104, 'Connection reset by peer')`
+  - raised as `RuntimeError: Failed to authenticate with qBittorrent`
+- So the refresh did **not** need rescans; it needed stack recovery and a resumed payload sync.
+
+**Hardening added:**
+- `bin/run-hashall-upgrade-scans.sh` now:
+  - probes qB and RT readiness before payload sync
+  - restarts the whole `gluetun_qbit` stack if qB or RT is degraded
+  - retries payload sync once after restart
+  - supports `--payload-sync-only` so a failed overnight run can resume without rescanning
+
+**Current recommended recovery command for this specific failure class:**
+- `bin/run-hashall-upgrade-scans.sh --payload-sync-only`
+
+**Recovery execution status:**
+- The recovery path was exercised successfully on `2026-04-02`.
+- Result:
+  - stack restarted once
+  - payload sync completed successfully
+  - no scan rerun was required
 
 ## 2026-04-01 Refresh Defaults + Client Boundary
 

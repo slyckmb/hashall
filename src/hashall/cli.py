@@ -20,6 +20,10 @@ from hashall.verify_trees import verify_trees
 from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 from hashall.device import get_files_table_name
+from hashall.rt_cache import (
+    DEFAULT_RT_SHARED_CACHE_FILE,
+    DEFAULT_RT_SHARED_CACHE_META_FILE,
+)
 from hashall.rtorrent import DEFAULT_RT_RPC_URL, DEFAULT_RT_SESSION_DIR, live_rt_root_paths
 from hashall import __version__
 
@@ -1846,15 +1850,48 @@ def rt_session_audit_cmd(session_dir, path_contains, missing_only, limit, json_o
 
 @rt.command("state-audit")
 @click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared silo RT cache rows JSON.")
+@click.option("--meta-file", default=str(DEFAULT_RT_SHARED_CACHE_META_FILE), show_default=True, help="Shared silo RT cache metadata JSON.")
+@click.option("--cache-max-age", type=float, default=60.0, show_default=True, help="Freshness threshold for shared RT cache in seconds.")
+@click.option("--live", "use_live", is_flag=True, help="Bypass shared cache and query rTorrent XMLRPC directly. Use only for explicit diagnostics.")
 @click.option("--state", "state_filters", multiple=True, help="Only include rows in these derived states.")
 @click.option("--bad-only", is_flag=True, help="Only include rows not already in uploading/stalledUP/stoppedUP.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
-def rt_state_audit_cmd(rpc_url, state_filters, bad_only, limit, json_output):
-    """Audit current rtorrent torrent states from live XMLRPC."""
+def rt_state_audit_cmd(rpc_url, cache_file, meta_file, cache_max_age, use_live, state_filters, bad_only, limit, json_output):
+    """Audit current rtorrent torrent states from shared cache or live XMLRPC."""
+    from hashall.rt_cache import load_rt_cache_snapshot
     from hashall.rtorrent import fetch_rt_status_rows
 
-    rows = fetch_rt_status_rows(rpc_url=rpc_url)
+    if use_live:
+        rows = fetch_rt_status_rows(rpc_url=rpc_url)
+        summary = {
+            "read_mode": "live",
+            "rpc_url": rpc_url,
+            "rows": len(rows),
+            "state_counts": {},
+        }
+    else:
+        snapshot = load_rt_cache_snapshot(
+            cache_file=Path(cache_file).expanduser(),
+            meta_file=Path(meta_file).expanduser(),
+            max_age_s=float(cache_max_age),
+        )
+        rows = list(snapshot["rows"])
+        summary = {
+            "read_mode": snapshot["read_mode"],
+            "cache_file": snapshot["cache_file"],
+            "meta_file": snapshot["meta_file"],
+            "cache_source": snapshot["cache_source"],
+            "cache_age_s": snapshot["cache_age_s"],
+            "cache_max_age_s": snapshot["max_age_s"],
+            "freshness": snapshot["freshness"],
+            "last_error": snapshot["last_error"],
+            "xmlrpc_url": snapshot["xmlrpc_url"],
+            "consecutive_failures": snapshot["consecutive_failures"],
+            "rows": len(rows),
+            "state_counts": {},
+        }
     wanted = {str(item).strip() for item in state_filters if str(item).strip()}
     if bad_only:
         rows = [row for row in rows if row["state"] not in {"uploading", "stalledUP", "stoppedUP"}]
@@ -1864,11 +1901,7 @@ def rt_state_audit_cmd(rpc_url, state_filters, bad_only, limit, json_output):
     if limit > 0:
         rows = rows[:limit]
 
-    summary = {
-        "rpc_url": rpc_url,
-        "rows": len(rows),
-        "state_counts": {},
-    }
+    summary["rows"] = len(rows)
     for row in rows:
         summary["state_counts"][row["state"]] = summary["state_counts"].get(row["state"], 0) + 1
 
@@ -1877,7 +1910,21 @@ def rt_state_audit_cmd(rpc_url, state_filters, bad_only, limit, json_output):
         return
 
     print("📊 rt state audit")
-    print(f"   rpc_url: {summary['rpc_url']}")
+    print(f"   read_mode: {summary['read_mode']}")
+    if use_live:
+        print(f"   rpc_url: {summary['rpc_url']}")
+    else:
+        print(f"   cache_file: {summary['cache_file']}")
+        print(f"   meta_file: {summary['meta_file']}")
+        print(f"   freshness: {summary['freshness']}")
+        print(f"   cache_source: {summary['cache_source']}")
+        print(f"   cache_age_s: {summary['cache_age_s']}")
+        if summary["xmlrpc_url"]:
+            print(f"   xmlrpc_url: {summary['xmlrpc_url']}")
+        if summary["last_error"]:
+            print(f"   last_error: {summary['last_error']}")
+        if summary["consecutive_failures"]:
+            print(f"   consecutive_failures: {summary['consecutive_failures']}")
     print(f"   rows: {summary['rows']}")
     print(f"   state_counts: {summary['state_counts']}")
     for row in rows:

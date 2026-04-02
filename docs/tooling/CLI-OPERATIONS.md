@@ -1,6 +1,6 @@
 # Hashall CLI Operations (Canonical)
 
-Last updated: 2026-03-25
+Last updated: 2026-04-02
 Status: canonical
 
 ## Purpose
@@ -120,6 +120,21 @@ rt session/repair guidance:
   - `--path-contains`
   - `--limit`
   - `--json-output`
+- `hashall rt state-audit` is now shared-cache-backed by default.
+- It reads the shared silo RT cache from:
+  - `~/.cache/silo-rt/torrents.json`
+  - `~/.cache/silo-rt/torrents.meta.json`
+- It does **not** silently fall back to live RT XMLRPC when the cache is stale or degraded.
+- Use `--live` only for explicit operator diagnostics that are allowed to touch RT directly.
+- It supports:
+  - `--cache-file`
+  - `--meta-file`
+  - `--cache-max-age`
+  - `--live`
+  - `--state`
+  - `--bad-only`
+  - `--limit`
+  - `--json-output`
 - `hashall rt repair-report` reevaluates a historical drift/repair JSON report against the live rt session and current on-disk targets.
 - It supports:
   - `--report`
@@ -161,6 +176,11 @@ Guidance:
   - `/pool/media`
   - `/mnt/hotspare6tb`
 - `bin/run-hashall-upgrade-scans.sh` is the explicit helper for the full upgrade scan sequence when operators want direct control instead of the wrapper command.
+- It now also hardens the final payload-sync stage:
+  - probes qB + RT readiness before payload sync
+  - restarts `gluetun`, `qbittorrent_vpn`, and `rtorrent_vpn` if the client stack is degraded
+  - retries payload sync once after restart
+  - `--payload-sync-only` resumes a failed overnight run from payload sync only, without rerunning the 4 scans
 - `hashall refresh-status` is the fast operator check for:
   - current `refresh.lock` metadata
   - whether the lock PID is still live

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -769,13 +770,114 @@ def test_rt_state_audit_bad_only(monkeypatch) -> None:
 
     monkeypatch.setattr(rtorrent_mod, "fetch_rt_status_rows", fake_fetch)
     runner = CliRunner()
-    result = runner.invoke(cli, ["rt", "state-audit", "--bad-only", "--json-output"])
+    result = runner.invoke(cli, ["rt", "state-audit", "--live", "--bad-only", "--json-output"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output[result.output.find("{"):])
+    assert payload["summary"]["read_mode"] == "live"
     assert payload["summary"]["rows"] == 1
     assert payload["summary"]["state_counts"] == {"stoppedDL": 1}
     assert payload["rows"][0]["hash"] == "bbb222"
+
+
+def test_rt_state_audit_uses_shared_cache_by_default(tmp_path: Path, monkeypatch) -> None:
+    from hashall import rtorrent as rtorrent_mod
+
+    cache_file = tmp_path / "torrents.json"
+    meta_file = tmp_path / "torrents.meta.json"
+    cache_file.write_text(
+        json.dumps(
+            [
+                {"hash": "aaa111", "name": "Healthy", "save_path": "/ok", "state": "stalledUP", "dlspeed": "0", "upspeed": "0", "peers": 0},
+                {"hash": "bbb222", "name": "Broken", "save_path": "/bad", "state": "stoppedDL", "dlspeed": "0", "upspeed": "0", "peers": 0},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    meta_file.write_text(
+        json.dumps({"source": "daemon", "fetched_at": time.time(), "xmlrpc_url": "http://localhost:18000/RPC2"}),
+        encoding="utf-8",
+    )
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("live RT fetch should not be used in cache mode")
+
+    monkeypatch.setattr(rtorrent_mod, "fetch_rt_status_rows", fail_fetch)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "state-audit",
+            "--cache-file",
+            str(cache_file),
+            "--meta-file",
+            str(meta_file),
+            "--bad-only",
+            "--json-output",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output[result.output.find("{"):])
+    assert payload["summary"]["read_mode"] == "shared_cache"
+    assert payload["summary"]["freshness"] == "fresh"
+    assert payload["summary"]["rows"] == 1
+    assert payload["summary"]["state_counts"] == {"stoppedDL": 1}
+    assert payload["rows"][0]["directory"] == "/bad"
+
+
+def test_rt_state_audit_reports_stale_error_without_live_fallback(tmp_path: Path, monkeypatch) -> None:
+    from hashall import rtorrent as rtorrent_mod
+
+    cache_file = tmp_path / "torrents.json"
+    meta_file = tmp_path / "torrents.meta.json"
+    cache_file.write_text(
+        json.dumps(
+            [
+                {"hash": "bbb222", "name": "Broken", "save_path": "/bad", "state": "stalledDL", "dlspeed": "0", "upspeed": "0", "peers": 0},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    meta_file.write_text(
+        json.dumps(
+            {
+                "source": "daemon_error",
+                "fetched_at": time.time() - 600,
+                "xmlrpc_url": "http://localhost:18000/RPC2",
+                "last_error": "rTorrent returned empty result",
+                "consecutive_failures": 12,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("live RT fetch should not be used when cache is stale/degraded")
+
+    monkeypatch.setattr(rtorrent_mod, "fetch_rt_status_rows", fail_fetch)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "state-audit",
+            "--cache-file",
+            str(cache_file),
+            "--meta-file",
+            str(meta_file),
+            "--json-output",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output[result.output.find("{"):])
+    assert payload["summary"]["read_mode"] == "shared_cache"
+    assert payload["summary"]["freshness"] == "stale_error"
+    assert payload["summary"]["last_error"] == "rTorrent returned empty result"
+    assert payload["summary"]["consecutive_failures"] == 12
+    assert payload["summary"]["state_counts"] == {"stalledDL": 1}
 
 
 def test_rt_recheck_dry_run_lists_hashes() -> None:
