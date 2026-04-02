@@ -73,6 +73,59 @@ def _safe_candidates(groups: Iterable[dict], *, limit: int) -> list[Candidate]:
     return picks[: max(1, limit)]
 
 
+def _unique_aliases_in_order(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _resolve_refresh_dedup_aliases(
+    catalog_path: Path,
+    roots: list[tuple[str, str, str]],
+) -> list[str]:
+    fallback = _unique_aliases_in_order(alias for _path, alias, _role in roots)
+    try:
+        conn = sqlite3.connect(str(catalog_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        aliases: list[str] = []
+        seen_aliases: set[str] = set()
+        for root_path, alias, _role in roots:
+            root = str(root_path or "").strip()
+            alias_fallback = str(alias or "").strip()
+            if root:
+                rows = cur.execute(
+                    """
+                    SELECT DISTINCT d.device_alias
+                    FROM scan_roots sr
+                    JOIN devices d ON d.fs_uuid = sr.fs_uuid
+                    WHERE d.device_alias IS NOT NULL
+                      AND d.device_alias != ''
+                      AND (sr.root_path = ? OR sr.root_path LIKE ?)
+                    ORDER BY d.device_alias
+                    """,
+                    (root, f"{root}/%"),
+                ).fetchall()
+                for row in rows:
+                    resolved = str(row["device_alias"] or "").strip()
+                    if resolved and resolved not in seen_aliases:
+                        seen_aliases.add(resolved)
+                        aliases.append(resolved)
+            if alias_fallback and alias_fallback not in seen_aliases:
+                seen_aliases.add(alias_fallback)
+                aliases.append(alias_fallback)
+        conn.close()
+        return aliases or fallback
+    except Exception:
+        return fallback
+
+
 def _is_qb_ready_state(state: Optional[str]) -> bool:
     """Return True if *state* is an acceptable post-rehome seed state."""
     if not state:
@@ -721,6 +774,7 @@ def run_refresh(
                         f"scan active_root ({active_root})",
                         [python, "-m", "hashall.cli", "scan", active_root,
                          "--parallel", "--workers", str(workers),
+                         "--scan-nested-datasets",
                          "--hash-mode", str(scan_hash_mode),
                          "--drift-policy", str(drift_policy)] + db_args,
                     )
@@ -732,72 +786,37 @@ def run_refresh(
                             f"scan dest_root ({dest_root})",
                             [python, "-m", "hashall.cli", "scan", dest_root,
                              "--parallel", "--workers", str(workers),
+                             "--scan-nested-datasets",
                              "--hash-mode", str(scan_hash_mode),
                              "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
 
-                    # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
-                    ok, _ = _run_step(
-                        f"dupes auto-upgrade (active={active_device})",
-                        [python, "-m", "hashall.cli", "dupes",
-                         "--device", active_device, "--auto-upgrade"] + db_args,
-                    )
-                    overall_ok = overall_ok and ok
-
-                    # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
-                    ok, _ = _run_step(
-                        f"dupes auto-upgrade (dest={dest_device})",
-                        [python, "-m", "hashall.cli", "dupes",
-                         "--device", dest_device, "--auto-upgrade"] + db_args,
-                    )
-                    overall_ok = overall_ok and ok
-
-                    # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
+                    # ── Managed roots: scan first; dedup targets resolved after scan ─────
                     for managed_path, managed_alias in (managed_roots or []):
                         ok, _ = _run_step(
                             f"scan managed root ({managed_path})",
                             [python, "-m", "hashall.cli", "scan", managed_path,
                              "--parallel", "--workers", str(workers),
+                             "--scan-nested-datasets",
                              "--hash-mode", str(scan_hash_mode),
                              "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
 
+                    dedup_aliases = _resolve_refresh_dedup_aliases(catalog_path, all_roots)
+                    print(f"  dedup_targets {', '.join(dedup_aliases)}")
+
+                    for dev_alias in dedup_aliases:
                         ok, _ = _run_step(
-                            f"dupes auto-upgrade (managed={managed_alias})",
+                            f"dupes auto-upgrade ({dev_alias})",
                             [python, "-m", "hashall.cli", "dupes",
-                             "--device", managed_alias, "--auto-upgrade"] + db_args,
+                             "--device", dev_alias, "--auto-upgrade"] + db_args,
                         )
                         overall_ok = overall_ok and ok
 
-                        if not skip_dedup:
-                            plan_name = f"refresh-{managed_alias}-{timestamp}"
-                            ok, stdout = _run_step(
-                                f"link plan ({managed_alias})",
-                                [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                                 "--device", managed_alias, "--min-size", "1048576"] + db_args,
-                                capture=True,
-                            )
-                            overall_ok = overall_ok and ok
-
-                            if ok:
-                                plan_id = _parse_link_plan_id(stdout)
-                                if plan_id:
-                                    execute_cmd = [
-                                        python, "-m", "hashall.cli", "link", "execute", plan_id,
-                                        "--yes",
-                                    ] + db_args
-                                    label = f"link execute plan_id={plan_id} ({managed_alias})"
-                                    print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
-                                    ok, _ = _run_step(label, execute_cmd)
-                                    overall_ok = overall_ok and ok
-                                else:
-                                    print(f"  [refresh] no parsable plan_id in link plan output for {managed_alias} — skipping execute")
-
-                    # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
                     if not skip_dedup:
-                        for dev_alias in (active_device, dest_device):
+                        for dev_alias in dedup_aliases:
                             plan_name = f"refresh-{dev_alias}-{timestamp}"
                             ok, stdout = _run_step(
                                 f"link plan ({dev_alias})",

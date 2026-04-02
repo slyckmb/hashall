@@ -253,8 +253,12 @@ def cli():
 @click.option("--full", "hash_mode_flag", flag_value='full', help="Shortcut for --hash-mode=full")
 @click.option("--upgrade", "hash_mode_flag", flag_value='upgrade', help="Shortcut for --hash-mode=upgrade")
 @click.option("--show-path", is_flag=True, help="Show current file path above progress bar.")
-@click.option("--scan-nested-datasets", is_flag=True,
-              help="Detect nested mountpoints/datasets and scan them separately.")
+@click.option(
+    "--scan-nested-datasets/--no-scan-nested-datasets",
+    default=True,
+    show_default=True,
+    help="Detect nested mountpoints/datasets and scan them separately.",
+)
 @click.option(
     "--drift-policy",
     type=click.Choice(["metadata", "quick", "full"], case_sensitive=False),
