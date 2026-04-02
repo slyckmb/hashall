@@ -148,10 +148,19 @@ hashall refresh-dashboard
 hashall sha256-backfill --device pool --dry-run
 hashall sha256-backfill --device pool
 hashall sha256-verify --device pool
+bin/run-hashall-upgrade-scans.sh
 ```
 
 Guidance:
 
+- Nested dataset scanning is now enabled by default for `hashall scan`.
+- `hashall refresh` now carries nested dataset scanning through each scan step and dedupes all covered roots / dataset aliases discovered under the refreshed scan roots.
+- The intended full-content refresh set currently includes:
+  - `/stash/media`
+  - `/pool/data`
+  - `/pool/media`
+  - `/mnt/hotspare6tb`
+- `bin/run-hashall-upgrade-scans.sh` is the explicit helper for the full upgrade scan sequence when operators want direct control instead of the wrapper command.
 - `hashall refresh-status` is the fast operator check for:
   - current `refresh.lock` metadata
   - whether the lock PID is still live

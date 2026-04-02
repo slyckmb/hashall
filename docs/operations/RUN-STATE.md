@@ -1,6 +1,54 @@
 # Operational Run State
 
-Last updated: 2026-03-27
+Last updated: 2026-04-01
+
+## 2026-04-01 Refresh Defaults + Client Boundary
+
+**Refresh / scan defaults updated:**
+- `hashall scan` now defaults to scanning nested datasets.
+- `hashall refresh` now carries nested dataset scanning through every scan step.
+- `hashall refresh` dedupe now resolves and covers all device aliases represented by the refreshed roots, rather than only the configured top-level aliases.
+
+**Current intended refresh coverage:**
+- `/stash/media`
+- `/pool/data`
+- `/pool/media`
+- `/mnt/hotspare6tb`
+- destination root `/pool/media/torrents/seeding`
+
+**Important config interpretation:**
+- Broad `/pool/media` had previously been missing from refresh coverage.
+- That meant older refresh runs could cover `/pool/media/torrents/seeding` while still missing other `/pool/media` content trees.
+- `/pool/data` subfolders could also appear to be "ignored" when operators looked only at `payloads`, because `payload sync` only materializes qB torrent roots while scan truth lives in `files_*`.
+- Nested dataset omission is now addressed by the new default scan behavior.
+
+**Current recommended full refresh commands:**
+- One-shot wrapper:
+  - `python -m hashall.cli refresh --scan-hash-mode upgrade --drift-policy quick`
+- Explicit helper script in repo:
+  - `bin/run-hashall-upgrade-scans.sh`
+- Explicit manual equivalent:
+  - `python -m hashall.cli scan /stash/media --hash-mode upgrade --drift-policy quick`
+  - `python -m hashall.cli scan /pool/data --hash-mode upgrade --drift-policy quick`
+  - `python -m hashall.cli scan /pool/media --hash-mode upgrade --drift-policy quick`
+  - `python -m hashall.cli scan /mnt/hotspare6tb --hash-mode upgrade --drift-policy quick`
+  - `python -m hashall.cli payload sync --upgrade-missing`
+
+**Current torrent-client boundary:**
+- `hashall` already has first-class rt repair/audit commands.
+- `hashall` is **not yet** torrent-client agnostic.
+- qB is still a dependency for:
+  - `refresh` end-state payload sync
+  - torrent-backed payload materialization
+  - `rehome apply`
+  - `rehome followup`
+  - current local piece verification that depends on qB `BT_backup`
+- Canonical plan for removing that dependency is now documented in:
+  - `docs/operations/TORRENT-CLIENT-AGNOSTIC-PLAN.md`
+
+**ZFS scrub note:**
+- `pool` scrub had already completed cleanly.
+- `stash` scrub was canceled during this session because it had been run recently and was not needed while refresh / scan work was active.
 
 ## 2026-03-27 Dual-Client Drift Handoff
 

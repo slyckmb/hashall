@@ -1,5 +1,34 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-04-01 Refresh + Client Transition State
+
+- New design/ops doc:
+  - `docs/operations/TORRENT-CLIENT-AGNOSTIC-PLAN.md`
+- `hashall` is currently:
+  - rt-capable for repair and audit
+  - still qB-authoritative for `refresh`, `payload sync`, and `rehome apply`
+- Do **not** shut qB down yet if `hashall` needs to:
+  - run `refresh`
+  - materialize torrent-backed `payloads`
+  - execute or verify `rehome` plans
+- Current managed refresh coverage is now intended to be:
+  - `/stash/media`
+  - `/pool/data`
+  - `/pool/media`
+  - `/mnt/hotspare6tb`
+  - plus the configured destination root `/pool/media/torrents/seeding`
+- Refresh behavior changed in repo code:
+  - nested dataset scanning is now on by default
+  - refresh dedupe expands to all covered device aliases / datasets under refreshed roots
+- Practical operator guidance:
+  - broad pool media refresh should now be safe via `hashall refresh --scan-hash-mode upgrade --drift-policy quick`
+  - if exact explicit coverage is desired, use `bin/run-hashall-upgrade-scans.sh`
+- DB rewrite is **not** needed to reuse existing `/pool/media/torrents/seeding` scan data when scanning `/pool/media`
+  - existing hashes are keyed by relative path / metadata and will be reused
+- ZFS scrub state at last check:
+  - `pool` scrub had already completed cleanly
+  - `stash` scrub was canceled because it had run recently and was not needed during this work
+
 ## 2026-03-27 Dual-Client Default + Drift Cleanup
 
 - New handoff doc:
