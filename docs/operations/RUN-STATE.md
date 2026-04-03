@@ -97,7 +97,8 @@ Last updated: 2026-04-03
 
 **Important constraint:**
 - qB must remain online while this loop runs
-- `payload sync` and `rehome apply` are still qB-backed in `hashall`
+- `rehome apply` is still qB-backed in `hashall`
+- `payload sync` now supports RT-backed sync and the maintenance wrapper defaults to RT mode
 
 **Source of truth while the loop is live:**
 - newest log under `~/.logs/hashall/pool-migration-loop/`
@@ -153,6 +154,7 @@ Last updated: 2026-04-03
   - restarts the whole `gluetun_qbit` stack if qB or RT is degraded
   - retries payload sync once after restart
   - supports `--payload-sync-only` so a failed overnight run can resume without rescanning
+  - defaults the final payload sync step to `--source rt`
 
 **Current recommended recovery command for this specific failure class:**
 - `bin/run-hashall-upgrade-scans.sh --payload-sync-only`

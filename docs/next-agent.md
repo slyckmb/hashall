@@ -118,7 +118,8 @@
   - `docs/operations/TORRENT-CLIENT-AGNOSTIC-PLAN.md`
 - `hashall` is currently:
   - rt-capable for repair and audit
-  - still qB-authoritative for `refresh`, `payload sync`, and `rehome apply`
+- RT-backed payload sync and refresh are now available
+- `rehome apply` is still qB-authoritative
 - Do **not** shut qB down yet if `hashall` needs to:
   - run `refresh`
   - materialize torrent-backed `payloads`

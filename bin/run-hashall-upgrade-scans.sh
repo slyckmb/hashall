@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Script: run-hashall-upgrade-scans.sh
-# Version: 0.2.0
-# Last-updated: 2026-04-02T17:40:00-04:00
+# Version: 0.3.0
+# Last-updated: 2026-04-03T15:15:00-04:00
 
 set -euo pipefail
 
 SCRIPT_NAME="run-hashall-upgrade-scans.sh"
-VERSION="0.2.0"
-LAST_UPDATED="2026-04-02T17:40:00-04:00"
+VERSION="0.3.0"
+LAST_UPDATED="2026-04-03T15:15:00-04:00"
 
 DRYRUN=0
 CONTINUE_ON_ERROR=0
@@ -21,6 +21,8 @@ STACK_CONTAINERS=(
 )
 STACK_READY_ATTEMPTS=18
 STACK_READY_SLEEP_S=10
+PAYLOAD_SOURCE="rt"
+RT_SESSION_DIR="/dump/docker/gluetun_qbit/rtorrent_vpn/.session"
 
 compose_up_gluetun_qbit_stack() {
   local label_source=""
@@ -48,6 +50,8 @@ Options:
   -n, --dryrun            Print commands without executing them
   -c, --continue-on-error Continue scanning other roots if one fails
   --payload-sync-only     Skip scans and resume from payload sync only
+  --payload-source SRC    Final payload sync source: rt or qb (default: rt)
+  --rt-session-dir PATH   rTorrent session directory for --payload-source rt
   -h, --help              Show this help
 
 Examples:
@@ -55,6 +59,7 @@ Examples:
   run-hashall-upgrade-scans.sh --dryrun
   run-hashall-upgrade-scans.sh --continue-on-error
   run-hashall-upgrade-scans.sh --payload-sync-only
+  run-hashall-upgrade-scans.sh --payload-source rt
 EOF
 }
 
@@ -184,7 +189,16 @@ run_payload_sync_with_recovery() {
     return 1
   fi
 
-  if run_cmd "payload-sync" python -m hashall.cli payload sync --upgrade-missing; then
+  local sync_cmd=(
+    python -m hashall.cli payload sync
+    --source "$PAYLOAD_SOURCE"
+    --upgrade-missing
+  )
+  if [[ "$PAYLOAD_SOURCE" == "rt" ]]; then
+    sync_cmd+=(--rt-session-dir "$RT_SESSION_DIR")
+  fi
+
+  if run_cmd "payload-sync" "${sync_cmd[@]}"; then
     payload_sync_status="ok"
     return 0
   fi
@@ -198,7 +212,7 @@ run_payload_sync_with_recovery() {
     payload_sync_status="failed"
     return 1
   fi
-  if run_cmd "payload-sync-retry" python -m hashall.cli payload sync --upgrade-missing; then
+  if run_cmd "payload-sync-retry" "${sync_cmd[@]}"; then
     payload_sync_status="recovered"
     return 0
   fi
@@ -233,6 +247,24 @@ main() {
     --payload-sync-only)
       PAYLOAD_SYNC_ONLY=1
       shift
+      ;;
+    --payload-source)
+      PAYLOAD_SOURCE="${2:-}"
+      if [[ "$PAYLOAD_SOURCE" != "rt" && "$PAYLOAD_SOURCE" != "qb" ]]; then
+        echo "error=invalid_payload_source value=${PAYLOAD_SOURCE:-missing}"
+        usage
+        exit 2
+      fi
+      shift 2
+      ;;
+    --rt-session-dir)
+      RT_SESSION_DIR="${2:-}"
+      if [[ -z "$RT_SESSION_DIR" ]]; then
+        echo "error=missing_rt_session_dir"
+        usage
+        exit 2
+      fi
+      shift 2
       ;;
     -h | --help)
       usage
@@ -285,6 +317,7 @@ main() {
   echo "scans_ok=${ok_count}"
   echo "scans_failed=${scan_fail_count}"
   echo "payload_sync=${payload_sync_status}"
+  echo "payload_source=${PAYLOAD_SOURCE}"
   echo "stack_restarts=${STACK_RESTARTS}"
 
   log_banner "end"
