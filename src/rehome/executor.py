@@ -1629,7 +1629,10 @@ class DemotionExecutor:
                     "torrent_hash": torrent_hash,
                     "source_save_path": target.get("source_save_path"),
                     "target_save_path": target["target_save_path"],
-                    "target_payload_root": constructed_roots.get(str(torrent_hash).strip().lower()),
+                    "target_payload_root": constructed_roots.get(
+                        str(torrent_hash).strip().lower(),
+                        str(plan.get("target_path") or ""),
+                    ),
                 })
             return relocations
 

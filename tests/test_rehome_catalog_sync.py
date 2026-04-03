@@ -3034,6 +3034,77 @@ def test_reuse_fallback_derives_save_path_for_single_entry_nested_file(tmp_path)
     )
 
 
+def test_build_relocations_carries_plan_target_path_for_view_targets_when_unbuilt(tmp_path):
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClient(default_path=str(tmp_path / "old"))
+
+    conn = sqlite3.connect(tmp_path / "catalog.db")
+    conn.execute(
+        """
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            device_id INTEGER,
+            save_path TEXT,
+            root_name TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "hash-a",
+            1,
+            141,
+            str(tmp_path / "stash" / "media" / "torrents" / "seeding" / "_qb-unique-repair" / "hash-a"),
+            "Wrapped.Release",
+        ),
+    )
+    conn.commit()
+
+    plan = {
+        "target_path": str(
+            tmp_path
+            / "pool"
+            / "media"
+            / "torrents"
+            / "seeding"
+            / "movies"
+            / "Wrapped.Release.mkv"
+        ),
+        "view_targets": [
+            {
+                "torrent_hash": "hash-a",
+                "source_save_path": str(tmp_path / "stash" / "media" / "torrents" / "seeding" / "_qb-unique-repair" / "hash-a"),
+                "target_save_path": str(tmp_path / "pool" / "media" / "torrents" / "seeding" / "movies"),
+                "root_name": "Wrapped.Release",
+            }
+        ],
+    }
+
+    relocations = executor._build_relocations(conn, plan)
+
+    assert relocations == [
+        {
+            "torrent_hash": "hash-a",
+            "source_save_path": str(tmp_path / "stash" / "media" / "torrents" / "seeding" / "_qb-unique-repair" / "hash-a"),
+            "target_save_path": str(tmp_path / "pool" / "media" / "torrents" / "seeding" / "movies"),
+            "target_payload_root": str(
+                tmp_path
+                / "pool"
+                / "media"
+                / "torrents"
+                / "seeding"
+                / "movies"
+                / "Wrapped.Release.mkv"
+            ),
+        }
+    ]
+
+
 def test_parse_rsync_progress_line_extracts_percent_eta():
     parsed = DemotionExecutor._parse_rsync_progress_line(
         "  38.85G  98.19%   224.31MB/s    0:00:03 (xfr#178, to-chk=0/180)"

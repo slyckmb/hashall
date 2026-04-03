@@ -448,6 +448,7 @@ def build_manifest_row_for_relocation(
     fastresume_dir: Path,
     torrent_dir: Path,
     target_save_path: str,
+    target_payload_root: Optional[str],
     source_root: str,
     dest_root: str,
     source_save_path: Optional[str] = None,
@@ -508,6 +509,7 @@ def build_manifest_row_for_relocation(
     path_shape_match = False
     dest_content_path = ""
     target_save_path_n = normalize_save_path(target_save_path)
+    target_payload_root_n = normalize_save_path(target_payload_root) if target_payload_root else ""
     if metadata is not None:
         expected_root_name = str(metadata["root_name"])
         is_multi_file = bool(metadata["is_multi_file"])
@@ -518,7 +520,10 @@ def build_manifest_row_for_relocation(
             path_shape_match = normalize_save_path(content_path) == normalize_save_path(
                 expected_old_content
             )
-            dest_content_path = expected_content_path(target_save_path_n, metadata)
+            if target_payload_root_n:
+                dest_content_path = target_payload_root_n
+            else:
+                dest_content_path = expected_content_path(target_save_path_n, metadata)
         else:
             issues.append("missing_old_save_path")
 
@@ -588,6 +593,7 @@ def build_manifest_for_relocations(
             fastresume_dir=fastresume_dir,
             torrent_dir=torrent_dir,
             target_save_path=str(relocation.get("target_save_path") or ""),
+            target_payload_root=str(relocation.get("target_payload_root") or ""),
             source_root=source_root,
             dest_root=dest_root,
             source_save_path=str(relocation.get("source_save_path") or ""),
