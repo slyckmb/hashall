@@ -211,7 +211,7 @@ run_rehome_round() {
   echo
   echo "[▶] round=${round} apply"
   python -m hashall.cli rehome auto --from stash --to pool-media --limit "$LIMIT" --apply | tee "$apply_log"
-  if grep -Eq 'apply\s+FAIL|verify\s+.*FAIL|status=failed|Traceback' "$apply_log"; then
+  if grep -Eq 'apply\s+FAIL|verify\s+.*FAIL|status=failed|Traceback|status=dest_missing' "$apply_log"; then
     pause_and_exit "round_${round}_apply_failed"
   fi
 

@@ -44,6 +44,13 @@ Last updated: 2026-04-02
 - observed round state:
   - one stash reuse wave advanced into verify on `/pool/media`
   - a later dry-run surfaced another all-`REUSE` stash batch (`3` groups)
+- the first unattended run then reached diminishing returns:
+  - later rounds resurfaced the same `3` families because one torrent in each family ended verification as `dest_missing`
+  - those residual hashes are:
+    - `06a8867d184c6972956307c7eea48ce16669e17c` (`Bullet Train` family)
+    - `2bf62b9780fa8c394a8a4d9a57ebb5b924309645` (`Muppet` family)
+    - `7c404604a9a478b5d35f109c72935023bd454ef2` (`Lego Masters` family)
+  - the loop script is now hardened to stop on `status=dest_missing` instead of treating that as a good enough round
 
 **Important constraint:**
 - qB must remain online while this loop runs

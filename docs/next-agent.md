@@ -15,6 +15,7 @@
 - Fail-closed conditions:
   - any non-`REUSE` plan decision
   - any apply / verify failure
+  - any verify `status=dest_missing`
   - qB / RT recovery failure
   - reviewed stale roots still referenced by qB or RT
 - Current observed live state:
@@ -32,6 +33,14 @@
   - `/stash/media`: about `12T`
 - While the loop is still running, the newest source of truth is:
   - `~/.logs/hashall/pool-migration-loop/`
+- Most important outcome from the first unattended run:
+  - the stale reviewed `How It's Made` residue was removed successfully
+  - later rounds re-surfaced the same `3` reuse families because one torrent in each family ended as `dest_missing`
+  - exact residual hashes:
+    - `06a8867d184c6972956307c7eea48ce16669e17c`
+    - `2bf62b9780fa8c394a8a4d9a57ebb5b924309645`
+    - `7c404604a9a478b5d35f109c72935023bd454ef2`
+  - next progress should be a targeted per-torrent repair/migration for those three, not another blind unattended loop
 
 ## 2026-04-02 RT cache + refresh recovery
 

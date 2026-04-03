@@ -43,6 +43,7 @@ It will pause instead of continuing if:
 
 - any candidate round includes non-`REUSE` decisions
 - any apply or verify step reports failure
+- any verify step reports `status=dest_missing`
 - qB / RT recovery does not succeed
 - the reviewed stale roots are still referenced by qB or RT
 
@@ -85,6 +86,32 @@ Because the loop may still be running when this file is read, the current source
 
 - `~/.logs/hashall/pool-migration-loop/`
 
+## Current manual follow-up after the first unattended run
+
+The first unattended run exposed a specific residual class the loop must not auto-repeat:
+
+- `06a8867d184c6972956307c7eea48ce16669e17c`
+  - `Bullet.Train.2022.BluRay.1080p.TrueHD.Atmos.7.1.AVC.HYBRID.REMUX-FraMeSToR`
+  - current save path: `/data/media/torrents/seeding/_qb-unique-repair/06a8867d184c6972956307c7eea48ce16669e17c`
+  - verify status in unattended run: `dest_missing`
+- `2bf62b9780fa8c394a8a4d9a57ebb5b924309645`
+  - `The.Muppet.Christmas.Carol.1992.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR`
+  - current save path: `/data/media/torrents/seeding/cross-seed/PrivateHD`
+  - verify status in unattended run: `dest_missing`
+- `7c404604a9a478b5d35f109c72935023bd454ef2`
+  - `Lego.Masters.US.S04.1080p.WEB-DL.AAC2.0.H.264-BAE`
+  - current save path: `/data/media/torrents/seeding/_qb-unique-repair/7c404604a9a478b5d35f109c72935023bd454ef2`
+  - verify status in unattended run: `dest_missing`
+
+These three are why later rounds kept resurfacing the same families.
+
+The next real progress step is **not** another unattended loop run. It is:
+
+1. isolate these three torrents
+2. decide the correct canonical target path for each shape variant
+3. repair / migrate them individually
+4. only then resume unattended stash reuse rounds
+
 ## Operator guidance
 
 Use this loop for the current narrow cleanup / reuse phase only.
@@ -95,4 +122,3 @@ Do not broaden it yet to:
 - mixed `MOVE` / `REUSE` stash batches
 - RT repair work
 - arbitrary duplicate deletion outside the reviewed residue list
-
