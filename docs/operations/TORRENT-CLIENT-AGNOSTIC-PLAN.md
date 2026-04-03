@@ -80,6 +80,43 @@ Today, `hashall` is:
 
 That means qB can stay running during transition work, but `hashall` is not yet safe to operate as a fully rt-only system.
 
+## Current Priority Shift
+
+The new operating target is:
+
+- rt is the primary live client and source of truth
+- qB remains available as a backup read-only mirror during transition
+- `hashall` should stop requiring qB for ordinary catalog truth as quickly as practical
+
+This does **not** mean qB should be deleted from the repo immediately. It means:
+
+- new truth-building flows should be written RT-first
+- qB-dependent flows should be downgraded to fallback / mirror status
+- hidden qB assumptions should be surfaced and removed in priority order
+
+## Phase 1 Status
+
+As of `2026-04-03`, the first RT-primary catalog step has landed:
+
+- `hashall payload sync` now supports:
+  - `--source qb`
+  - `--source rt`
+- RT-backed payload sync reads from rTorrent session files and materializes payloads without talking to qB.
+- `hashall refresh` now supports:
+  - `--payload-source qb`
+  - `--payload-source rt`
+
+What this means today:
+
+- you can refresh scans and then sync payloads from RT session truth
+- qB is no longer the only way to materialize torrent-backed payload rows
+
+What it does **not** mean yet:
+
+- merged qB+RT inventory does not exist yet
+- `rehome apply` is still qB-primary
+- qB BT_backup is still part of some verification/repair flows
+
 ## Why This Matters
 
 If qB is eventually shut down while `hashall` still assumes qB is the torrent authority:
@@ -194,6 +231,11 @@ Transitional behavior:
 - if rt is enabled, include rt rows
 - if both are enabled, merge by hash and content root
 
+Immediate next slice:
+
+- keep `payload sync --source rt` stable
+- add a merged inventory mode after RT-only sync is trusted operationally
+
 ### 3. Make refresh client-neutral
 
 Current `refresh` does:
@@ -210,6 +252,11 @@ The new requirement is:
 4. `payload sync` from the merged torrent inventory
 
 `refresh` must succeed even when qB is absent.
+
+Immediate next slice:
+
+- make `refresh --payload-source rt` the preferred operator path during RT-primary transition
+- keep qB refresh path available until rehome/followup are also RT-first
 
 ### 4. Make rehome execution stop depending on qB as sole runtime authority
 

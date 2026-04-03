@@ -158,8 +158,10 @@ rt session/repair guidance:
 ```bash
 hashall refresh --verbose --scan-hash-mode fast --drift-policy quick
 hashall refresh --verbose --scan-hash-mode full --drift-policy full
+hashall refresh --payload-source rt --verbose --scan-hash-mode upgrade --drift-policy quick
 hashall refresh-status
 hashall refresh-dashboard
+hashall payload sync --source rt --upgrade-missing
 hashall sha256-backfill --device pool --dry-run
 hashall sha256-backfill --device pool
 hashall sha256-verify --device pool
@@ -170,6 +172,8 @@ Guidance:
 
 - Nested dataset scanning is now enabled by default for `hashall scan`.
 - `hashall refresh` now carries nested dataset scanning through each scan step and dedupes all covered roots / dataset aliases discovered under the refreshed scan roots.
+- `hashall payload sync` now supports `--source rt` for RT-backed payload materialization from session files.
+- `hashall refresh` now supports `--payload-source rt` so the final payload sync can use RT instead of qB.
 - The intended full-content refresh set currently includes:
   - `/stash/media`
   - `/pool/data`
@@ -212,6 +216,10 @@ Guidance:
 - `bin/qb-checking-watch.sh` now defaults to cached reads; use `--no-cache` only for direct-mode debugging.
 - `bin/qb-start-seeding-gradual.sh` now defaults to cached `torrents/info` reads; use `--no-cache` only when debugging cache behavior.
 - Read-heavy list/status tooling should prefer cached reads; write/mutation endpoints can remain direct when immediate freshness matters.
+- During RT-primary transition, prefer:
+  - `hashall payload sync --source rt`
+  - `hashall refresh --payload-source rt`
+- Keep qB-backed sync available as a fallback until `rehome apply` and followup stop depending on qB runtime state.
 
 ## Standard Operator Loop
 

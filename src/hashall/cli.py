@@ -24,7 +24,12 @@ from hashall.rt_cache import (
     DEFAULT_RT_SHARED_CACHE_FILE,
     DEFAULT_RT_SHARED_CACHE_META_FILE,
 )
-from hashall.rtorrent import DEFAULT_RT_RPC_URL, DEFAULT_RT_SESSION_DIR, live_rt_root_paths
+from hashall.rtorrent import (
+    DEFAULT_RT_RPC_URL,
+    DEFAULT_RT_SESSION_DIR,
+    live_rt_root_paths,
+    load_rt_inventory_rows,
+)
 from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
@@ -47,6 +52,7 @@ def _payload_sync_upgrade_state_dir() -> Path:
 def _payload_sync_upgrade_scope(
     *,
     db_path: Path,
+    source: str = "qb",
     path_prefixes: list[Path],
     category: str | None,
     tag: str | None,
@@ -56,6 +62,7 @@ def _payload_sync_upgrade_scope(
 ) -> str:
     payload = {
         "db_path": str(db_path.expanduser().resolve()),
+        "source": str(source or "qb").lower(),
         "path_prefixes": [str(Path(p)) for p in path_prefixes],
         "category": str(category or ""),
         "tag": str(tag or ""),
@@ -449,9 +456,23 @@ def payload():
 
 @payload.command("sync")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--source",
+    type=click.Choice(["qb", "rt"], case_sensitive=False),
+    default="qb",
+    show_default=True,
+    help="Torrent client inventory source.",
+)
 @click.option("--qbit-url", default=None, help="qBittorrent URL (default: http://localhost:9003)")
 @click.option("--qbit-user", default=None, help="qBittorrent username (default: admin)")
 @click.option("--qbit-pass", default=None, help="qBittorrent password")
+@click.option(
+    "--rt-session-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=str(DEFAULT_RT_SESSION_DIR),
+    show_default=True,
+    help="rTorrent session directory for --source rt.",
+)
 @click.option("--category", default=None, help="Filter torrents by category")
 @click.option("--tag", default=None, help="Filter torrents by tag")
 @click.option(
@@ -503,9 +524,11 @@ def payload():
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
 def payload_sync(
     db,
+    source,
     qbit_url,
     qbit_user,
     qbit_pass,
+    rt_session_dir,
     category,
     tag,
     path_prefixes,
@@ -521,9 +544,9 @@ def payload_sync(
     low_priority,
 ):
     """
-    Sync torrent instances from qBittorrent and map to payloads.
+    Sync torrent instances from the selected client inventory and map to payloads.
 
-    Connects to qBittorrent (read-only), retrieves torrent list, maps torrents
+    Connects to the selected client inventory source, retrieves torrent list, maps torrents
     to on-disk payload roots, computes payload hashes, and updates the database.
 
     This command is idempotent and can be run multiple times.
@@ -543,26 +566,49 @@ def payload_sync(
     # In dry-run mode, open read-only and skip migrations to guarantee "no writes".
     conn = connect_db(Path(db), read_only=dry_run, apply_migrations=not dry_run)
 
-    # Connect to qBittorrent
-    print("🔌 Connecting to qBittorrent...")
-    qbit = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
+    source = str(source or "qb").lower()
+    qbit = None
+    inventory_rows: list[dict[str, str]] = []
+    root_path_from_content_path = 0
+    root_path_files_fallback_calls = 0
 
-    if not qbit.test_connection():
-        err = getattr(qbit, "last_error", None)
-        msg = f"Failed to connect to qBittorrent at {qbit.base_url}"
-        if err:
-            msg = f"{msg}: {err}"
-        msg = f"{msg}\nHint: uses QBITTORRENT_API_URL and /mnt/config/secrets/qbittorrent/api.env"
-        raise click.ClickException(msg)
+    if source == "qb":
+        print("🔌 Connecting to qBittorrent...")
+        qbit = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
 
-    if not qbit.login():
-        err = getattr(qbit, "last_error", None)
-        msg = "Failed to authenticate with qBittorrent"
-        if err:
-            msg = f"{msg}: {err}"
-        raise click.ClickException(msg)
+        if not qbit.test_connection():
+            err = getattr(qbit, "last_error", None)
+            msg = f"Failed to connect to qBittorrent at {qbit.base_url}"
+            if err:
+                msg = f"{msg}: {err}"
+            msg = f"{msg}\nHint: uses QBITTORRENT_API_URL and /mnt/config/secrets/qbittorrent/api.env"
+            raise click.ClickException(msg)
 
-    print("✅ Connected to qBittorrent")
+        if not qbit.login():
+            err = getattr(qbit, "last_error", None)
+            msg = "Failed to authenticate with qBittorrent"
+            if err:
+                msg = f"{msg}: {err}"
+            raise click.ClickException(msg)
+
+        print("✅ Connected to qBittorrent")
+    else:
+        if category or tag:
+            raise click.ClickException("--category/--tag are only supported with --source qb")
+        session_path = Path(rt_session_dir).expanduser()
+        print(f"📥 Loading rTorrent session inventory from {session_path}...")
+        inventory_rows = [
+            {
+                "hash": row.torrent_hash,
+                "name": row.root_name,
+                "save_path": row.save_path,
+                "content_path": row.content_path,
+                "category": "",
+                "tags": "",
+            }
+            for row in load_rt_inventory_rows(session_path)
+        ]
+        print(f"✅ Loaded {len(inventory_rows)} rTorrent session rows")
 
     if dry_run and upgrade_missing:
         print("⚠️  DRY-RUN: ignoring --upgrade-missing (would modify DB)")
@@ -623,9 +669,29 @@ def payload_sync(
         return p
 
     # Get torrents
-    print("📥 Fetching torrents...")
-    torrents = qbit.get_torrents(category=category, tag=tag)
-    print(f"   Found {len(torrents)} torrents")
+    if source == "qb":
+        print("📥 Fetching torrents...")
+        torrents = qbit.get_torrents(category=category, tag=tag)
+        print(f"   Found {len(torrents)} torrents")
+        for torrent in torrents:
+            root_path = qbit.get_torrent_root_path(torrent)
+            if torrent.content_path:
+                root_path_from_content_path += 1
+            inventory_rows.append(
+                {
+                    "hash": torrent.hash,
+                    "name": torrent.name,
+                    "save_path": torrent.save_path,
+                    "content_path": torrent.content_path,
+                    "category": torrent.category,
+                    "tags": torrent.tags,
+                    "root_path": root_path,
+                }
+            )
+        root_path_files_fallback_calls = getattr(qbit, "root_path_files_fallback_calls", 0)
+    else:
+        print("📥 Using preloaded rTorrent inventory rows...")
+        print(f"   Found {len(inventory_rows)} torrents")
 
     # Process each torrent
     synced_count = 0
@@ -635,7 +701,6 @@ def payload_sync(
     processed = 0
     checked = 0
     prune_stats = None
-    root_path_from_content_path = 0
     write_batch_ops = 0
     write_batch_threshold = 400
     upgrade_queue: dict[str, dict] = {}
@@ -644,19 +709,17 @@ def payload_sync(
     upgrade_failed = 0
 
     with TwoLineProgress(
-        total=len(torrents),
+        total=len(inventory_rows),
         prefix="📦 Syncing payloads",
         unit="torrents",
         enabled=not dry_run
     ) as progress:
-        for torrent in torrents:
+        for torrent in inventory_rows:
             if limit and processed >= limit:
                 break
 
             # Get torrent root path
-            root_path = qbit.get_torrent_root_path(torrent)
-            if torrent.content_path:
-                root_path_from_content_path += 1
+            root_path = str(torrent.get("root_path") or torrent.get("content_path") or "").strip()
             root_canon = _canonicalize_payload_root_path(root_path)
 
             if prefix_paths:
@@ -665,20 +728,20 @@ def payload_sync(
                     checked += 1
                     if checked % 500 == 0:
                         print(
-                            f"\n   ⏳ Prefix filter progress: checked={checked}/{len(torrents)} "
+                            f"\n   ⏳ Prefix filter progress: checked={checked}/{len(inventory_rows)} "
                             f"processed={processed} skipped={skipped_prefix}"
                         )
                     progress.update(
-                        desc=f"filtering checked={checked}/{len(torrents)} "
+                        desc=f"filtering checked={checked}/{len(inventory_rows)} "
                              f"processed={processed} skipped={skipped_prefix}",
                         advance=1,
                     )
                     continue
 
-            progress.update(desc=f"{torrent.name[:60]}", advance=0)
+            progress.update(desc=f"{str(torrent.get('name') or '')[:60]}", advance=0)
 
-            print(f"\n🔄 Processing: {torrent.name[:50]}...")
-            print(f"   Hash: {torrent.hash}")
+            print(f"\n🔄 Processing: {str(torrent.get('name') or '')[:50]}...")
+            print(f"   Hash: {torrent.get('hash')}")
             print(f"   Path: {root_path}")
             if str(root_canon) != root_path:
                 print(f"   Canonical: {root_canon}")
@@ -693,8 +756,8 @@ def payload_sync(
                     upgrade_queue[key] = {
                         "root_path": key,
                         "device_id": payload.device_id,
-                        "first_torrent": torrent.name,
-                        "first_hash": torrent.hash,
+                        "first_torrent": str(torrent.get("name") or ""),
+                        "first_hash": str(torrent.get("hash") or ""),
                         "first_seen_order": processed,
                         "file_count": int(payload.file_count or 0),
                         "total_bytes": int(payload.total_bytes or 0),
@@ -706,14 +769,14 @@ def payload_sync(
 
                 # Insert/update torrent instance
                 torrent_instance = TorrentInstance(
-                    torrent_hash=torrent.hash,
+                    torrent_hash=str(torrent.get("hash") or ""),
                     payload_id=payload_id,
                     device_id=payload.device_id,
                     fs_uuid=payload.fs_uuid,
-                    save_path=torrent.save_path,
-                    root_name=torrent.name,
-                    category=torrent.category,
-                    tags=torrent.tags,
+                    save_path=str(torrent.get("save_path") or ""),
+                    root_name=str(torrent.get("name") or ""),
+                    category=str(torrent.get("category") or ""),
+                    tags=str(torrent.get("tags") or ""),
                     last_seen_at=time.time()
                 )
                 upsert_torrent_instance(conn, torrent_instance, commit=False)
@@ -765,6 +828,7 @@ def payload_sync(
 
         upgrade_scope = _payload_sync_upgrade_scope(
             db_path=Path(db),
+            source=source,
             path_prefixes=prefix_paths,
             category=category,
             tag=tag,
@@ -961,19 +1025,25 @@ def payload_sync(
     print(f"   processed: {processed}")
     if prefix_paths:
         print(f"   skipped (path-prefix): {skipped_prefix}")
-        if processed == 0 and len(torrents) > 0:
+        if processed == 0 and len(inventory_rows) > 0:
             sample_prefixes = ", ".join(str(p) for p in prefix_paths[:3])
             print("   ⚠️  no torrents matched current path-prefix filters")
             print(f"      prefixes(sample): {sample_prefixes}")
-            print("      hint: verify canonical roots from qB content_path/save_path")
+            if source == "qb":
+                print("      hint: verify canonical roots from qB content_path/save_path")
+            else:
+                print("      hint: verify rt session directory paths and mount aliases")
     print(f"   complete payloads: {synced_count}")
     print(f"   incomplete payloads: {incomplete_count}")
     print(f"   missing in catalog: {missing_in_catalog}")
-    print(
-        "   root path source: "
-        f"content_path={root_path_from_content_path}, "
-        f"files_api_fallback={getattr(qbit, 'root_path_files_fallback_calls', 0)}"
-    )
+    if source == "qb":
+        print(
+            "   root path source: "
+            f"content_path={root_path_from_content_path}, "
+            f"files_api_fallback={root_path_files_fallback_calls}"
+        )
+    else:
+        print(f"   root path source: rt_session_rows={len(inventory_rows)}")
     if upgrade_missing and not dry_run:
         print(
             "   upgrade stage: "

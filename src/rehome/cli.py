@@ -2141,6 +2141,20 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
               help="Skip dedup (dedup executes by default)")
 @click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
 @click.option("--debug", is_flag=True, help="Show config resolution and raw detail (implies --verbose)")
+@click.option(
+    "--payload-source",
+    type=click.Choice(["qb", "rt"], case_sensitive=False),
+    default="qb",
+    show_default=True,
+    help="Torrent inventory source for the final payload sync step.",
+)
+@click.option(
+    "--rt-session-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=str(DEFAULT_RT_SESSION_DIR),
+    show_default=True,
+    help="rTorrent session directory used when --payload-source rt.",
+)
 @click.option("--active-device", default=None, help="Override config active device alias")
 @click.option("--dest-device", default=None, help="Override config destination device alias")
 @click.option("--active-root", default=None, help="Override config active root path")
@@ -2152,10 +2166,11 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 @click.option("--pool-payload-root", default=None, hidden=True)
 @click.option("--catalog", default=None, help="Override config catalog path")
 def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debug,
+                payload_source, rt_session_dir,
                 active_device, dest_device, active_root, dest_root,
                 stash_device, pool_device, seeding_root, pool_payload_root,
                 catalog):
-    """Scan all managed roots, upgrade SHA256, run dedup, then sync qBit payloads.
+    """Scan all managed roots, upgrade SHA256, run dedup, then sync torrent-backed payloads.
 
     Dedup executes by default. Use --no-dedup to skip it.
     """
@@ -2189,6 +2204,8 @@ def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debu
         managed_roots=managed,
         verbose=verbose,
         debug=debug,
+        payload_source=str(payload_source).lower(),
+        rt_session_dir=str(rt_session_dir),
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)

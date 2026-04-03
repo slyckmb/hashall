@@ -42,6 +42,14 @@ class RTSessionFiles:
     libtorrent_resume_file: Path
 
 
+@dataclass(frozen=True)
+class RTTorrentInventoryRow:
+    torrent_hash: str
+    root_name: str
+    save_path: str
+    content_path: str
+
+
 def rt_path_aligned(
     rt_directory: str | None,
     *,
@@ -233,6 +241,40 @@ def load_rt_torrent_meta(session_dir: Path, torrent_hash: str) -> RTTorrentMeta 
         info_name=info_name,
         is_multi_file=isinstance(info.get(b"files"), list),
     )
+
+
+def load_rt_inventory_rows(
+    session_dir: Path = DEFAULT_RT_SESSION_DIR,
+) -> list[RTTorrentInventoryRow]:
+    rows: list[RTTorrentInventoryRow] = []
+    session_rows = load_rt_session_directories(session_dir)
+    for torrent_hash, session_entry in session_rows.items():
+        meta = load_rt_torrent_meta(session_dir, torrent_hash)
+        root_name = (meta.info_name if meta and meta.info_name else "").strip()
+        if not root_name:
+            continue
+        save_path = str(session_entry.directory or "").strip()
+        if not save_path:
+            continue
+        try:
+            save_path = str(canonicalize_path(Path(save_path)))
+        except Exception:
+            pass
+        content_path = str(Path(save_path) / root_name)
+        try:
+            content_path = str(canonicalize_path(Path(content_path)))
+        except Exception:
+            pass
+        rows.append(
+            RTTorrentInventoryRow(
+                torrent_hash=torrent_hash,
+                root_name=root_name,
+                save_path=save_path,
+                content_path=content_path,
+            )
+        )
+    rows.sort(key=lambda row: row.torrent_hash)
+    return rows
 
 
 def derive_rt_target_directory(

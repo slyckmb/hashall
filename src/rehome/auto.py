@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
 
 # States acceptable after a successful rehome (lower-case for comparison).
 SEED_READY = {"uploading", "stalledup", "queuedup", "forcedup", "pausedup", "stoppedup"}
@@ -589,6 +590,8 @@ def run_refresh(
     managed_roots: "list[tuple[str, str]]" = [],
     verbose: bool = False,
     debug: bool = False,
+    payload_source: str = "qb",
+    rt_session_dir: str = str(DEFAULT_RT_SESSION_DIR),
     # Backwards-compat params (old names)
     seeding_root: "str | None" = None,
     pool_payload_root: "str | None" = None,
@@ -608,7 +611,7 @@ def run_refresh(
       3c. (for each managed root) hashall dupes --device <alias> --auto-upgrade
       4a. hashall link plan <name> --device <alias> --min-size 1048576  (if not skip_dedup)
       4b. hashall link execute <plan_id> [--dry-run]                    (if not skip_dedup)
-      5. hashall payload sync --upgrade-missing
+      5. hashall payload sync --upgrade-missing --source <payload_source>
 
     Returns exit code (0 = all steps succeeded, 1 = at least one failed).
     """
@@ -844,7 +847,10 @@ def run_refresh(
                     ok, payload_stdout = _run_step(
                         "payload sync --upgrade-missing",
                         [python, "-m", "hashall.cli", "payload", "sync",
-                         "--upgrade-missing"] + db_args,
+                         "--upgrade-missing",
+                         "--source", str(payload_source)] +
+                        (["--rt-session-dir", str(rt_session_dir)] if str(payload_source).lower() == "rt" else []) +
+                        db_args,
                         capture=True,
                     )
                     overall_ok = overall_ok and ok

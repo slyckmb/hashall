@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 import hashall.cli as cli_mod
 from hashall.cli import cli
+from hashall.bencode import bencode_encode
 from hashall.device import ensure_files_table
 from hashall.model import connect_db
 from hashall.payload import build_payload
@@ -345,6 +346,65 @@ class TestPayloadSyncCLI(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("processed: 2", result.output)
+
+    def test_payload_sync_supports_rt_source_from_session_dir(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        torrent_hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+            bencode_encode({b"directory": str(self.payload_root).encode("utf-8")})
+        )
+        (session_dir / f"{torrent_hash}.torrent").write_bytes(
+            bencode_encode({b"info": {b"name": b"a.bin"}})
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "payload",
+                "sync",
+                "--db",
+                str(self.db_path),
+                "--source",
+                "rt",
+                "--rt-session-dir",
+                str(session_dir),
+                "--dry-run",
+                "--path-prefix",
+                str(self.tmp_path),
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Loaded 1 rTorrent session rows", result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("complete payloads: 1", result.output)
+        self.assertIn("root path source: rt_session_rows=1", result.output)
+
+    def test_payload_sync_rejects_qb_filters_with_rt_source(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "payload",
+                "sync",
+                "--db",
+                str(self.db_path),
+                "--source",
+                "rt",
+                "--rt-session-dir",
+                str(session_dir),
+                "--category",
+                "movies",
+            ],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--category/--tag are only supported with --source qb", result.output)
 
     def test_payload_sync_path_prefix_skips_out_of_scope(self):
         """Torrents whose root is not under --path-prefix are skipped."""
