@@ -3034,6 +3034,41 @@ def test_reuse_fallback_derives_save_path_for_single_entry_nested_file(tmp_path)
     )
 
 
+def test_reuse_fallback_derives_target_payload_root_for_single_entry_nested_file(tmp_path):
+    target_file = (
+        tmp_path
+        / "pool"
+        / "media"
+        / "torrents"
+        / "seeding"
+        / "cross-seed"
+        / "seedpool (API)"
+        / "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX"
+        / "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX.mkv"
+    )
+
+    class _File:
+        name = "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX/Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX.mkv"
+
+    target_save_path = DemotionExecutor._derive_target_save_path_for_torrent(target_file, [_File()])
+    derived = DemotionExecutor._derive_target_payload_root_for_torrent(
+        target_file,
+        target_save_path,
+        [_File()],
+    )
+
+    assert derived == (
+        tmp_path
+        / "pool"
+        / "media"
+        / "torrents"
+        / "seeding"
+        / "cross-seed"
+        / "seedpool (API)"
+        / "Twisters.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX"
+    )
+
+
 def test_build_relocations_carries_plan_target_path_for_view_targets_when_unbuilt(tmp_path):
     executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
     executor.qbit_client = FakeQbitClient(default_path=str(tmp_path / "old"))
@@ -3099,10 +3134,85 @@ def test_build_relocations_carries_plan_target_path_for_view_targets_when_unbuil
                 / "torrents"
                 / "seeding"
                 / "movies"
-                / "Wrapped.Release.mkv"
+                / "Wrapped.Release"
             ),
         }
     ]
+
+
+def test_build_fallback_nested_single_entry_views_constructs_wrapper_root(tmp_path):
+    payload_file = (
+        tmp_path
+        / "pool"
+        / "media"
+        / "torrents"
+        / "seeding"
+        / "movies"
+        / "Wrapped.Release.mkv"
+    )
+    payload_file.parent.mkdir(parents=True, exist_ok=True)
+    payload_file.write_bytes(b"payload")
+
+    executor = DemotionExecutor(catalog_path=tmp_path / "catalog.db")
+    executor.qbit_client = FakeQbitClientWithFiles(
+        default_path=str(tmp_path / "old"),
+        files=[
+            QBitFile(
+                name="Wrapped.Release/Wrapped.Release.mkv",
+                size=len(b"payload"),
+            )
+        ],
+    )
+
+    conn = sqlite3.connect(tmp_path / "catalog.db")
+    conn.execute(
+        """
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            device_id INTEGER,
+            save_path TEXT,
+            root_name TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "hash-a",
+            1,
+            46,
+            str(tmp_path / "stash" / "media" / "torrents" / "seeding" / "_qb-unique-repair" / "hash-a"),
+            "Wrapped.Release",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    plan = {
+        "target_path": str(payload_file),
+        "affected_torrents": ["hash-a"],
+        "view_targets": [],
+    }
+
+    executor._build_fallback_nested_single_entry_views(payload_file, plan)
+
+    expected_root = (
+        tmp_path
+        / "pool"
+        / "media"
+        / "torrents"
+        / "seeding"
+        / "Wrapped.Release"
+    )
+    expected_file = expected_root / "Wrapped.Release.mkv"
+
+    assert plan["constructed_payload_roots"]["hash-a"] == str(expected_root)
+    assert expected_root.is_dir()
+    assert expected_file.is_file()
 
 
 def test_parse_rsync_progress_line_extracts_percent_eta():

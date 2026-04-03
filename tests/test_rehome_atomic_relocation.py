@@ -12,6 +12,7 @@ import pytest
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+import rehome.executor as executor_module
 from rehome.executor import DemotionExecutor
 
 
@@ -1034,6 +1035,47 @@ def test_ensure_target_donor_promotes_move_to_reuse_when_existing_target_family_
     assert plan["target_path"] == str(existing_target)
     assert donor.acquisition_mode == "existing"
     assert donor.target_path == existing_target
+
+
+def test_ensure_target_donor_skips_expensive_compare_for_current_target(tmp_path, monkeypatch):
+    executor = DemotionExecutor(catalog_path=tmp_path / "db.sqlite")
+    monkeypatch.setattr(executor, "_spot_check_payload", lambda *args, **kwargs: None)
+
+    source = tmp_path / "stash" / "movies" / "Show.S01"
+    source.mkdir(parents=True)
+    (source / "episode.mkv").write_bytes(b"payload")
+
+    current_target = tmp_path / "pool-media" / "movies" / "Show.S01"
+    current_target.mkdir(parents=True)
+    (current_target / "episode.mkv").write_bytes(b"payload")
+
+    plan = {
+        "decision": "REUSE",
+        "source_path": str(source),
+        "target_path": str(current_target),
+        "file_count": 1,
+        "total_bytes": len(b"payload"),
+        "target_device_id": 44,
+        "view_targets": [
+            {
+                "torrent_hash": "hash_a",
+                "source_save_path": str(source.parent),
+                "target_save_path": str(current_target.parent),
+                "root_name": "Show.S01",
+            },
+        ],
+    }
+
+    def fail_compare(*_args, **_kwargs):
+        raise AssertionError("compare_root_content should not run for current target")
+
+    monkeypatch.setattr(executor_module, "compare_root_content", fail_compare)
+
+    donor = executor._ensure_target_donor(plan)
+
+    assert plan["target_path"] == str(current_target)
+    assert donor.target_path == current_target
+    assert donor.acquisition_mode == "existing"
 
 
 def test_ensure_target_donor_blocks_before_copy_on_conflicting_existing_target_family_view(tmp_path, monkeypatch):

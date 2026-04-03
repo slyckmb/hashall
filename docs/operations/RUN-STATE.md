@@ -1,6 +1,42 @@
 # Operational Run State
 
-Last updated: 2026-04-02
+Last updated: 2026-04-03
+
+## 2026-04-03 Residual stash reuse follow-up
+
+**Key outcome:**
+- the `Bullet Train` residual reuse family is now fixed and no longer part of the ambiguous cleanup queue
+
+**What changed in code:**
+- `src/rehome/executor.py` now:
+  - skips the expensive compare against the already-selected current target root
+  - derives a per-torrent `target_payload_root` for wrapped single-entry reuse rows
+  - constructs fallback wrapper views when reuse plans have empty `view_targets` but the torrent metadata requires a nested single-entry root
+
+**Live execution result:**
+- single-item run:
+  - `python -m hashall.cli rehome auto --from stash --to pool-media --limit 1 --apply`
+- family repaired:
+  - `Bullet.Train.2022...`
+- result:
+  - `10/10` rows verified
+  - `0` failures
+  - qB patch applied successfully
+  - stash cleanup intentionally deferred with `MANUAL_ACTION_REQUIRED`
+- current source of truth:
+  - `~/.logs/hashall/reports/rehome-relocate/20260403-010351-8b5c09e0c7c083bf`
+  - `~/.logs/hashall/rehome/auto/20260403-010348.log`
+
+**Operational interpretation:**
+- do not restart the broad unattended pool-migration loop yet
+- the right pattern now is narrow single-item stash reuse execution
+- the next dry-run queue has narrowed to only `2` clean reuse groups:
+  - `The Muppet...`
+  - `Le...`
+
+**Residual warning to keep in mind:**
+- post-run reality still reports shared catalog grouping for `9` related hashes in the reused `Bullet Train` family
+- this is a de-hitchhike/catalog-normalization follow-up, not a blocker for the successful move
 
 ## 2026-04-02 Pool Migration Maintenance Loop
 

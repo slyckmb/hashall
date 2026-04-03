@@ -1,5 +1,29 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-04-03 Residual stash reuse repair
+
+- The residual `dest_missing` loop is materially fixed for the `Bullet Train` family.
+- Code changes in `src/rehome/executor.py` now:
+  - skip expensive current-target compare during existing-target-family alignment
+  - derive the correct per-torrent `target_payload_root` for wrapped single-entry reuse rows
+  - build fallback wrapper views when a reuse plan has no explicit `view_targets` but the torrent metadata is nested single-entry
+- Validation:
+  - `Bullet Train` single-item apply completed successfully
+  - `10/10` siblings verified `exact_tree`
+  - report dir:
+    - `~/.logs/hashall/reports/rehome-relocate/20260403-010351-8b5c09e0c7c083bf`
+  - stash cleanup is still deferred on purpose:
+    - `MANUAL_ACTION_REQUIRED` on the `_qb-unique-repair/.../Bullet.Train...mkv` source
+- Important remaining warning:
+  - post-run reality still reports a shared catalog payload grouping across 9 related hashes
+  - future work should de-hitchhike these into unique target payload roots, but this did not block the successful reuse execution
+- The autonomous maintenance loop should **not** be restarted blindly yet.
+  - it was correctly hardened to stop on `dest_missing`
+  - the right follow-up is single-item reuse execution for the narrowed queue
+- Current next safe stash reuse dry-run is now only `2` groups:
+  - `The Muppet...`
+  - `Le...`
+
 ## 2026-04-02 Pool migration cleanup / stash restart automation
 
 - New helper:

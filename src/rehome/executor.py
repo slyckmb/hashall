@@ -1360,6 +1360,85 @@ class DemotionExecutor:
         finally:
             conn.close()
 
+    def _build_fallback_nested_single_entry_views(
+        self,
+        payload_root: Path,
+        plan: Dict,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
+        """
+        Build wrapper views for nested single-entry torrents when planner view_targets are absent.
+
+        This handles mixed sibling families where most rows are flat single-file
+        torrents, but one or more rows wrap that same file under a top-level
+        directory in the torrent metadata.
+        """
+        if plan.get("view_targets"):
+            return
+        if not Path(payload_root).is_file():
+            return
+
+        files_cache: Dict[str, List] = dict(preloaded_files or {})
+        constructed_payload_roots: Dict[str, str] = {
+            str(key).strip().lower(): str(value)
+            for key, value in (plan.get("constructed_payload_roots") or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        created_target_views: set[str] = {
+            str(canonicalize_path(Path(raw).resolve()))
+            for raw in (plan.get("_created_target_views") or [])
+            if str(raw).strip()
+        }
+
+        conn = self._get_db_connection()
+        try:
+            for torrent_hash in plan.get("affected_torrents") or []:
+                torrent_key = str(torrent_hash).strip().lower()
+                if not torrent_key or torrent_key in constructed_payload_roots:
+                    continue
+                files = files_cache.get(torrent_hash)
+                if files is None:
+                    files = self.qbit_client.get_torrent_files(torrent_hash)
+                    files_cache[torrent_hash] = files
+                if len(files or []) != 1:
+                    continue
+                rel_name = str(getattr(files[0], "name", "") or "").strip()
+                rel_parts = [p for p in Path(rel_name).parts if p not in ("", ".", "/")]
+                if len(rel_parts) <= 1:
+                    continue
+                source_save = self._get_torrent_save_path(conn, torrent_hash)
+                if not source_save:
+                    continue
+                target_save_path = self._derive_target_save_path_for_torrent(
+                    Path(plan["target_path"]),
+                    files,
+                )
+                root_name = rel_parts[0]
+                result = build_torrent_view(
+                    payload_root=payload_root,
+                    target_save_path=target_save_path,
+                    files=files,
+                    root_name=root_name,
+                    progress_cb=lambda msg: self._log(f"  {msg}"),
+                )
+                built_root = str(result.view_root.resolve())
+                constructed_payload_roots[torrent_key] = built_root
+                created_target_views.add(
+                    str(canonicalize_path(result.view_root.resolve()))
+                )
+                self._log(
+                    "  build_views_fallback_nested_single "
+                    f"hash={torrent_hash[:16]} root={built_root}"
+                )
+        finally:
+            conn.close()
+
+        if constructed_payload_roots:
+            plan["constructed_payload_roots"] = constructed_payload_roots
+        if created_target_views:
+            plan["_created_target_views"] = sorted(created_target_views)
+
     def _iter_target_family_roots(self, plan: Dict) -> List[Path]:
         roots: List[Path] = []
         seen: set[str] = set()
@@ -1390,7 +1469,12 @@ class DemotionExecutor:
             _add(Path(save_path) / root_name)
         return roots
 
-    def _inspect_target_family(self, plan: Dict) -> TargetFamilyInspection:
+    def _inspect_target_family(
+        self,
+        plan: Dict,
+        *,
+        skip_content_compare_roots: Optional[set[str]] = None,
+    ) -> TargetFamilyInspection:
         candidate_roots = self._iter_target_family_roots(plan)
         source_path = (
             canonicalize_path(Path(str(plan.get("source_path") or "")).resolve())
@@ -1403,6 +1487,7 @@ class DemotionExecutor:
         conflict_details: List[Tuple[str, str]] = []
         expected_count = int(plan.get("file_count") or 0)
         expected_bytes = int(plan.get("total_bytes") or 0)
+        skip_compare = {str(Path(root)) for root in (skip_content_compare_roots or set())}
         root_content_cache: Dict[str, RootContentSnapshot] = {}
         path_sha_cache: Dict[Tuple[str, int, int], Optional[str]] = {}
         inode_sha_cache: Dict[Tuple[int, int, int, int], Optional[str]] = {}
@@ -1413,6 +1498,9 @@ class DemotionExecutor:
             stats = self._path_stats(candidate)
             if self._path_stats_match(stats, expected_count, expected_bytes):
                 if source_path is None or not source_exists:
+                    exact_roots.append(candidate)
+                    continue
+                if str(candidate) in skip_compare:
                     exact_roots.append(candidate)
                     continue
                 comparison = compare_root_content(
@@ -1448,7 +1536,16 @@ class DemotionExecutor:
         )
 
     def _align_plan_with_existing_target_family(self, plan: Dict) -> TargetFamilyInspection:
-        inspection = self._inspect_target_family(plan)
+        current_target = (
+            canonicalize_path(Path(str(plan.get("target_path") or "")).resolve())
+            if str(plan.get("target_path") or "").strip()
+            else None
+        )
+        skip_compare_roots = {str(current_target)} if current_target is not None else None
+        inspection = self._inspect_target_family(
+            plan,
+            skip_content_compare_roots=skip_compare_roots,
+        )
         normalization = dict(plan.get("normalization") or {})
         normalization["target_family_exact_views"] = len(inspection.exact_roots)
         normalization["target_family_conflicts"] = len(inspection.conflicting_roots)
@@ -1457,11 +1554,6 @@ class DemotionExecutor:
                 {"path": path, "reason": reason}
                 for path, reason in inspection.conflict_details[:3]
             ]
-        current_target = (
-            canonicalize_path(Path(str(plan.get("target_path") or "")).resolve())
-            if str(plan.get("target_path") or "").strip()
-            else None
-        )
 
         if inspection.exact_roots:
             donor_path = inspection.exact_roots[0]
@@ -1625,13 +1717,18 @@ class DemotionExecutor:
                 torrent_hash = target["torrent_hash"]
                 if not target.get("source_save_path"):
                     raise RuntimeError(f"Missing source_save_path for torrent {torrent_hash}")
+                fallback_target_root = str(plan.get("target_path") or "")
+                target_save_path = str(target.get("target_save_path") or "").strip()
+                root_name = str(target.get("root_name") or "").strip()
+                if target_save_path and root_name:
+                    fallback_target_root = str(Path(target_save_path) / root_name)
                 relocations.append({
                     "torrent_hash": torrent_hash,
                     "source_save_path": target.get("source_save_path"),
                     "target_save_path": target["target_save_path"],
                     "target_payload_root": constructed_roots.get(
                         str(torrent_hash).strip().lower(),
-                        str(plan.get("target_path") or ""),
+                        fallback_target_root,
                     ),
                 })
             return relocations
@@ -1651,13 +1748,18 @@ class DemotionExecutor:
                 fallback_target,
                 files or [],
             )
+            target_payload_root = self._derive_target_payload_root_for_torrent(
+                fallback_target,
+                target_save_path,
+                files or [],
+            )
             relocations.append({
                 "torrent_hash": torrent_hash,
                 "source_save_path": str(source_save) if source_save else None,
                 "target_save_path": str(target_save_path),
                 "target_payload_root": constructed_roots.get(
                     str(torrent_hash).strip().lower(),
-                    str(fallback_target),
+                    str(target_payload_root),
                 ),
             })
         return relocations
@@ -1728,6 +1830,37 @@ class DemotionExecutor:
         for _ in rel_parts:
             current = current.parent
         return current
+
+    @staticmethod
+    def _derive_target_payload_root_for_torrent(
+        target_path: Path,
+        target_save_path: Path,
+        files: List[object],
+    ) -> Path:
+        """
+        Derive the target content root for a torrent using its file layout.
+
+        For wrapped single-entry torrents, target_save_path points above the
+        wrapper directory, so plan["target_path"] alone is too flat.
+        """
+        target_path = Path(target_path).resolve()
+        target_save_path = Path(target_save_path).resolve()
+        if not files:
+            return target_path
+
+        common_prefix = _common_prefix(files)
+        if common_prefix:
+            return target_save_path / common_prefix
+
+        if len(files) == 1:
+            rel_name = str(getattr(files[0], "name", "") or "").strip()
+            rel_parts = [p for p in Path(rel_name).parts if p not in ("", ".", "/")]
+            if len(rel_parts) > 1:
+                return target_save_path / rel_parts[0]
+            if rel_parts:
+                return target_save_path / rel_parts[-1]
+
+        return target_path
 
     def _get_torrent_info_with_retry(
         self,
@@ -4237,6 +4370,11 @@ class DemotionExecutor:
         self._build_views(
             target_path,
             plan.get("view_targets") or [],
+            plan,
+            preloaded_files=preloaded_files,
+        )
+        self._build_fallback_nested_single_entry_views(
+            target_path,
             plan,
             preloaded_files=preloaded_files,
         )
