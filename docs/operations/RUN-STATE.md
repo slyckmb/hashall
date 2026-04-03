@@ -26,17 +26,24 @@ Last updated: 2026-04-03
 - current source of truth:
   - `~/.logs/hashall/reports/rehome-relocate/20260403-010351-8b5c09e0c7c083bf`
   - `~/.logs/hashall/rehome/auto/20260403-010348.log`
+- two more narrowed single-item reuse runs then completed successfully:
+  - `The Muppet...`
+    - report: `~/.logs/hashall/reports/rehome-relocate/20260403-012107-7b198aa544d1f641`
+    - log: `~/.logs/hashall/rehome/auto/20260403-012104.log`
+  - `Lego Masters...`
+    - report: `~/.logs/hashall/reports/rehome-relocate/20260403-012850-ca30f78203851ebf`
+    - log: `~/.logs/hashall/rehome/auto/20260403-012847.log`
 
 **Operational interpretation:**
 - do not restart the broad unattended pool-migration loop yet
 - the right pattern now is narrow single-item stash reuse execution
-- the next dry-run queue has narrowed to only `2` clean reuse groups:
-  - `The Muppet...`
-  - `Le...`
+- that narrowed queue is now exhausted; current dry-run result is:
+  - `0 MOVE groups available (stash:0), taking top 0`
+  - `No eligible candidates found.`
 
 **Residual warning to keep in mind:**
-- post-run reality still reports shared catalog grouping for `9` related hashes in the reused `Bullet Train` family
-- this is a de-hitchhike/catalog-normalization follow-up, not a blocker for the successful move
+- post-run reality still reports shared catalog grouping for the reused `Bullet Train`, `The Muppet...`, and `Lego Masters...` families
+- this is a de-hitchhike/catalog-normalization follow-up, not a blocker for the successful moves
 
 ## 2026-04-02 Pool Migration Maintenance Loop
 

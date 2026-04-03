@@ -14,15 +14,25 @@
     - `~/.logs/hashall/reports/rehome-relocate/20260403-010351-8b5c09e0c7c083bf`
   - stash cleanup is still deferred on purpose:
     - `MANUAL_ACTION_REQUIRED` on the `_qb-unique-repair/.../Bullet.Train...mkv` source
+- Additional narrowed single-item stash reuse runs completed successfully:
+  - `The Muppet...`
+    - `9/9` siblings verified
+    - report dir:
+      - `~/.logs/hashall/reports/rehome-relocate/20260403-012107-7b198aa544d1f641`
+  - `Lego Masters...`
+    - `8/8` siblings verified
+    - report dir:
+      - `~/.logs/hashall/reports/rehome-relocate/20260403-012850-ca30f78203851ebf`
 - Important remaining warning:
-  - post-run reality still reports a shared catalog payload grouping across 9 related hashes
-  - future work should de-hitchhike these into unique target payload roots, but this did not block the successful reuse execution
+  - post-run reality still reports shared catalog payload grouping for all 3 repaired reuse families
+  - future work should de-hitchhike these into unique target payload roots, but this did not block the successful reuse executions
 - The autonomous maintenance loop should **not** be restarted blindly yet.
   - it was correctly hardened to stop on `dest_missing`
-  - the right follow-up is single-item reuse execution for the narrowed queue
-- Current next safe stash reuse dry-run is now only `2` groups:
-  - `The Muppet...`
-  - `Le...`
+  - the right follow-up was single-item reuse execution for the narrowed queue, and that queue is now exhausted
+- Current stash reuse planner state:
+  - `python -m hashall.cli rehome auto --from stash --to pool-media --limit 10`
+  - result: `0 MOVE groups available (stash:0), taking top 0`
+  - no currently safe all-`REUSE` stash batch remains to execute without widening policy
 
 ## 2026-04-02 Pool migration cleanup / stash restart automation
 
