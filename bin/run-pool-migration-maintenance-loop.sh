@@ -12,6 +12,7 @@ LAST_UPDATED="2026-04-02T17:25:00-04:00"
 DRYRUN=0
 MAX_ROUNDS=3
 LIMIT=20
+APPLY_LIMIT=1
 SKIP_CLEANUP=0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,7 +34,8 @@ Usage:
 Options:
   -n, --dryrun          Print commands without mutating state
   --max-rounds N        Max stash->pool rehome rounds to execute (default: 3)
-  --limit N             Candidate limit per rehome round (default: 20)
+  --limit N             Candidate limit per dry-run rehome round (default: 20)
+  --apply-limit N       Candidate limit per apply round (default: 1)
   --skip-cleanup        Skip stale /pool/data residue cleanup
   -h, --help            Show this help
 
@@ -210,8 +212,9 @@ run_rehome_round() {
 
   echo
   echo "[▶] round=${round} apply"
-  python -m hashall.cli rehome auto --from stash --to pool-media --limit "$LIMIT" --apply | tee "$apply_log"
+  python -m hashall.cli rehome auto --from stash --to pool-media --limit "$APPLY_LIMIT" --apply | tee "$apply_log"
   if grep -Eq 'apply\s+FAIL|verify\s+.*FAIL|status=failed|Traceback|status=dest_missing' "$apply_log"; then
+    ensure_stack_synced || true
     pause_and_exit "round_${round}_apply_failed"
   fi
 
@@ -234,6 +237,10 @@ main() {
         LIMIT="$2"
         shift 2
         ;;
+      --apply-limit)
+        APPLY_LIMIT="$2"
+        shift 2
+        ;;
       --skip-cleanup)
         SKIP_CLEANUP=1
         shift
@@ -254,7 +261,7 @@ main() {
 
   log_banner "start"
   echo "run_log=${RUN_LOG}"
-  echo "max_rounds=${MAX_ROUNDS} limit=${LIMIT} dryrun=${DRYRUN} skip_cleanup=${SKIP_CLEANUP}"
+  echo "max_rounds=${MAX_ROUNDS} limit=${LIMIT} apply_limit=${APPLY_LIMIT} dryrun=${DRYRUN} skip_cleanup=${SKIP_CLEANUP}"
 
   ensure_stack_synced
 
