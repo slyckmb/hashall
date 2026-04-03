@@ -6,14 +6,18 @@ import os
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
+import hashall.cli as cli_mod
 from hashall.cli import cli
+from hashall.bencode import bencode_encode
 from hashall.device import ensure_files_table
 from hashall.model import connect_db
+from hashall.payload import build_payload
 from hashall.qbittorrent import QBitTorrent
 
 
@@ -343,6 +347,65 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("processed: 2", result.output)
 
+    def test_payload_sync_supports_rt_source_from_session_dir(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        torrent_hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+            bencode_encode({b"directory": str(self.payload_root).encode("utf-8")})
+        )
+        (session_dir / f"{torrent_hash}.torrent").write_bytes(
+            bencode_encode({b"info": {b"name": b"a.bin"}})
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "payload",
+                "sync",
+                "--db",
+                str(self.db_path),
+                "--source",
+                "rt",
+                "--rt-session-dir",
+                str(session_dir),
+                "--dry-run",
+                "--path-prefix",
+                str(self.tmp_path),
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Loaded 1 rTorrent session rows", result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("complete payloads: 1", result.output)
+        self.assertIn("root path source: rt_session_rows=1", result.output)
+
+    def test_payload_sync_rejects_qb_filters_with_rt_source(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "payload",
+                "sync",
+                "--db",
+                str(self.db_path),
+                "--source",
+                "rt",
+                "--rt-session-dir",
+                str(session_dir),
+                "--category",
+                "movies",
+            ],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--category/--tag are only supported with --source qb", result.output)
+
     def test_payload_sync_path_prefix_skips_out_of_scope(self):
         """Torrents whose root is not under --path-prefix are skipped."""
         torrents = [
@@ -618,6 +681,156 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(mock_upgrade.call_count, 1)
         self.assertIn("upgrade stage: queued=1 started=1", result.output)
+
+    def test_payload_sync_upgrade_resume_skips_completed_root_from_checkpoint(self):
+        device_id = os.stat(self.payload_root).st_dev
+        conn = connect_db(self.db_path)
+        conn.execute(f"UPDATE files_{device_id} SET sha256 = 'ready', sha1 = 'ready'")
+        conn.commit()
+        conn.close()
+
+        torrents = [
+            QBitTorrent(
+                hash="t1",
+                name="torrent-1",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+        scope = cli_mod._payload_sync_upgrade_scope(
+            db_path=self.db_path,
+            path_prefixes=[self.tmp_path],
+            category="",
+            tag="",
+            limit=0,
+            upgrade_order="small-first",
+            upgrade_root_limit=0,
+        )
+        state_path = cli_mod._payload_sync_upgrade_state_path(scope)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            cli_mod.json.dumps(
+                {
+                    "completed_roots": {
+                        cli_mod._payload_sync_upgrade_root_key(
+                            {"device_id": device_id, "root_path": str(self.payload_root)}
+                        ): {
+                            "root_path": str(self.payload_root),
+                            "device_id": device_id,
+                            "completed_at": 123,
+                            "payload_hash": "done-hash",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        conn = connect_db(self.db_path)
+        payload_complete = build_payload(conn, str(self.payload_root), device_id=device_id, already_canonical=True)
+        conn.close()
+        payload_incomplete = replace(payload_complete, payload_hash=None, status="incomplete", last_built_at=None)
+
+        runner = CliRunner()
+        with (
+            patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake),
+            patch("hashall.payload.build_payload", return_value=payload_incomplete),
+            patch("hashall.payload.upgrade_payload_missing_sha256") as mock_upgrade,
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--upgrade-missing",
+                    "--path-prefix",
+                    str(self.tmp_path),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_upgrade.call_count, 0)
+        self.assertIn("resume checkpoint: skipped already-complete roots=1", result.output)
+        self.assertFalse(state_path.exists())
+
+    def test_payload_sync_upgrade_resume_does_not_skip_stale_checkpoint(self):
+        device_id = os.stat(self.payload_root).st_dev
+        conn = connect_db(self.db_path)
+        conn.execute(f"UPDATE files_{device_id} SET sha256 = NULL, sha1 = NULL")
+        conn.commit()
+        conn.close()
+
+        torrents = [
+            QBitTorrent(
+                hash="t1",
+                name="torrent-1",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+        scope = cli_mod._payload_sync_upgrade_scope(
+            db_path=self.db_path,
+            path_prefixes=[self.tmp_path],
+            category="",
+            tag="",
+            limit=0,
+            upgrade_order="small-first",
+            upgrade_root_limit=0,
+        )
+        state_path = cli_mod._payload_sync_upgrade_state_path(scope)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            cli_mod.json.dumps(
+                {
+                    "completed_roots": {
+                        cli_mod._payload_sync_upgrade_root_key(
+                            {"device_id": device_id, "root_path": str(self.payload_root)}
+                        ): {
+                            "root_path": str(self.payload_root),
+                            "device_id": device_id,
+                            "completed_at": 123,
+                            "payload_hash": "stale-hash",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        with (
+            patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake),
+            patch("hashall.payload.upgrade_payload_missing_sha256", return_value=0) as mock_upgrade,
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--upgrade-missing",
+                    "--path-prefix",
+                    str(self.tmp_path),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_upgrade.call_count, 1)
+        self.assertNotIn("resume checkpoint: skipped already-complete roots=1", result.output)
 
 
 class TestPayloadSyncQbitFailFast(unittest.TestCase):

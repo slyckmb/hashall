@@ -43,6 +43,7 @@ from rehome.view_builder import (
     build_torrent_view,
     derive_view_layout,
 )
+from rehome.content_identity import RootContentSnapshot, compare_root_content
 from rehome.reality import build_plan_reality_snapshot
 
 
@@ -71,6 +72,14 @@ class PreflightCheckStatus:
     blocked: Tuple[str, ...]
     transient_only: bool
     message: str
+
+
+@dataclass(frozen=True)
+class TargetFamilyInspection:
+    candidate_roots: Tuple[Path, ...]
+    exact_roots: Tuple[Path, ...]
+    conflicting_roots: Tuple[Path, ...]
+    conflict_details: Tuple[Tuple[str, str], ...] = ()
 
 
 class DemotionExecutor:
@@ -747,6 +756,7 @@ class DemotionExecutor:
         t0 = time.monotonic()
         controller = tool._ensure_controller()
         controller_stopped_for_patch = False
+        patch_applied = False
         try:
             if not controller.is_stopped():
                 emit_log("qb_stop", phase="validate", reason="prepare_for_patch")
@@ -773,6 +783,7 @@ class DemotionExecutor:
             )
             if patch_code != 0:
                 raise RuntimeError(f"rehome relocation patch failed manifest={manifest_path}")
+            patch_applied = True
             phase_times["patch"] = time.monotonic() - t0
 
             t0 = time.monotonic()
@@ -792,33 +803,40 @@ class DemotionExecutor:
                 if controller.is_stopped():
                     controller.start()
                 tool._wait_for_qb_online()
+                self._wait_qb_online_after_restart()
                 manifest = tool._load_manifest(manifest_path)
                 for row in row_selection(manifest["rows"]):
                     if str(row.get("patch_status") or "") != "patched":
                         continue
-                    info = self.qbit_client.get_torrent_info(str(row.get("hash") or ""))
-                    if info is None:
-                        raise RuntimeError(f"qB info unavailable after patch for torrent {row['hash'][:16]}")
-                    if canonicalize_path(Path(info.save_path).resolve()) != canonicalize_path(
-                        Path(str(row.get("new_save_path") or "")).resolve()
-                    ):
-                        raise RuntimeError(
-                            f"save_path verification failed after patch hash={row['hash'][:16]} "
-                            f"expected={row.get('new_save_path')} actual={getattr(info, 'save_path', '')}"
-                        )
-                    if not self._post_patch_qb_accounting_healthy(info):
-                        raise RuntimeError(
-                            "post-patch qB accounting incomplete "
-                            f"hash={row['hash'][:16]} state={getattr(info, 'state', '')} "
-                            f"progress={getattr(info, 'progress', '')} "
-                            f"completed={getattr(info, 'completed', '')} "
-                            f"amount_left={getattr(info, 'amount_left', '')} "
-                            f"size={getattr(info, 'size', '')}"
-                        )
+                    info = self._ensure_post_patch_runtime_alignment(row)
                     row["resume_status"] = "kept_paused"
                 tool._checkpoint_manifest(manifest_path, manifest)
             phase_times["post_patch"] = time.monotonic() - t0
         except Exception:
+            if patch_applied:
+                try:
+                    rollback_code = tool.rollback(
+                        manifest_path=manifest_path,
+                        journal_path=patch_journal_path,
+                        apply=True,
+                        auto_stop_qb=True,
+                    )
+                    if rollback_code != 0:
+                        self._log(
+                            f"  fastresume_rollback_failed manifest={manifest_path} code={rollback_code}",
+                            "warning",
+                        )
+                    else:
+                        self._log(
+                            f"  fastresume_rollback_restored manifest={manifest_path}",
+                            "warning",
+                        )
+                except Exception as rollback_exc:
+                    self._log(
+                        f"  fastresume_rollback_failed manifest={manifest_path} "
+                        f"error={type(rollback_exc).__name__}:{rollback_exc}",
+                        "warning",
+                    )
             if controller_stopped_for_patch:
                 controller = tool._ensure_controller()
                 if controller.is_stopped():
@@ -827,6 +845,67 @@ class DemotionExecutor:
                     tool._wait_for_qb_online()
             raise
         return phase_times
+
+    def _ensure_post_patch_runtime_alignment(
+        self,
+        row: Dict[str, object],
+        *,
+        timeout_seconds: float = 300.0,
+    ) -> object:
+        torrent_hash = str(row.get("hash") or "").strip()
+        expected_save_path_raw = str(row.get("new_save_path") or "").strip()
+        if not torrent_hash or not expected_save_path_raw:
+            raise RuntimeError("post-patch runtime alignment requires hash and new_save_path")
+
+        expected_path = canonicalize_path(Path(expected_save_path_raw).resolve())
+        info, actual_path = self._wait_for_save_path(
+            torrent_hash,
+            expected_path,
+            timeout_seconds=max(timeout_seconds, 120.0),
+            interval_seconds=1.0,
+            require_live=True,
+        )
+        if not info or actual_path != expected_path:
+            self._log(
+                "  retry_post_patch_set_location "
+                f"hash={torrent_hash[:16]} expected={expected_path} actual={actual_path}",
+                "warning",
+            )
+            self.qbit_client.pause_torrent(torrent_hash)
+            relocated = self._set_location_with_retry(
+                torrent_hash,
+                expected_save_path_raw,
+                attempts=12,
+                delay_seconds=1.0,
+            )
+            info, actual_path = self._wait_for_save_path(
+                torrent_hash,
+                expected_path,
+                timeout_seconds=max(timeout_seconds, 300.0),
+                interval_seconds=1.0,
+                require_live=True,
+            )
+            if (not relocated) or not info or actual_path != expected_path:
+                raise RuntimeError(
+                    f"save_path verification failed after patch hash={torrent_hash[:16]} "
+                    f"expected={expected_save_path_raw} actual={actual_path or getattr(info, 'save_path', '')}"
+                )
+
+        self._validate_qb_content_path(
+            torrent_hash,
+            attempts=5,
+            delay_seconds=1.0,
+            require_live=True,
+        )
+        settled = self._wait_for_post_patch_accounting(
+            torrent_hash,
+            expected_path=expected_path,
+            timeout_seconds=max(timeout_seconds, 180.0),
+            interval_seconds=2.0,
+        )
+        if settled is None:
+            raise RuntimeError(f"qB info unavailable after patch for torrent {torrent_hash[:16]}")
+        return settled
 
     @staticmethod
     def _hardened_manifest_reconcile_hashes(rows: Sequence[Dict[str, object]]) -> set[str]:
@@ -1130,6 +1209,11 @@ class DemotionExecutor:
         seen_view_targets: set[tuple[str, str]] = set()
         view_roots_by_key: Dict[tuple[str, str], str] = {}
         constructed_payload_roots: Dict[str, str] = {}
+        created_target_views: set[str] = {
+            str(canonicalize_path(Path(raw).resolve()))
+            for raw in (plan.get("_created_target_views") or [])
+            if str(raw).strip()
+        }
         skipped_hashes: set[str] = set()
 
         conn = self._get_db_connection()
@@ -1197,6 +1281,11 @@ class DemotionExecutor:
                     files=files,
                     root_name=root_name,
                 )
+                cleanup_path = layout.single_file_direct_dst if layout.single_file_direct_dst is not None else layout.view_root
+                cleanup_path_resolved = canonicalize_path(cleanup_path.resolve())
+                if not (cleanup_path.exists() or cleanup_path.is_symlink()):
+                    created_target_views.add(str(cleanup_path_resolved))
+                    plan["_created_target_views"] = sorted(created_target_views)
                 link_start = time.monotonic()
                 try:
                     result = build_torrent_view(
@@ -1266,8 +1355,238 @@ class DemotionExecutor:
                 }
                 prior_roots.update(constructed_payload_roots)
                 plan["constructed_payload_roots"] = prior_roots
+            if created_target_views:
+                plan["_created_target_views"] = sorted(created_target_views)
         finally:
             conn.close()
+
+    def _build_fallback_nested_single_entry_views(
+        self,
+        payload_root: Path,
+        plan: Dict,
+        *,
+        preloaded_files: Optional[Dict[str, List]] = None,
+    ) -> None:
+        """
+        Build wrapper views for nested single-entry torrents when planner view_targets are absent.
+
+        This handles mixed sibling families where most rows are flat single-file
+        torrents, but one or more rows wrap that same file under a top-level
+        directory in the torrent metadata.
+        """
+        if plan.get("view_targets"):
+            return
+        if not Path(payload_root).is_file():
+            return
+
+        files_cache: Dict[str, List] = dict(preloaded_files or {})
+        constructed_payload_roots: Dict[str, str] = {
+            str(key).strip().lower(): str(value)
+            for key, value in (plan.get("constructed_payload_roots") or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        created_target_views: set[str] = {
+            str(canonicalize_path(Path(raw).resolve()))
+            for raw in (plan.get("_created_target_views") or [])
+            if str(raw).strip()
+        }
+
+        conn = self._get_db_connection()
+        try:
+            for torrent_hash in plan.get("affected_torrents") or []:
+                torrent_key = str(torrent_hash).strip().lower()
+                if not torrent_key or torrent_key in constructed_payload_roots:
+                    continue
+                files = files_cache.get(torrent_hash)
+                if files is None:
+                    files = self.qbit_client.get_torrent_files(torrent_hash)
+                    files_cache[torrent_hash] = files
+                if len(files or []) != 1:
+                    continue
+                rel_name = str(getattr(files[0], "name", "") or "").strip()
+                rel_parts = [p for p in Path(rel_name).parts if p not in ("", ".", "/")]
+                if len(rel_parts) <= 1:
+                    continue
+                source_save = self._get_torrent_save_path(conn, torrent_hash)
+                if not source_save:
+                    continue
+                target_save_path = self._derive_target_save_path_for_torrent(
+                    Path(plan["target_path"]),
+                    files,
+                )
+                root_name = rel_parts[0]
+                result = build_torrent_view(
+                    payload_root=payload_root,
+                    target_save_path=target_save_path,
+                    files=files,
+                    root_name=root_name,
+                    progress_cb=lambda msg: self._log(f"  {msg}"),
+                )
+                built_root = str(result.view_root.resolve())
+                constructed_payload_roots[torrent_key] = built_root
+                created_target_views.add(
+                    str(canonicalize_path(result.view_root.resolve()))
+                )
+                self._log(
+                    "  build_views_fallback_nested_single "
+                    f"hash={torrent_hash[:16]} root={built_root}"
+                )
+        finally:
+            conn.close()
+
+        if constructed_payload_roots:
+            plan["constructed_payload_roots"] = constructed_payload_roots
+        if created_target_views:
+            plan["_created_target_views"] = sorted(created_target_views)
+
+    def _iter_target_family_roots(self, plan: Dict) -> List[Path]:
+        roots: List[Path] = []
+        seen: set[str] = set()
+
+        def _add(raw: object) -> None:
+            text = str(raw or "").strip()
+            if not text:
+                return
+            path = canonicalize_path(Path(text).resolve())
+            key = str(path)
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append(path)
+
+        _add(plan.get("target_path"))
+
+        snapshot = plan.get("_reality_snapshot_pre") or {}
+        for row in snapshot.get("rows") or []:
+            if bool(row.get("target_content_exists")):
+                _add(row.get("expected_target_content_path"))
+
+        for target in plan.get("view_targets") or []:
+            save_path = str(target.get("target_save_path") or "").strip()
+            root_name = str(target.get("root_name") or "").strip()
+            if not save_path or not root_name:
+                continue
+            _add(Path(save_path) / root_name)
+        return roots
+
+    def _inspect_target_family(
+        self,
+        plan: Dict,
+        *,
+        skip_content_compare_roots: Optional[set[str]] = None,
+    ) -> TargetFamilyInspection:
+        candidate_roots = self._iter_target_family_roots(plan)
+        source_path = (
+            canonicalize_path(Path(str(plan.get("source_path") or "")).resolve())
+            if str(plan.get("source_path") or "").strip()
+            else None
+        )
+        source_exists = bool(source_path and source_path.exists())
+        exact_roots: List[Path] = []
+        conflicting_roots: List[Path] = []
+        conflict_details: List[Tuple[str, str]] = []
+        expected_count = int(plan.get("file_count") or 0)
+        expected_bytes = int(plan.get("total_bytes") or 0)
+        skip_compare = {str(Path(root)) for root in (skip_content_compare_roots or set())}
+        root_content_cache: Dict[str, RootContentSnapshot] = {}
+        path_sha_cache: Dict[Tuple[str, int, int], Optional[str]] = {}
+        inode_sha_cache: Dict[Tuple[int, int, int, int], Optional[str]] = {}
+
+        for candidate in candidate_roots:
+            if source_path is not None and candidate == source_path:
+                continue
+            stats = self._path_stats(candidate)
+            if self._path_stats_match(stats, expected_count, expected_bytes):
+                if source_path is None or not source_exists:
+                    exact_roots.append(candidate)
+                    continue
+                if str(candidate) in skip_compare:
+                    exact_roots.append(candidate)
+                    continue
+                comparison = compare_root_content(
+                    source_path,
+                    candidate,
+                    root_cache=root_content_cache,
+                    path_sha_cache=path_sha_cache,
+                    inode_sha_cache=inode_sha_cache,
+                )
+                if comparison.matches:
+                    exact_roots.append(candidate)
+                else:
+                    conflicting_roots.append(candidate)
+                    conflict_details.append((str(candidate), comparison.reason))
+            elif stats.exists and not self._path_stats_empty(stats):
+                conflicting_roots.append(candidate)
+                conflict_details.append(
+                    (
+                        str(candidate),
+                        self._format_path_stats(
+                            stats,
+                            expected_count=expected_count,
+                            expected_bytes=expected_bytes,
+                        ),
+                    )
+                )
+
+        return TargetFamilyInspection(
+            candidate_roots=tuple(candidate_roots),
+            exact_roots=tuple(exact_roots),
+            conflicting_roots=tuple(conflicting_roots),
+            conflict_details=tuple(conflict_details),
+        )
+
+    def _align_plan_with_existing_target_family(self, plan: Dict) -> TargetFamilyInspection:
+        current_target = (
+            canonicalize_path(Path(str(plan.get("target_path") or "")).resolve())
+            if str(plan.get("target_path") or "").strip()
+            else None
+        )
+        skip_compare_roots = {str(current_target)} if current_target is not None else None
+        inspection = self._inspect_target_family(
+            plan,
+            skip_content_compare_roots=skip_compare_roots,
+        )
+        normalization = dict(plan.get("normalization") or {})
+        normalization["target_family_exact_views"] = len(inspection.exact_roots)
+        normalization["target_family_conflicts"] = len(inspection.conflicting_roots)
+        if inspection.conflict_details:
+            normalization["target_family_conflict_examples"] = [
+                {"path": path, "reason": reason}
+                for path, reason in inspection.conflict_details[:3]
+            ]
+
+        if inspection.exact_roots:
+            donor_path = inspection.exact_roots[0]
+            prior_target = str(plan.get("target_path") or "").strip()
+            plan["target_path"] = str(donor_path)
+            if (
+                str(plan.get("decision") or "").upper() == "MOVE"
+                and canonicalize_path(Path(prior_target).resolve()) != donor_path
+            ):
+                self._log(
+                    "target_family_reuse_detected "
+                    f"prior_target={prior_target or '<none>'} donor={donor_path}",
+                    "warning",
+                )
+                plan["decision"] = "REUSE"
+            normalization["target_family_donor_path"] = str(donor_path)
+
+        blocking_conflicts = [
+            path for path in inspection.conflicting_roots
+            if current_target is None or path != current_target
+        ]
+        if blocking_conflicts:
+            conflicts = ", ".join(str(path) for path in blocking_conflicts[:3])
+            detail_lookup = dict(inspection.conflict_details)
+            detail = detail_lookup.get(str(blocking_conflicts[0]))
+            raise RuntimeError(
+                "Target family conflict exists before apply: "
+                f"payload={str(plan.get('payload_hash') or '')[:16]} conflicts={conflicts}"
+                + (f" detail={detail}" if detail else "")
+            )
+
+        plan["normalization"] = normalization
+        return inspection
 
     def _preflight_existing_view_conflicts(
         self,
@@ -1364,7 +1683,7 @@ class DemotionExecutor:
                         continue
                     existing_paths += 1
                     try:
-                        _ensure_hardlink(src, dst, compare_hint=compare_hint)
+                        _ensure_hardlink(src, dst, compare_hint=compare_hint, relink_identical=False)
                     except Exception as exc:
                         raise RuntimeError(
                             f"Target view conflict for {torrent_hash[:16]} at {dst}: {exc}"
@@ -1398,11 +1717,19 @@ class DemotionExecutor:
                 torrent_hash = target["torrent_hash"]
                 if not target.get("source_save_path"):
                     raise RuntimeError(f"Missing source_save_path for torrent {torrent_hash}")
+                fallback_target_root = str(plan.get("target_path") or "")
+                target_save_path = str(target.get("target_save_path") or "").strip()
+                root_name = str(target.get("root_name") or "").strip()
+                if target_save_path and root_name:
+                    fallback_target_root = str(Path(target_save_path) / root_name)
                 relocations.append({
                     "torrent_hash": torrent_hash,
                     "source_save_path": target.get("source_save_path"),
                     "target_save_path": target["target_save_path"],
-                    "target_payload_root": constructed_roots.get(str(torrent_hash).strip().lower()),
+                    "target_payload_root": constructed_roots.get(
+                        str(torrent_hash).strip().lower(),
+                        fallback_target_root,
+                    ),
                 })
             return relocations
 
@@ -1421,13 +1748,18 @@ class DemotionExecutor:
                 fallback_target,
                 files or [],
             )
+            target_payload_root = self._derive_target_payload_root_for_torrent(
+                fallback_target,
+                target_save_path,
+                files or [],
+            )
             relocations.append({
                 "torrent_hash": torrent_hash,
                 "source_save_path": str(source_save) if source_save else None,
                 "target_save_path": str(target_save_path),
                 "target_payload_root": constructed_roots.get(
                     str(torrent_hash).strip().lower(),
-                    str(fallback_target),
+                    str(target_payload_root),
                 ),
             })
         return relocations
@@ -1445,6 +1777,26 @@ class DemotionExecutor:
                 continue
             roots[torrent_hash] = canonicalize_path(Path(target_root).resolve())
         return roots
+
+    @staticmethod
+    def _normalize_nested_single_file_target_path(source_path: Path, target_path: Path) -> Path:
+        """
+        Repair single-file MOVE targets that still carry a wrapper directory name.
+
+        Example:
+        - source: .../Release/Release/Release.mkv
+        - planned target: .../Release/Release
+        - corrected target: .../Release/Release/Release.mkv
+        """
+        source_path = Path(source_path).resolve()
+        target_path = Path(target_path).resolve()
+        if not source_path.is_file():
+            return target_path
+        if target_path.name == source_path.name:
+            return target_path
+        if source_path.parent.name != target_path.name:
+            return target_path
+        return target_path / source_path.name
 
     @staticmethod
     def _derive_target_save_path_for_torrent(target_path: Path, files: List[object]) -> Path:
@@ -1479,24 +1831,76 @@ class DemotionExecutor:
             current = current.parent
         return current
 
+    @staticmethod
+    def _derive_target_payload_root_for_torrent(
+        target_path: Path,
+        target_save_path: Path,
+        files: List[object],
+    ) -> Path:
+        """
+        Derive the target content root for a torrent using its file layout.
+
+        For wrapped single-entry torrents, target_save_path points above the
+        wrapper directory, so plan["target_path"] alone is too flat.
+        """
+        target_path = Path(target_path).resolve()
+        target_save_path = Path(target_save_path).resolve()
+        if not files:
+            return target_path
+
+        common_prefix = _common_prefix(files)
+        if common_prefix:
+            return target_save_path / common_prefix
+
+        if len(files) == 1:
+            rel_name = str(getattr(files[0], "name", "") or "").strip()
+            rel_parts = [p for p in Path(rel_name).parts if p not in ("", ".", "/")]
+            if len(rel_parts) > 1:
+                return target_save_path / rel_parts[0]
+            if rel_parts:
+                return target_save_path / rel_parts[-1]
+
+        return target_path
+
     def _get_torrent_info_with_retry(
         self,
         torrent_hash: str,
         *,
         attempts: int = 3,
         delay_seconds: float = 1.0,
+        require_live: bool = False,
     ) -> Optional[object]:
         """Fetch torrent info with retries for transient qB timeouts."""
         import time
 
         for attempt in range(1, attempts + 1):
-            info = self.qbit_client.get_torrent_info(torrent_hash)
+            try:
+                info = self.qbit_client.get_torrent_info(torrent_hash)
+            except Exception as exc:
+                info = None
+                if attempt < attempts:
+                    self._log(
+                        f"  retry_get_torrent_info hash={torrent_hash[:16]} "
+                        f"attempt={attempt + 1}/{attempts} error={type(exc).__name__}:{exc}",
+                        "warning",
+                    )
+                    time.sleep(min(delay_seconds * attempt, 3.0))
+                    continue
+                self._log(
+                    f"  get_torrent_info_failed hash={torrent_hash[:16]} "
+                    f"attempt={attempt}/{attempts} error={type(exc).__name__}:{exc}",
+                    "warning",
+                )
+                return None
+            if info and require_live and self._qb_last_error_is_cache_fallback():
+                info = None
             if info:
                 return info
             if attempt < attempts:
+                reason = "cache_fallback" if require_live and self._qb_last_error_is_cache_fallback() else "no_info"
                 self._log(
                     f"  retry_get_torrent_info hash={torrent_hash[:16]} "
-                    f"attempt={attempt + 1}/{attempts}",
+                    f"attempt={attempt + 1}/{attempts} reason={reason}",
                     "warning",
                 )
                 time.sleep(min(delay_seconds * attempt, 3.0))
@@ -1745,14 +2149,33 @@ class DemotionExecutor:
     def _wait_qb_online_after_restart(self, timeout_seconds: float = 120.0) -> None:
         import time
 
+        if not hasattr(self.qbit_client, "test_connection") or not hasattr(self.qbit_client, "login"):
+            return
+
         deadline = time.monotonic() + max(10.0, timeout_seconds)
-        self.qbit_client._authenticated = False  # type: ignore[attr-defined]
+        if hasattr(self.qbit_client, "_authenticated"):
+            self.qbit_client._authenticated = False  # type: ignore[attr-defined]
+        last_error = ""
+        last_debug = 0.0
         while time.monotonic() <= deadline:
-            if self.qbit_client.test_connection() and self.qbit_client.login():
-                return
+            try:
+                connected = bool(self.qbit_client.test_connection())
+                if connected and self.qbit_client.login():
+                    return
+                last_error = str(getattr(self.qbit_client, "last_error", "") or "")
+            except Exception as exc:
+                last_error = str(exc)
+            now = time.monotonic()
+            if self.debug_qb and (last_debug == 0.0 or (now - last_debug) >= 5.0):
+                self._log(
+                    f"  qb_restart_wait error={last_error or 'not_ready'} timeout_s={int(timeout_seconds)}",
+                    "warning",
+                )
+                last_debug = now
             time.sleep(2.0)
         raise RuntimeError(
-            f"qB did not come back online after restart within {int(timeout_seconds)}s"
+            f"qB did not come back online after restart within {int(timeout_seconds)}s "
+            f"error={last_error or 'unknown'}"
         )
 
     def _restore_fastresume_backups(self, backups: Dict[Path, Path]) -> None:
@@ -2116,8 +2539,13 @@ class DemotionExecutor:
         This keeps rollback idempotent when payload move is restored but view links
         were already materialized for sibling save paths.
         """
-        view_targets = plan.get("view_targets") or []
-        if not view_targets:
+        created_view_paths = [
+            str(raw).strip()
+            for raw in (plan.get("_created_target_views") or [])
+            if str(raw).strip()
+        ]
+        if not created_view_paths:
+            self._log("  rollback_cleanup_summary removed=0 skipped=0 reason=no_created_target_views")
             return
 
         source_path = Path(plan.get("source_path", "")).resolve() if plan.get("source_path") else None
@@ -2127,14 +2555,8 @@ class DemotionExecutor:
         removed = 0
         skipped = 0
 
-        for target in view_targets:
-            target_save = str(target.get("target_save_path") or "").strip()
-            root_name = str(target.get("root_name") or "").strip()
-            if not target_save or not root_name:
-                skipped += 1
-                continue
-
-            view_path = (Path(target_save) / root_name).resolve()
+        for raw_path in created_view_paths:
+            view_path = Path(raw_path).resolve()
             key = str(view_path)
             if key in seen:
                 continue
@@ -2227,6 +2649,7 @@ class DemotionExecutor:
             expected,
             timeout_seconds=0.0,
             interval_seconds=0.0,
+            require_live=True,
         )
         if current_info and current_path == expected:
             return True
@@ -2240,6 +2663,7 @@ class DemotionExecutor:
                 expected,
                 timeout_seconds=2.0,
                 interval_seconds=0.5,
+                require_live=True,
             )
             if info and actual == expected:
                 return True
@@ -2259,6 +2683,7 @@ class DemotionExecutor:
             expected,
             timeout_seconds=5.0,
             interval_seconds=0.5,
+            require_live=True,
         )
         if info and actual == expected:
             return True
@@ -2310,37 +2735,164 @@ class DemotionExecutor:
         *,
         timeout_seconds: float = 45.0,
         interval_seconds: float = 1.0,
+        require_live: bool = False,
     ) -> tuple[Optional[object], Optional[Path]]:
         """Poll qB until save_path matches expected, or timeout."""
         import time
 
-        deadline = time.monotonic() + timeout_seconds
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
         last_info = None
         last_actual: Optional[Path] = None
         last_debug_log = 0.0
-        while time.monotonic() <= deadline:
-            info = self.qbit_client.get_torrent_info(torrent_hash)
+        last_error = ""
+        first_pass = True
+        while first_pass or time.monotonic() <= deadline:
+            first_pass = False
+            try:
+                info = self.qbit_client.get_torrent_info(torrent_hash)
+            except Exception as exc:
+                info = None
+                last_error = str(exc)
             if info:
-                last_info = info
-                try:
-                    last_actual = canonicalize_path(Path(info.save_path).resolve())
-                except Exception:
-                    last_actual = Path(info.save_path).resolve()
-                if last_actual == expected_path:
-                    return info, last_actual
+                if require_live and self._qb_last_error_is_cache_fallback():
+                    info = None
+                else:
+                    last_info = info
+                    try:
+                        last_actual = canonicalize_path(Path(info.save_path).resolve())
+                    except Exception:
+                        last_actual = Path(info.save_path).resolve()
+                    if last_actual == expected_path:
+                        return info, last_actual
+                    if self.debug_qb:
+                        now = time.monotonic()
+                        if last_debug_log == 0.0 or (now - last_debug_log) >= 5.0:
+                            self._log(
+                                f"  qb_wait hash={torrent_hash[:16]} "
+                                f"state={getattr(info, 'state', 'unknown')} "
+                                f"progress={getattr(info, 'progress', 'unknown')} "
+                                f"actual={last_actual} expected={expected_path}",
+                                "warning",
+                            )
+                            last_debug_log = now
+            if require_live and self._qb_last_error_is_cache_fallback():
+                last_error = str(getattr(self.qbit_client, "last_error", "") or "")
                 if self.debug_qb:
                     now = time.monotonic()
                     if last_debug_log == 0.0 or (now - last_debug_log) >= 5.0:
                         self._log(
-                            f"  qb_wait hash={torrent_hash[:16]} "
-                            f"state={getattr(info, 'state', 'unknown')} "
-                            f"progress={getattr(info, 'progress', 'unknown')} "
-                            f"actual={last_actual} expected={expected_path}",
+                            f"  qb_wait_live hash={torrent_hash[:16]} "
+                            f"reason={last_error or 'cache_fallback'} expected={expected_path}",
                             "warning",
                         )
                         last_debug_log = now
+            elif not info and last_error and self.debug_qb:
+                now = time.monotonic()
+                if last_debug_log == 0.0 or (now - last_debug_log) >= 5.0:
+                    self._log(
+                        f"  qb_wait hash={torrent_hash[:16]} error={last_error}",
+                        "warning",
+                    )
+                    last_debug_log = now
+            if time.monotonic() > deadline:
+                break
             time.sleep(interval_seconds)
         return last_info, last_actual
+
+    def _wait_for_post_patch_accounting(
+        self,
+        torrent_hash: str,
+        *,
+        expected_path: Optional[Path] = None,
+        timeout_seconds: float = 180.0,
+        interval_seconds: float = 2.0,
+    ) -> Optional[object]:
+        import time
+
+        deadline = time.monotonic() + max(10.0, timeout_seconds)
+        last_info = None
+        last_debug = 0.0
+
+        while time.monotonic() <= deadline:
+            info = self._get_torrent_info_with_retry(
+                torrent_hash,
+                attempts=2,
+                delay_seconds=interval_seconds,
+                require_live=True,
+            )
+            if info:
+                last_info = info
+                if expected_path is not None:
+                    try:
+                        actual_path = canonicalize_path(Path(info.save_path).resolve())
+                    except Exception:
+                        actual_path = Path(info.save_path).resolve()
+                    if actual_path != expected_path:
+                        now = time.monotonic()
+                        if self.debug_qb and (last_debug == 0.0 or (now - last_debug) >= 5.0):
+                            self._log(
+                                f"  post_patch_wait hash={torrent_hash[:16]} "
+                                f"reason=save_path_stale actual={actual_path} expected={expected_path}",
+                                "warning",
+                            )
+                            last_debug = now
+                        time.sleep(interval_seconds)
+                        continue
+                if self._post_patch_qb_accounting_healthy(info):
+                    return info
+                if self._post_patch_qb_accounting_definitive_failure(info):
+                    raise RuntimeError(
+                        "post-patch qB accounting incomplete "
+                        f"hash={torrent_hash[:16]} state={getattr(info, 'state', '')} "
+                        f"progress={getattr(info, 'progress', '')} "
+                        f"completed={getattr(info, 'completed', '')} "
+                        f"amount_left={getattr(info, 'amount_left', '')} "
+                        f"size={getattr(info, 'size', '')}"
+                    )
+                now = time.monotonic()
+                if self.debug_qb and (last_debug == 0.0 or (now - last_debug) >= 5.0):
+                    self._log(
+                        f"  post_patch_wait hash={torrent_hash[:16]} "
+                        f"state={getattr(info, 'state', '')} "
+                        f"progress={getattr(info, 'progress', '')} "
+                        f"completed={getattr(info, 'completed', '')} "
+                        f"amount_left={getattr(info, 'amount_left', '')} "
+                        f"size={getattr(info, 'size', '')}",
+                        "warning",
+                    )
+                    last_debug = now
+            time.sleep(interval_seconds)
+        return last_info
+
+    def _qb_last_error_is_cache_fallback(self) -> bool:
+        return str(getattr(self.qbit_client, "last_error", "") or "").startswith("cache_fallback")
+
+    @staticmethod
+    def _post_patch_qb_accounting_definitive_failure(info: object) -> bool:
+        state = str(getattr(info, "state", "") or "").strip().lower()
+        if "checking" in state or "moving" in state or "allocating" in state or "queued" in state:
+            return False
+        if state in {
+            "error",
+            "missingfiles",
+            "downloading",
+            "stalleddl",
+            "queueddl",
+            "forceddl",
+            "metadl",
+            "pauseddl",
+            "stoppeddl",
+        }:
+            return True
+        try:
+            progress = float(getattr(info, "progress", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        try:
+            amount_left = int(getattr(info, "amount_left", 0) or 0)
+        except (TypeError, ValueError):
+            amount_left = 0
+        return progress < 0.9999 and amount_left > 0
 
     def _validate_qb_content_path(
         self,
@@ -2348,6 +2900,7 @@ class DemotionExecutor:
         *,
         attempts: int = 5,
         delay_seconds: float = 1.0,
+        require_live: bool = False,
     ) -> None:
         """Best-effort qB content-path validation after relocation."""
         import time
@@ -2355,7 +2908,12 @@ class DemotionExecutor:
         warned_missing_field = False
         last_content = ""
         for attempt in range(1, attempts + 1):
-            info = self.qbit_client.get_torrent_info(torrent_hash)
+            info = self._get_torrent_info_with_retry(
+                torrent_hash,
+                attempts=1,
+                delay_seconds=delay_seconds,
+                require_live=require_live,
+            )
             if not info:
                 if attempt < attempts:
                     self._log(
@@ -3100,6 +3658,8 @@ class DemotionExecutor:
         preloaded_files = self._sanitize_plan_live_torrents(plan)
         artifact_dir = self._relocation_artifact_dir(plan)
         self._preflight_torrent_state_check_with_settle(plan, artifact_dir=artifact_dir)
+        self._align_plan_with_existing_target_family(plan)
+        decision = plan['decision']
 
         self._log(f"Executing {direction} {decision} plan for payload {plan['payload_hash'][:16] if plan['payload_hash'] else 'N/A'}...")
 
@@ -3813,6 +4373,11 @@ class DemotionExecutor:
             plan,
             preloaded_files=preloaded_files,
         )
+        self._build_fallback_nested_single_entry_views(
+            target_path,
+            plan,
+            preloaded_files=preloaded_files,
+        )
         phase_times["build_views"] = time.monotonic() - t0
 
         t0 = time.monotonic()
@@ -3841,6 +4406,7 @@ class DemotionExecutor:
         plan: Dict,
         spot_check: int = 0,
     ) -> TargetDonor:
+        self._align_plan_with_existing_target_family(plan)
         source_path = Path(plan["source_path"])
         target_path = Path(plan["target_path"])
         target_device_id = self._resolve_plan_device_id(plan, "target")
@@ -3866,6 +4432,17 @@ class DemotionExecutor:
 
         if decision != "MOVE":
             raise RuntimeError(f"unsupported donor acquisition decision: {decision}")
+
+        corrected_target_path = self._normalize_nested_single_file_target_path(
+            source_path,
+            target_path,
+        )
+        if corrected_target_path != target_path:
+            self._log(
+                "step=normalize_target_path "
+                f"reason=nested_single_file_source_shape old={target_path} new={corrected_target_path}"
+            )
+            target_path = corrected_target_path
 
         self._log(f"step=verify_source path={source_path}")
         moved_payload = False
@@ -3947,6 +4524,7 @@ class DemotionExecutor:
 
     def _build_execute_plan_for_donor(self, plan: Dict, donor: TargetDonor) -> Dict:
         execute_plan = dict(plan)
+        execute_plan["target_path"] = str(donor.target_path)
         if str(plan.get("decision") or "").upper() == "MOVE":
             filtered_view_targets = self._filter_move_view_targets(plan, donor.source_path)
             execute_plan["view_targets"] = filtered_view_targets
@@ -4049,6 +4627,12 @@ class DemotionExecutor:
             return False
         if not donor_root.exists():
             return False
+        if donor_root.is_file():
+            self._log(
+                "  cleanup_unused_target_donor_skipped "
+                "reason=file_target_requires_manual_review",
+            )
+            return False
 
         try:
             if donor_root.is_dir():
@@ -4148,8 +4732,23 @@ class DemotionExecutor:
             )
             phase_times.update(attach_times)
             self._cleanup_unused_target_donor(execute_plan, donor)
-        except Exception:
+        except Exception as exc:
+            artifact_dir_raw = str(plan.get("_artifact_dir") or "").strip()
+            if artifact_dir_raw:
+                self._write_plan_reality_snapshot(
+                    execute_plan,
+                    artifact_dir=Path(artifact_dir_raw),
+                    phase="failure-pre-rollback",
+                    error=str(exc),
+                )
             self._rollback_move_donor(execute_plan, donor)
+            if artifact_dir_raw:
+                self._write_plan_reality_snapshot(
+                    execute_plan,
+                    artifact_dir=Path(artifact_dir_raw),
+                    phase="failure-post-rollback",
+                    error=str(exc),
+                )
             raise
 
         t0 = time.monotonic()

@@ -8,15 +8,18 @@ import contextlib
 import io
 import json
 import os
+import queue
 import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
 
 # States acceptable after a successful rehome (lower-case for comparison).
 SEED_READY = {"uploading", "stalledup", "queuedup", "forcedup", "pausedup", "stoppedup"}
@@ -69,6 +72,59 @@ def _safe_candidates(groups: Iterable[dict], *, limit: int) -> list[Candidate]:
 
     picks.sort(key=lambda c: c.movable_bytes, reverse=True)
     return picks[: max(1, limit)]
+
+
+def _unique_aliases_in_order(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _resolve_refresh_dedup_aliases(
+    catalog_path: Path,
+    roots: list[tuple[str, str, str]],
+) -> list[str]:
+    fallback = _unique_aliases_in_order(alias for _path, alias, _role in roots)
+    try:
+        conn = sqlite3.connect(str(catalog_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        aliases: list[str] = []
+        seen_aliases: set[str] = set()
+        for root_path, alias, _role in roots:
+            root = str(root_path or "").strip()
+            alias_fallback = str(alias or "").strip()
+            if root:
+                rows = cur.execute(
+                    """
+                    SELECT DISTINCT d.device_alias
+                    FROM scan_roots sr
+                    JOIN devices d ON d.fs_uuid = sr.fs_uuid
+                    WHERE d.device_alias IS NOT NULL
+                      AND d.device_alias != ''
+                      AND (sr.root_path = ? OR sr.root_path LIKE ?)
+                    ORDER BY d.device_alias
+                    """,
+                    (root, f"{root}/%"),
+                ).fetchall()
+                for row in rows:
+                    resolved = str(row["device_alias"] or "").strip()
+                    if resolved and resolved not in seen_aliases:
+                        seen_aliases.add(resolved)
+                        aliases.append(resolved)
+            if alias_fallback and alias_fallback not in seen_aliases:
+                seen_aliases.add(alias_fallback)
+                aliases.append(alias_fallback)
+        conn.close()
+        return aliases or fallback
+    except Exception:
+        return fallback
 
 
 def _is_qb_ready_state(state: Optional[str]) -> bool:
@@ -343,6 +399,96 @@ def _parse_link_plan_id(stdout: str) -> Optional[str]:
     return None
 
 
+def _stream_subprocess_output(
+    cmd: list[str],
+    *,
+    heartbeat_s: int,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """
+    Run *cmd* with live stdout/stderr relay while retaining combined stdout text.
+
+    This keeps wrapper commands operator-visible during long-running child work
+    without losing captured output needed for post-step quality gates.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    output_queue: "queue.Queue[tuple[str, Optional[str]]]" = queue.Queue()
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def _reader(stream: Any, stream_name: str) -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                output_queue.put((stream_name, line))
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            output_queue.put((stream_name, None))
+
+    stdout_thread = threading.Thread(
+        target=_reader, args=(proc.stdout, "stdout"), daemon=True
+    )
+    stderr_thread = threading.Thread(
+        target=_reader, args=(proc.stderr, "stderr"), daemon=True
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    started_monotonic = time.monotonic()
+    next_heartbeat = started_monotonic + max(5, heartbeat_s)
+    stream_done = {"stdout": False, "stderr": False}
+    tail_hint = "tail -n0 -F ~/.logs/hashall/hashall.log"
+
+    while True:
+        drained = False
+        try:
+            while True:
+                stream_name, payload = output_queue.get_nowait()
+                drained = True
+                if payload is None:
+                    stream_done[stream_name] = True
+                    continue
+                if stream_name == "stdout":
+                    stdout_chunks.append(payload)
+                    print(payload, end="")
+                else:
+                    stderr_chunks.append(payload)
+                    print(payload, end="", file=sys.stderr)
+        except queue.Empty:
+            pass
+
+        rc = proc.poll()
+        if rc is not None and all(stream_done.values()) and not drained:
+            break
+
+        now_monotonic = time.monotonic()
+        if now_monotonic >= next_heartbeat:
+            elapsed_hb = int(now_monotonic - started_monotonic)
+            print(
+                "  [refresh] still running "
+                f"elapsed={elapsed_hb}s watch='{tail_hint}'"
+            )
+            next_heartbeat = now_monotonic + max(5, heartbeat_s)
+        time.sleep(0.2)
+
+    stdout_thread.join(timeout=1.0)
+    stderr_thread.join(timeout=1.0)
+    rc = proc.wait()
+    stdout = "".join(stdout_chunks)
+    stderr = "".join(stderr_chunks)
+    return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr=stderr), stdout
+
+
 # ---------------------------------------------------------------------------
 # Inline verify
 # ---------------------------------------------------------------------------
@@ -444,6 +590,8 @@ def run_refresh(
     managed_roots: "list[tuple[str, str]]" = [],
     verbose: bool = False,
     debug: bool = False,
+    payload_source: str = "qb",
+    rt_session_dir: str = str(DEFAULT_RT_SESSION_DIR),
     # Backwards-compat params (old names)
     seeding_root: "str | None" = None,
     pool_payload_root: "str | None" = None,
@@ -463,7 +611,7 @@ def run_refresh(
       3c. (for each managed root) hashall dupes --device <alias> --auto-upgrade
       4a. hashall link plan <name> --device <alias> --min-size 1048576  (if not skip_dedup)
       4b. hashall link execute <plan_id> [--dry-run]                    (if not skip_dedup)
-      5. hashall payload sync --upgrade-missing
+      5. hashall payload sync --upgrade-missing --source <payload_source>
 
     Returns exit code (0 = all steps succeeded, 1 = at least one failed).
     """
@@ -507,21 +655,16 @@ def run_refresh(
                 t0 = datetime.now()
                 print(f"\n[refresh] {label}")
                 print(f"  $ {' '.join(cmd)}")
+                try:
+                    heartbeat_s = max(5, int(os.environ.get("REHOME_REFRESH_HEARTBEAT_S", "30")))
+                except ValueError:
+                    heartbeat_s = 30
                 should_capture = capture or logger.verbose
                 if should_capture:
-                    result = subprocess.run(cmd, capture_output=True, text=True)
-                    if result.stdout:
-                        print(result.stdout, end="")
+                    result, stdout = _stream_subprocess_output(cmd, heartbeat_s=heartbeat_s)
                     if result.stderr:
-                        # stderr goes to stderr; write_raw ensures it lands in the log too
-                        print(result.stderr, end="", file=sys.stderr)
                         logger.write_raw(result.stderr)
-                    stdout = result.stdout or ""
                 else:
-                    try:
-                        heartbeat_s = max(5, int(os.environ.get("REHOME_REFRESH_HEARTBEAT_S", "30")))
-                    except ValueError:
-                        heartbeat_s = 30
                     started_monotonic = time.monotonic()
                     next_heartbeat = started_monotonic + heartbeat_s
                     proc = subprocess.Popen(cmd)
@@ -634,6 +777,7 @@ def run_refresh(
                         f"scan active_root ({active_root})",
                         [python, "-m", "hashall.cli", "scan", active_root,
                          "--parallel", "--workers", str(workers),
+                         "--scan-nested-datasets",
                          "--hash-mode", str(scan_hash_mode),
                          "--drift-policy", str(drift_policy)] + db_args,
                     )
@@ -645,72 +789,37 @@ def run_refresh(
                             f"scan dest_root ({dest_root})",
                             [python, "-m", "hashall.cli", "scan", dest_root,
                              "--parallel", "--workers", str(workers),
+                             "--scan-nested-datasets",
                              "--hash-mode", str(scan_hash_mode),
                              "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
 
-                    # ── Step 3a: dupes auto-upgrade for active ────────────────────────────
-                    ok, _ = _run_step(
-                        f"dupes auto-upgrade (active={active_device})",
-                        [python, "-m", "hashall.cli", "dupes",
-                         "--device", active_device, "--auto-upgrade"] + db_args,
-                    )
-                    overall_ok = overall_ok and ok
-
-                    # ── Step 3b: dupes auto-upgrade for dest ─────────────────────────────
-                    ok, _ = _run_step(
-                        f"dupes auto-upgrade (dest={dest_device})",
-                        [python, "-m", "hashall.cli", "dupes",
-                         "--device", dest_device, "--auto-upgrade"] + db_args,
-                    )
-                    overall_ok = overall_ok and ok
-
-                    # ── Managed roots: scan + dupes (+ dedup if opted-in) ────────────────
+                    # ── Managed roots: scan first; dedup targets resolved after scan ─────
                     for managed_path, managed_alias in (managed_roots or []):
                         ok, _ = _run_step(
                             f"scan managed root ({managed_path})",
                             [python, "-m", "hashall.cli", "scan", managed_path,
                              "--parallel", "--workers", str(workers),
+                             "--scan-nested-datasets",
                              "--hash-mode", str(scan_hash_mode),
                              "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
 
+                    dedup_aliases = _resolve_refresh_dedup_aliases(catalog_path, all_roots)
+                    print(f"  dedup_targets {', '.join(dedup_aliases)}")
+
+                    for dev_alias in dedup_aliases:
                         ok, _ = _run_step(
-                            f"dupes auto-upgrade (managed={managed_alias})",
+                            f"dupes auto-upgrade ({dev_alias})",
                             [python, "-m", "hashall.cli", "dupes",
-                             "--device", managed_alias, "--auto-upgrade"] + db_args,
+                             "--device", dev_alias, "--auto-upgrade"] + db_args,
                         )
                         overall_ok = overall_ok and ok
 
-                        if not skip_dedup:
-                            plan_name = f"refresh-{managed_alias}-{timestamp}"
-                            ok, stdout = _run_step(
-                                f"link plan ({managed_alias})",
-                                [python, "-m", "hashall.cli", "link", "plan", plan_name,
-                                 "--device", managed_alias, "--min-size", "1048576"] + db_args,
-                                capture=True,
-                            )
-                            overall_ok = overall_ok and ok
-
-                            if ok:
-                                plan_id = _parse_link_plan_id(stdout)
-                                if plan_id:
-                                    execute_cmd = [
-                                        python, "-m", "hashall.cli", "link", "execute", plan_id,
-                                        "--yes",
-                                    ] + db_args
-                                    label = f"link execute plan_id={plan_id} ({managed_alias})"
-                                    print("  [refresh] delegated progress may continue in: tail -n0 -F ~/.logs/hashall/hashall.log")
-                                    ok, _ = _run_step(label, execute_cmd)
-                                    overall_ok = overall_ok and ok
-                                else:
-                                    print(f"  [refresh] no parsable plan_id in link plan output for {managed_alias} — skipping execute")
-
-                    # ── Steps 4a/4b: dedup for active + dest ─────────────────────────────
                     if not skip_dedup:
-                        for dev_alias in (active_device, dest_device):
+                        for dev_alias in dedup_aliases:
                             plan_name = f"refresh-{dev_alias}-{timestamp}"
                             ok, stdout = _run_step(
                                 f"link plan ({dev_alias})",
@@ -738,7 +847,10 @@ def run_refresh(
                     ok, payload_stdout = _run_step(
                         "payload sync --upgrade-missing",
                         [python, "-m", "hashall.cli", "payload", "sync",
-                         "--upgrade-missing"] + db_args,
+                         "--upgrade-missing",
+                         "--source", str(payload_source)] +
+                        (["--rt-session-dir", str(rt_session_dir)] if str(payload_source).lower() == "rt" else []) +
+                        db_args,
                         capture=True,
                     )
                     overall_ok = overall_ok and ok

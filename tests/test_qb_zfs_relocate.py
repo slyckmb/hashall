@@ -320,6 +320,21 @@ def _write_multi_file_torrent(path: Path, root_name: str) -> None:
     )
 
 
+def _write_single_entry_wrapped_torrent(path: Path, root_name: str, file_name: str, size: int = 10) -> None:
+    path.write_bytes(
+        bencode_encode(
+            {
+                b"info": {
+                    b"name": root_name.encode("utf-8"),
+                    b"files": [
+                        {b"length": int(size), b"path": [file_name.encode("utf-8")]},
+                    ],
+                }
+            }
+        )
+    )
+
+
 def _write_verify_report(path: Path, candidate_path: Path, *, classification: str = "exact_tree", verified: int = 1) -> None:
     write_json(
         path,
@@ -1160,6 +1175,56 @@ def test_build_manifest_for_relocations_marks_missing_reconnect_rows_reused(tmp_
     built = manifest["rows"][0]
     assert built["dest_exists"] is True
     assert built["copy_status"] == "reused_existing_dest"
+
+
+def test_build_manifest_for_relocations_prefers_target_payload_root_for_wrapped_single_entry(tmp_path):
+    torrent_hash = "wrappedsingle123"
+    save_path = tmp_path / "new_ds" / "movies"
+    target_file = save_path / "Wrapped.Release.mkv"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_bytes(b"payload")
+    torrent_dir = tmp_path / "torrents"
+    torrent_dir.mkdir()
+    _write_single_entry_wrapped_torrent(
+        torrent_dir / f"{torrent_hash}.torrent",
+        "Wrapped.Release",
+        "Wrapped.Release.mkv",
+        size=7,
+    )
+
+    client = FakeClient(
+        {
+            torrent_hash: _torrent_info(
+                torrent_hash,
+                "Wrapped.Release",
+                str(save_path),
+                str(target_file),
+                state="missingFiles",
+                progress=0.0,
+            )
+        }
+    )
+    manifest = qb_zfs_relocate.build_manifest_for_relocations(
+        qb_client=client,
+        relocations=[
+            {
+                "torrent_hash": torrent_hash,
+                "source_save_path": str(tmp_path / "old_ds" / "movies"),
+                "target_save_path": str(save_path),
+                "target_payload_root": str(target_file),
+            }
+        ],
+        fastresume_dir=tmp_path / "BT_backup",
+        torrent_dir=torrent_dir,
+        source_root=str(tmp_path / "old_ds"),
+        dest_root=str(tmp_path / "new_ds"),
+        mode="rehome_apply",
+        apply_context={},
+    )
+
+    built = manifest["rows"][0]
+    assert built["dest_content_path"] == str(target_file)
+    assert built["dest_exists"] is True
 
 
 def test_validate_allows_already_repointed_rows_when_source_content_differs(tmp_path):

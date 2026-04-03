@@ -95,20 +95,32 @@ Unified roadmap + active backlog for development and operations.
 Live state as of 2026-03-19: 41 pool-data torrents remain (was 34 in Mar-13 docs).
 Two blockers must be cleared before running a new plan.
 
+Confirmed live split of the 41 qB rows:
+- `8` under `/pool/data/media/torrents/seeding`
+- `28` under `/pool/data/cross-seed-link`
+- `5` under `/pool/data/cross-seed`
+
+Important operator note:
+- `bin/migrate-pool-data-to-media.sh` only auto-selects the exact
+  `/pool/data/media/torrents/seeding` subset, so a dry-run there currently sees only `8` rows.
+- That wrapper also includes `Alien Romulus`, which should stay out of the plain migration lane.
+- Therefore it is not the correct "resume the whole remaining 41" command as currently wired.
+
 ### Phase 0 — Blocker investigation (operator, read-only)
 - [ ] Verify and remove stale `~/.hashall/rehome.lock` (5 days old, pid likely dead)
 - [ ] Investigate 640 consecutive qB API failures in cache meta (check `last_error`, confirm live API responds)
 - [ ] Run `hashall refresh --verbose` to confirm catalog freshness
 
 ### Phase 1 — Fresh plan generation
-- [ ] Generate new relocate plan: `hashall rehome relocate-plan --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding --output out/rehome-plan-pool-data-to-media-2026-03-19.json`
+- [ ] Generate new relocate plan for the full live remainder: `hashall rehome relocate-plan --source-root /pool/data --target-root /pool/media/torrents/seeding --output out/rehome-plan-pool-data-to-media-2026-03-19.json`
 - [ ] Audit plan coverage vs. live qB pool-data list (41 hashes expected)
 - [ ] Investigate any pool-data torrents not in plan (likely: missing catalog entry, stale reuse, or repair-lane items)
 - [ ] Note: 2026-03-18/19 audit fixes (unique-view, bind-mount) may reclassify some previously-BLOCKED candidates
 
 ### Phase 2 — Execution
 - [ ] Execute migration in conservative batches; gate each on absence of download-like flips, clean qB states, and catalog OK
-- [ ] Handle `Alien Romulus` stoppedDL separately (repair lane, not plain MOVE)
+- [ ] Keep `Alien Romulus` out of the plain migration batches (repair/proving lane, not plain MOVE)
+- [ ] Keep the bad `Shining.Girls...` reuse family out of plain migration batches until it is explicitly re-audited
 - [ ] Run `hashall rehome followup --cleanup` after each green apply batch
 
 See `docs/operations/RUN-STATE.md` "2026-03-19 Migration Analysis" for shell commands.

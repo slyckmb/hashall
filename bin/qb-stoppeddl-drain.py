@@ -977,6 +977,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify poll interval seconds (default: 1)",
     )
     p.add_argument(
+        "--verify-heartbeat",
+        type=float,
+        default=30.0,
+        help="Heartbeat seconds while a verifier subprocess is running (default: 30)",
+    )
+    p.add_argument(
         "--verify-python",
         default="/usr/bin/python3",
         help="Python executable for verifier script (default: /usr/bin/python3)",
@@ -1959,6 +1965,8 @@ def main() -> int:
 
             terminated_for_stop = False
             poll_sleep = max(0.2, float(args.verify_poll))
+            started_verify = time.monotonic()
+            next_verify_heartbeat = started_verify + max(5.0, float(args.verify_heartbeat))
             while proc.poll() is None:
                 if stop_requested():
                     terminated_for_stop = True
@@ -1979,6 +1987,16 @@ def main() -> int:
                         except subprocess.TimeoutExpired:
                             pass
                     break
+                now_verify = time.monotonic()
+                if now_verify >= next_verify_heartbeat:
+                    elapsed_verify = int(now_verify - started_verify)
+                    print(
+                        "  verify_wait "
+                        f"hash={h} candidate={cidx}/{len(existing_paths)} "
+                        f"elapsed_s={elapsed_verify} timeout_s={int(float(args.verify_timeout))} "
+                        f"path={p}"
+                    )
+                    next_verify_heartbeat = now_verify + max(5.0, float(args.verify_heartbeat))
                 time.sleep(poll_sleep)
 
             if not args.show_verify_progress:

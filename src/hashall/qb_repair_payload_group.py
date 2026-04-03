@@ -16,7 +16,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from hashall.device import get_files_table_name
-from hashall.fastresume import patch_fastresume_file
+from hashall.content_inventory import discover_content_roots, rank_donor_candidates_for_torrent
+from hashall.fastresume import normalize_save_path, patch_fastresume_file, validate_qb_target_save_path
 from hashall.link_executor import create_hardlink_atomic
 from hashall.qbittorrent import QBitTorrent, get_qbittorrent_client
 
@@ -31,6 +32,11 @@ DEFAULT_QB_URL = "http://localhost:9003"
 DEFAULT_LOG_DIR = Path.home() / ".logs" / "hashall" / "reports" / "qbit-triage"
 DEFAULT_OUT_DIR = Path("out") / "qb-repair-payload-group"
 DEFAULT_SUCCESS_FILE = DEFAULT_LOG_DIR / "repair-consecutive-successes.txt"
+DEFAULT_CONTENT_BASE_ROOTS = (
+    "/pool/data/orphaned_data",
+    "/pool/data/seeds",
+    "/pool/data/RecycleBin",
+)
 GOOD_DONOR_STATES = {"stalledup", "stoppedup", "pausedup", "queuedup", "uploading", "forcedup"}
 BROKEN_EXPECTED_STATES = {
     "stoppeddl",
@@ -64,6 +70,8 @@ class PayloadIdentity:
     root_path: str
     save_path: str
     root_name: str
+    file_count: int
+    total_bytes: int
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,116 @@ class RepairPlanItem:
     same_inode: bool
 
 
+@dataclass(frozen=True)
+class PayloadRelationship:
+    allowed: bool
+    reason: str
+    detail: str
+def _normalize_or_empty(path: str) -> str:
+    try:
+        return normalize_save_path(path)
+    except Exception:
+        return ""
+
+
+def choose_repair_save_paths(
+    *,
+    good_runtime_save_path: str,
+    broken_runtime_save_path: str,
+    good_catalog_save_path: str,
+    broken_catalog_save_path: str,
+) -> Dict[str, str]:
+    """Choose safe save-path anchors for repair work.
+
+    Repair is allowed to trust a known-good donor runtime path, but must not
+    blindly persist the broken torrent's current runtime path. The broken side
+    is anchored to catalog state unless runtime matches that known path.
+    """
+
+    good_runtime = _normalize_or_empty(good_runtime_save_path)
+    broken_runtime = _normalize_or_empty(broken_runtime_save_path)
+    good_catalog = _normalize_or_empty(good_catalog_save_path)
+    broken_catalog = _normalize_or_empty(broken_catalog_save_path)
+
+    if not good_catalog:
+        raise RuntimeError("good_catalog_save_path_missing")
+    if not broken_catalog:
+        raise RuntimeError("broken_catalog_save_path_missing")
+
+    if good_runtime and good_runtime != good_catalog:
+        good_effective = good_catalog
+        good_reason = "catalog_good_save_path_fallback"
+    elif good_runtime:
+        good_effective = good_runtime
+        good_reason = "validated_good_runtime_save_path"
+    else:
+        good_effective = good_catalog
+        good_reason = "catalog_good_save_path_missing_runtime"
+
+    if broken_runtime and broken_runtime == broken_catalog:
+        broken_effective = broken_runtime
+        broken_reason = "validated_broken_runtime_save_path"
+    else:
+        broken_effective = broken_catalog
+        broken_reason = (
+            "catalog_broken_save_path_fallback" if broken_runtime else "catalog_broken_save_path_missing_runtime"
+        )
+
+    return {
+        "good_effective_save_path": good_effective,
+        "good_reason": good_reason,
+        "broken_effective_save_path": broken_effective,
+        "broken_reason": broken_reason,
+        "good_runtime_save_path": good_runtime,
+        "broken_runtime_save_path": broken_runtime,
+        "good_catalog_save_path": good_catalog,
+        "broken_catalog_save_path": broken_catalog,
+    }
+
+
+def classify_payload_relationship(
+    good: PayloadIdentity,
+    broken: PayloadIdentity,
+    *,
+    good_files: Sequence[Dict[str, Any]],
+    broken_files: Sequence[Dict[str, Any]],
+    force_identical: bool = False,
+) -> PayloadRelationship:
+    payload_group_match = bool(good.payload_hash) and good.payload_hash == broken.payload_hash
+    file_tree_match = qbtree_evidence_matches(good_files, broken_files)
+    identity_match = payload_identity_evidence_matches(good, broken)
+
+    if payload_group_match:
+        return PayloadRelationship(True, "catalog_payload_hash_match", "")
+    if identity_match and file_tree_match:
+        return PayloadRelationship(
+            True,
+            "catalog_payload_mismatch_identical_evidence",
+            f"good_payload={good.payload_hash[:16]} broken_payload={broken.payload_hash[:16]}",
+        )
+    if not broken.payload_hash and file_tree_match:
+        return PayloadRelationship(
+            True,
+            "broken_payload_hash_missing_file_tree_match",
+            f"good_payload={good.payload_hash[:16]} broken_payload=",
+        )
+    if force_identical and file_tree_match:
+        return PayloadRelationship(
+            True,
+            "force_identical_file_tree_match",
+            f"good_payload={good.payload_hash[:16]} broken_payload={broken.payload_hash[:16]}",
+        )
+    if not broken.payload_hash:
+        return PayloadRelationship(
+            False,
+            "broken_payload_hash_missing",
+            "action=refresh_payload_sync_or_use_content_donors",
+        )
+    return PayloadRelationship(
+        False,
+        "payload_group_mismatch",
+        f"good_payload={good.payload_hash[:16]} broken_payload={broken.payload_hash[:16]}",
+    )
 class RunLogger:
     def __init__(self, log_path: Path):
         self.log_path = log_path
@@ -201,6 +319,8 @@ class CatalogLookup:
             SELECT lower(ti.torrent_hash) AS torrent_hash,
                    p.payload_hash,
                    p.root_path,
+                   p.file_count,
+                   p.total_bytes,
                    ti.save_path,
                    ti.root_name
             FROM torrent_instances ti
@@ -218,6 +338,8 @@ class CatalogLookup:
             root_path=str(row["root_path"] or ""),
             save_path=str(row["save_path"] or ""),
             root_name=str(row["root_name"] or ""),
+            file_count=int(row["file_count"] or 0),
+            total_bytes=int(row["total_bytes"] or 0),
         )
 
 
@@ -248,6 +370,45 @@ def ensure_same_payload_group(catalog: CatalogLookup, good_hash: str, broken_has
             f"good_payload={good.payload_hash[:16]} broken_payload={broken.payload_hash[:16]}"
         )
     return good, broken
+
+
+def load_payload_pair(catalog: CatalogLookup, good_hash: str, broken_hash: str) -> Tuple[PayloadIdentity, PayloadIdentity]:
+    good = catalog.payload_identity(good_hash)
+    broken = catalog.payload_identity(broken_hash)
+    if good is None:
+        raise RuntimeError(f"good_hash_missing_from_catalog hash={good_hash}")
+    if broken is None:
+        raise RuntimeError(f"broken_hash_missing_from_catalog hash={broken_hash}")
+    return good, broken
+
+
+def payload_identity_evidence_matches(good: PayloadIdentity, broken: PayloadIdentity) -> bool:
+    if int(good.file_count or 0) <= 0 or int(broken.file_count or 0) <= 0:
+        return False
+    if int(good.total_bytes or 0) <= 0 or int(broken.total_bytes or 0) <= 0:
+        return False
+    return (
+        int(good.file_count) == int(broken.file_count)
+        and int(good.total_bytes) == int(broken.total_bytes)
+        and str(good.root_name or "").strip() == str(broken.root_name or "").strip()
+    )
+
+
+def normalized_torrent_file_signature(items: Sequence[Dict[str, Any]]) -> List[Tuple[str, int]]:
+    total = len(items)
+    out: List[Tuple[str, int]] = []
+    for row in items:
+        rel = str(row.get("name") or "").strip()
+        size = int(row.get("size") or 0)
+        key = _file_key(rel, size, total)
+        out.append((key, size))
+    return sorted(out)
+
+
+def qbtree_evidence_matches(good_files: Sequence[Dict[str, Any]], broken_files: Sequence[Dict[str, Any]]) -> bool:
+    if len(good_files) != len(broken_files):
+        return False
+    return normalized_torrent_file_signature(good_files) == normalized_torrent_file_signature(broken_files)
 
 
 def _file_key(rel_path: str, size: int, total_files: int) -> str:
@@ -477,7 +638,7 @@ def execute_same_fs_rebuild(
     journal_path: Path,
     logger: RunLogger,
 ) -> None:
-    rebuild_actions = {"garbage", "dup_copy", "missing"}
+    rebuild_actions = {"garbage", "missing"}
     for item in plan:
         if item.action not in rebuild_actions:
             continue
@@ -621,6 +782,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--good", required=True, help="Good sibling hash")
     parser.add_argument("--broken", required=True, help="Broken sibling hash")
     parser.add_argument("--apply", action="store_true", help="Execute live changes")
+    parser.add_argument(
+        "--force-identical",
+        action="store_true",
+        help="Allow repair when catalog payload hashes differ but qB file trees match exactly",
+    )
     parser.add_argument("--db", default=str(DEFAULT_DB), help=f"Catalog DB path (default: {DEFAULT_DB})")
     parser.add_argument(
         "--fastresume-dir",
@@ -680,6 +846,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "good_hash": good_hash,
         "broken_hash": broken_hash,
         "apply": bool(args.apply),
+        "force_identical": bool(args.force_identical),
         "db": str(db_path),
         "fastresume_dir": str(fastresume_dir),
         "qb_container": args.qb_container,
@@ -693,8 +860,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         logger.line(f"━━━ REPAIR good={good_hash[:12]} broken={broken_hash[:12]} apply={args.apply} ━━━")
         logger.line("▸ P1 validate")
-        good_identity, broken_identity = ensure_same_payload_group(catalog, good_hash, broken_hash)
-        logger.line(f"  payload_hash={good_identity.payload_hash[:16]}...")
+        good_identity, broken_identity = load_payload_pair(catalog, good_hash, broken_hash)
 
         qb = get_qbittorrent_client(base_url=args.qb_url)
         info_by_hash = qb.get_torrents_by_hashes([good_hash, broken_hash])
@@ -713,19 +879,82 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.line(f"  good   state={state_progress_line(good_info)} save={good_info.save_path}")
         logger.line(f"  broken state={state_progress_line(broken_info)} save={broken_info.save_path}")
 
-        good_device = catalog.resolve_file_table(good_info.save_path + "/.placeholder")
-        broken_device = catalog.resolve_file_table(broken_info.save_path + "/.placeholder")
+        save_paths = choose_repair_save_paths(
+            good_runtime_save_path=good_info.save_path,
+            broken_runtime_save_path=broken_info.save_path,
+            good_catalog_save_path=good_identity.save_path,
+            broken_catalog_save_path=broken_identity.save_path,
+        )
+        good_effective_save_path = save_paths["good_effective_save_path"]
+        broken_effective_save_path = save_paths["broken_effective_save_path"]
+        logger.line(
+            "  good_target_save_path={target} reason={reason} runtime={runtime} catalog={catalog}".format(
+                target=good_effective_save_path,
+                reason=save_paths["good_reason"],
+                runtime=save_paths["good_runtime_save_path"] or "-",
+                catalog=save_paths["good_catalog_save_path"],
+            )
+        )
+        logger.line(
+            "  broken_target_save_path={target} reason={reason} runtime={runtime} catalog={catalog}".format(
+                target=broken_effective_save_path,
+                reason=save_paths["broken_reason"],
+                runtime=save_paths["broken_runtime_save_path"] or "-",
+                catalog=save_paths["broken_catalog_save_path"],
+            )
+        )
+
+        good_device = catalog.resolve_file_table(good_effective_save_path + "/.placeholder")
+        broken_device = catalog.resolve_file_table(broken_effective_save_path + "/.placeholder")
         same_fs = bool(good_device and broken_device and good_device[0].fs_uuid == broken_device[0].fs_uuid)
         logger.line(f"  same_fs={same_fs}")
+
+        donor_report = rank_donor_candidates_for_torrent(
+            catalog.conn,
+            broken_hash,
+            discover_content_roots(catalog.conn, DEFAULT_CONTENT_BASE_ROOTS),
+        )
+        top_candidates = donor_report["ranked_candidates"][:3]
+        if top_candidates:
+            logger.line("  donor_candidates_top:")
+            for candidate in top_candidates:
+                logger.line(
+                    "    {confidence:9s} {reason:28s} {root}".format(
+                        confidence=candidate.confidence,
+                        reason=candidate.reason,
+                        root=candidate.root_path,
+                    )
+                )
+        else:
+            logger.line("  donor_candidates_top: none")
 
         logger.line("▸ P2 content analysis")
         good_files = [{"name": row.name, "size": row.size} for row in qb.get_torrent_files(good_hash)]
         broken_files = [{"name": row.name, "size": row.size} for row in qb.get_torrent_files(broken_hash)]
+        relationship = classify_payload_relationship(
+            good_identity,
+            broken_identity,
+            good_files=good_files,
+            broken_files=broken_files,
+            force_identical=bool(args.force_identical),
+        )
+        if relationship.reason == "catalog_payload_hash_match":
+            logger.line(f"  payload_hash={good_identity.payload_hash[:16]}...")
+        elif relationship.allowed:
+            logger.line(f"  WARN {relationship.reason} {relationship.detail}".rstrip())
+        else:
+            suffix = relationship.detail
+            if top_candidates:
+                suffix = (suffix + " " if suffix else "") + (
+                    f"top_donor={top_candidates[0].root_path} "
+                    f"top_confidence={top_candidates[0].confidence}"
+                )
+            raise RuntimeError(f"{relationship.reason} {suffix}".rstrip())
         write_json(good_files_path, good_files)
         write_json(broken_files_path, broken_files)
         plan = build_repair_plan(
-            good_save=good_info.save_path,
-            broken_save=broken_info.save_path,
+            good_save=good_effective_save_path,
+            broken_save=broken_effective_save_path,
             good_files=good_files,
             broken_files=broken_files,
             quick_hash_lookup=catalog.quick_hash,
@@ -743,23 +972,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise RuntimeError("repair_plan_blocked ambiguous_or_missing_matches")
 
         logger.line(f"▸ P3 hardlink rebuild same_fs={same_fs}")
-        target_save_path = broken_info.save_path
+        target_save_path = broken_effective_save_path
+        target_reason = save_paths["broken_reason"]
         reuse_good_save_path = can_reuse_good_save_path_directly(plan)
         if reuse_good_save_path:
-            target_save_path = good_info.save_path
-            logger.line(f"  donor-reuse fallback target={target_save_path}")
+            target_save_path = good_effective_save_path
+            target_reason = save_paths["good_reason"]
+            logger.line(f"  donor-reuse fallback target={target_save_path} reason={target_reason}")
         if args.apply:
             if same_fs and not reuse_good_save_path:
                 execute_same_fs_rebuild(plan=plan, journal_path=work_journal, logger=logger)
             else:
-                target_save_path = good_info.save_path
-                logger.line(f"  setLocation-only target={target_save_path}")
+                target_save_path = good_effective_save_path
+                target_reason = save_paths["good_reason"]
+                logger.line(f"  setLocation-only target={target_save_path} reason={target_reason}")
         else:
             if same_fs and not reuse_good_save_path:
-                logger.line("  [dry-run] would rebuild hardlinks for garbage/dup_copy/missing")
+                logger.line("  [dry-run] would rebuild hardlinks for garbage/missing; dup_copy stays in place")
             else:
-                logger.line(f"  [dry-run] would setLocation broken -> {good_info.save_path}")
-                target_save_path = good_info.save_path
+                logger.line(
+                    f"  [dry-run] would setLocation broken -> {good_effective_save_path} "
+                    f"reason={save_paths['good_reason']}"
+                )
+                target_save_path = good_effective_save_path
+                target_reason = save_paths["good_reason"]
+        logger.line(
+            "  target_save_path_validation "
+            f"old_qb_save_path={broken_info.save_path} "
+            f"chosen_target_save_path={target_save_path} "
+            f"reason={target_reason}"
+        )
+        target_save_path = validate_qb_target_save_path(
+            target_save_path,
+            approved_roots=[good_identity.save_path, broken_identity.save_path],
+        )
 
         logger.line("▸ P4 qB fix")
         fastresume_path = fastresume_dir / f"{broken_hash}.fastresume"
@@ -769,7 +1015,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ok = qb.set_location(broken_hash, target_save_path)
                 if not ok:
                     raise RuntimeError(f"set_location_failed error={qb.last_error or 'unknown'}")
-                logger.line(f"  setLocation ok target={target_save_path}")
+                logger.line(f"  setLocation ok target={target_save_path} reason={target_reason}")
             else:
                 logger.line("  setLocation skipped save_path already correct")
 

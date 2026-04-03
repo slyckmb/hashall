@@ -7,7 +7,12 @@ import rehome.auto as auto_mod
 import rehome.cli as cli_mod
 import rehome.config as config_mod
 
-from rehome.auto import _parse_link_plan_id, _parse_upgrade_summary, _run_catalog_preflight
+from rehome.auto import (
+    _parse_link_plan_id,
+    _parse_upgrade_summary,
+    _resolve_refresh_dedup_aliases,
+    _run_catalog_preflight,
+)
 
 
 class _DummyLock:
@@ -50,12 +55,6 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
 
     commands: list[list[str]] = []
 
-    class _Result:
-        def __init__(self, stdout: str = "", returncode: int = 0):
-            self.stdout = stdout
-            self.stderr = ""
-            self.returncode = returncode
-
     class _FakePopen:
         def __init__(self, cmd):
             commands.append(list(cmd))
@@ -80,16 +79,18 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
         def poll(self):
             return self.returncode
 
-    def _fake_run(cmd, capture_output=False, text=False):
+    def _fake_stream(cmd, heartbeat_s=30):
         commands.append(list(cmd))
         label = " ".join(cmd)
         if " link plan " in f" {label} ":
             device = cmd[cmd.index("--device") + 1]
             plan_ids = {"stash": "55", "pool-media": "56"}
-            return _Result(stdout=f"📋 Plan #{plan_ids[device]}: refresh-{device}\n")
+            stdout = f"📋 Plan #{plan_ids[device]}: refresh-{device}\n"
+            return auto_mod.subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=""), stdout
         if " payload sync " in f" {label} ":
-            return _Result(stdout="upgrade_summary queued=1 started=1 completed=1 failed=0 elapsed_s=1\n")
-        return _Result(stdout="")
+            stdout = "upgrade_summary queued=1 started=1 completed=1 failed=0 elapsed_s=1\n"
+            return auto_mod.subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=""), stdout
+        return auto_mod.subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""), ""
 
     class _FakeRunLogger:
         def __init__(self, *args, **kwargs):
@@ -130,8 +131,8 @@ def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
             {"ok": True, "checks": [], "summary": {"failed_error": 0, "failed_warning": 0, "total_checks": 9}},
         ),
     )
-    monkeypatch.setattr(auto_mod.subprocess, "run", _fake_run)
     monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(auto_mod, "_stream_subprocess_output", _fake_stream)
     monkeypatch.setattr("rehome.runlog.RunLogger", _FakeRunLogger)
     monkeypatch.setattr("rehome.seed_state.publish_seed_root_state", _fake_publish_seed_root_state)
     monkeypatch.setattr("rehome.cli._acquire_refresh_lock", lambda: _DummyLock())
@@ -165,12 +166,6 @@ def test_run_refresh_passes_scan_hash_mode_and_drift_policy(
 
     commands: list[list[str]] = []
 
-    class _Result:
-        def __init__(self, stdout: str = "", returncode: int = 0):
-            self.stdout = stdout
-            self.stderr = ""
-            self.returncode = returncode
-
     class _FakePopen:
         def __init__(self, cmd):
             commands.append(list(cmd))
@@ -203,12 +198,13 @@ def test_run_refresh_passes_scan_hash_mode_and_drift_policy(
         def __exit__(self, *args):
             return None
 
-    def _fake_run(cmd, capture_output=False, text=False):
+    def _fake_stream(cmd, heartbeat_s=30):
         commands.append(list(cmd))
         label = " ".join(cmd)
         if " payload sync " in f" {label} ":
-            return _Result(stdout="upgrade_summary queued=0 started=0 completed=0 failed=0 elapsed_s=0\n")
-        return _Result(stdout="")
+            stdout = "upgrade_summary queued=0 started=0 completed=0 failed=0 elapsed_s=0\n"
+            return auto_mod.subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=""), stdout
+        return auto_mod.subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""), ""
 
     monkeypatch.setattr(auto_mod, "_validate_refresh_roots", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -219,8 +215,8 @@ def test_run_refresh_passes_scan_hash_mode_and_drift_policy(
             {"ok": True, "checks": [], "summary": {"failed_error": 0, "failed_warning": 0, "total_checks": 1}},
         ),
     )
-    monkeypatch.setattr(auto_mod.subprocess, "run", _fake_run)
     monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(auto_mod, "_stream_subprocess_output", _fake_stream)
     monkeypatch.setattr("rehome.runlog.RunLogger", _FakeRunLogger)
     monkeypatch.setattr(
         "rehome.seed_state.publish_seed_root_state",
@@ -251,6 +247,7 @@ def test_run_refresh_passes_scan_hash_mode_and_drift_policy(
     ]
     assert scan_commands
     for cmd in scan_commands:
+        assert "--scan-nested-datasets" in cmd
         assert "--hash-mode" in cmd
         assert cmd[cmd.index("--hash-mode") + 1] == "full"
         assert "--drift-policy" in cmd
@@ -262,12 +259,6 @@ def test_run_refresh_keeps_logger_open_while_patch_stdout_is_active(
 ) -> None:
     db_path = tmp_path / "catalog.db"
     db_path.write_text("")
-
-    class _Result:
-        def __init__(self, stdout: str = "", returncode: int = 0):
-            self.stdout = stdout
-            self.stderr = ""
-            self.returncode = returncode
 
     class _FakePopen:
         def __init__(self, cmd):
@@ -313,14 +304,20 @@ def test_run_refresh_keeps_logger_open_while_patch_stdout_is_active(
             {"ok": True, "checks": [], "summary": {"failed_error": 0, "failed_warning": 0, "total_checks": 1}},
         ),
     )
+    monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(
-        auto_mod.subprocess,
-        "run",
-        lambda *args, **kwargs: _Result(
-            stdout="upgrade_summary queued=0 started=0 completed=0 failed=0 elapsed_s=0\n"
+        auto_mod,
+        "_stream_subprocess_output",
+        lambda cmd, heartbeat_s=30: (
+            auto_mod.subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="upgrade_summary queued=0 started=0 completed=0 failed=0 elapsed_s=0\n",
+                stderr="",
+            ),
+            "upgrade_summary queued=0 started=0 completed=0 failed=0 elapsed_s=0\n",
         ),
     )
-    monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr("rehome.runlog.RunLogger", _GuardedRunLogger)
     monkeypatch.setattr(
         "rehome.seed_state.publish_seed_root_state",
@@ -419,3 +416,47 @@ def test_run_catalog_preflight_reports_unknown_device_refs(tmp_path: Path) -> No
         str(chk.get("name")) == "payload_device_refs_known" and not bool(chk.get("ok"))
         for chk in report.get("checks", [])
     )
+
+
+def test_resolve_refresh_dedup_aliases_expands_from_scan_roots(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.executescript(
+        """
+        CREATE TABLE devices (
+            fs_uuid TEXT PRIMARY KEY,
+            device_id INTEGER NOT NULL,
+            device_alias TEXT,
+            mount_point TEXT NOT NULL
+        );
+        CREATE TABLE scan_roots (
+            fs_uuid TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            last_scanned_at TEXT,
+            scan_count INTEGER DEFAULT 0,
+            PRIMARY KEY (fs_uuid, root_path)
+        );
+        INSERT INTO devices (fs_uuid, device_id, device_alias, mount_point) VALUES
+            ('fs-stash', 1, 'stash', '/stash/media'),
+            ('fs-pool', 2, 'pool-media', '/pool/media'),
+            ('fs-nested', 3, 'pool-media-books', '/pool/media/books');
+        INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count) VALUES
+            ('fs-stash', '/stash/media', datetime('now'), 1),
+            ('fs-pool', '/pool/media', datetime('now'), 1),
+            ('fs-pool', '/pool/media/torrents/seeding', datetime('now'), 1),
+            ('fs-nested', '/pool/media/books', datetime('now'), 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    aliases = _resolve_refresh_dedup_aliases(
+        db_path,
+        [
+            ("/stash/media", "stash", "active"),
+            ("/pool/media", "pool-media", "dest"),
+        ],
+    )
+
+    assert aliases == ["stash", "pool-media", "pool-media-books"]

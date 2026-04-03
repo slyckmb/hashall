@@ -377,6 +377,78 @@ def test_diff_scan_sessions_prefers_canonical_mount_point(temp_db_path):
     conn.close()
 
 
+def test_diff_scan_sessions_prefers_scan_session_fs_uuid_over_stale_device_id(temp_db_path):
+    conn = sqlite3.connect(temp_db_path)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE devices (
+            device_id INTEGER PRIMARY KEY,
+            fs_uuid TEXT,
+            mount_point TEXT NOT NULL,
+            preferred_mount_point TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE scan_sessions (
+            id INTEGER PRIMARY KEY,
+            device_id INTEGER NOT NULL,
+            fs_uuid TEXT,
+            root_path TEXT NOT NULL
+        )
+        """
+    )
+
+    cursor.execute(
+        "INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point) VALUES (?, ?, ?, ?)",
+        (9, "fs-stable-9", "/pool", "/pool"),
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE files_9 (
+            path TEXT PRIMARY KEY,
+            sha256 TEXT,
+            sha1 TEXT,
+            inode INTEGER,
+            status TEXT
+        )
+        """
+    )
+    cursor.execute(
+        "INSERT INTO files_9 (path, sha256, sha1, inode, status) VALUES (?, ?, ?, ?, 'active')",
+        ("media/alpha.txt", "ha", "sa", 1),
+    )
+    cursor.execute(
+        "INSERT INTO files_9 (path, sha256, sha1, inode, status) VALUES (?, ?, ?, ?, 'active')",
+        ("other/bravo.txt", "hb", "sb", 2),
+    )
+
+    src_id = 1
+    dst_id = 2
+    cursor.execute(
+        "INSERT INTO scan_sessions (id, device_id, fs_uuid, root_path) VALUES (?, ?, ?, ?)",
+        (src_id, 7, "fs-stable-9", "/pool/media"),
+    )
+    cursor.execute(
+        "INSERT INTO scan_sessions (id, device_id, fs_uuid, root_path) VALUES (?, ?, ?, ?)",
+        (dst_id, 7, "fs-stable-9", "/pool/other"),
+    )
+
+    conn.commit()
+
+    report = diff_scan_sessions(conn, src_id, dst_id)
+    buckets = _entries_by_status(report)
+
+    assert "/alpha.txt" in buckets["removed"]
+    assert "/bravo.txt" in buckets["added"]
+
+    conn.close()
+
+
 def test_diff_scan_sessions_legacy_device_id_change_marks_changed(temp_db_path):
     conn = sqlite3.connect(temp_db_path)
     cursor = conn.cursor()

@@ -1,13 +1,466 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-04-03 Residual stash reuse repair
+
+- The residual `dest_missing` loop is materially fixed for the `Bullet Train` family.
+- Code changes in `src/rehome/executor.py` now:
+  - skip expensive current-target compare during existing-target-family alignment
+  - derive the correct per-torrent `target_payload_root` for wrapped single-entry reuse rows
+  - build fallback wrapper views when a reuse plan has no explicit `view_targets` but the torrent metadata is nested single-entry
+- Validation:
+  - `Bullet Train` single-item apply completed successfully
+  - `10/10` siblings verified `exact_tree`
+  - report dir:
+    - `~/.logs/hashall/reports/rehome-relocate/20260403-010351-8b5c09e0c7c083bf`
+  - stash cleanup is still deferred on purpose:
+    - `MANUAL_ACTION_REQUIRED` on the `_qb-unique-repair/.../Bullet.Train...mkv` source
+- Additional narrowed single-item stash reuse runs completed successfully:
+  - `The Muppet...`
+    - `9/9` siblings verified
+    - report dir:
+      - `~/.logs/hashall/reports/rehome-relocate/20260403-012107-7b198aa544d1f641`
+  - `Lego Masters...`
+    - `8/8` siblings verified
+    - report dir:
+      - `~/.logs/hashall/reports/rehome-relocate/20260403-012850-ca30f78203851ebf`
+- Important remaining warning:
+  - post-run reality still reports shared catalog payload grouping for all 3 repaired reuse families
+  - future work should de-hitchhike these into unique target payload roots, but this did not block the successful reuse executions
+- The autonomous maintenance loop should **not** be restarted blindly yet.
+  - it was correctly hardened to stop on `dest_missing`
+  - the right follow-up was single-item reuse execution for the narrowed queue, and that queue is now exhausted
+- Current stash reuse planner state:
+  - `python -m hashall.cli rehome auto --from stash --to pool-media --limit 10`
+  - result: `0 MOVE groups available (stash:0), taking top 0`
+  - no currently safe all-`REUSE` stash batch remains to execute without widening policy
+
+## 2026-04-02 Pool migration cleanup / stash restart automation
+
+- New helper:
+  - `bin/run-pool-migration-maintenance-loop.sh`
+- New ops doc:
+  - `docs/operations/POOL-MIGRATION-MAINTENANCE-LOOP-2026-04-02.md`
+- The loop is intentionally narrow:
+  1. recover payload sync via `bin/run-hashall-upgrade-scans.sh --payload-sync-only`
+  2. delete only two exact reviewed stale `How It's Made` roots on `/pool/data`
+  3. rescan `/pool/data`
+  4. rerun payload sync
+  5. auto-apply stash -> pool-media rounds only when the batch is all `REUSE`
+- Fail-closed conditions:
+  - any non-`REUSE` plan decision
+  - any apply / verify failure
+  - any verify `status=dest_missing`
+  - qB / RT recovery failure
+  - reviewed stale roots still referenced by qB or RT
+- Current observed live state:
+  - both stale `How It's Made` roots under `SpeedCD` and `TorrentDay` are already gone
+  - qB and RT are healthy
+  - the loop has already progressed into stash reuse verification
+  - a later dry-run showed another all-`REUSE` stash batch with `3` groups
+- Current migration residue counts:
+  - `10` torrent rows still rooted on `/pool/data`
+  - `379` rooted on `/pool/media`
+  - `0` rooted on `/stash`
+- Current free space:
+  - `/pool/data`: about `3.7T`
+  - `/pool/media`: about `3.7T`
+  - `/stash/media`: about `12T`
+- While the loop is still running, the newest source of truth is:
+  - `~/.logs/hashall/pool-migration-loop/`
+- Most important outcome from the first unattended run:
+  - the stale reviewed `How It's Made` residue was removed successfully
+  - later rounds re-surfaced the same `3` reuse families because one torrent in each family ended as `dest_missing`
+  - exact residual hashes:
+    - `06a8867d184c6972956307c7eea48ce16669e17c`
+    - `2bf62b9780fa8c394a8a4d9a57ebb5b924309645`
+    - `7c404604a9a478b5d35f109c72935023bd454ef2`
+  - next progress should be a targeted per-torrent repair/migration for those three, not another blind unattended loop
+
+## 2026-04-02 RT cache + refresh recovery
+
+- New canonical docs:
+  - `docs/operations/RT-CACHE-ALIGNMENT-2026-04-02.md`
+  - `docs/operations/RT-CACHE-AGENT-COMMS-2026-04-02.md`
+  - `docs/operations/REFRESH-RECOVERY-2026-04-02.md`
+- `hashall rt state-audit` is now shared-cache-backed by default.
+- Default mode uses:
+  - `~/.cache/silo-rt/torrents.json`
+  - `~/.cache/silo-rt/torrents.meta.json`
+- No silent live fallback:
+  - stale/degraded cache state is reported
+  - `--live` is explicit diagnostics only
+- Direct RT XMLRPC remains intentional only for mutation / repair:
+  - `rt repoint`
+  - `rt recheck`
+  - `rt session-reset`
+  - `rt repair-apply`
+- Overnight full refresh failure was **not** a scan failure.
+  - all 4 scans finished
+  - failure was final `payload sync --upgrade-missing`
+  - qB auth reset with `Connection reset by peer`
+- Recovery / hardening now exists in:
+  - `bin/run-hashall-upgrade-scans.sh`
+- New behavior:
+  - preflight qB + RT health before payload sync
+  - restart whole `gluetun_qbit` stack if degraded
+  - retry payload sync once after restart
+  - `--payload-sync-only` to resume a failed overnight run without rescanning
+- Recommended next operator command after this exact failure:
+  - `bin/run-hashall-upgrade-scans.sh --payload-sync-only`
+- This recovery path was already exercised successfully once:
+  - stack restart succeeded
+  - payload sync completed
+  - no scan rerun was needed
+
+## 2026-04-01 Refresh + Client Transition State
+
+- New design/ops doc:
+  - `docs/operations/TORRENT-CLIENT-AGNOSTIC-PLAN.md`
+- `hashall` is currently:
+  - rt-capable for repair and audit
+- RT-backed payload sync and refresh are now available
+- `rehome apply` is still qB-authoritative
+- Do **not** shut qB down yet if `hashall` needs to:
+  - run `refresh`
+  - materialize torrent-backed `payloads`
+  - execute or verify `rehome` plans
+- Current managed refresh coverage is now intended to be:
+  - `/stash/media`
+  - `/pool/data`
+  - `/pool/media`
+  - `/mnt/hotspare6tb`
+  - plus the configured destination root `/pool/media/torrents/seeding`
+- Refresh behavior changed in repo code:
+  - nested dataset scanning is now on by default
+  - refresh dedupe expands to all covered device aliases / datasets under refreshed roots
+- Practical operator guidance:
+  - broad pool media refresh should now be safe via `hashall refresh --scan-hash-mode upgrade --drift-policy quick`
+  - if exact explicit coverage is desired, use `bin/run-hashall-upgrade-scans.sh`
+- DB rewrite is **not** needed to reuse existing `/pool/media/torrents/seeding` scan data when scanning `/pool/media`
+  - existing hashes are keyed by relative path / metadata and will be reused
+- ZFS scrub state at last check:
+  - `pool` scrub had already completed cleanly
+  - `stash` scrub was canceled because it had run recently and was not needed during this work
+
+## 2026-03-27 Dual-Client Default + Drift Cleanup
+
+- New handoff doc:
+  - `docs/operations/RT-QB-DRIFT-HANDOFF.md`
+- Going forward, assume seeded data is dual-client sensitive by default.
+- Do not treat qB-only status as the default assumption.
+- Current refined drift sweep:
+  - `4522` hashes exist in both clients
+  - `55` have real rt/qB path drift after normalization
+  - none of the still-remaining `/pool/data` migration items are currently drifted between rt and qB
+- Highest-priority cleanup is the `19` rows where qB already points at `/pool/media` but rt still points elsewhere.
+- Code follow-up required:
+  1. make migration success checks dual-client aware
+  2. make reclaim protection rt-aware as well as qB-aware
+  3. stop assuming path normalization is complete when only qB has moved
+
+## 2026-03-28 rt-only cleanup status
+
+- qB is gone; rt is the only live client.
+- `hashall rt repair-report` is now the live reevaluation command for the old drift action-plan JSON.
+- The former Wave 1 bucket (`fix_now_repoint_rt_to_pool_media`) now evaluates as fully `aligned_now`.
+- Current live remainder is `6` rows total:
+  - `4` straightforward `normalize_rt_old_download_path` repoints
+  - `2` shape-specific review rows
+- Live checklist command:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --unresolved-only --markdown-output`
+- Canonical current handoff:
+  - `docs/operations/RT-REPAIR-REMAINING-CHECKLIST.md`
+
+## 2026-03-25 Active Findings (compact-safe) — UPDATED
+
+- Pivot priority is now back on `pool/data -> pool/media` migration.
+- Current operational blocker is headroom, not repair/tooling:
+  - live `df -h` now shows `0` available on both `/pool/data` and `/pool/media`
+  - current catalog still shows:
+    - `26` qB rows under `/pool/data`
+    - `361` qB rows under `/pool/media`
+  - migration should not resume until space is reclaimed
+- Recent repair/content follow-up work is complete enough to pause:
+  - invalid qB save-path guards are in
+  - donor-style repair mismatch handling is in
+  - non-qB inventory scanning and read-only reporting are in
+  - shared donor ranking is partially wired into repair planning
+- The immediate next migration action is therefore:
+  1. reclaim pool headroom
+  2. re-evaluate the current live qB failure cluster rather than relying on stale carve-out shorthand
+  3. then generate the next safe `pool/data -> pool/media` batch
+- That next-safe batch is now ready:
+  - plan: `out/rehome-plan-pool-data-to-media-nextsafe-2026-03-26.json`
+  - dry-run: passed cleanly
+  - contents:
+    - `The.Substance.2024...` dir root
+    - `The.Substance.2024...` file root
+    - `The.Edge.of.Sleep.S01...`
+    - `The Last Stop in Yuma County...`
+    - `UEFA.Europa.Conference.League...`
+  - excluded on purpose:
+    - current failed-ish movie-family rows
+    - `Alien Romulus`
+    - `Shining Girls`
+    - `Transformers.One`
+  - total planned bytes: `34,821,012,982`
+  - current reason it is not yet applied:
+    - live `df -h` still shows `0` available on both `/pool/data` and `/pool/media`
+
+## 2026-03-26 Live qB Failed-ish Set (compact-safe)
+
+- Current live qB failed-ish set is `9` items:
+  - `6` `stoppedDL`
+  - `3` `stalledDL`
+- Current hashes:
+  - `20555f704e0ae477dce28844c95c626fcf78a261`
+  - `e2ae560a5d51186e2160099aa56d63687a25def1`
+  - `5c86280a99d1007104452b2f72d0d686e092e2f8`
+  - `96d896ca35f42d93e4a4bdee92e8ac90adc34b54`
+  - `7dafdd61e6b9d58d9721c12d8a3da2cde40fc776`
+  - `127c38342cfedaf4016b8079be13c5f7883b9cfe`
+  - `5feb771c9b7f75fe09205204b367c88efa993031`
+  - `5caca88d29e64de495a47b53a466f7cadcb3ce02`
+  - `c8f01321b9fe0697c19c9aa450b570b59548eb15`
+- Live shape of this cluster:
+  - mostly `/data/media/torrents/seeding/...` runtime drift / missing-content fallout
+  - not evidence of a current explicit `skip-check` flag
+  - all inspected fastresume rows currently have `sequential_download=0`
+  - explicit qB tag/category/name search found `0` `skip-check` / `skip_check` / `skipcheck` matches
+- Most actionable split:
+  - missing-content `stoppedDL 0%` rows:
+    - `20555...`
+    - `e2ae...`
+    - `5c862...`
+    - `7daf...`
+    - `5feb...`
+    - `c8f013...`
+  - near-complete `stalledDL` rows with content still present:
+    - `96d896...`
+    - `127c383...`
+    - `5caca88...`
+- `5feb...` is the clearest metadata-drift example:
+  - runtime `save_path=/data/media/torrents/seeding/movies`
+  - runtime `content_path=/incomplete_torrents/...`
+  - fastresume `save_path=/incomplete_torrents`
+  - fastresume `qBt-savePath=/data/media/torrents/seeding/movies`
+- `c8f013...` remains the donor-looking broken-payload case:
+  - runtime points at `/data/media/torrents/seeding/movies/...`
+  - content missing on disk
+  - catalog payload row is effectively empty (`payload_hash=NULL`, `file_count=0`, `total_bytes=0`)
+- Current migration triage:
+  1. repair-first:
+     - `20555...`
+     - `e2ae...`
+     - `7daf...`
+     - `5feb...`
+     - `c8f013...`
+  2. same-family repair with `5feb...`, but not its own separate migration blocker:
+     - `5c862...`
+  3. monitor only; do not let these near-complete rows block general pool migration:
+     - `96d896...`
+     - `127c383...`
+     - `5caca88...`
+
+## 2026-03-26 Historical Carve-Out Recheck (compact-safe)
+
+- `Alien Romulus`
+  - no current live qB match by name/save path
+  - keep as historical special-case context only
+- `Shining Girls`
+  - one current live qB match:
+    - `57c38fa86c83c211a6233c8302afde1bd14c6ace`
+    - state `stoppedUP`
+    - path `/pool/media/torrents/seeding/cross-seed/TorrentDay`
+  - not currently part of the failed-ish qB set
+  - keep as historical content-conflict context, not as the current live blocker
+- `West Wing`
+  - no current live qB match by name/save path
+  - keep as historical proving-lane context, not as the current live blocker
+
+- External report `hashall-bug-9a731a-fastresume-root-corruption-20260325.md` was correct about a
+  current bug in the repair path:
+  - `src/hashall/qb_repair_payload_group.py` could trust `broken_info.save_path`
+  - that bad runtime path could then be written into fastresume
+  - example failure mode: `/tmp` becomes persisted `save_path` / `qBt-savePath`
+- Current code now:
+  - anchors repair target-save-path selection to catalog state instead of the broken torrent's
+    live runtime save path
+  - logs chosen target save path plus the reason it was selected
+  - regression coverage includes the `/tmp` drift case
+- Key design finding on `/pool/data` coverage:
+  - the scan itself is not the missing piece
+  - `scan /pool/data` populates `files_*`
+  - `payload sync` then materializes `payloads` only for qB torrent roots
+  - that matches the current definition of payloads as "the on-disk content tree a torrent points
+    to"
+  - it does **not** match the broader operator intent of indexing as much content as possible
+- Recommended remedy for that gap:
+  - keep `payloads` qB/torrent-root scoped
+  - add a separate durable non-qB content inventory layer for managed scan roots such as
+    `/pool/data/orphaned_data`
+  - if that broader inventory is not desired, update requirements/docs explicitly so operators do
+    not assume whole-tree coverage
+- Intent clarification:
+  - the operator goal is to hash folder trees broadly and find duplicate folder trees quickly
+  - those duplicate/non-qB trees should be usable as donor candidates for qB repair and runtime
+    drift remediation
+  - the desired feature is therefore broader than "scan everything"; it is "scan and make folder
+    trees comparable/searchable outside qB roots"
+- Current pool headroom reality has tightened again:
+  - `/pool/data`: `27G` free
+  - `/pool/media`: `27G` free
+  - largest reclaim/policy targets currently visible:
+    - `/pool/data/orphaned_data`: `2.3T`
+    - `/pool/data/seeds`: `1.2T`
+    - `/pool/data/cross-seed-link`: `413G`
+- Recommended reclaim order:
+  1. decide orphan-donor policy first
+  2. audit `/pool/data/seeds`, especially `_qbm_recycle`, `RecycleBin`, `_qb-unique-repair`
+  3. only then consider broader cleanup under `cross-seed-link` / `cross-seed`
+
+## 2026-03-26 Non-qB Scan Sitrep (compact-safe) — UPDATED
+
+- The non-qB upgrade scan in tmux session `hashall-nonqb-scan` completed.
+- Completed sequence:
+  - `/pool/data/orphaned_data`
+  - `/pool/data/seeds`
+  - `/pool/data/RecycleBin`
+- It used:
+  - `--hash-mode upgrade`
+  - `--drift-policy quick`
+- Rationale:
+  - quick hashes already existed broadly
+  - the main missing value for duplicate-tree / donor analysis was SHA256 coverage
+- Final state after the run:
+  - `orphaned_data`: `19134` files, `2.49T`, SHA256 `19134/19134`
+  - `seeds`: `1255` files, `3.70T`, SHA256 `1255/1255`
+  - `RecycleBin`: `63` files, `690.4M`, SHA256 `63/63`
+  - `cross-seed-link`: already `1327/1327` SHA256-complete
+  - `cross-seed`: already `14/14` SHA256-complete
+- The first concrete feature step after scan completion is now in code:
+  - read-only `hashall content inventory`
+  - read-only `hashall content duplicates`
+  - read-only `hashall content donors --torrent <hash>`
+- Root discovery was then refined to stop treating broad container dirs as single content roots.
+- Current live `hashall content inventory` output now discovers `14030` canonical non-qB roots
+  across `orphaned_data`, `seeds`, and `RecycleBin`, in about `1.3s`.
+- Current live `hashall content duplicates` reports `23` exact duplicate groups at this refined
+  root-discovery level.
+- Operator-friendly filtering/ranking is now in place for the read-only reports:
+  - inventory filters: `--kind`, `--status`, `--path-contains`, `--min-bytes`, `--sort`, `--limit`
+  - duplicate filters: `--path-contains`, `--min-bytes`, `--sort`, `--limit`
+- `content donors --torrent` is now partially integrated into repair planning as a ranked planner
+  input:
+  - repair logs the top ranked donor candidates from the shared donor planner
+  - hard-fail mismatch output can now include the top donor and confidence
+  - repair still requires explicit `--good`; it does not auto-pick donors yet
+  - current limitation: if the broken qB payload row is effectively empty (`payload_hash=NULL`,
+    `file_count=0`, `total_bytes=0`), generic donor ranking may return no candidates even when the
+    explicit donor-driven repair path can still proceed
+- The next feature step is not more scanning; it is:
+  - define the durable non-qB content inventory / duplicate-tree lookup layer
+  - then pivot priority back to `pool/data -> pool/media` migration
+
+## 2026-03-21 Rehome Fastresume Rollback Fix (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.9`
+- The `0.8.8` pilot exposed one more real failure path:
+  - a hardened fastresume apply could fail after patching
+  - payload/file rollback would run
+  - but fastresume metadata was not restored from backups
+  - qB could then stay pointed at `/pool/media` even though rollback removed the target files
+- Current code now:
+  - restores fastresume backups on post-patch hardened-fastresume failure
+  - restarts qB after that restore so runtime metadata returns to the pre-run source paths
+- Fresh validation on 2026-03-21:
+  - focused rollback regressions: passed
+  - this is the fix needed before another real `West Wing` pilot
+
+## 2026-03-21 Rehome qB Runtime Settle Fix (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.8`
+- `West Wing` already proved the data path was good through copy, verify, view build, and sibling
+  relocate; the remaining failure was the post-patch qB runtime handoff.
+- Root cause was qB restart jitter plus cache-fallback API reads:
+  - `.fastresume` files were patched correctly to `/pool/media`
+  - but executor checked runtime `save_path` too early
+  - and cache-fallback qB API reads could still report stale `/pool/data` runtime info
+- Current code now:
+  - waits for qB restart/authentication before post-patch verification
+  - requires live qB runtime info for `save_path` checks instead of trusting cache fallback
+  - retries stale post-patch `save_path` with an explicit `set_location` nudge when needed
+  - waits for post-patch qB accounting to settle, but still fails fast for definite bad states
+- Fresh validation on 2026-03-21:
+  - rehome regression pack: `81 passed`
+  - live dry-run of `out/rehome-plan-west-wing-s02-2026-03-21-v087.json` is clean
+
+## 2026-03-21 Rehome Content-Proofed Reuse (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.7`
+- Rehome target-family reuse no longer trusts only file counts / total bytes.
+- Planner + executor now compute a real payload hash from the live files before calling a target
+  family reusable; same-size same-byte roots with different bytes are treated as conflicts.
+- This directly explains the `Shining.Girls...` lane:
+  - `/pool/media` `TorrentDay` and `Aither` sibling roots match by counts/bytes
+  - but they diverge by actual content
+  - the lane should be treated as a real repair conflict, not a reusable family
+- Current code now:
+  - content-proofs target reuse from live filesystem bytes
+  - blocks apply before any work when the target family is internally divergent
+  - still allows stale-source reuse fallback when the source root is already gone
+- Fresh validation on 2026-03-21:
+  - targeted sim suite: `78 passed`
+  - `West Wing` dry-run remains clean `MOVE`
+  - `Shining Girls` live plan generation now hashes real files and is expected to be slower
+    because it is proving content, not assuming it
+
+## 2026-03-20 Rehome West-Wing Fixes (compact-safe) — UPDATED
+
+- `hashall` is now `0.8.6`
+- Root cause of the failed `West Wing S02` rehome was confirmed and fixed in code:
+  - planner previously chose `MOVE` from one canonical target path and ignored existing sibling
+    views on `/pool/media`
+  - target-view preflight was mutating existing target files instead of only inspecting them
+  - rollback deleted a pre-existing good target-side sibling view because it did not track whether
+    that view existed before the run
+- Current code now:
+  - prefers family-level target reuse when an exact target-side sibling view already exists
+  - blocks `MOVE` before rsync when alternate sibling target views already exist but conflict
+  - keeps target-view preflight read-only
+  - rolls back only view paths created by the current run
+  - writes extra `failure-pre-rollback` / `failure-post-rollback` reality snapshots during move failures
+- Fresh live dry-run on 2026-03-20 for `/pool/data/media/torrents/seeding`:
+  - `Shining.Girls...` = `REUSE`
+  - `The.West.Wing.S02...` = `MOVE`
+  - `Alien Romulus` = `MOVE`
+- Important current reality:
+  - the previously good `/pool/media` `West Wing` donor/sibling view is already gone from the
+    earlier buggy run
+  - because of that, the fresh `West Wing` plan now correctly shows `target_family_exact_views=0`
+    and no longer tries to reuse a donor that is not actually present
+- Historical note: `Shining.Girls...` was the next recommended reuse pilot before content-proofed
+  target-family checks exposed the target-side divergence.
+
 ## 2026-03-19 Migration State (compact-safe) — UPDATED
 
 - `hashall` is now `0.8.5`
 - **41** pool-data torrents remain (all `stalledUP`); **344** on pool-media; state: `in_progress`
+- Live split of those `41` rows on 2026-03-19:
+  - `8` under `/pool/data/media/torrents/seeding`
+  - `28` under `/pool/data/cross-seed-link`
+  - `5` under `/pool/data/cross-seed`
 - **Blockers CLEARED:**
   - `~/.hashall/rehome.lock` removed (pid confirmed dead)
   - `consecutive_failures=640` was a stale counter artifact — fixed in code; qB API healthy
 - **Next step:** `hashall refresh --verbose` → generate fresh relocate-plan → execute in batches
+- Important: `bin/migrate-pool-data-to-media.sh` is **not** the full 41-row resume path as currently wired.
+  - Its dry-run on 2026-03-19 only selected the `8` rows under the exact
+    `/pool/data/media/torrents/seeding` source root.
+  - It also included `Alien Romulus`, which remains a special-case repair/proving lane item.
+- Current known special cases:
+  - `Alien Romulus` (`1376e795...`) is **still active as a special case**, not resolved for plain batching
+  - `Shining.Girls...` is **still a bad reuse candidate** and should stay excluded from plain batches
 - Phase 0→1 commands: `docs/operations/RUN-STATE.md` "2026-03-19 Migration Analysis" section
 - Bug fixes this sub-session: `qb_cache.py` counter reset, `qb-checking-watch.sh` help text,
   stoppeddl bucket path, `migrate_common.sh` comment, version bump
@@ -36,7 +489,8 @@
   - qB profile detection and state alias normalization now live in `src/hashall/qbittorrent.py`
   - read-heavy hashall qB scripts should prefer the local cache by default
 - Remaining follow-up:
-  - qbitui’s external dashboard/cache path was not modified from this worktree
+- silo’s external dashboard/cache path was not modified from this worktree
+  - historical note: earlier docs may still call this external repo `qbitui`
   - if you need the same cache/profile behavior there, that is a separate cross-repo task
 
 Primary run-state source:
@@ -266,3 +720,45 @@ If context is compacted, recover with this sequence:
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`
+
+## 2026-03-24 Current TODO Split
+
+- Must do:
+  - let the current tmux `%61` refresh finish; do not start another refresh concurrently
+  - generate a fresh `/pool/data -> /pool/media/torrents/seeding` relocate plan after that refresh completes
+  - keep `Alien Romulus` and `Shining.Girls...` out of plain migration batches
+  - re-check the `West Wing` lane on current code before treating it as a normal migration slice
+  - investigate why `hashall refresh` scanned `/pool/data` but the catalog still does not cover the whole `/pool/data` tree
+    - confirmed current catalog counts: `0` rows under `/pool/data/orphaned_data`, `17` under `/pool/data/cross-seed-link`, `23` under `/pool/data/cross-seed`, `87` total under `/pool/data`
+    - this conflicts with the operator expectation that the whole `/pool/data` tree would be represented after `scan /pool/data`
+    - important current finding: `scan /pool/data` populates per-device `files_*` tables, but `payloads` are materialized later by `build_payload()`
+    - in the refresh flow, those `build_payload()` calls come from `payload sync`, which iterates qB torrents, so non-qB trees like `/pool/data/orphaned_data` may never become payload rows
+    - determine whether that is the intended model or a real gap in coverage/documentation
+  - evaluate requirements and design gaps around non-qB tree scans, and propose a remedy
+    - operator intent is to hash as much content as possible, not only qB-backed roots
+    - goal is to let `cross-seed`, `jdupes`, and `hashall` reason over the same broader content surface and manage seed data correctly
+    - specifically assess whether non-qB trees under managed scan roots should also materialize into `payloads`, or whether a second content-index layer is needed
+    - produce a concrete recommendation covering schema, refresh behavior, pruning, and operator expectations
+    - treat this as a likely product gap unless the requirements explicitly say non-qB trees are out of scope
+    - compare the intended model against actual behavior for:
+      - managed scan roots such as `/pool/data`
+      - non-qB subtrees such as `/pool/data/orphaned_data`
+      - downstream consumers: `cross-seed`, `jdupes`, `hashall` planning, and future space-reclaim analysis
+    - remedy proposal must say which layer owns broad content coverage:
+      - expand `payload` materialization beyond qB roots
+      - or add a separate durable content-index / inventory layer for non-qB trees
+    - document any resulting requirement change explicitly if the current qB-centric design is intentional
+  - develop a concrete plan to increase headroom on `pool`
+    - current state after pilot + batch 2: `/pool/data` ≈ `99G` free, `/pool/media` ≈ `99G` free
+    - current relocation batches are not increasing reported free space enough to justify continuing blindly
+    - produce ranked reclaim options with estimated GiB impact and operational risk
+  - review the external fastresume corruption report, investigate, and report findings
+    - report path: `/mnt/config/docker/.agent/worktrees/cr-docker-20260323-114236-codex/docs/hashall-bug-9a731a-fastresume-root-corruption-20260325.md`
+    - determine whether it describes:
+      - a current `hashall` bug already present in this branch
+      - a stale behavior already fixed here
+      - or a new cross-repo / deployment-specific integration issue
+    - produce a concrete finding with impact, affected code path, and required remediation if any
+- Proposals:
+  - improve refresh lock-holder diagnostics further if `refresh-status` still leaves operator ambiguity
+  - do any future cross-repo qB helper alignment against `silo`, not the old `qbitui` identity

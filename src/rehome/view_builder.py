@@ -102,6 +102,7 @@ def _ensure_hardlink(
     *,
     compare_hint: Optional[Callable[[Path, Path], Optional[bool]]] = None,
     progress_cb: Optional[Callable[[str], None]] = None,
+    relink_identical: bool = True,
 ) -> None:
     def _relink_existing_identical(a: Path, b: Path) -> None:
         a_stat = os.stat(a)
@@ -168,14 +169,16 @@ def _ensure_hardlink(
         if compare_hint is not None:
             hinted = compare_hint(a, b)
             if hinted is True:
-                _relink_existing_identical(a, b)
+                if relink_identical:
+                    _relink_existing_identical(a, b)
                 return True
             if hinted is False:
                 raise RuntimeError(f"Destination exists and differs: {b}")
         if _same_content(a, b):
             # Existing identical files should be relinked to the donor so successful
             # rehome/reconnect runs do not leave duplicate bytes behind.
-            _relink_existing_identical(a, b)
+            if relink_identical:
+                _relink_existing_identical(a, b)
             return True
         raise RuntimeError(f"Destination exists and differs: {b}")
 

@@ -457,20 +457,20 @@ def test_root_relocation_plan_synthesizes_unique_view_targets_for_colliding_sibl
 
     assert report["summary"]["candidates"] == 1
     assert report["summary"]["view_collisions"] == 1
-    assert report["summary"]["unique_view_targets"] == 2
+    assert report["summary"]["unique_view_targets"] == 1
 
     plan = report["plans"][0]
     assert plan["affected_torrents"] == ["thash21a", "thash21b"]
     assert plan["normalization"]["view_collisions"] == 1
     assert plan["normalization"]["unique_per_torrent"] is True
-    assert plan["normalization"]["unique_view_targets"] == 2
+    assert plan["normalization"]["unique_view_targets"] == 1
 
     by_hash = {row["torrent_hash"]: row for row in plan["view_targets"]}
-    assert by_hash["thash21a"]["target_save_path"] == str(
-        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21a"
-    )
+    assert by_hash["thash21a"]["target_save_path"] == str(source_root).replace(
+        str(source_root), str(target_root)
+    ) + "/tv"
     assert by_hash["thash21b"]["target_save_path"] == str(
-        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21b"
+        target_root / "tv" / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash21b"
     )
 
 
@@ -522,16 +522,14 @@ def test_root_relocation_plan_includes_already_targeted_siblings_in_same_payload
     )
 
     assert report["summary"]["candidates"] == 1
-    assert report["summary"]["unique_view_targets"] == 2
+    assert report["summary"]["unique_view_targets"] == 1
     plan = report["plans"][0]
     assert plan["affected_torrents"] == ["thash22a", "thash22b"]
     assert plan["normalization"]["unique_per_torrent"] is True
     by_hash = {row["torrent_hash"]: row for row in plan["view_targets"]}
-    assert by_hash["thash22a"]["target_save_path"] == str(
-        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22a"
-    )
+    assert by_hash["thash22a"]["target_save_path"] == str(target_root / "tv")
     assert by_hash["thash22b"]["target_save_path"] == str(
-        target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22b"
+        target_root / "tv" / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash22b"
     )
 
 
@@ -640,6 +638,114 @@ def test_root_relocation_plan_prefers_surviving_target_payload_when_source_root_
     assert plan["normalization"]["source_hint"] == "target_payload_root"
 
 
+def test_root_relocation_plan_reuses_existing_target_family_view_when_canonical_target_absent(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding"
+    source_path = source_root / "cross-seed" / "Aither (API)" / "The.West.Wing.S02"
+    existing_target = target_root / "cross-seed" / "TorrentLeech" / source_path.name
+
+    source_path.mkdir(parents=True, exist_ok=True)
+    existing_target.mkdir(parents=True, exist_ok=True)
+    (source_path / "episode1.mkv").write_bytes(b"aaa")
+    (source_path / "episode2.mkv").write_bytes(b"bbb")
+    (existing_target / "episode1.mkv").write_bytes(b"aaa")
+    (existing_target / "episode2.mkv").write_bytes(b"bbb")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (40, 'hash40', 231, ?, 2, 6, 'complete')
+        """,
+        (str(source_path),),
+    )
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags)
+        VALUES (?, 40, 231, ?, ?, 'cross-seed', 'cross-seed')
+        """,
+        [
+            ("hash40a", str(source_root / "cross-seed" / "Aither (API)"), source_path.name),
+            ("hash40b", str(source_root / "cross-seed" / "TorrentLeech"), source_path.name),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_root_relocation_batch(
+        catalog_path=db_path,
+        source_device=231,
+        target_device=141,
+        source_root=str(source_root),
+        target_root=str(target_root),
+        flat_only=False,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "REUSE"
+    assert plan["target_path"] == str(existing_target)
+    assert plan["normalization"]["target_family_exact_views"] == 1
+    assert plan["normalization"]["target_family_conflicts"] == 0
+    assert plan["normalization"]["target_family_donor_path"] == str(existing_target)
+
+
+def test_root_relocation_plan_marks_same_size_different_content_target_family_as_conflict(tmp_path):
+    db_path = tmp_path / "catalog.db"
+    source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding"
+    source_path = source_root / "cross-seed" / "Aither (API)" / "Show.S01"
+    conflicting_target = target_root / "cross-seed" / "TorrentLeech" / source_path.name
+
+    source_path.mkdir(parents=True, exist_ok=True)
+    conflicting_target.mkdir(parents=True, exist_ok=True)
+    (source_path / "episode1.mkv").write_bytes(b"aaa")
+    (source_path / "episode2.mkv").write_bytes(b"bbb")
+    (conflicting_target / "episode1.mkv").write_bytes(b"xxx")
+    (conflicting_target / "episode2.mkv").write_bytes(b"yyy")
+
+    conn = sqlite3.connect(db_path)
+    _init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes, status)
+        VALUES (41, 'hash41', 231, ?, 2, 6, 'complete')
+        """,
+        (str(source_path),),
+    )
+    conn.executemany(
+        """
+        INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name, category, tags)
+        VALUES (?, 41, 231, ?, ?, 'cross-seed', 'cross-seed')
+        """,
+        [
+            ("hash41a", str(source_root / "cross-seed" / "Aither (API)"), source_path.name),
+            ("hash41b", str(source_root / "cross-seed" / "TorrentLeech"), source_path.name),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    report = build_root_relocation_batch(
+        catalog_path=db_path,
+        source_device=231,
+        target_device=141,
+        source_root=str(source_root),
+        target_root=str(target_root),
+        flat_only=False,
+    )
+
+    assert report["summary"]["candidates"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "MOVE"
+    assert plan["normalization"]["review_required"] is True
+    assert plan["normalization"]["target_family_exact_views"] == 0
+    assert plan["normalization"]["target_family_conflicts"] == 1
+    assert plan["normalization"]["target_family_donor_path"] is None
+
+
 def test_root_relocation_plan_skips_groups_when_all_view_targets_are_already_targeted(tmp_path):
     db_path = tmp_path / "catalog.db"
     source_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
@@ -685,8 +791,8 @@ def test_root_relocation_plan_skips_groups_when_all_view_targets_are_already_tar
         flat_only=False,
     )
 
-    assert report["summary"]["candidates"] == 0
-    assert any(
-        item["reason"] == "already_targeted_view_targets"
-        for item in report["skipped"]
-    )
+    assert report["summary"]["candidates"] == 1
+    plan = report["plans"][0]
+    assert plan["decision"] == "MOVE"
+    assert plan["source_path"] == str(source_path)
+    assert plan["target_path"] == str(target_root / DEFAULT_UNIQUE_VIEW_SUBDIR / "thash30a" / "Brave.New.World.US.S01")

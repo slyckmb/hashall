@@ -6,15 +6,21 @@ from pathlib import Path
 import pytest
 
 from hashall.bencode import bencode_encode
-from hashall.fastresume import read_fastresume
+from hashall.fastresume import read_fastresume, validate_qb_target_save_path
 from hashall.qb_repair_payload_group import (
     CatalogLookup,
     build_repair_plan,
     can_reuse_good_save_path_directly,
+    classify_payload_relationship,
+    choose_repair_save_paths,
     ensure_same_payload_group,
+    load_payload_pair,
     parse_args,
     patch_fastresume_with_journal,
+    payload_identity_evidence_matches,
+    qbtree_evidence_matches,
 )
+from hashall.qb_repair_payload_group import PayloadIdentity
 
 
 def _init_catalog(db_path: Path) -> None:
@@ -78,6 +84,48 @@ def test_ensure_same_payload_group_rejects_mismatch(tmp_path: Path) -> None:
             ensure_same_payload_group(catalog, "goodhash", "brokenhash")
     finally:
         catalog.close()
+
+
+def test_payload_identity_evidence_matches_allows_catalog_drift_when_shape_matches(tmp_path: Path) -> None:
+    db_path = tmp_path / "catalog.db"
+    _init_catalog(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        "INSERT INTO payloads (payload_id, payload_hash, device_id, root_path, file_count, total_bytes) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (1, "payload-a", 1, "/pool/media/a", 22, 71017483824),
+            (2, "payload-b", 1, "/pool/media/b", 22, 71017483824),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO torrent_instances (torrent_hash, payload_id, device_id, save_path, root_name) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("goodhash", 1, 1, "/pool/media/save-a", "The.West.Wing.S02"),
+            ("brokenhash", 2, 1, "/pool/media/save-b", "The.West.Wing.S02"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = CatalogLookup(db_path)
+    try:
+        good, broken = load_payload_pair(catalog, "goodhash", "brokenhash")
+        assert payload_identity_evidence_matches(good, broken) is True
+    finally:
+        catalog.close()
+
+
+def test_qbtree_evidence_matches_when_root_names_differ() -> None:
+    good_files = [
+        {"name": "Show.Good/Disc1/track01.flac", "size": 10},
+        {"name": "Show.Good/Disc2/track01.flac", "size": 11},
+    ]
+    broken_files = [
+        {"name": "Show Bad/Disc1/track01.flac", "size": 10},
+        {"name": "Show Bad/Disc2/track01.flac", "size": 11},
+    ]
+
+    assert qbtree_evidence_matches(good_files, broken_files) is True
 
 
 def test_catalog_lookup_supports_pool_media(tmp_path: Path) -> None:
@@ -215,9 +263,83 @@ def test_patch_fastresume_with_journal_uses_shared_backup(tmp_path: Path) -> Non
     assert logged["backup_path"] == entry["backup_path"]
 
 
+def test_choose_repair_save_paths_rejects_broken_runtime_drift_to_tmp() -> None:
+    result = choose_repair_save_paths(
+        good_runtime_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+        broken_runtime_save_path="/tmp",
+        good_catalog_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+        broken_catalog_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+    )
+
+    assert result["good_effective_save_path"] == "/data/media/torrents/seeding/cross-seed/TorrentLeech"
+    assert result["broken_effective_save_path"] == "/data/media/torrents/seeding/cross-seed/TorrentLeech"
+    assert result["broken_reason"] == "catalog_broken_save_path_fallback"
+
+
+def test_choose_repair_save_paths_prefers_catalog_when_good_runtime_drifts() -> None:
+    result = choose_repair_save_paths(
+        good_runtime_save_path="/pool/media/torrents/seeding/cross-seed/TorrentLeech",
+        broken_runtime_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+        good_catalog_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+        broken_catalog_save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech",
+    )
+
+    assert result["good_effective_save_path"] == "/data/media/torrents/seeding/cross-seed/TorrentLeech"
+    assert result["good_reason"] == "catalog_good_save_path_fallback"
+
+def test_validate_qb_target_save_path_rejects_tmp() -> None:
+    with pytest.raises(ValueError, match="qb_target_save_path_disallowed"):
+        validate_qb_target_save_path(
+            "/tmp",
+            approved_roots=["/data/media/torrents/seeding", "/pool/media/torrents/seeding"],
+        )
+
+
+def test_validate_qb_target_save_path_rejects_outside_approved_roots() -> None:
+    with pytest.raises(ValueError, match="qb_target_save_path_outside_approved_roots"):
+        validate_qb_target_save_path(
+            "/elsewhere/root",
+            approved_roots=["/data/media/torrents/seeding", "/pool/media/torrents/seeding"],
+        )
+
+
+def test_classify_payload_relationship_allows_missing_broken_payload_when_file_tree_matches() -> None:
+    good = PayloadIdentity(
+        torrent_hash="goodhash",
+        payload_hash="payload-a",
+        root_path="/pool/media/Show.Good",
+        save_path="/pool/media/torrents/seeding",
+        root_name="Show.Good",
+        file_count=1,
+        total_bytes=10,
+    )
+    broken = PayloadIdentity(
+        torrent_hash="brokenhash",
+        payload_hash="",
+        root_path="/pool/data/Show Bad",
+        save_path="/pool/data/torrents/seeding",
+        root_name="Show Bad",
+        file_count=1,
+        total_bytes=10,
+    )
+    relationship = classify_payload_relationship(
+        good,
+        broken,
+        good_files=[{"name": "Show.Good/episode01.mkv", "size": 10}],
+        broken_files=[{"name": "Show Bad/episode01.mkv", "size": 10}],
+    )
+
+    assert relationship.allowed is True
+    assert relationship.reason == "broken_payload_hash_missing_file_tree_match"
 def test_parse_args_defaults_log_path_to_empty_string() -> None:
     args = parse_args(["--good", "goodhash", "--broken", "brokenhash"])
     assert args.log_path == ""
+    assert args.force_identical is False
+
+
+def test_parse_args_accepts_force_identical() -> None:
+    args = parse_args(["--good", "goodhash", "--broken", "brokenhash", "--force-identical"])
+    assert args.force_identical is True
 
 
 def test_build_repair_plan_does_not_stat_live_files(monkeypatch, tmp_path: Path) -> None:

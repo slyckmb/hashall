@@ -1,6 +1,6 @@
 # Hashall CLI Operations (Canonical)
 
-Last updated: 2026-02-28
+Last updated: 2026-04-02
 Status: canonical
 
 ## Purpose
@@ -49,15 +49,154 @@ hashall payload show <torrent_hash>
 hashall payload siblings <torrent_hash>
 ```
 
+Important scope note:
+
+- `payload` commands describe qB/torrent-root content only.
+- Scanning non-qB trees improves the `files_*` inventory and hash coverage, but does not by itself
+  create non-qB `payloads` under the current model.
+- Broader duplicate folder-tree / donor discovery for non-qB roots is a separate inventory feature
+  requirement, not a side effect of `payload sync`.
+
+Current read-only CLI in this area:
+
+- `hashall content inventory`
+- `hashall content duplicates`
+- `hashall content donors --torrent <hash>`
+- `hashall content reclaim-report`
+
+Current status:
+
+- These commands read existing `files_*`, `payloads`, and `torrent_instances` metadata only.
+- They do not yet materialize a durable non-qB `content_roots` table.
+- Current root discovery now prefers payload-like leaf content roots:
+  - recurse through broad container dirs
+  - treat loose files as single-file roots where appropriate
+  - keep real leaf directories grouped
+- This is good enough for first donor/duplicate reporting, but still needs durable inventory writes
+  and stronger filtering/ranking.
+- Current operator-friendly filters include:
+  - `hashall content inventory --kind orphan --path-contains movies --sort bytes --limit 20`
+  - `hashall content inventory --status complete --min-bytes 1000000000`
+  - `hashall content duplicates --path-contains west.wing --limit 10`
+  - `hashall content duplicates --sort count`
+  - `hashall content reclaim-report --root /pool/data/seeds --root /pool/media/torrents/seeding --min-bytes 1000000000`
+
+Reclaim-report guidance:
+
+- `hashall content reclaim-report` is read-only and exact-match-only.
+- It ranks duplicate non-qB roots into:
+  - one preferred `keep` path
+  - one or more `purge` candidates
+- It now protects live qB payload roots by default:
+  - if a duplicate root overlaps a live qB payload root, that root becomes the `keep` target
+  - fully protected duplicate groups are hidden by default
+  - use `--include-fully-protected` to audit those groups explicitly
+- It now also protects live rt session roots by default:
+  - pass `--rt-session-dir` when you need to point at a non-default rt session tree
+  - if one duplicate root is still referenced by rt, that path will not be emitted as a purge candidate
+  - if qB and rt each protect different roots in the same duplicate group, the report keeps the preferred path and emits no purge rows for that fully protected group unless `--include-fully-protected` is set
+- Current path preference is conservative:
+  - prefer `/pool/media/...`
+  - then `_rehome-unique`
+  - then `/pool/data/cross-seed-link`
+  - then `/pool/data/cross-seed`
+  - then `/pool/data/seeds`
+  - then `/pool/data/orphaned_data`
+  - then `/pool/data/RecycleBin`
+- Use it to feed a separate review/apply script; do not treat it as a blind deletion command.
+
+Drift-audit guidance:
+
+- `hashall rehome drift-audit` is no longer qB-only.
+- It now accepts `--rt-session-dir` and reports `rt_drift_rows` in the summary.
+- Rows that are otherwise qB-aligned but still drifted in rt remain visible in the sample output as `rt=drift`.
+
+rt session/repair guidance:
+
+- `hashall rt session-audit` audits live rt session roots from `.torrent.rtorrent` files.
+- It supports:
+  - `--session-dir`
+  - `--missing-only`
+  - `--path-contains`
+  - `--limit`
+  - `--json-output`
+- `hashall rt state-audit` is now shared-cache-backed by default.
+- It reads the shared silo RT cache from:
+  - `~/.cache/silo-rt/torrents.json`
+  - `~/.cache/silo-rt/torrents.meta.json`
+- It does **not** silently fall back to live RT XMLRPC when the cache is stale or degraded.
+- Use `--live` only for explicit operator diagnostics that are allowed to touch RT directly.
+- It supports:
+  - `--cache-file`
+  - `--meta-file`
+  - `--cache-max-age`
+  - `--live`
+  - `--state`
+  - `--bad-only`
+  - `--limit`
+  - `--json-output`
+- `hashall rt repair-report` reevaluates a historical drift/repair JSON report against the live rt session and current on-disk targets.
+- It supports:
+  - `--report`
+  - `--session-dir`
+  - `--action-bucket`
+  - `--ready-only`
+  - `--unresolved-only`
+  - `--limit`
+  - `--json-output`
+  - `--markdown-output`
+- The former rt-only Wave 1 scope is now historical; that bucket currently evaluates as fully aligned.
+- To verify that historical bucket explicitly, use:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --action-bucket fix_now_repoint_rt_to_pool_media`
+- To focus on remaining work after a wave has been partially or fully cleaned up, use:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --unresolved-only`
+- To regenerate an operator checklist from live state, use:
+  - `hashall rt repair-report --report out/rt-qb-savepath-drift-action-plan-2026-03-27.json --unresolved-only --markdown-output`
+
 ### Maintenance
 
 ```bash
 hashall refresh --verbose --scan-hash-mode fast --drift-policy quick
 hashall refresh --verbose --scan-hash-mode full --drift-policy full
+hashall refresh --payload-source rt --verbose --scan-hash-mode upgrade --drift-policy quick
+hashall refresh-status
+hashall refresh-dashboard
+hashall payload sync --source rt --upgrade-missing
 hashall sha256-backfill --device pool --dry-run
 hashall sha256-backfill --device pool
 hashall sha256-verify --device pool
+bin/run-hashall-upgrade-scans.sh
 ```
+
+Guidance:
+
+- Nested dataset scanning is now enabled by default for `hashall scan`.
+- `hashall refresh` now carries nested dataset scanning through each scan step and dedupes all covered roots / dataset aliases discovered under the refreshed scan roots.
+- `hashall payload sync` now supports `--source rt` for RT-backed payload materialization from session files.
+- `hashall refresh` now supports `--payload-source rt` so the final payload sync can use RT instead of qB.
+- The intended full-content refresh set currently includes:
+  - `/stash/media`
+  - `/pool/data`
+  - `/pool/media`
+  - `/mnt/hotspare6tb`
+- `bin/run-hashall-upgrade-scans.sh` is the explicit helper for the full upgrade scan sequence when operators want direct control instead of the wrapper command.
+- It now also hardens the final payload-sync stage:
+  - probes qB + RT readiness before payload sync
+  - restarts `gluetun`, `qbittorrent_vpn`, and `rtorrent_vpn` if the client stack is degraded
+  - retries payload sync once after restart
+  - `--payload-sync-only` resumes a failed overnight run from payload sync only, without rerunning the 4 scans
+- `hashall refresh-status` is the fast operator check for:
+  - current `refresh.lock` metadata
+  - whether the lock PID is still live
+  - any other live refresh holder processes detected from `/proc`
+  - the latest refresh log path
+- `hashall refresh-dashboard` renders the phase/task view for the latest refresh log by default.
+- `hashall payload sync --upgrade-missing` now writes per-scope resume checkpoints under:
+  - `~/.hashall/payload-sync-upgrade-state/`
+- Those checkpoint files are:
+  - reused automatically on the next matching upgrade scope
+  - ignored when the checkpoint is stale relative to current DB state
+  - removed automatically when the upgrade stage completes cleanly
 
 ### qB Cache / Compatibility
 
@@ -77,6 +216,10 @@ Guidance:
 - `bin/qb-checking-watch.sh` now defaults to cached reads; use `--no-cache` only for direct-mode debugging.
 - `bin/qb-start-seeding-gradual.sh` now defaults to cached `torrents/info` reads; use `--no-cache` only when debugging cache behavior.
 - Read-heavy list/status tooling should prefer cached reads; write/mutation endpoints can remain direct when immediate freshness matters.
+- During RT-primary transition, prefer:
+  - `hashall payload sync --source rt`
+  - `hashall refresh --payload-source rt`
+- Keep qB-backed sync available as a fallback until `rehome apply` and followup stop depending on qB runtime state.
 
 ## Standard Operator Loop
 
@@ -104,6 +247,7 @@ Root names remain as compatibility wrappers.
 - If content drift is suspected, do not trust metadata-only scans; rerun scan/refresh with `--drift-policy quick` or `--drift-policy full`.
 - If plan conflicts with live qB state, rebuild the plan.
 - If a command appears hung, check process and DB lock status.
+- For refresh-specific triage, run `hashall refresh-status` before deleting `~/.hashall/refresh.lock`.
 
 ## Related Canonical Docs
 

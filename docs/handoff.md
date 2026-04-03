@@ -1,5 +1,147 @@
 # Handoff Notes
 
+## 2026-03-21 Rehome Fastresume Rollback Fix (same branch)
+
+### What changed
+The `0.8.8` pilot exposed one more real bug after the qB runtime-settle fix: when hardened
+fastresume failed after patching, the executor rolled back copied files and views but did not
+restore the fastresume backups. That left qB pointed at `/pool/media` even though rollback had
+removed the target files.
+
+### Code fixes in this sub-session
+- `src/rehome/executor.py`
+  - hardened fastresume failure handling now calls the relocation tool rollback path when patching
+    had already succeeded
+  - this restores fastresume backups from the patch journal before qB is restarted
+- tests
+  - added a regression that forces a post-patch failure and asserts fastresume rollback is called
+
+### Validation
+- focused regression suite:
+  - `pytest tests/test_rehome_catalog_sync.py::test_hardened_fastresume_restores_fastresume_after_post_patch_failure tests/test_rehome_catalog_sync.py::test_hardened_fastresume_keep_paused_rejects_incomplete_qb_accounting tests/test_rehome_catalog_sync.py::test_hardened_fastresume_post_patch_reapplies_location_after_stale_runtime_save_path -q`
+  - result: `3 passed`
+
+### Operational note
+- Before another real `West Wing` pilot, the live qB rows need to be restored from the existing
+  fastresume backups so they point back to `/pool/data`.
+
+## 2026-03-21 Rehome qB Runtime Settle Fix (same branch)
+
+### What changed
+The `West Wing` pilot had already proved the data path was good. The remaining failure was the
+post-patch qB runtime handoff after restart: `.fastresume` was correctly patched to `/pool/media`,
+but runtime verification could still see stale `/pool/data` information during qB restart jitter.
+
+### Code fixes in this sub-session
+- `src/rehome/executor.py`
+  - hardened fastresume post-patch now waits for qB restart/authentication
+  - runtime `save_path` verification now requires live qB API data and ignores cache-fallback
+    reads during verification
+  - if runtime `save_path` stays stale after a good patch, executor retries with an explicit
+    `set_location(expected_save_path)` nudge before failing
+  - post-patch accounting now waits for qB to settle, but still fails fast for definite bad
+    states like `pausedDL`, `stoppedDL`, or nonzero `amount_left`
+- tests
+  - added regressions for cache-fallback save-path polling
+  - added regressions for post-patch accounting settle
+  - added regressions for stale runtime `save_path` recovered by reapplying the target location
+
+### Simulation / dry-run status
+- targeted simulation suite:
+  - `pytest tests/test_rehome_catalog_sync.py tests/test_rehome_atomic_relocation.py tests/test_rehome_normalize.py -q`
+  - result: `81 passed`
+- live dry-run:
+  - `/home/michael/.venvs/hashall/bin/python -m hashall.cli rehome apply out/rehome-plan-west-wing-s02-2026-03-21-v087.json --dryrun`
+  - completed cleanly
+
+### Operational conclusion
+- The remaining `West Wing` issue was a qB runtime settle bug, not another data-move bug.
+- Next step is to rerun the same real `West Wing` pilot with `0.8.8`.
+
+## 2026-03-21 Rehome Content Identity Hardening (same branch)
+
+### What changed
+The previous fix set still had one important blind spot: target-family reuse could treat a family
+as reusable when sibling roots matched only by file count and total bytes. That was not enough for
+real-world payloads like `Shining.Girls...`, where two `/pool/media` sibling roots had the same
+shape but different bytes.
+
+### Code fixes in this sub-session
+- `src/rehome/content_identity.py`
+  - new helper that computes a payload hash from the live filesystem bytes with inode-based hash
+    caching, so hardlinked siblings do not get rehashed repeatedly
+- `src/rehome/normalize.py`
+  - planner target-family inspection now compares actual content before choosing `REUSE`
+  - conflicting same-size roots now count as real target-family conflicts
+- `src/rehome/executor.py`
+  - executor target-family inspection now uses the same content proof
+  - apply blocks before any work when alternate target-side siblings are content-divergent
+  - stale-source reuse fallback is preserved when the source root is already gone
+- tests
+  - added regressions for same-size/different-content target roots and reuse-family preflight
+    blocking
+
+### Simulation / dry-run status
+- targeted simulation suite:
+  - `pytest tests/test_rehome_normalize.py tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py -q`
+  - result: `78 passed`
+- compile check:
+  - `python3 -m py_compile src/rehome/content_identity.py src/rehome/normalize.py src/rehome/executor.py`
+  - result: passed
+- live dry-run:
+  - `West Wing S02` remains a clean `MOVE`
+- live plan generation:
+  - `Shining.Girls...` now hashes real files to prove reuse and is therefore materially slower than
+    the old count/byte heuristic
+
+### Operational conclusion
+- `Shining.Girls...` is confirmed as a real target-side content conflict on `/pool/media`, not a
+  planner hallucination
+- `West Wing` is still the best current live `MOVE` pilot for proving the end-to-end rehome lane
+
+## 2026-03-20 Rehome Planner/Executor Hardening (same branch)
+
+### Root cause confirmed
+The real `West Wing S02` apply on 2026-03-20 copied ~71 GB and then failed on a target-side
+`Aither (API)` sibling conflict. The real bug was not rsync. It was that the planner/executor
+treated one canonical target root as the whole truth:
+
+- planner chose `MOVE` when that one canonical target root was absent
+- it ignored alternate sibling target views already present on `/pool/media`
+- target-view “preflight” was not actually read-only; it could relink identical files
+- rollback then deleted a pre-existing good target-side sibling view because it did not track
+  whether a view existed before the run
+
+### Code fixes in this sub-session
+- `src/rehome/normalize.py`
+  - planner now inspects the whole target family and reuses an exact existing target-side sibling
+    as the donor when one exists
+- `src/rehome/executor.py`
+  - family-level target inspection now runs before donor acquisition
+  - alternate conflicting target siblings now block `MOVE` before rsync
+  - rollback now only removes target views created during the current run
+  - move failures now write both `failure-pre-rollback` and `failure-post-rollback` reality
+    snapshots
+- `src/rehome/view_builder.py`
+  - target-view preflight now compares existing targets without relinking them
+
+### Simulation / dry-run status
+- targeted simulation suite:
+  - `pytest tests/test_rehome_normalize.py tests/test_rehome_atomic_relocation.py tests/test_rehome_catalog_sync.py -q`
+  - result: `76 passed`
+- module compile check:
+  - `python3 -m py_compile src/rehome/normalize.py src/rehome/view_builder.py src/rehome/executor.py`
+  - result: passed
+- fresh live dry-run (2026-03-20):
+  - `Shining.Girls...` = `REUSE`
+  - `The.West.Wing.S02...` = `MOVE`
+  - `Alien Romulus` = `MOVE`
+
+### Current important live fact
+- the previously good `/pool/media` `West Wing` donor is already gone from the earlier buggy run
+- therefore the fresh `West Wing` plan correctly has no reusable target-side donor right now
+- if you want a real reuse/reconcile pilot, use `Shining.Girls...`, not `West Wing`
+
 ## 2026-03-19 Migration Audit + Bug Fixes (same branch)
 
 ### Stale lock cleared
@@ -28,6 +170,10 @@ Test added: `test_daemon_once_resets_consecutive_failures_on_success`.
 - Migration scripts: `bin/migrate-pool-data-to-media.sh` ready for Phase 1 plan generation
 - Next step: run Phase 0→1 workflow (see RUN-STATE.md "2026-03-19 Migration Analysis")
 
+### Cross-repo naming note
+- Historical references in this repo to `qbitui` mean the external dashboard/cache repo now named `silo`.
+- Treat `silo` as the canonical external repo name; treat `qbitui` and `qbit-*` script names as migration-era compatibility terminology only.
+
 ---
 
 ## 2026-03-19 Migration Analysis (same branch)
@@ -46,6 +192,18 @@ Pool-data → pool-media migration is still `in_progress` with two blockers.
 1. Phase 0: clear lock, verify qB health, `hashall refresh --verbose`
 2. Phase 1: `hashall rehome relocate-plan --source-root /pool/data/media/torrents/seeding --target-root /pool/media/torrents/seeding --output out/rehome-plan-pool-data-to-media-2026-03-19.json`; audit coverage vs. 41 qB pool-data hashes
 3. Phase 2: execute in small curated batches
+
+**Special-case audit update (2026-03-19):**
+- The live `41` remaining `/pool/data` qB rows are split across three path families:
+  - `8` under `/pool/data/media/torrents/seeding`
+  - `28` under `/pool/data/cross-seed-link`
+  - `5` under `/pool/data/cross-seed`
+- Dry-running `bin/migrate-pool-data-to-media.sh` only selected the `8` rows under the exact
+  wrapper source root. It is therefore **not** the full 41-row resume command as currently wired.
+- That dry-run also included `Alien Romulus` (`1376e795...`), which remains a deliberate
+  repair/proving-lane item and should stay out of plain migration batches.
+- `Shining.Girls...` also remains unresolved as a bad reuse candidate and should stay excluded
+  from plain migration batches until it is explicitly re-audited.
 
 **Code notes for new plan:** 2026-03-18/19 audit fixes (bind-mount false-positive, unique-view single-torrent) may reclassify some previously-BLOCKED candidates. No executor logic changed.
 
@@ -128,7 +286,7 @@ Five bugs found; five fixed across two commits. Tests written for all fixes. No 
     - `src/hashall/qb_cache.py`
     - `bin/qb-cache-agent.py`
     - `bin/qb-cache-daemon.py`
-  - the local cache no longer depends on qbitui’s external raw-API cache scripts
+  - the local cache no longer depends on silo’s legacy pre-refactor raw-API cache scripts
   - qB server/profile detection now lives in `src/hashall/qbittorrent.py`
   - current normalized compatibility contract:
     - probe `app/version`
@@ -153,7 +311,7 @@ Five bugs found; five fixed across two commits. Tests written for all fixes. No 
     - `bin/qb-repair-batch.sh` discovery/no-ramp list reads
   - operator implication:
     - multiple list/status views should now share one cache daemon instead of each polling qB directly
-    - qbitui dashboard remains an external follow-up if you want the same compatibility/cache contract there
+    - silo dashboard remains an external follow-up if you want the same compatibility/cache contract there
 - Active docs are now intentionally minimal and stub-free:
   - canonical active set:
     - `README.md`

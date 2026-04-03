@@ -34,7 +34,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hashall.qbittorrent import QBitFile, QBitTorrent, get_qbittorrent_client
+from hashall.qbittorrent import QBitFile, QBitTorrent, get_qbittorrent_client, get_torrents_from_cache
 
 
 BROKEN_STATES_DEFAULT = "missingFiles,stoppedDL"
@@ -370,6 +370,18 @@ def parse_args() -> argparse.Namespace:
     p_plan.add_argument("--unique-subdir", default="_qb-repair-v2")
     p_plan.add_argument("--manifest-cache", default="", help="Optional JSON cache path")
     p_plan.add_argument("--report-json", default="")
+    p_plan.add_argument(
+        "--cache",
+        action="store_true",
+        default=False,
+        help="Read full torrent list from shared cache file instead of live API (default: disabled)",
+    )
+    p_plan.add_argument(
+        "--cache-max-age",
+        type=float,
+        default=30.0,
+        help="Max cache file age in seconds when --cache is set (default: 30)",
+    )
 
     p_prepare = sub.add_parser(
         "prepare", help="Build unique hardlinked payload roots from a plan report"
@@ -488,7 +500,14 @@ def shortlist_candidates(
 
 def build_plan(args: argparse.Namespace) -> int:
     qb = get_qbittorrent_client()
-    torrents = qb.get_torrents()
+    _cached_payloads = get_torrents_from_cache(max_age_s=args.cache_max_age) if args.cache else None
+    if _cached_payloads is None:
+        if args.cache:
+            print("cache_miss falling_back=live_api")
+        torrents = qb.get_torrents()
+    else:
+        print(f"cache_hit count={len(_cached_payloads)} max_age_s={args.cache_max_age}")
+        torrents = [qb._torrent_from_payload(p) for p in _cached_payloads]
     by_hash = {t.hash.lower(): t for t in torrents}
     trusted_states = {s.lower() for s in split_csv(args.trusted_states)}
     broken_states = {s.lower() for s in split_csv(args.broken_states)}

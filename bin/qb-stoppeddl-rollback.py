@@ -16,7 +16,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hashall.qbittorrent import get_qbittorrent_client
+from hashall.qbittorrent import get_qbittorrent_client, get_torrents_from_cache
 
 SCRIPT_NAME = Path(__file__).name
 SEMVER = "0.1.1"
@@ -227,6 +227,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(recheck=True)
     p.add_argument("--apply", action="store_true", help="Execute rollback changes (default: dry-run)")
     p.add_argument("--report-json", default="", help="Optional report JSON path")
+    p.add_argument(
+        "--cache",
+        action="store_true",
+        default=False,
+        help="Read torrent list from shared cache file instead of live API per-hash lookups (default: disabled)",
+    )
+    p.add_argument(
+        "--cache-max-age",
+        type=float,
+        default=30.0,
+        help="Max cache file age in seconds when --cache is set (default: 30)",
+    )
     return p
 
 
@@ -276,11 +288,22 @@ def main() -> int:
     }
 
     qb = None
+    _cache_by_hash: Optional[Dict[str, Any]] = None
     if args.apply:
         qb = get_qbittorrent_client()
         if not qb.test_connection() or not qb.login():
             print("ERROR qB connection/login failed", flush=True)
             return 2
+        if args.cache:
+            _cached_payloads = get_torrents_from_cache(max_age_s=args.cache_max_age)
+            if _cached_payloads is None:
+                print("cache_miss falling_back=live_api", flush=True)
+            else:
+                _cache_by_hash = {
+                    qb._torrent_from_payload(p).hash.lower(): qb._torrent_from_payload(p)
+                    for p in _cached_payloads
+                }
+                print(f"cache_hit count={len(_cache_by_hash)} max_age_s={args.cache_max_age}", flush=True)
 
     for idx, row in enumerate(selected, start=1):
         item: Dict[str, Any] = {
@@ -311,7 +334,10 @@ def main() -> int:
             continue
 
         summary["applied"] += 1
-        info = qb.get_torrent_info(row.hash) if qb is not None else None
+        if _cache_by_hash is not None:
+            info = _cache_by_hash.get(row.hash.lower())
+        else:
+            info = qb.get_torrent_info(row.hash) if qb is not None else None
         if info is None:
             item["status"] = "skipped_missing_torrent"
             item["detail"] = "missing_torrent_info"

@@ -3,6 +3,7 @@
 # ✅ Minimal fix: Added --no-export, fixed missing arg to verify_trees
 
 import click
+import hashlib
 import time
 import os
 import re
@@ -19,6 +20,16 @@ from hashall.verify_trees import verify_trees
 from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 from hashall.device import get_files_table_name
+from hashall.rt_cache import (
+    DEFAULT_RT_SHARED_CACHE_FILE,
+    DEFAULT_RT_SHARED_CACHE_META_FILE,
+)
+from hashall.rtorrent import (
+    DEFAULT_RT_RPC_URL,
+    DEFAULT_RT_SESSION_DIR,
+    live_rt_root_paths,
+    load_rt_inventory_rows,
+)
 from hashall import __version__
 
 DEFAULT_DB_PATH = Path.home() / ".hashall" / "catalog.db"
@@ -32,6 +43,64 @@ _RUN_HEADER_EMITTED = False
 _PIPE_BROKEN = False
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _payload_sync_upgrade_state_dir() -> Path:
+    return Path.home() / ".hashall" / "payload-sync-upgrade-state"
+
+
+def _payload_sync_upgrade_scope(
+    *,
+    db_path: Path,
+    source: str = "qb",
+    path_prefixes: list[Path],
+    category: str | None,
+    tag: str | None,
+    limit: int,
+    upgrade_order: str,
+    upgrade_root_limit: int,
+) -> str:
+    payload = {
+        "db_path": str(db_path.expanduser().resolve()),
+        "source": str(source or "qb").lower(),
+        "path_prefixes": [str(Path(p)) for p in path_prefixes],
+        "category": str(category or ""),
+        "tag": str(tag or ""),
+        "limit": int(limit or 0),
+        "upgrade_order": str(upgrade_order or "small-first").lower(),
+        "upgrade_root_limit": int(upgrade_root_limit or 0),
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _payload_sync_upgrade_root_key(item: dict) -> str:
+    return f"{int(item.get('device_id') or 0)}::{str(item.get('root_path') or '')}"
+
+
+def _payload_sync_upgrade_state_path(scope: str) -> Path:
+    safe_scope = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(scope or "").strip()) or "default"
+    return _payload_sync_upgrade_state_dir() / f"{safe_scope}.json"
+
+
+def _load_payload_sync_upgrade_state(state_path: Path) -> dict:
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"completed_roots": {}}
+    except Exception:
+        return {"completed_roots": {}}
+    completed = data.get("completed_roots")
+    if not isinstance(completed, dict):
+        completed = {}
+    return {"completed_roots": dict(completed)}
+
+
+def _write_payload_sync_upgrade_state(state_path: Path, state: dict) -> None:
+    _payload_sync_upgrade_state_dir().mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(state_path)
 
 
 def _apply_low_priority() -> None:
@@ -195,8 +264,12 @@ def cli():
 @click.option("--full", "hash_mode_flag", flag_value='full', help="Shortcut for --hash-mode=full")
 @click.option("--upgrade", "hash_mode_flag", flag_value='upgrade', help="Shortcut for --hash-mode=upgrade")
 @click.option("--show-path", is_flag=True, help="Show current file path above progress bar.")
-@click.option("--scan-nested-datasets", is_flag=True,
-              help="Detect nested mountpoints/datasets and scan them separately.")
+@click.option(
+    "--scan-nested-datasets/--no-scan-nested-datasets",
+    default=True,
+    show_default=True,
+    help="Detect nested mountpoints/datasets and scan them separately.",
+)
 @click.option(
     "--drift-policy",
     type=click.Choice(["metadata", "quick", "full"], case_sensitive=False),
@@ -356,6 +429,7 @@ def doctor_repair_identity(db, apply, max_actions, allow_bind_alias, report_json
         f"apply={str(bool(apply)).lower()} "
         f"payload_candidates={result.payload_candidates} "
         f"torrent_candidates={result.torrent_candidates} "
+        f"scan_session_candidates={result.scan_session_candidates} "
         f"actions_planned={result.actions_planned} "
         f"actions_applied={result.actions_applied} "
         f"unresolved={result.unresolved_count}"
@@ -382,9 +456,23 @@ def payload():
 
 @payload.command("sync")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--source",
+    type=click.Choice(["qb", "rt"], case_sensitive=False),
+    default="qb",
+    show_default=True,
+    help="Torrent client inventory source.",
+)
 @click.option("--qbit-url", default=None, help="qBittorrent URL (default: http://localhost:9003)")
 @click.option("--qbit-user", default=None, help="qBittorrent username (default: admin)")
 @click.option("--qbit-pass", default=None, help="qBittorrent password")
+@click.option(
+    "--rt-session-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=str(DEFAULT_RT_SESSION_DIR),
+    show_default=True,
+    help="rTorrent session directory for --source rt.",
+)
 @click.option("--category", default=None, help="Filter torrents by category")
 @click.option("--tag", default=None, help="Filter torrents by tag")
 @click.option(
@@ -436,9 +524,11 @@ def payload():
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
 def payload_sync(
     db,
+    source,
     qbit_url,
     qbit_user,
     qbit_pass,
+    rt_session_dir,
     category,
     tag,
     path_prefixes,
@@ -454,9 +544,9 @@ def payload_sync(
     low_priority,
 ):
     """
-    Sync torrent instances from qBittorrent and map to payloads.
+    Sync torrent instances from the selected client inventory and map to payloads.
 
-    Connects to qBittorrent (read-only), retrieves torrent list, maps torrents
+    Connects to the selected client inventory source, retrieves torrent list, maps torrents
     to on-disk payload roots, computes payload hashes, and updates the database.
 
     This command is idempotent and can be run multiple times.
@@ -465,7 +555,7 @@ def payload_sync(
     from hashall.qbittorrent import get_qbittorrent_client
     from hashall.payload import (
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
-        upgrade_payload_missing_sha256, prune_orphan_payloads,
+        upgrade_payload_missing_sha256, prune_orphan_payloads, count_missing_sha256_for_path,
     )
     from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
 
@@ -476,26 +566,49 @@ def payload_sync(
     # In dry-run mode, open read-only and skip migrations to guarantee "no writes".
     conn = connect_db(Path(db), read_only=dry_run, apply_migrations=not dry_run)
 
-    # Connect to qBittorrent
-    print("🔌 Connecting to qBittorrent...")
-    qbit = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
+    source = str(source or "qb").lower()
+    qbit = None
+    inventory_rows: list[dict[str, str]] = []
+    root_path_from_content_path = 0
+    root_path_files_fallback_calls = 0
 
-    if not qbit.test_connection():
-        err = getattr(qbit, "last_error", None)
-        msg = f"Failed to connect to qBittorrent at {qbit.base_url}"
-        if err:
-            msg = f"{msg}: {err}"
-        msg = f"{msg}\nHint: uses QBITTORRENT_API_URL and /mnt/config/secrets/qbittorrent/api.env"
-        raise click.ClickException(msg)
+    if source == "qb":
+        print("🔌 Connecting to qBittorrent...")
+        qbit = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
 
-    if not qbit.login():
-        err = getattr(qbit, "last_error", None)
-        msg = "Failed to authenticate with qBittorrent"
-        if err:
-            msg = f"{msg}: {err}"
-        raise click.ClickException(msg)
+        if not qbit.test_connection():
+            err = getattr(qbit, "last_error", None)
+            msg = f"Failed to connect to qBittorrent at {qbit.base_url}"
+            if err:
+                msg = f"{msg}: {err}"
+            msg = f"{msg}\nHint: uses QBITTORRENT_API_URL and /mnt/config/secrets/qbittorrent/api.env"
+            raise click.ClickException(msg)
 
-    print("✅ Connected to qBittorrent")
+        if not qbit.login():
+            err = getattr(qbit, "last_error", None)
+            msg = "Failed to authenticate with qBittorrent"
+            if err:
+                msg = f"{msg}: {err}"
+            raise click.ClickException(msg)
+
+        print("✅ Connected to qBittorrent")
+    else:
+        if category or tag:
+            raise click.ClickException("--category/--tag are only supported with --source qb")
+        session_path = Path(rt_session_dir).expanduser()
+        print(f"📥 Loading rTorrent session inventory from {session_path}...")
+        inventory_rows = [
+            {
+                "hash": row.torrent_hash,
+                "name": row.root_name,
+                "save_path": row.save_path,
+                "content_path": row.content_path,
+                "category": "",
+                "tags": "",
+            }
+            for row in load_rt_inventory_rows(session_path)
+        ]
+        print(f"✅ Loaded {len(inventory_rows)} rTorrent session rows")
 
     if dry_run and upgrade_missing:
         print("⚠️  DRY-RUN: ignoring --upgrade-missing (would modify DB)")
@@ -556,9 +669,29 @@ def payload_sync(
         return p
 
     # Get torrents
-    print("📥 Fetching torrents...")
-    torrents = qbit.get_torrents(category=category, tag=tag)
-    print(f"   Found {len(torrents)} torrents")
+    if source == "qb":
+        print("📥 Fetching torrents...")
+        torrents = qbit.get_torrents(category=category, tag=tag)
+        print(f"   Found {len(torrents)} torrents")
+        for torrent in torrents:
+            root_path = qbit.get_torrent_root_path(torrent)
+            if torrent.content_path:
+                root_path_from_content_path += 1
+            inventory_rows.append(
+                {
+                    "hash": torrent.hash,
+                    "name": torrent.name,
+                    "save_path": torrent.save_path,
+                    "content_path": torrent.content_path,
+                    "category": torrent.category,
+                    "tags": torrent.tags,
+                    "root_path": root_path,
+                }
+            )
+        root_path_files_fallback_calls = getattr(qbit, "root_path_files_fallback_calls", 0)
+    else:
+        print("📥 Using preloaded rTorrent inventory rows...")
+        print(f"   Found {len(inventory_rows)} torrents")
 
     # Process each torrent
     synced_count = 0
@@ -568,7 +701,6 @@ def payload_sync(
     processed = 0
     checked = 0
     prune_stats = None
-    root_path_from_content_path = 0
     write_batch_ops = 0
     write_batch_threshold = 400
     upgrade_queue: dict[str, dict] = {}
@@ -577,19 +709,17 @@ def payload_sync(
     upgrade_failed = 0
 
     with TwoLineProgress(
-        total=len(torrents),
+        total=len(inventory_rows),
         prefix="📦 Syncing payloads",
         unit="torrents",
         enabled=not dry_run
     ) as progress:
-        for torrent in torrents:
+        for torrent in inventory_rows:
             if limit and processed >= limit:
                 break
 
             # Get torrent root path
-            root_path = qbit.get_torrent_root_path(torrent)
-            if torrent.content_path:
-                root_path_from_content_path += 1
+            root_path = str(torrent.get("root_path") or torrent.get("content_path") or "").strip()
             root_canon = _canonicalize_payload_root_path(root_path)
 
             if prefix_paths:
@@ -598,20 +728,20 @@ def payload_sync(
                     checked += 1
                     if checked % 500 == 0:
                         print(
-                            f"\n   ⏳ Prefix filter progress: checked={checked}/{len(torrents)} "
+                            f"\n   ⏳ Prefix filter progress: checked={checked}/{len(inventory_rows)} "
                             f"processed={processed} skipped={skipped_prefix}"
                         )
                     progress.update(
-                        desc=f"filtering checked={checked}/{len(torrents)} "
+                        desc=f"filtering checked={checked}/{len(inventory_rows)} "
                              f"processed={processed} skipped={skipped_prefix}",
                         advance=1,
                     )
                     continue
 
-            progress.update(desc=f"{torrent.name[:60]}", advance=0)
+            progress.update(desc=f"{str(torrent.get('name') or '')[:60]}", advance=0)
 
-            print(f"\n🔄 Processing: {torrent.name[:50]}...")
-            print(f"   Hash: {torrent.hash}")
+            print(f"\n🔄 Processing: {str(torrent.get('name') or '')[:50]}...")
+            print(f"   Hash: {torrent.get('hash')}")
             print(f"   Path: {root_path}")
             if str(root_canon) != root_path:
                 print(f"   Canonical: {root_canon}")
@@ -626,8 +756,8 @@ def payload_sync(
                     upgrade_queue[key] = {
                         "root_path": key,
                         "device_id": payload.device_id,
-                        "first_torrent": torrent.name,
-                        "first_hash": torrent.hash,
+                        "first_torrent": str(torrent.get("name") or ""),
+                        "first_hash": str(torrent.get("hash") or ""),
                         "first_seen_order": processed,
                         "file_count": int(payload.file_count or 0),
                         "total_bytes": int(payload.total_bytes or 0),
@@ -639,14 +769,14 @@ def payload_sync(
 
                 # Insert/update torrent instance
                 torrent_instance = TorrentInstance(
-                    torrent_hash=torrent.hash,
+                    torrent_hash=str(torrent.get("hash") or ""),
                     payload_id=payload_id,
                     device_id=payload.device_id,
                     fs_uuid=payload.fs_uuid,
-                    save_path=torrent.save_path,
-                    root_name=torrent.name,
-                    category=torrent.category,
-                    tags=torrent.tags,
+                    save_path=str(torrent.get("save_path") or ""),
+                    root_name=str(torrent.get("name") or ""),
+                    category=str(torrent.get("category") or ""),
+                    tags=str(torrent.get("tags") or ""),
                     last_seen_at=time.time()
                 )
                 upsert_torrent_instance(conn, torrent_instance, commit=False)
@@ -696,6 +826,31 @@ def payload_sync(
             conn.commit()
             write_batch_ops = 0
 
+        upgrade_scope = _payload_sync_upgrade_scope(
+            db_path=Path(db),
+            source=source,
+            path_prefixes=prefix_paths,
+            category=category,
+            tag=tag,
+            limit=limit,
+            upgrade_order=order_mode,
+            upgrade_root_limit=upgrade_root_limit,
+        )
+        upgrade_state_path = _payload_sync_upgrade_state_path(upgrade_scope)
+        upgrade_state = _load_payload_sync_upgrade_state(upgrade_state_path)
+        completed_roots = upgrade_state["completed_roots"]
+        skipped_resumed = 0
+        pending_queue_items = []
+        for item in queue_items:
+            root_key = _payload_sync_upgrade_root_key(item)
+            root_path = str(item.get("root_path") or "")
+            device_id = int(item.get("device_id") or 0)
+            if root_key in completed_roots and count_missing_sha256_for_path(conn, device_id, root_path) == 0:
+                skipped_resumed += 1
+                continue
+            pending_queue_items.append(item)
+        queue_items = pending_queue_items
+
         total_upgrade_roots = len(queue_items)
         total_upgrade_bytes = sum(max(0, int(item.get("total_bytes") or 0)) for item in queue_items)
         print(
@@ -705,6 +860,11 @@ def payload_sync(
         )
         if upgrade_root_limit > 0:
             print(f"   upgrade root limit applied: {upgrade_root_limit}")
+        if skipped_resumed:
+            print(
+                f"   resume checkpoint: skipped already-complete roots={skipped_resumed} "
+                f"state={upgrade_state_path}"
+            )
 
         for root_idx, item in enumerate(queue_items, start=1):
             root_path = str(item.get("root_path") or "")
@@ -821,6 +981,13 @@ def payload_sync(
 
             if refreshed.status == "complete":
                 upgrade_completed += 1
+                completed_roots[_payload_sync_upgrade_root_key(item)] = {
+                    "root_path": root_path,
+                    "device_id": int(item.get("device_id") or 0),
+                    "completed_at": int(time.time()),
+                    "payload_hash": str(refreshed.payload_hash or ""),
+                }
+                _write_payload_sync_upgrade_state(upgrade_state_path, upgrade_state)
                 print(
                     f"   ✅ Upgrade complete: groups={upgraded_groups} "
                     f"payload_hash={str(refreshed.payload_hash or '')[:16]}"
@@ -833,6 +1000,11 @@ def payload_sync(
             f"queued={total_upgrade_roots} started={upgrade_started} "
             f"completed={upgrade_completed} failed={upgrade_failed} elapsed_s={upgrade_elapsed}"
         )
+        if upgrade_failed == 0 and total_upgrade_roots == upgrade_completed:
+            try:
+                upgrade_state_path.unlink()
+            except FileNotFoundError:
+                pass
         print("------------------------------------------------------------")
 
     if not dry_run and write_batch_ops:
@@ -853,19 +1025,25 @@ def payload_sync(
     print(f"   processed: {processed}")
     if prefix_paths:
         print(f"   skipped (path-prefix): {skipped_prefix}")
-        if processed == 0 and len(torrents) > 0:
+        if processed == 0 and len(inventory_rows) > 0:
             sample_prefixes = ", ".join(str(p) for p in prefix_paths[:3])
             print("   ⚠️  no torrents matched current path-prefix filters")
             print(f"      prefixes(sample): {sample_prefixes}")
-            print("      hint: verify canonical roots from qB content_path/save_path")
+            if source == "qb":
+                print("      hint: verify canonical roots from qB content_path/save_path")
+            else:
+                print("      hint: verify rt session directory paths and mount aliases")
     print(f"   complete payloads: {synced_count}")
     print(f"   incomplete payloads: {incomplete_count}")
     print(f"   missing in catalog: {missing_in_catalog}")
-    print(
-        "   root path source: "
-        f"content_path={root_path_from_content_path}, "
-        f"files_api_fallback={getattr(qbit, 'root_path_files_fallback_calls', 0)}"
-    )
+    if source == "qb":
+        print(
+            "   root path source: "
+            f"content_path={root_path_from_content_path}, "
+            f"files_api_fallback={root_path_files_fallback_calls}"
+        )
+    else:
+        print(f"   root path source: rt_session_rows={len(inventory_rows)}")
     if upgrade_missing and not dry_run:
         print(
             "   upgrade stage: "
@@ -1459,6 +1637,697 @@ def payload_siblings(torrent_hash, db):
             print(f"      Category: {torrent.category or 'None'}")
             print(f"      Root: {torrent.root_name}")
             print()
+
+
+@cli.group()
+def content():
+    """Read-only inventory/reporting for non-qB content roots."""
+    pass
+
+
+@cli.group()
+def rt():
+    """Read-only rtorrent session inspection."""
+    pass
+
+
+def _default_content_base_roots() -> list[str]:
+    return [
+        "/pool/data/orphaned_data",
+        "/pool/data/seeds",
+        "/pool/data/RecycleBin",
+    ]
+
+
+@content.command("inventory")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--root",
+    "base_roots",
+    multiple=True,
+    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+)
+@click.option("--kind", "root_kind", type=click.Choice(["archive", "orphan", "recovery", "other"]), help="Filter by root kind.")
+@click.option("--status", type=click.Choice(["complete", "incomplete"]), help="Filter by hash-completeness status.")
+@click.option("--path-contains", help="Only include roots whose path contains this substring.")
+@click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include roots at or above this size.")
+@click.option("--sort", "sort_by", type=click.Choice(["bytes", "files", "path"]), default="bytes", show_default=True, help="Sort order.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def content_inventory_cmd(db, base_roots, root_kind, status, path_contains, min_bytes, sort_by, limit, json_output):
+    """Discover canonical non-qB content roots from scanned files_* metadata."""
+    from hashall.content_inventory import discover_content_roots, filter_content_roots, sort_content_roots
+    from hashall.model import connect_db
+
+    roots = list(base_roots) or _default_content_base_roots()
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    items = discover_content_roots(conn, roots)
+    conn.close()
+    items = filter_content_roots(
+        items,
+        root_kind=root_kind,
+        status=status,
+        path_contains=path_contains,
+        min_bytes=min_bytes,
+    )
+    items = sort_content_roots(items, sort_by=sort_by)
+    if limit > 0:
+        items = items[:limit]
+
+    if json_output:
+        print(json.dumps([item.__dict__ for item in items], indent=2))
+        return
+
+    print("🗂️  Content inventory (read-only)")
+    print(f"   base_roots: {len(roots)}")
+    print(f"   discovered_roots: {len(items)}")
+    for item in items:
+        print(
+            f"   {item.root_kind:8s} {item.status:10s} "
+            f"files={item.file_count:<6d} sha256={item.files_with_sha256}/{item.file_count} "
+            f"bytes={item.total_bytes:,} root={item.root_path}"
+        )
+
+
+@content.command("duplicates")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--root",
+    "base_roots",
+    multiple=True,
+    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+)
+@click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
+@click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
+@click.option("--sort", "sort_by", type=click.Choice(["bytes", "count", "path"]), default="bytes", show_default=True, help="Sort order.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit groups shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def content_duplicates_cmd(db, base_roots, path_contains, min_bytes, sort_by, limit, json_output):
+    """List exact duplicate non-qB content roots."""
+    from hashall.content_inventory import (
+        discover_content_roots,
+        duplicate_content_roots,
+        filter_duplicate_groups,
+        sort_duplicate_groups,
+    )
+    from hashall.model import connect_db
+
+    roots = list(base_roots) or _default_content_base_roots()
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    groups = duplicate_content_roots(discover_content_roots(conn, roots))
+    conn.close()
+    groups = filter_duplicate_groups(groups, path_contains=path_contains, min_bytes=min_bytes)
+    groups = sort_duplicate_groups(groups, sort_by=sort_by)
+    if limit > 0:
+        groups = groups[:limit]
+
+    if json_output:
+        print(json.dumps([[item.__dict__ for item in group] for group in groups], indent=2))
+        return
+
+    print("🔁 Exact duplicate content roots")
+    print(f"   groups: {len(groups)}")
+    for idx, group in enumerate(groups, start=1):
+        first = group[0]
+        print(
+            f"   [{idx}] files={first.file_count} bytes={first.total_bytes:,} "
+            f"tree_hash={str(first.tree_hash or '')[:16]}"
+        )
+        for item in group:
+            print(f"      - {item.root_path}")
+
+
+@content.command("donors")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--torrent", "torrent_hash", required=True, help="Torrent hash to find donor roots for.")
+@click.option(
+    "--root",
+    "base_roots",
+    multiple=True,
+    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+)
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def content_donors_cmd(db, torrent_hash, base_roots, json_output):
+    """Find non-qB donor candidates for a qB payload/torrent."""
+    from hashall.content_inventory import discover_content_roots, donors_for_torrent
+    from hashall.model import connect_db
+
+    roots = list(base_roots) or _default_content_base_roots()
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    report = donors_for_torrent(conn, torrent_hash, discover_content_roots(conn, roots))
+    conn.close()
+
+    if json_output:
+        payload = dict(report)
+        payload["exact_non_qb_donors"] = [item.__dict__ for item in report["exact_non_qb_donors"]]
+        payload["candidate_non_qb_donors"] = [item.__dict__ for item in report["candidate_non_qb_donors"]]
+        payload["ranked_candidates"] = [item.__dict__ for item in report.get("ranked_candidates", [])]
+        print(json.dumps(payload, indent=2))
+        return
+
+    print(f"🩹 Donor candidates for {report['torrent_hash']}")
+    print(f"   root_path: {report['root_path']}")
+    print(f"   payload_hash: {report['payload_hash'] or '(incomplete)'}")
+    print(f"   files={report['file_count']} bytes={report['total_bytes']:,}")
+    print(f"   exact_non_qb_donors: {len(report['exact_non_qb_donors'])}")
+    for item in report["exact_non_qb_donors"]:
+        print(f"      - {item.root_path} ({item.root_kind})")
+    print(f"   candidate_non_qb_donors: {len(report['candidate_non_qb_donors'])}")
+    for item in report["candidate_non_qb_donors"][:10]:
+        print(f"      - {item.root_path} ({item.status} {item.root_kind})")
+
+
+@content.command("reclaim-report")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--root",
+    "base_roots",
+    multiple=True,
+    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+)
+@click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
+@click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit groups shown; 0 means no limit.")
+@click.option("--include-fully-protected", is_flag=True, help="Include duplicate groups where every root is protected by live qB ownership.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory used to protect live rt-owned roots.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def content_reclaim_report_cmd(db, base_roots, path_contains, min_bytes, limit, include_fully_protected, rt_session_dir, json_output):
+    """Rank exact duplicate non-qB roots into keep/purge candidates."""
+    from hashall.content_inventory import (
+        discover_content_roots,
+        duplicate_content_roots,
+        filter_duplicate_groups,
+        live_qb_root_paths,
+        rank_reclaim_groups,
+    )
+    from hashall.model import connect_db
+
+    roots = list(base_roots) or _default_content_base_roots()
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    groups = duplicate_content_roots(discover_content_roots(conn, roots))
+    protected_qb_roots = live_qb_root_paths(conn)
+    protected_rt_roots = live_rt_root_paths(Path(rt_session_dir).expanduser())
+    conn.close()
+    groups = filter_duplicate_groups(groups, path_contains=path_contains, min_bytes=min_bytes)
+    ranked = rank_reclaim_groups(
+        groups,
+        protected_qb_roots=protected_qb_roots,
+        protected_rt_roots=protected_rt_roots,
+        include_fully_protected=include_fully_protected,
+    )
+    if limit > 0:
+        ranked = ranked[:limit]
+
+    if json_output:
+        payload = [
+            {
+                "tree_hash": group.tree_hash,
+                "file_count": group.file_count,
+                "total_bytes": group.total_bytes,
+                "reclaimable_bytes": sum(item.total_bytes for item in group.purge),
+                "keep": group.keep.__dict__,
+                "purge": [item.__dict__ for item in group.purge],
+            }
+            for group in ranked
+        ]
+        print(json.dumps(payload, indent=2))
+        return
+
+    total_reclaimable = sum(sum(item.total_bytes for item in group.purge) for group in ranked)
+    print("🧹 Duplicate reclaim report (read-only)")
+    print(f"   groups: {len(ranked)}")
+    print(f"   reclaimable_bytes: {total_reclaimable:,}")
+    print(f"   protected_qb_roots: {len(protected_qb_roots)}")
+    print(f"   protected_rt_roots: {len(protected_rt_roots)}")
+    for idx, group in enumerate(ranked, start=1):
+        reclaimable = sum(item.total_bytes for item in group.purge)
+        print(
+            f"   [{idx}] files={group.file_count} bytes={group.total_bytes:,} "
+            f"reclaimable={reclaimable:,} tree_hash={group.tree_hash[:16]}"
+        )
+        print(f"      keep:  {group.keep.root_path} ({group.keep.reason})")
+        for item in group.purge:
+            print(f"      purge: {item.root_path}")
+
+
+@rt.command("session-audit")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--path-contains", help="Only include session rows whose directory contains this substring.")
+@click.option("--missing-only", is_flag=True, help="Only include rows whose current rt session path is missing on disk.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def rt_session_audit_cmd(session_dir, path_contains, missing_only, limit, json_output):
+    """Audit current rtorrent session roots for missing/existing paths."""
+    from hashall.rtorrent import load_rt_session_directories
+
+    rows = list(load_rt_session_directories(Path(session_dir).expanduser()).values())
+    needle = str(path_contains or "").strip().lower()
+    filtered = []
+    for row in rows:
+        if missing_only and row.path_exists:
+            continue
+        if needle and needle not in row.directory.lower():
+            continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: (row.path_exists, row.directory.lower(), row.torrent_hash))
+    if limit > 0:
+        filtered = filtered[:limit]
+
+    summary = {
+        "session_dir": str(Path(session_dir).expanduser()),
+        "total_rows": len(rows),
+        "missing_rows": sum(1 for row in rows if not row.path_exists),
+        "existing_rows": sum(1 for row in rows if row.path_exists),
+    }
+
+    if json_output:
+        payload = {
+            "summary": summary,
+            "rows": [row.__dict__ for row in filtered],
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
+    print("🧭 rt session audit")
+    print(f"   session_dir: {summary['session_dir']}")
+    print(f"   total_rows: {summary['total_rows']}")
+    print(f"   missing_rows: {summary['missing_rows']}")
+    print(f"   existing_rows: {summary['existing_rows']}")
+    for row in filtered:
+        state = "exists" if row.path_exists else "missing"
+        print(f"   {state:7s} {row.torrent_hash[:16]} {row.directory}")
+
+
+@rt.command("state-audit")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared silo RT cache rows JSON.")
+@click.option("--meta-file", default=str(DEFAULT_RT_SHARED_CACHE_META_FILE), show_default=True, help="Shared silo RT cache metadata JSON.")
+@click.option("--cache-max-age", type=float, default=60.0, show_default=True, help="Freshness threshold for shared RT cache in seconds.")
+@click.option("--live", "use_live", is_flag=True, help="Bypass shared cache and query rTorrent XMLRPC directly. Use only for explicit diagnostics.")
+@click.option("--state", "state_filters", multiple=True, help="Only include rows in these derived states.")
+@click.option("--bad-only", is_flag=True, help="Only include rows not already in uploading/stalledUP/stoppedUP.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def rt_state_audit_cmd(rpc_url, cache_file, meta_file, cache_max_age, use_live, state_filters, bad_only, limit, json_output):
+    """Audit current rtorrent torrent states from shared cache or live XMLRPC."""
+    from hashall.rt_cache import load_rt_cache_snapshot
+    from hashall.rtorrent import fetch_rt_status_rows
+
+    if use_live:
+        rows = fetch_rt_status_rows(rpc_url=rpc_url)
+        summary = {
+            "read_mode": "live",
+            "rpc_url": rpc_url,
+            "rows": len(rows),
+            "state_counts": {},
+        }
+    else:
+        snapshot = load_rt_cache_snapshot(
+            cache_file=Path(cache_file).expanduser(),
+            meta_file=Path(meta_file).expanduser(),
+            max_age_s=float(cache_max_age),
+        )
+        rows = list(snapshot["rows"])
+        summary = {
+            "read_mode": snapshot["read_mode"],
+            "cache_file": snapshot["cache_file"],
+            "meta_file": snapshot["meta_file"],
+            "cache_source": snapshot["cache_source"],
+            "cache_age_s": snapshot["cache_age_s"],
+            "cache_max_age_s": snapshot["max_age_s"],
+            "freshness": snapshot["freshness"],
+            "last_error": snapshot["last_error"],
+            "xmlrpc_url": snapshot["xmlrpc_url"],
+            "consecutive_failures": snapshot["consecutive_failures"],
+            "rows": len(rows),
+            "state_counts": {},
+        }
+    wanted = {str(item).strip() for item in state_filters if str(item).strip()}
+    if bad_only:
+        rows = [row for row in rows if row["state"] not in {"uploading", "stalledUP", "stoppedUP"}]
+    if wanted:
+        rows = [row for row in rows if row["state"] in wanted]
+    rows.sort(key=lambda row: (row["state"], row["name"].lower(), row["hash"]))
+    if limit > 0:
+        rows = rows[:limit]
+
+    summary["rows"] = len(rows)
+    for row in rows:
+        summary["state_counts"][row["state"]] = summary["state_counts"].get(row["state"], 0) + 1
+
+    if json_output:
+        print(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        return
+
+    print("📊 rt state audit")
+    print(f"   read_mode: {summary['read_mode']}")
+    if use_live:
+        print(f"   rpc_url: {summary['rpc_url']}")
+    else:
+        print(f"   cache_file: {summary['cache_file']}")
+        print(f"   meta_file: {summary['meta_file']}")
+        print(f"   freshness: {summary['freshness']}")
+        print(f"   cache_source: {summary['cache_source']}")
+        print(f"   cache_age_s: {summary['cache_age_s']}")
+        if summary["xmlrpc_url"]:
+            print(f"   xmlrpc_url: {summary['xmlrpc_url']}")
+        if summary["last_error"]:
+            print(f"   last_error: {summary['last_error']}")
+        if summary["consecutive_failures"]:
+            print(f"   consecutive_failures: {summary['consecutive_failures']}")
+    print(f"   rows: {summary['rows']}")
+    print(f"   state_counts: {summary['state_counts']}")
+    for row in rows:
+        print(f"   {row['state']:10s} {row['hash'][:16]} {row['name']} :: {row['directory']}")
+
+
+@rt.command("repoint")
+@click.option("--hash", "torrent_hash", required=True, help="Torrent hash to repoint.")
+@click.option("--target-directory", required=True, help="Directory to write via d.directory.set.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute the repoint. Default is dry-run.")
+def rt_repoint_cmd(torrent_hash, target_directory, rpc_url, do_apply):
+    """Directly repoint a single rtorrent hash to a new directory."""
+    from hashall.rtorrent import (
+        DEFAULT_RT_SESSION_DIR,
+        load_rt_torrent_meta,
+        normalize_rt_target_directory,
+        rt_apply_directory_repoint,
+    )
+
+    torrent_key = str(torrent_hash).strip().lower()
+    torrent_meta = load_rt_torrent_meta(DEFAULT_RT_SESSION_DIR, torrent_key)
+    normalized_target = normalize_rt_target_directory(target_directory, torrent_meta)
+
+    print("↪️  rt repoint")
+    print(f"   hash: {torrent_key}")
+    print(f"   target_directory: {target_directory}")
+    if normalized_target != target_directory:
+        print(f"   normalized_target_directory: {normalized_target}")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    if not do_apply:
+        return
+    completed = rt_apply_directory_repoint(torrent_key, normalized_target, rpc_url=rpc_url)
+    print(f"   completed: {completed}")
+
+
+@rt.command("recheck")
+@click.option("--hash", "hash_filters", multiple=True, required=True, help="Torrent hash(es) to recheck.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute the recheck. Default is dry-run.")
+def rt_recheck_cmd(hash_filters, rpc_url, do_apply):
+    """Force rtorrent to hash-check and restart one or more torrents."""
+    from hashall.rtorrent import rt_recheck_torrent
+
+    hashes = [str(item).strip().lower() for item in hash_filters if str(item).strip()]
+    print("🔁 rt recheck")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    print(f"   hashes: {len(hashes)}")
+    for torrent_key in hashes:
+        print(f"   hash: {torrent_key}")
+        if not do_apply:
+            continue
+        completed = rt_recheck_torrent(torrent_key, rpc_url=rpc_url)
+        print(f"      completed: {completed}")
+
+
+@rt.command("session-reset")
+@click.option("--hash", "hash_filters", multiple=True, required=True, help="Torrent hash(es) to reset from session.")
+@click.option("--target-directory", required=True, help="Desired content root to restore after reload.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session files.")
+@click.option("--backup-root", type=click.Path(file_okay=False), default="out/rt-session-reset", show_default=True, help="Backup directory for copied session files.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute the session reset. Default is dry-run.")
+def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_root, rpc_url, do_apply):
+    """Rebuild one or more rt torrents from .torrent plus existing data."""
+    from hashall.rtorrent import rt_reset_torrent_session
+
+    hashes = [str(item).strip().lower() for item in hash_filters if str(item).strip()]
+    session_path = Path(session_dir).expanduser()
+    backup_path = Path(backup_root).expanduser()
+    print("♻️  rt session reset")
+    print(f"   session_dir: {session_path}")
+    print(f"   backup_root: {backup_path}")
+    print(f"   target_directory: {target_directory}")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    print(f"   hashes: {len(hashes)}")
+    for torrent_key in hashes:
+        print(f"   hash: {torrent_key}")
+        if not do_apply:
+            continue
+        result = rt_reset_torrent_session(
+            torrent_key,
+            target_directory=target_directory,
+            session_dir=session_path,
+            backup_root=backup_path,
+            rpc_url=rpc_url,
+        )
+        print(f"      backup_dir: {result['backup_dir']}")
+        if result["normalized_target_directory"] != target_directory:
+            print(f"      normalized_target_directory: {result['normalized_target_directory']}")
+        print(f"      completed: {result['completed']}")
+
+
+def _build_rt_repair_rows(report_path: str, session_dir: str, action_bucket: str | None) -> tuple[list[dict], list[dict]]:
+    from hashall.rtorrent import (
+        derive_rt_target_directory,
+        load_rt_session_directories,
+        load_rt_torrent_meta,
+        normalize_rt_target_directory,
+        rt_path_aligned,
+    )
+
+    report = json.loads(Path(report_path).expanduser().read_text(encoding="utf-8"))
+    source_rows = list(report.get("rows") or [])
+    session_path = Path(session_dir).expanduser()
+    session_rows = load_rt_session_directories(session_path)
+    bucket_filter = str(action_bucket or "").strip()
+    rows = []
+    for row in source_rows:
+        if bucket_filter and row.get("action_bucket") != bucket_filter:
+            continue
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        if not torrent_hash:
+            continue
+        session_entry = session_rows.get(torrent_hash)
+        current_rt_directory = (
+            session_entry.directory if session_entry else str(row.get("rt_directory") or "").strip()
+        )
+        current_rt_exists = session_entry.path_exists if session_entry else bool(
+            current_rt_directory and Path(current_rt_directory).exists()
+        )
+        candidate_targets = []
+        for raw in (row.get("qb_content_path"), row.get("qb_save_path")):
+            text = str(raw or "").strip()
+            if text and text not in candidate_targets:
+                candidate_targets.append(text)
+        preferred_target = ""
+        preferred_target_exists = False
+        for target in candidate_targets:
+            if Path(target).exists():
+                preferred_target = target
+                preferred_target_exists = True
+                break
+        if not preferred_target and candidate_targets:
+            preferred_target = candidate_targets[0]
+        torrent_meta = load_rt_torrent_meta(session_path, torrent_hash)
+        target_directory = derive_rt_target_directory(
+            qb_save_path=row.get("qb_save_path"),
+            qb_content_path=row.get("qb_content_path"),
+            torrent_meta=torrent_meta,
+        )
+        target_directory = normalize_rt_target_directory(target_directory, torrent_meta)
+        target_directory_exists = bool(target_directory and Path(target_directory).exists())
+        aligned_now = rt_path_aligned(
+            current_rt_directory,
+            qb_save_path=row.get("qb_save_path"),
+            qb_content_path=row.get("qb_content_path"),
+        ) and current_rt_exists
+        if aligned_now:
+            repair_status = "aligned_now"
+        elif preferred_target_exists and current_rt_exists:
+            repair_status = "ready_repoint_drifted_rt_root"
+        elif preferred_target_exists:
+            repair_status = "ready_repoint_missing_rt_root"
+        elif candidate_targets:
+            repair_status = "blocked_missing_target"
+        else:
+            repair_status = "missing_target_info"
+        rows.append(
+            {
+                "hash": torrent_hash,
+                "name": row.get("name"),
+                "action_bucket": row.get("action_bucket"),
+                "repair_status": repair_status,
+                "current_rt_directory": current_rt_directory,
+                "current_rt_exists": current_rt_exists,
+                "preferred_target": preferred_target,
+                "preferred_target_exists": preferred_target_exists,
+                "target_directory": target_directory,
+                "target_directory_exists": target_directory_exists,
+                "qb_save_path": row.get("qb_save_path"),
+                "qb_content_path": row.get("qb_content_path"),
+                "info_name": torrent_meta.info_name if torrent_meta else "",
+                "is_multi_file": torrent_meta.is_multi_file if torrent_meta else None,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            row["repair_status"],
+            row["action_bucket"] or "",
+            str(row["name"] or "").lower(),
+            row["hash"],
+        )
+    )
+    return source_rows, rows
+
+
+@rt.command("repair-report")
+@click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False), required=True, help="Historical drift/repair action-plan JSON to reevaluate against the live rt session.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--action-bucket", help="Only include rows from this action bucket.")
+@click.option("--ready-only", is_flag=True, help="Only include rows that are immediately ready for direct repoint.")
+@click.option("--unresolved-only", is_flag=True, help="Only include rows that are not already aligned now.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+@click.option("--markdown-output", is_flag=True, help="Emit a markdown checklist.")
+def rt_repair_report_cmd(report_path, session_dir, action_bucket, ready_only, unresolved_only, limit, json_output, markdown_output):
+    """Reevaluate historical rt repair rows against the live rt session and on-disk targets."""
+    source_rows, rows = _build_rt_repair_rows(report_path, session_dir, action_bucket)
+    filtered = []
+    for row in rows:
+        if ready_only and not row["repair_status"].startswith("ready_repoint_"):
+            continue
+        if unresolved_only and row["repair_status"] == "aligned_now":
+            continue
+        filtered.append(row)
+    rows = filtered
+    if limit > 0:
+        rows = rows[:limit]
+
+    summary = {
+        "report_path": str(Path(report_path).expanduser()),
+        "session_dir": str(Path(session_dir).expanduser()),
+        "source_rows": len(source_rows),
+        "rows": len(rows),
+        "repair_status_counts": {},
+        "action_bucket_counts": {},
+    }
+    for row in rows:
+        summary["repair_status_counts"][row["repair_status"]] = (
+            summary["repair_status_counts"].get(row["repair_status"], 0) + 1
+        )
+        summary["action_bucket_counts"][row["action_bucket"]] = (
+            summary["action_bucket_counts"].get(row["action_bucket"], 0) + 1
+        )
+
+    if json_output:
+        print(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        return
+
+    if markdown_output:
+        print("# RT Repair Report")
+        print()
+        print(f"- report_path: `{summary['report_path']}`")
+        print(f"- session_dir: `{summary['session_dir']}`")
+        print(f"- source_rows: `{summary['source_rows']}`")
+        print(f"- rows: `{summary['rows']}`")
+        print(f"- repair_status_counts: `{summary['repair_status_counts']}`")
+        print()
+        current_bucket = None
+        for idx, row in enumerate(rows, start=1):
+            bucket = str(row.get("action_bucket") or "(none)")
+            if bucket != current_bucket:
+                current_bucket = bucket
+                print(f"## {current_bucket}")
+                print()
+            print(f"### {idx}. {row.get('name')}")
+            print()
+            print(f"- hash: `{row['hash']}`")
+            print(f"- repair_status: `{row['repair_status']}`")
+            print(f"- current_rt_directory: `{row['current_rt_directory']}`")
+            print(f"- current_rt_exists: `{row['current_rt_exists']}`")
+            print(f"- preferred_target: `{row['preferred_target']}`")
+            print(f"- preferred_target_exists: `{row['preferred_target_exists']}`")
+            print(f"- target_directory: `{row['target_directory']}`")
+            print(f"- target_directory_exists: `{row['target_directory_exists']}`")
+            print()
+        return
+
+    print("🩺 rt repair report")
+    print(f"   report_path: {summary['report_path']}")
+    print(f"   session_dir: {summary['session_dir']}")
+    print(f"   source_rows: {summary['source_rows']}")
+    print(f"   rows: {summary['rows']}")
+    print(f"   repair_status_counts: {summary['repair_status_counts']}")
+    for row in rows:
+        print(
+            f"   {row['repair_status']:27s} {row['hash'][:16]} "
+            f"{row['name']} :: rt={row['current_rt_directory']} -> target={row['target_directory'] or row['preferred_target']}"
+        )
+
+
+@rt.command("repair-apply")
+@click.option("--report", "report_path", type=click.Path(exists=True, dir_okay=False), required=True, help="Historical drift/repair action-plan JSON to reevaluate and apply against the live rt session.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--action-bucket", help="Only include rows from this action bucket.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict apply to specific torrent hash(es).")
+@click.option("--include-drifted-existing", is_flag=True, help="Also apply rows where the current rt root exists but should still be repointed.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows applied; 0 means no limit.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute rt repoints. Default is dry-run.")
+def rt_repair_apply_cmd(report_path, session_dir, rpc_url, action_bucket, hash_filters, include_drifted_existing, limit, do_apply):
+    """Apply live rt repair-report rows that are ready for direct repoint."""
+    from hashall.rtorrent import rt_apply_directory_repoint
+
+    _, rows = _build_rt_repair_rows(report_path, session_dir, action_bucket)
+    hash_set = {str(item).strip().lower() for item in hash_filters if str(item).strip()}
+    selected = []
+    for row in rows:
+        if row["repair_status"] == "ready_repoint_missing_rt_root":
+            pass
+        elif include_drifted_existing and row["repair_status"] == "ready_repoint_drifted_rt_root":
+            pass
+        else:
+            continue
+        if hash_set and row["hash"] not in hash_set:
+            continue
+        if not row["target_directory"]:
+            continue
+        selected.append(row)
+    if limit > 0:
+        selected = selected[:limit]
+
+    print("🛠️  rt repair apply")
+    print(f"   report_path: {Path(report_path).expanduser()}")
+    print(f"   session_dir: {Path(session_dir).expanduser()}")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    print(f"   candidates: {len(selected)}")
+    if not selected:
+        return
+
+    applied = 0
+    errors = 0
+    for row in selected:
+        print(
+            f"   {row['repair_status']:27s} {row['hash'][:16]} "
+            f"{row['name']} :: {row['current_rt_directory']} -> {row['target_directory']}"
+        )
+        if not do_apply:
+            continue
+        try:
+            rt_apply_directory_repoint(row["hash"], row["target_directory"], rpc_url=rpc_url)
+            applied += 1
+            print("      result: OK")
+        except Exception as exc:
+            errors += 1
+            print(f"      result: ERROR {exc}")
+    print(f"   applied: {applied}")
+    print(f"   errors: {errors}")
 
 @payload.command("collisions")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
@@ -3293,18 +4162,20 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
             click.echo(f"💡 Review errors: hashall link show-plan {plan_id}")
 
         conn.close()
-        return 0 if result.actions_failed == 0 else 1
+        if result.actions_failed == 0:
+            return 0
+        raise click.exceptions.Exit(1)
 
     except ValueError as e:
         click.echo(f"❌ Error: {e}", err=True)
         conn.close()
-        return 1
+        raise click.exceptions.Exit(1)
     except Exception as e:
         click.echo(f"❌ Unexpected error: {e}", err=True)
         import traceback
         traceback.print_exc()
         conn.close()
-        return 1
+        raise click.exceptions.Exit(1)
 
 
 # Devices command group
@@ -3926,10 +4797,18 @@ def devices_preferred_mount(device, mount_point, db):
 # Canonical CLI surface:
 # - `hashall rehome ...` exposes the full rehome command tree
 # - `hashall refresh` is a direct top-level alias for the rehome refresh flow
-from rehome.cli import cli as rehome_cli, refresh_cmd as rehome_refresh_cmd
+# - `hashall refresh-dashboard` exposes the refresh task status view directly
+from rehome.cli import (
+    cli as rehome_cli,
+    refresh_cmd as rehome_refresh_cmd,
+    refresh_dashboard_cmd as rehome_refresh_dashboard_cmd,
+    refresh_status_cmd as rehome_refresh_status_cmd,
+)
 
 cli.add_command(rehome_cli, name="rehome")
 cli.add_command(rehome_refresh_cmd, name="refresh")
+cli.add_command(rehome_refresh_dashboard_cmd, name="refresh-dashboard")
+cli.add_command(rehome_refresh_status_cmd, name="refresh-status")
 
 
 if __name__ == "__main__":

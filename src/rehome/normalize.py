@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import quote
 
 from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias, to_relpath
+from rehome.content_identity import RootContentSnapshot, compare_root_content
 
 
 @dataclass(frozen=True)
@@ -342,12 +343,98 @@ def _map_target_save_path(
 
 def _choose_unique_target_save(
     *,
-    target_root: Path,
+    baseline_target_save_path: Path,
     torrent_hash: str,
     unique_view_subdir: str,
 ) -> Path:
     subdir = _sanitize_path_component(unique_view_subdir or DEFAULT_UNIQUE_VIEW_SUBDIR)
-    return _canonical(target_root / subdir / torrent_hash)
+    return _canonical(baseline_target_save_path / subdir / torrent_hash)
+
+
+def _path_stats(path: Path) -> Tuple[bool, int, int]:
+    target = _canonical(path)
+    if not target.exists():
+        return False, 0, 0
+    if target.is_file():
+        return True, 1, int(target.stat().st_size)
+
+    file_count = 0
+    total_bytes = 0
+    for candidate in target.rglob("*"):
+        if not candidate.is_file():
+            continue
+        file_count += 1
+        total_bytes += int(candidate.stat().st_size)
+    return True, file_count, total_bytes
+
+
+def _inspect_existing_target_family(
+    *,
+    source_path: Path,
+    target_path: Path,
+    view_targets: Sequence[Dict[str, str]],
+    expected_count: int,
+    expected_bytes: int,
+    root_content_cache: Optional[Dict[str, RootContentSnapshot]] = None,
+    path_sha_cache: Optional[Dict[Tuple[str, int, int], Optional[str]]] = None,
+    inode_sha_cache: Optional[Dict[Tuple[int, int, int, int], Optional[str]]] = None,
+) -> Tuple[Optional[Path], List[str], List[str]]:
+    candidate_roots: List[Path] = []
+    seen: Set[str] = set()
+    source_exists = _canonical(source_path).exists()
+
+    def _add(path: Optional[Path]) -> None:
+        if path is None:
+            return
+        normalized = _canonical(path)
+        key = str(normalized)
+        if key in seen:
+            return
+        seen.add(key)
+        candidate_roots.append(normalized)
+
+    _add(target_path)
+    for target in view_targets:
+        save_path = str(target.get("target_save_path") or "").strip()
+        root_name = str(target.get("root_name") or "").strip()
+        if not save_path or not root_name:
+            continue
+        _add(Path(save_path) / root_name)
+
+    exact_roots: List[str] = []
+    conflicting_roots: List[str] = []
+    donor_path: Optional[Path] = None
+
+    for candidate in candidate_roots:
+        if candidate == _canonical(source_path):
+            continue
+        exists, file_count, total_bytes = _path_stats(candidate)
+        if not exists:
+            continue
+        if int(file_count) == int(expected_count) and int(total_bytes) == int(expected_bytes):
+            if not source_exists:
+                exact_roots.append(str(candidate))
+                if donor_path is None:
+                    donor_path = candidate
+                continue
+            comparison = compare_root_content(
+                source_path,
+                candidate,
+                root_cache=root_content_cache,
+                path_sha_cache=path_sha_cache,
+                inode_sha_cache=inode_sha_cache,
+            )
+            if comparison.matches:
+                exact_roots.append(str(candidate))
+                if donor_path is None:
+                    donor_path = candidate
+            else:
+                conflicting_roots.append(str(candidate))
+            continue
+        if int(file_count) > 0 or int(total_bytes) > 0:
+            conflicting_roots.append(str(candidate))
+
+    return donor_path, exact_roots, conflicting_roots
 
 
 def _build_target_view_targets(
@@ -397,31 +484,21 @@ def _build_target_view_targets(
         candidates.append((torrent_hash, save_path, root_name, target_save_path))
 
     affected_torrents = [torrent_hash for torrent_hash, _, _, _ in candidates]
-    force_unique_targets = bool(unique_per_torrent and len(candidates) > 1)
     view_targets: List[Dict[str, str]] = []
     unique_views = 0
     seen_view_keys: Set[Tuple[str, str]] = set()
 
     for torrent_hash, save_path, root_name, baseline_target_save_path in candidates:
         target_save_path = baseline_target_save_path
-        if force_unique_targets:
+        view_key = (str(target_save_path), root_name)
+        if view_key in seen_view_keys and (unique_on_collision or unique_per_torrent):
             target_save_path = _choose_unique_target_save(
-                target_root=target_root,
+                baseline_target_save_path=baseline_target_save_path,
                 torrent_hash=torrent_hash,
                 unique_view_subdir=unique_view_subdir,
             )
             if target_save_path != baseline_target_save_path:
                 unique_views += 1
-        else:
-            view_key = (str(target_save_path), root_name)
-            if view_key in seen_view_keys and unique_on_collision:
-                target_save_path = _choose_unique_target_save(
-                    target_root=target_root,
-                    torrent_hash=torrent_hash,
-                    unique_view_subdir=unique_view_subdir,
-                )
-                if target_save_path != baseline_target_save_path:
-                    unique_views += 1
 
         view_key = (str(target_save_path), root_name)
         seen_view_keys.add(view_key)
@@ -478,6 +555,9 @@ def build_root_relocation_batch(
     plans: List[Dict] = []
     skipped: List[NormalizationSkip] = []
     payload_group_cache: Dict[str, List[Dict]] = {}
+    root_content_cache: Dict[str, RootContentSnapshot] = {}
+    path_sha_cache: Dict[Tuple[str, int, int], Optional[str]] = {}
+    inode_sha_cache: Dict[Tuple[int, int, int, int], Optional[str]] = {}
 
     def _source_row_score(row: sqlite3.Row) -> int:
         score = 0
@@ -530,14 +610,25 @@ def build_root_relocation_batch(
         for payload_hash in payload_hash_order:
             rows_for_hash = payload_rows_by_hash[payload_hash]
             in_scope_rows: List[sqlite3.Row] = []
+            under_source_root_rows: List[sqlite3.Row] = []
             for row in rows_for_hash:
                 source = _canonical(str(row["root_path"]))
                 if not is_under(source, source_root_path):
                     continue
+                under_source_root_rows.append(row)
                 if flat_only and source.parent != source_root_path:
                     continue
                 in_scope_rows.append(row)
             if not in_scope_rows:
+                if under_source_root_rows:
+                    skipped.append(
+                        NormalizationSkip(
+                            payload_id=int(under_source_root_rows[0]["payload_id"]),
+                            payload_hash=payload_hash,
+                            source_path=str(_canonical(str(under_source_root_rows[0]["root_path"]))),
+                            reason="nested_under_source_root_flat_only",
+                        )
+                    )
                 continue
 
             row = max(in_scope_rows, key=_source_row_score)
@@ -711,7 +802,11 @@ def build_root_relocation_batch(
                 if str(view.get("source_save_path") or "").strip()
             )
             if all_view_targets_already_targeted and (
-                source_path == target_path or not any_view_still_under_source_root
+                source_path == target_path
+                or (
+                    not any_view_still_under_source_root
+                    and not is_under(source_path, source_root_path)
+                )
             ):
                 skipped.append(
                     NormalizationSkip(
@@ -751,7 +846,21 @@ def build_root_relocation_batch(
                     ).fetchall()
                 ]
 
-            decision = "REUSE" if target_path.exists() else "MOVE"
+            existing_target_donor, exact_target_views, conflicting_target_views = _inspect_existing_target_family(
+                source_path=source_path,
+                target_path=target_path,
+                view_targets=view_targets,
+                expected_count=file_count,
+                expected_bytes=total_bytes,
+                root_content_cache=root_content_cache,
+                path_sha_cache=path_sha_cache,
+                inode_sha_cache=inode_sha_cache,
+            )
+            if existing_target_donor is not None:
+                target_path = existing_target_donor
+            decision = "REUSE" if existing_target_donor is not None else "MOVE"
+            if conflicting_target_views:
+                review_required = True
             plan = {
                 "version": "1.0",
                 "direction": "demote",
@@ -788,6 +897,9 @@ def build_root_relocation_batch(
                     "view_collisions": int(view_collisions),
                     "unique_view_targets": int(unique_view_targets),
                     "unique_view_subdir": _sanitize_path_component(unique_view_subdir),
+                    "target_family_exact_views": len(exact_target_views),
+                    "target_family_conflicts": len(conflicting_target_views),
+                    "target_family_donor_path": str(existing_target_donor) if existing_target_donor else None,
                 },
             }
             plans.append(plan)

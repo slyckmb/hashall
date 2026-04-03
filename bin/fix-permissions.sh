@@ -20,11 +20,17 @@ Recursively fix ownership and permissions on media roots:
 Default targets (if no paths specified):
   /data/media
   /pool/data
+  /pool/media
   /mnt/hotspare6tb
 
 Options:
   --dry-run   Show what would be done, don't apply
   -h, --help  Show help
+
+Notes:
+  Apply mode changes ownership recursively and normally requires root.
+  Run with sudo:
+    sudo $(basename "$0")
 USAGE
 }
 
@@ -38,7 +44,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${#TARGETS[@]}" -eq 0 ]]; then
-  TARGETS=(/data/media /pool/data /mnt/hotspare6tb)
+  TARGETS=(/data/media /pool/data /pool/media /mnt/hotspare6tb)
+fi
+
+if [[ "$DRY_RUN" -eq 0 && "${EUID:-$(id -u)}" -ne 0 ]]; then
+  echo "ERROR: fix-permissions.sh applies recursive chown and must be run with sudo." >&2
+  echo "Run: sudo $(basename "$0") ${TARGETS[*]}" >&2
+  exit 1
 fi
 
 echo "fix-permissions.sh v${SCRIPT_VERSION} dry_run=${DRY_RUN}"

@@ -109,3 +109,59 @@ def test_compute_treehash_unified_catalog():
     conn.close()
     assert result == treehash_in_db
     os.unlink(db_path)
+
+
+def test_compute_treehash_prefers_scan_session_fs_uuid_after_device_id_change():
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        db_path = tmp.name
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    cur.executescript("""
+    CREATE TABLE devices (
+        device_id INTEGER PRIMARY KEY,
+        fs_uuid TEXT,
+        mount_point TEXT NOT NULL,
+        preferred_mount_point TEXT
+    );
+    CREATE TABLE scan_sessions (
+        id INTEGER PRIMARY KEY,
+        scan_id TEXT UNIQUE,
+        root_path TEXT,
+        device_id INTEGER,
+        fs_uuid TEXT,
+        treehash TEXT
+    );
+    CREATE TABLE files_53 (
+        path TEXT PRIMARY KEY,
+        size INTEGER NOT NULL,
+        mtime REAL NOT NULL,
+        sha1 TEXT,
+        sha256 TEXT,
+        status TEXT DEFAULT 'active'
+    );
+    """)
+
+    cur.execute(
+        "INSERT INTO devices (device_id, fs_uuid, mount_point, preferred_mount_point) VALUES (53, 'fs-stable-53', '/stash', '/stash')"
+    )
+    cur.execute(
+        "INSERT INTO scan_sessions (scan_id, root_path, device_id, fs_uuid) VALUES (?, ?, ?, ?)",
+        ("rebooted123", "/stash/data", 52, "fs-stable-53"),
+    )
+    cur.executemany(
+        "INSERT INTO files_53 (path, size, mtime, sha256, sha1, status) VALUES (?, ?, ?, ?, ?, 'active')",
+        [
+            ("data/a.txt", 100, 1680000000, "aaa256", "aaa1"),
+            ("data/b.txt", 200, 1680000001, "bbb256", "bbb1"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    result = compute_treehash("rebooted123", db_path)
+    assert isinstance(result, str)
+    assert len(result) == 64
+
+    os.unlink(db_path)

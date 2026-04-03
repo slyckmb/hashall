@@ -23,7 +23,34 @@ class _FakeQBClient:
             "state": "stoppedUP",
             "state_raw": "pausedUP",
             "progress": 1.0,
+            "tracker": "http://tracker.example:8080/announce",
+            "trackers_count": 2,
+            "magnet_uri": (
+                "magnet:?xt=urn:btih:abc123"
+                "&tr=http%3A%2F%2Ftracker.example%3A8080%2Fannounce"
+                "&tr=https%3A%2F%2Fbackup.example%2Fannounce"
+            ),
         }]
+
+    def enrich_torrents_payload_with_trackers(self, torrents):
+        enriched = []
+        for row in torrents:
+            payload = dict(row)
+            payload["tracker_urls"] = [
+                "http://tracker.example:8080/announce",
+                "https://backup.example/announce",
+            ]
+            payload["tracker_urls_http"] = list(payload["tracker_urls"])
+            payload["primary_tracker"] = "http://tracker.example:8080/announce"
+            payload["real_trackers_count"] = 2
+            payload["tracker_domains"] = ["tracker.example", "backup.example"]
+            payload["tracker_enrichment_source"] = "magnet_uri"
+            enriched.append(payload)
+        return enriched, {
+            "mode": "magnet_uri_with_fastresume_fallback",
+            "sources": {"magnet_uri": 1},
+            "fallback_rows": 0,
+        }
 
 
 def test_daemon_once_writes_normalized_cache_and_profile(tmp_path, monkeypatch):
@@ -48,11 +75,23 @@ def test_daemon_once_writes_normalized_cache_and_profile(tmp_path, monkeypatch):
     payload = json.loads(cache_file.read_text(encoding="utf-8"))
     assert payload[0]["state"] == "stoppedUP"
     assert payload[0]["state_raw"] == "pausedUP"
+    assert payload[0]["tracker_urls"] == [
+        "http://tracker.example:8080/announce",
+        "https://backup.example/announce",
+    ]
+    assert payload[0]["tracker_urls_http"] == payload[0]["tracker_urls"]
+    assert payload[0]["primary_tracker"] == "http://tracker.example:8080/announce"
+    assert payload[0]["trackers_count"] == 2
+    assert payload[0]["real_trackers_count"] == 2
+    assert payload[0]["tracker_domains"] == ["tracker.example", "backup.example"]
+    assert payload[0]["tracker_enrichment_source"] == "magnet_uri"
 
     meta = json.loads(meta_file.read_text(encoding="utf-8"))
     assert meta["items"] == 1
     assert meta["qb_profile"]["app_version"] == "5.0.4"
     assert meta["qb_profile"]["webapi_version"] == "2.11.4"
+    assert meta["tracker_enrichment"]["mode"] == "magnet_uri_with_fastresume_fallback"
+    assert meta["tracker_enrichment"]["sources"] == {"magnet_uri": 1}
 
 
 def test_daemon_once_resets_consecutive_failures_on_success(tmp_path, monkeypatch):

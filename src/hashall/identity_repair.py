@@ -1,6 +1,7 @@
 """Catalog identity repair helpers for fs_uuid-first reconciliation.
 
-This module repairs legacy/stale rows in ``payloads`` and ``torrent_instances``
+This module repairs legacy/stale rows in ``payloads``, ``torrent_instances``,
+and ``scan_sessions``
 by reconciling identity in this order:
 
 1) Existing valid ``fs_uuid``
@@ -51,6 +52,7 @@ class RepairResult:
     apply_mode: bool
     payload_candidates: int
     torrent_candidates: int
+    scan_session_candidates: int
     actions_planned: int
     actions_applied: int
     unresolved_count: int
@@ -67,6 +69,7 @@ class RepairResult:
             "summary": {
                 "payload_candidates": self.payload_candidates,
                 "torrent_candidates": self.torrent_candidates,
+                "scan_session_candidates": self.scan_session_candidates,
                 "actions_planned": self.actions_planned,
                 "actions_applied": self.actions_applied,
                 "unresolved_count": self.unresolved_count,
@@ -268,6 +271,24 @@ def _torrent_candidates(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     ).fetchall()
 
 
+def _scan_session_candidates(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT s.scan_id, s.device_id, s.fs_uuid, s.root_path
+        FROM scan_sessions s
+        LEFT JOIN devices d_id ON d_id.device_id = s.device_id
+        LEFT JOIN devices d_uuid ON d_uuid.fs_uuid = s.fs_uuid
+        WHERE s.device_id IS NULL
+           OR d_id.device_id IS NULL
+           OR s.fs_uuid IS NULL
+           OR trim(s.fs_uuid) = ''
+           OR d_uuid.fs_uuid IS NULL
+           OR (d_id.fs_uuid IS NOT NULL AND s.fs_uuid IS NOT NULL AND trim(s.fs_uuid) <> '' AND d_id.fs_uuid <> s.fs_uuid)
+        ORDER BY s.scan_id
+        """
+    ).fetchall()
+
+
 def _infer_payload_target(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -396,6 +417,33 @@ def _infer_torrent_target(
     return None
 
 
+def _infer_scan_session_target(
+    row: sqlite3.Row,
+    by_id: Dict[int, DeviceInfo],
+    by_uuid: Dict[str, DeviceInfo],
+    prefixes: List[Tuple[str, DeviceInfo]],
+    *,
+    allow_bind_aliases: bool,
+) -> Optional[Tuple[int, str, str]]:
+    current_fs = str(row["fs_uuid"] or "").strip()
+    if current_fs and current_fs in by_uuid:
+        info = by_uuid[current_fs]
+        return info.device_id, info.fs_uuid, "scan_session_current_fs_uuid"
+
+    current_dev = row["device_id"]
+    if current_dev is not None:
+        info = by_id.get(int(current_dev))
+        if info:
+            return info.device_id, info.fs_uuid, "scan_session_current_device_id"
+
+    root_path = str(row["root_path"] or "")
+    inferred_path = _infer_from_path(root_path, prefixes, allow_bind_aliases=allow_bind_aliases)
+    if inferred_path:
+        tgt_dev, tgt_fs, reason = inferred_path
+        return tgt_dev, tgt_fs, f"scan_session_{reason}"
+    return None
+
+
 def run_identity_repair(
     db_path: Path,
     *,
@@ -420,6 +468,7 @@ def run_identity_repair(
 
         payload_rows = _payload_candidates(conn)
         torrent_rows = _torrent_candidates(conn)
+        scan_session_rows = _scan_session_candidates(conn)
 
         for row in payload_rows:
             inferred = _infer_payload_target(
@@ -503,6 +552,45 @@ def run_identity_repair(
                 )
             )
 
+        for row in scan_session_rows:
+            inferred = _infer_scan_session_target(
+                row,
+                by_id,
+                by_uuid,
+                prefixes,
+                allow_bind_aliases=allow_bind_aliases,
+            )
+            if not inferred:
+                unresolved.append(
+                    {
+                        "table": "scan_sessions",
+                        "key": str(row["scan_id"]),
+                        "path": str(row["root_path"] or ""),
+                        "device_id": str(row["device_id"] if row["device_id"] is not None else "NULL"),
+                        "fs_uuid": str(row["fs_uuid"] or ""),
+                        "reason": "unresolved_scan_session",
+                    }
+                )
+                continue
+            tgt_dev, tgt_fs, reason = inferred
+            before_dev = int(row["device_id"]) if row["device_id"] is not None else None
+            before_fs = str(row["fs_uuid"] or "").strip() or None
+            if before_dev == tgt_dev and before_fs == tgt_fs:
+                continue
+            reason_counts[reason] += 1
+            actions.append(
+                RepairAction(
+                    table="scan_sessions",
+                    key=str(row["scan_id"]),
+                    before_device_id=before_dev,
+                    before_fs_uuid=before_fs,
+                    target_device_id=tgt_dev,
+                    target_fs_uuid=tgt_fs,
+                    reason=reason,
+                    path_hint=str(row["root_path"] or ""),
+                )
+            )
+
         if max_actions > 0:
             actions = actions[: max_actions]
 
@@ -532,7 +620,7 @@ def run_identity_repair(
                             (action.target_device_id, action.target_fs_uuid, int(action.key)),
                         )
                 else:
-                    if torrent_has_updated_at:
+                    if action.table == "torrent_instances" and torrent_has_updated_at:
                         conn.execute(
                             """
                             UPDATE torrent_instances
@@ -541,12 +629,21 @@ def run_identity_repair(
                             """,
                             (action.target_device_id, action.target_fs_uuid, action.key),
                         )
-                    else:
+                    elif action.table == "torrent_instances":
                         conn.execute(
                             """
                             UPDATE torrent_instances
                             SET device_id = ?, fs_uuid = ?
                             WHERE torrent_hash = ?
+                            """,
+                            (action.target_device_id, action.target_fs_uuid, action.key),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE scan_sessions
+                            SET device_id = ?, fs_uuid = ?
+                            WHERE scan_id = ?
                             """,
                             (action.target_device_id, action.target_fs_uuid, action.key),
                         )
@@ -559,6 +656,7 @@ def run_identity_repair(
             apply_mode=bool(apply_mode),
             payload_candidates=len(payload_rows),
             torrent_candidates=len(torrent_rows),
+            scan_session_candidates=len(scan_session_rows),
             actions_planned=len(actions),
             actions_applied=applied,
             unresolved_count=len(unresolved),

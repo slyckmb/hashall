@@ -6,13 +6,14 @@ import click
 import fcntl
 import json
 import os
+import re
 import socket
 import sqlite3
 import subprocess
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -33,8 +34,10 @@ from rehome.reality import DEFAULT_FASTRESUME_DIR, build_plan_reality_snapshot
 from rehome.planner import DemotionPlanner, PromotionPlanner
 from rehome.executor import DemotionExecutor
 from rehome.library_roots import collect_library_roots
+from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_session_directories, rt_path_aligned
 
 DEFAULT_CATALOG_PATH = Path.home() / ".hashall" / "catalog.db"
+DEFAULT_REFRESH_LOG_DIR = Path.home() / ".logs" / "hashall" / "rehome" / "refresh"
 
 
 def _debug_enabled() -> bool:
@@ -274,6 +277,84 @@ def _acquire_named_lock(lock_filename: str, description: str) -> "file":
     return lock_fh
 
 
+def _looks_like_refresh_command(cmdline: list[str]) -> bool:
+    if not cmdline:
+        return False
+    joined = " ".join(str(part) for part in cmdline if part)
+    lowered = joined.lower()
+    if " refresh" not in f" {lowered}":
+        return False
+    return (
+        " hashall " in f" {lowered} "
+        or lowered.endswith("/hashall refresh")
+        or " -m rehome.cli refresh" in lowered
+        or " -m hashall.cli refresh" in lowered
+    )
+
+
+def _iter_other_refresh_holders() -> list[dict[str, object]]:
+    holders: list[dict[str, object]] = []
+    self_pid = os.getpid()
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return holders
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == self_pid:
+            continue
+        try:
+            raw_cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw_cmdline:
+            continue
+        cmdline = [part for part in raw_cmdline.decode("utf-8", errors="ignore").split("\x00") if part]
+        if not _looks_like_refresh_command(cmdline):
+            continue
+        cwd = ""
+        try:
+            cwd = os.readlink(entry / "cwd")
+        except OSError:
+            cwd = ""
+        holders.append(
+            {
+                "pid": pid,
+                "cwd": cwd,
+                "cmdline": cmdline,
+            }
+        )
+    return holders
+
+
+def _read_lock_metadata(lock_filename: str) -> tuple[Path, dict[str, str]]:
+    lock_path = Path.home() / ".hashall" / lock_filename
+    metadata: dict[str, str] = {}
+    if not lock_path.exists():
+        return lock_path, metadata
+    try:
+        for line in lock_path.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = str(key).strip()
+            value = str(value).strip()
+            if key:
+                metadata[key] = value
+    except Exception:
+        return lock_path, {}
+    return lock_path, metadata
+
+
+def _pid_is_live(pid_text: str) -> bool:
+    try:
+        pid = int(str(pid_text).strip())
+    except Exception:
+        return False
+    return Path(f"/proc/{pid}").exists()
+
+
 def _acquire_rehome_lock() -> "file":
     """
     Acquire an exclusive process-level lock for rehome apply operations.
@@ -288,13 +369,370 @@ def _acquire_rehome_lock() -> "file":
 
 def _acquire_refresh_lock() -> "file":
     """Acquire an exclusive process-level lock for refresh operations."""
-    return _acquire_named_lock("refresh.lock", "hashall refresh")
+    lock_fh = _acquire_named_lock("refresh.lock", "hashall refresh")
+    other_holders = _iter_other_refresh_holders()
+    if other_holders:
+        lock_fh.close()
+        holder = other_holders[0]
+        holder_cmd = " ".join(str(part) for part in holder.get("cmdline", []))
+        holder_cwd = str(holder.get("cwd") or "")
+        cwd_suffix = f" cwd={holder_cwd}" if holder_cwd else ""
+        click.echo(
+            "❌ Another hashall refresh process is already running "
+            f"(pid={holder.get('pid')}{cwd_suffix} cmd={holder_cmd}). "
+            "This usually means a live refresh survived after refresh.lock was deleted. "
+            "Aborting.",
+            err=True,
+        )
+        raise SystemExit(1)
+    return lock_fh
 
 
 def _emit_banner() -> None:
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
     script = Path(sys.argv[0]).name
     print(f"🧾 {script} v{__version__} @ {timestamp}", flush=True)
+
+
+def _fmt_seconds_brief(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "-"
+    total = max(0, int(round(float(seconds))))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _fmt_dt(value: Optional[datetime]) -> str:
+    if value is None:
+        return "-"
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_elapsed_seconds(text: str) -> Optional[int]:
+    value = str(text or "").strip()
+    if not value:
+        return None
+    total = 0
+    matched = False
+    for amount, unit in re.findall(r"(\d+)([hms])", value):
+        matched = True
+        n = int(amount)
+        if unit == "h":
+            total += n * 3600
+        elif unit == "m":
+            total += n * 60
+        elif unit == "s":
+            total += n
+    if matched:
+        return total
+    return None
+
+
+def _parse_refresh_started_at(lines: list[str]) -> Optional[datetime]:
+    for line in lines:
+        if line.startswith("Rehome Refresh  "):
+            value = line[len("Rehome Refresh  "):].strip()
+            try:
+                return datetime.strptime(value, "%Y-%m-%d %H:%M")
+            except ValueError:
+                return None
+    return None
+
+
+def _latest_refresh_log_path(log_dir: Path = DEFAULT_REFRESH_LOG_DIR) -> Optional[Path]:
+    candidates = sorted(log_dir.glob("*.log"))
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
+def _parse_refresh_roots_from_log(lines: list[str]) -> list[tuple[str, str, str]]:
+    roots: list[tuple[str, str, str]] = []
+    in_roots = False
+    for line in lines:
+        if line.startswith("  Scan roots ("):
+            in_roots = True
+            continue
+        if in_roots:
+            if not line.startswith("    ["):
+                break
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                alias = parts[1]
+                role = parts[2]
+                path = " ".join(parts[3:])
+                roots.append((path, alias, role))
+    return roots
+
+
+def _parse_refresh_dedup_mode(lines: list[str]) -> str:
+    for line in lines:
+        if line.startswith("  dedup"):
+            return line.split()[-1].strip().lower()
+    return "execute"
+
+
+def _build_refresh_phase_plan(lines: list[str]) -> list[str]:
+    roots = _parse_refresh_roots_from_log(lines)
+    dedup_mode = _parse_refresh_dedup_mode(lines)
+    phases = ["doctor preflight"]
+    active_root = roots[0][0] if roots else ""
+    dest_root = roots[1][0] if len(roots) > 1 and roots[1][2] == "dest" else active_root
+    active_alias = roots[0][1] if roots else "active"
+    dest_alias = roots[1][1] if len(roots) > 1 and roots[1][2] == "dest" else active_alias
+
+    phases.append(f"scan active_root ({active_root})")
+    if dest_root != active_root:
+        phases.append(f"scan dest_root ({dest_root})")
+    phases.append(f"dupes auto-upgrade (active={active_alias})")
+    phases.append(f"dupes auto-upgrade (dest={dest_alias})")
+
+    managed = [(path, alias) for path, alias, role in roots if role == "managed"]
+    for managed_path, managed_alias in managed:
+        phases.append(f"scan managed root ({managed_path})")
+        phases.append(f"dupes auto-upgrade (managed={managed_alias})")
+        if dedup_mode != "off":
+            phases.append(f"link plan ({managed_alias})")
+            phases.append(f"link execute ({managed_alias})")
+
+    if dedup_mode != "off":
+        for alias in (active_alias, dest_alias):
+            phases.append(f"link plan ({alias})")
+            phases.append(f"link execute ({alias})")
+
+    phases.append("payload sync --upgrade-missing")
+    return phases
+
+
+def _normalize_refresh_label(label: str) -> str:
+    label = label.strip()
+    if label.startswith("link execute plan_id="):
+        open_paren = label.rfind("(")
+        close_paren = label.rfind(")")
+        if open_paren != -1 and close_paren > open_paren:
+            alias = label[open_paren + 1:close_paren].strip()
+            return f"link execute ({alias})"
+    return label
+
+
+def _parse_refresh_started_labels(lines: list[str]) -> list[str]:
+    labels: list[str] = []
+    for line in lines:
+        if line.startswith("[refresh] "):
+            labels.append(_normalize_refresh_label(line[len("[refresh] "):]))
+    return labels
+
+
+def _parse_refresh_step_results(lines: list[str]) -> dict[str, tuple[str, str, Optional[int]]]:
+    results: dict[str, tuple[str, str, Optional[int]]] = {}
+    current_label: Optional[str] = None
+    current_block: list[str] = []
+    error_markers = ("Traceback", "OperationalError", "Unexpected error", "❌", "FAILED", "Aborting")
+    for line in lines:
+        if line.startswith("[refresh] "):
+            current_block = []
+            current_label = _normalize_refresh_label(line[len("[refresh] "):])
+            continue
+        if current_label is None:
+            continue
+        current_block.append(line)
+        stripped = line.strip()
+        if stripped.startswith("elapsed "):
+            tail = stripped[len("elapsed "):]
+            if "  " in tail:
+                elapsed_text, status_text = tail.split("  ", 1)
+            else:
+                parts = tail.rsplit(" ", 1)
+                elapsed_text = parts[0]
+                status_text = parts[1] if len(parts) > 1 else ""
+            status = status_text.strip()
+            if status == "OK" and any(marker in block_line for block_line in current_block for marker in error_markers):
+                status = "WARN"
+            elapsed_text = elapsed_text.strip()
+            results[current_label] = (elapsed_text, status, _parse_elapsed_seconds(elapsed_text))
+            current_label = None
+            current_block = []
+    return results
+
+
+def _parse_refresh_in_progress_elapsed_seconds(lines: list[str], label: str) -> Optional[int]:
+    current_label: Optional[str] = None
+    latest_elapsed: Optional[int] = None
+    heartbeat_pat = re.compile(r"\[refresh\] still running elapsed=(\d+)s")
+    for line in lines:
+        if line.startswith("[refresh] "):
+            current_label = _normalize_refresh_label(line[len("[refresh] "):])
+            continue
+        if current_label != label:
+            continue
+        m = heartbeat_pat.search(line)
+        if m:
+            latest_elapsed = int(m.group(1))
+            continue
+        if line.strip().startswith("elapsed "):
+            break
+    return latest_elapsed
+
+
+def _estimate_payload_sync_eta(lines: list[str]) -> str:
+    progress_pat = re.compile(r"upgrade_progress roots_done=(\d+)/(\d+) completed=(\d+) failed=(\d+)")
+    heartbeat_pat = re.compile(r"\[refresh\] still running elapsed=(\d+)s")
+    points: list[tuple[int, int]] = []
+    for i, line in enumerate(lines):
+        m = progress_pat.search(line)
+        if not m:
+            continue
+        elapsed = None
+        for j in range(i, max(-1, i - 60), -1):
+            h = heartbeat_pat.search(lines[j])
+            if h:
+                elapsed = int(h.group(1))
+                break
+        if elapsed is None:
+            continue
+        roots_done = int(m.group(1))
+        total_roots = int(m.group(2))
+        points.append((elapsed, roots_done))
+    if len(points) < 2:
+        return "ETA unavailable"
+    window = points[-40:] if len(points) >= 40 else points
+    elapsed_delta = window[-1][0] - window[0][0]
+    roots_delta = window[-1][1] - window[0][1]
+    if elapsed_delta <= 0 or roots_delta <= 0:
+        return "ETA unavailable"
+    rate = roots_delta / elapsed_delta
+    latest_elapsed, latest_roots = window[-1]
+    total_roots = int(progress_pat.search(next(line for line in reversed(lines) if progress_pat.search(line))).group(2))
+    remaining = max(0, total_roots - latest_roots)
+    eta_seconds = remaining / rate if rate > 0 else None
+    percent = 0.0 if total_roots <= 0 else (100.0 * latest_roots / total_roots)
+    return f"{latest_roots}/{total_roots} ({percent:.0f}%) eta={_fmt_seconds_brief(eta_seconds)}"
+
+
+def _estimate_payload_sync_remaining_seconds(lines: list[str]) -> Optional[int]:
+    progress_pat = re.compile(r"upgrade_progress roots_done=(\d+)/(\d+) completed=(\d+) failed=(\d+)")
+    heartbeat_pat = re.compile(r"\[refresh\] still running elapsed=(\d+)s")
+    points: list[tuple[int, int, int]] = []
+    for i, line in enumerate(lines):
+        m = progress_pat.search(line)
+        if not m:
+            continue
+        elapsed = None
+        for j in range(i, max(-1, i - 60), -1):
+            h = heartbeat_pat.search(lines[j])
+            if h:
+                elapsed = int(h.group(1))
+                break
+        if elapsed is None:
+            continue
+        points.append((elapsed, int(m.group(1)), int(m.group(2))))
+    if len(points) < 2:
+        return None
+    window = points[-40:] if len(points) >= 40 else points
+    elapsed_delta = window[-1][0] - window[0][0]
+    roots_delta = window[-1][1] - window[0][1]
+    if elapsed_delta <= 0 or roots_delta <= 0:
+        return None
+    rate = roots_delta / elapsed_delta
+    latest_elapsed, latest_roots, total_roots = window[-1]
+    remaining = max(0, total_roots - latest_roots)
+    if rate <= 0:
+        return None
+    return int(round(remaining / rate))
+
+
+def _render_refresh_dashboard(log_path: Path) -> str:
+    lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    phases = _build_refresh_phase_plan(lines)
+    started = _parse_refresh_started_labels(lines)
+    results = _parse_refresh_step_results(lines)
+    started_set = set(started)
+    current_label = None
+    for label in reversed(started):
+        if label not in results:
+            current_label = label
+            break
+
+    started_at = _parse_refresh_started_at(lines)
+    cursor_dt = started_at
+    rows: list[tuple[str, str, str, str, str]] = []
+    for phase in phases:
+        if phase in results:
+            elapsed_text, status_text, elapsed_seconds = results[phase]
+            if status_text == "OK":
+                state = "done"
+            elif status_text == "WARN":
+                state = "warning"
+            else:
+                state = "failed"
+            start_dt = cursor_dt
+            stop_dt = (start_dt + timedelta(seconds=elapsed_seconds)) if (start_dt and elapsed_seconds is not None) else None
+            rows.append((phase, state, _fmt_dt(start_dt), _fmt_dt(stop_dt), elapsed_text))
+            cursor_dt = stop_dt or cursor_dt
+        elif phase == current_label:
+            elapsed_seconds = _parse_refresh_in_progress_elapsed_seconds(lines, phase)
+            estimated_remaining_seconds = (
+                _estimate_payload_sync_remaining_seconds(lines)
+                if phase == "payload sync --upgrade-missing"
+                else None
+            )
+            estimated_total_seconds = None
+            if elapsed_seconds is not None:
+                estimated_total_seconds = elapsed_seconds + (estimated_remaining_seconds or 0)
+            elapsed_text = f"({_fmt_seconds_brief(estimated_total_seconds)})" if estimated_total_seconds is not None else "-"
+            start_dt = cursor_dt
+            stop_dt = (
+                _fmt_dt(start_dt + timedelta(seconds=estimated_total_seconds))
+                if (start_dt and estimated_total_seconds is not None)
+                else "-"
+            )
+            rows.append((phase, "in_progress", _fmt_dt(start_dt), stop_dt, elapsed_text))
+        elif phase in started_set:
+            start_dt = cursor_dt
+            rows.append((phase, "in_progress", _fmt_dt(start_dt), "-", "-"))
+        else:
+            rows.append((phase, "todo", "-", "-", "-"))
+
+    task_w = max(len("TASK"), max(len(task) for task, _, _, _, _ in rows))
+    state_w = max(len("STATUS"), max(len(state) for _, state, _, _, _ in rows))
+    start_w = max(len("START"), max(len(text) for _, _, text, _, _ in rows))
+    stop_w = max(len("STOP"), max(len(text) for _, _, _, text, _ in rows))
+    duration_w = max(len("DURATION"), max(len(text) for _, _, _, _, text in rows))
+
+    def style_status(text: str) -> str:
+        if text == "done":
+            return click.style(text, fg="green")
+        if text == "warning":
+            return click.style(text, fg="yellow")
+        if text == "failed":
+            return click.style(text, fg="red")
+        if text == "in_progress":
+            return click.style(text, fg="cyan")
+        if text == "todo":
+            return click.style(text, fg="bright_black")
+        return text
+
+    out = [
+        f"Refresh dashboard: {log_path}",
+        f"{'TASK':<{task_w}}  {'STATUS':<{state_w}}  {'START':<{start_w}}  {'STOP':<{stop_w}}  {'DURATION':<{duration_w}}",
+        f"{'-' * task_w}  {'-' * state_w}  {'-' * start_w}  {'-' * stop_w}  {'-' * duration_w}",
+    ]
+    for task, state, start_text, stop_text, duration_text in rows:
+        out.append(
+            f"{task:<{task_w}}  "
+            f"{style_status(state):<{state_w + 9}}  "
+            f"{start_text:<{start_w}}  "
+            f"{stop_text:<{stop_w}}  "
+            f"{duration_text:<{duration_w}}"
+        )
+    out.append("")
+    out.append("Note: START/STOP timestamps are inferred from run start + phase durations, not native per-line log timestamps.")
+    return "\n".join(out)
 
 
 def _build_payload_sync_command(
@@ -1412,8 +1850,8 @@ def normalize_plan_cmd(
               help="Restrict relocation planning to specific payload hash(es)")
 @click.option("--limit", type=int, default=0,
               help="Max relocation candidates to include (0 = all)")
-@click.option("--flat-only/--all-mismatches", default=True,
-              help="Plan only payloads directly under source root (default) or all mismatches")
+@click.option("--flat-only/--all-mismatches", default=False,
+              help="Plan only payloads directly under source root or all mismatches (default)")
 @click.option("--unique-view-subdir", default=DEFAULT_UNIQUE_VIEW_SUBDIR, show_default=True,
               help="Subdirectory under target root used for synthesized unique sibling views")
 @click.option("--output", "-o", type=click.Path(),
@@ -1703,6 +2141,20 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
               help="Skip dedup (dedup executes by default)")
 @click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
 @click.option("--debug", is_flag=True, help="Show config resolution and raw detail (implies --verbose)")
+@click.option(
+    "--payload-source",
+    type=click.Choice(["qb", "rt"], case_sensitive=False),
+    default="qb",
+    show_default=True,
+    help="Torrent inventory source for the final payload sync step.",
+)
+@click.option(
+    "--rt-session-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=str(DEFAULT_RT_SESSION_DIR),
+    show_default=True,
+    help="rTorrent session directory used when --payload-source rt.",
+)
 @click.option("--active-device", default=None, help="Override config active device alias")
 @click.option("--dest-device", default=None, help="Override config destination device alias")
 @click.option("--active-root", default=None, help="Override config active root path")
@@ -1714,10 +2166,11 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 @click.option("--pool-payload-root", default=None, hidden=True)
 @click.option("--catalog", default=None, help="Override config catalog path")
 def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debug,
+                payload_source, rt_session_dir,
                 active_device, dest_device, active_root, dest_root,
                 stash_device, pool_device, seeding_root, pool_payload_root,
                 catalog):
-    """Scan all managed roots, upgrade SHA256, run dedup, then sync qBit payloads.
+    """Scan all managed roots, upgrade SHA256, run dedup, then sync torrent-backed payloads.
 
     Dedup executes by default. Use --no-dedup to skip it.
     """
@@ -1751,9 +2204,75 @@ def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debu
         managed_roots=managed,
         verbose=verbose,
         debug=debug,
+        payload_source=str(payload_source).lower(),
+        rt_session_dir=str(rt_session_dir),
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
+
+
+@cli.command("refresh-dashboard")
+@click.option(
+    "--log",
+    "log_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Refresh log to inspect (defaults to latest under ~/.logs/hashall/rehome/refresh/).",
+)
+def refresh_dashboard_cmd(log_path: Optional[Path]) -> None:
+    """Show a task/status dashboard for the latest refresh run."""
+    chosen = log_path or _latest_refresh_log_path()
+    if chosen is None:
+        click.echo("❌ No refresh log found.", err=True)
+        raise click.exceptions.Exit(1)
+    click.echo(_render_refresh_dashboard(chosen))
+
+
+@cli.command("refresh-status")
+def refresh_status_cmd() -> None:
+    """Show refresh lock/owner status and the latest refresh log path."""
+    lock_path, metadata = _read_lock_metadata("refresh.lock")
+    holders = _iter_other_refresh_holders()
+    latest_log = _latest_refresh_log_path()
+
+    click.echo("🔎 Refresh status")
+    click.echo(f"   lock_path: {lock_path}")
+    if metadata:
+        pid_text = metadata.get("pid", "")
+        click.echo(f"   lock_metadata: present")
+        if pid_text:
+            click.echo(f"   lock_pid: {pid_text}")
+            click.echo(f"   lock_pid_live: {'yes' if _pid_is_live(pid_text) else 'no'}")
+        if metadata.get("host"):
+            click.echo(f"   lock_host: {metadata['host']}")
+        if metadata.get("started_at"):
+            click.echo(f"   lock_started_at: {metadata['started_at']}")
+        if metadata.get("cwd"):
+            click.echo(f"   lock_cwd: {metadata['cwd']}")
+    else:
+        click.echo("   lock_metadata: missing")
+
+    click.echo(f"   live_refresh_holders: {len(holders)}")
+    for idx, holder in enumerate(holders, start=1):
+        cmdline = " ".join(str(part) for part in holder.get("cmdline", []))
+        click.echo(
+            f"   holder[{idx}]: pid={holder.get('pid')} "
+            f"cwd={holder.get('cwd') or '-'} cmd={cmdline}"
+        )
+
+    if holders:
+        click.echo("   status: active_refresh_running")
+    elif metadata and metadata.get("pid") and _pid_is_live(metadata["pid"]):
+        click.echo("   status: lock_pid_live_no_holder_match")
+    elif metadata:
+        click.echo("   status: stale_lock_metadata_only")
+    else:
+        click.echo("   status: idle")
+
+    if latest_log is not None:
+        click.echo(f"   latest_refresh_log: {latest_log}")
+    else:
+        click.echo("   latest_refresh_log: -")
 
 
 @cli.command("qb-missing-audit")
@@ -1957,8 +2476,15 @@ def qb_missing_remediate_cmd(
     show_default=True,
     help="Directory containing qB .fastresume files",
 )
+@click.option(
+    "--rt-session-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=str(DEFAULT_RT_SESSION_DIR),
+    show_default=True,
+    help="Directory containing rtorrent .torrent.rtorrent session files",
+)
 @click.option("--output", "-o", type=click.Path(), help="Optional JSON report output path")
-def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
+def drift_audit_cmd(plan_path, catalog, fastresume_dir, rt_session_dir, output):
     """Compare a rehome plan to live qB, fastresume, filesystem, and catalog state."""
     from hashall.qbittorrent import get_qbittorrent_client
 
@@ -1989,11 +2515,13 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
         )
         for plan in plans
     ]
+    rt_sessions = load_rt_session_directories(Path(rt_session_dir).expanduser())
 
     group_states: dict[str, int] = {}
     total_rows = 0
     blocked_rows = 0
     out_of_plan_groups = 0
+    rt_drift_rows = 0
     for snapshot in snapshots:
         state = str(snapshot.get("group_state") or "unknown")
         group_states[state] = group_states.get(state, 0) + 1
@@ -2003,6 +2531,19 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
         for row in snapshot.get("rows") or []:
             if str(row.get("classification") or "") not in {"aligned_target", "catalog_drift_already_targeted"}:
                 blocked_rows += 1
+            torrent_hash = str(row.get("torrent_hash") or "").strip().lower()
+            rt_entry = rt_sessions.get(torrent_hash)
+            qb_save_path = str(row.get("runtime_save_path") or "")
+            qb_content_path = str(row.get("runtime_content_path") or "")
+            if rt_entry and not rt_path_aligned(rt_entry.directory, qb_save_path=qb_save_path, qb_content_path=qb_content_path):
+                row["rt_directory"] = rt_entry.directory
+                row["rt_alignment"] = "drift"
+                rt_drift_rows += 1
+            elif rt_entry:
+                row["rt_directory"] = rt_entry.directory
+                row["rt_alignment"] = "aligned"
+            else:
+                row["rt_alignment"] = "unknown"
 
     report = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -2015,6 +2556,7 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
             "group_states": group_states,
             "attention_rows": blocked_rows,
             "plans_with_out_of_plan_siblings": out_of_plan_groups,
+            "rt_drift_rows": rt_drift_rows,
         },
         "plans": snapshots,
     }
@@ -2034,6 +2576,7 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
         "   plans_with_out_of_plan_siblings: "
         f"{report['summary']['plans_with_out_of_plan_siblings']}"
     )
+    click.echo(f"   rt_drift_rows: {report['summary']['rt_drift_rows']}")
     if group_states:
         click.echo("   group_states:")
         for state, count in sorted(group_states.items(), key=lambda item: (-int(item[1]), str(item[0]))):
@@ -2043,13 +2586,15 @@ def drift_audit_cmd(plan_path, catalog, fastresume_dir, output):
     for snapshot in snapshots:
         for row in snapshot.get("rows") or []:
             classification = str(row.get("classification") or "")
-            if classification in {"aligned_target", "catalog_drift_already_targeted"}:
+            rt_alignment = str(row.get("rt_alignment") or "")
+            if classification in {"aligned_target", "catalog_drift_already_targeted"} and rt_alignment != "drift":
                 continue
             click.echo(
                 "     "
                 f"{str(row.get('torrent_hash') or '')[:16]} "
                 f"group={snapshot.get('group_state')} "
                 f"class={classification} "
+                f"rt={rt_alignment} "
                 f"reason={row.get('operator_reason')}"
             )
             printed += 1
