@@ -24,6 +24,7 @@ from hashall.rt_cache import (
     DEFAULT_RT_SHARED_CACHE_FILE,
     DEFAULT_RT_SHARED_CACHE_META_FILE,
 )
+from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 from hashall.rtorrent import (
     DEFAULT_RT_RPC_URL,
     DEFAULT_RT_SESSION_DIR,
@@ -1550,6 +1551,111 @@ def payload_orphan_audit_cmd(db, path_prefixes, samples, json_output):
         print(f"   alias artifact samples: {', '.join(alias_samples)}")
 
     conn.close()
+
+
+@payload.command("orphan-sweep")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    show_default=True,
+    help="Dry-run by default; pass --execute to actually move/delete.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Process at most N orphan items (for staged runs).",
+)
+@click.option(
+    "--verbose", "-v",
+    is_flag=True,
+    help="Print live (non-orphan) items too.",
+)
+@click.option(
+    "--rt-cache", "rt_cache_file",
+    default=str(DEFAULT_RT_SHARED_CACHE_FILE),
+    show_default=True,
+    help="Silo RT shared cache file.",
+)
+@click.option(
+    "--qb-cache", "qb_cache_file",
+    default=str(DEFAULT_QB_CACHE_FILE),
+    show_default=True,
+    help="hashall qB shared cache file.",
+)
+def payload_orphan_sweep_cmd(db, dry_run, limit, verbose, rt_cache_file, qb_cache_file):
+    """
+    Sweep seeding trees and relocate orphaned content to orphaned_data/.
+
+    Scans /pool/data/media/torrents/seeding, /pool/media/torrents/seeding,
+    and /stash/media/torrents/seeding for content not backed by an active RT
+    or qBittorrent torrent.
+
+    Orphaned items are moved to /pool/media/torrents/orphaned_data/<tracker>/.
+    Items with active catalog references (hitchhiker groups) are skipped.
+    .bad.* and __hl_tmp__* files are deleted unconditionally.
+
+    Runs dry-run by default.  Pass --execute to perform moves.
+    """
+    from hashall.orphan_sweep import run_orphan_sweep
+    from pathlib import Path as _Path
+
+    if dry_run:
+        print("🔍 DRY-RUN mode — no files will be moved or deleted")
+    else:
+        print("⚡ EXECUTE mode — files will be moved/deleted")
+
+    summary = run_orphan_sweep(
+        dry_run=dry_run,
+        limit=limit,
+        db_path=_Path(db) if db else None,
+        rt_cache_file=_Path(rt_cache_file),
+        qb_cache_file=_Path(qb_cache_file),
+        verbose=verbose,
+    )
+
+    diag = summary["cache_diag"]
+    print(
+        f"\n📡 Cache: RT {diag['rt_rows']} rows ({diag.get('rt_freshness','?')},"
+        f" {diag.get('rt_age_s', 0):.0f}s old),"
+        f" qB {diag['qb_rows']} rows ({diag.get('qb_age_s', 0):.0f}s old)"
+    )
+    for w in diag.get("warnings", []):
+        print(f"   ⚠️  {w}")
+
+    items = summary["items"]
+    orphans = [i for i in items if i.is_orphan]
+    live_count = len(items) - len(orphans)
+
+    print(f"\n📊 Results:")
+    print(f"   total items scanned:  {len(items)}")
+    print(f"   live (backed):        {live_count}")
+    print(f"   orphaned:             {len(orphans)}")
+    print(f"   moved:                {summary['moved']}")
+    print(f"   skipped:              {summary['skipped']}")
+    print(f"   nlinks>1 warnings:    {summary['warned_nlinks']}")
+    print(f"   bad files deleted:    {summary['bad_deleted']}")
+
+    empty_dirs = [i for i in orphans if i.skip_reason == "empty_dir"]
+    movers = [i for i in orphans if i.skip_reason != "empty_dir"]
+    if empty_dirs:
+        verb = "DRY-RUN: Would delete" if dry_run else "Deleted"
+        print(f"\n{verb} empty dirs ({len(empty_dirs)}):")
+        for item in empty_dirs:
+            print(f"   [{item.dataset_name}] {item.path}")
+    if movers:
+        verb = "DRY-RUN: Would move" if dry_run else "Moved"
+        print(f"\n{verb} orphans ({len(movers)}):")
+        for item in movers:
+            nl_tag = " ⚠️ nlinks>1" if item.warn_nlinks else ""
+            ref_tag = f" (refs={item.catalog_refs})" if item.catalog_refs else ""
+            skip_tag = f" → SKIP: {item.skip_reason}" if item.skip_reason else ""
+            dest_tag = f" → {item.dest_path}" if item.dest_path else ""
+            print(
+                f"   [{item.dataset_name}/{item.tracker_label}] {item.path.name}"
+                f"{nl_tag}{ref_tag}{skip_tag}{dest_tag}"
+            )
 
 
 @payload.command("show")
