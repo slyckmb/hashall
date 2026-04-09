@@ -19,6 +19,14 @@
 #   --hash HASH  Limit output to specific broken hash(es) (comma-separated, prefix OK)
 set -euo pipefail
 
+
+SCRIPT_NAME="$(basename "$0")"
+SEMVER="0.1.0"
+LAST_UPDATED="2026-04-09T07:05:00-04:00"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/script-metadata.sh"
+script_meta_start "$@"
+trap 'script_meta_end "$?"' EXIT
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/qb-cache.sh"
 source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null

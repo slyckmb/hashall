@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 # qb-repair-batch.sh — batch repair of stoppedDL/pausedDL torrents.
 # Version: 1.6.1
 # Date:    2026-02-25
@@ -35,6 +36,13 @@
 #   --same-save  Process same-save-path pairs: clear download_path + recheck (no hardlink work)
 #   --clear-bl   Clear the repair blacklist and exit
 #   -h, --help   Show this help and exit
+SCRIPT_NAME="$(basename "$0")"
+SEMVER="1.6.1"
+LAST_UPDATED="2026-02-25"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/script-metadata.sh"
+script_meta_start "$@"
+trap 'script_meta_end "$?"' EXIT
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
