@@ -17,7 +17,7 @@ from hashall.cli import cli
 from hashall.bencode import bencode_encode
 from hashall.device import ensure_files_table
 from hashall.model import connect_db
-from hashall.payload import build_payload
+from hashall.payload import Payload, build_payload
 from hashall.qbittorrent import QBitTorrent
 
 
@@ -381,6 +381,118 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertIn("processed: 1", result.output)
         self.assertIn("complete payloads: 1", result.output)
         self.assertIn("root path source: rt_session_rows=1", result.output)
+
+    def test_payload_sync_upgrade_uses_alias_aware_build_payload_for_rt_source(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        torrent_hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        root_alias = "/data/media/torrents/seeding/tv/example/example.mkv"
+
+        (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+            bencode_encode({b"directory": b"/data/media/torrents/seeding/tv/example"})
+        )
+        (session_dir / f"{torrent_hash}.torrent").write_bytes(
+            bencode_encode({b"info": {b"name": b"example.mkv"}})
+        )
+
+        build_calls = []
+
+        def fake_build_payload(conn, root_path, device_id=None, *, already_canonical=False):
+            build_calls.append((root_path, device_id, already_canonical))
+            status = "complete" if len(build_calls) > 1 else "incomplete"
+            return Payload(
+                payload_id=None,
+                payload_hash="done-hash" if status == "complete" else None,
+                device_id=device_id if device_id is not None else os.stat(self.payload_root).st_dev,
+                root_path=root_path,
+                file_count=1,
+                total_bytes=1,
+                status=status,
+                last_built_at=None,
+                fs_uuid=None,
+            )
+
+        runner = CliRunner()
+        with (
+            patch("hashall.payload.build_payload", side_effect=fake_build_payload),
+            patch("hashall.payload.upsert_payload", return_value=1),
+            patch("hashall.payload.upsert_torrent_instance"),
+            patch("hashall.payload.summarize_missing_sha256_for_path", return_value={"files": 1, "bytes": 1}),
+            patch("hashall.payload.upgrade_payload_missing_sha256", return_value=1),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--source",
+                    "rt",
+                    "--rt-session-dir",
+                    str(session_dir),
+                    "--upgrade-missing",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertGreaterEqual(len(build_calls), 2)
+        self.assertEqual(build_calls[0][0], root_alias)
+        self.assertFalse(build_calls[0][2], result.output)
+        self.assertFalse(build_calls[1][2], result.output)
+        self.assertIn("✅ Upgrade complete: groups=1", result.output)
+
+    def test_payload_sync_upgrade_skips_zero_file_roots_and_warns(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        torrent_hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+
+        (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+            bencode_encode({b"directory": b"/data/media/torrents/seeding/tv/example"})
+        )
+        (session_dir / f"{torrent_hash}.torrent").write_bytes(
+            bencode_encode({b"info": {b"name": b"example.mkv"}})
+        )
+
+        def fake_build_payload(conn, root_path, device_id=None, *, already_canonical=False):
+            return Payload(
+                payload_id=None,
+                payload_hash=None,
+                device_id=device_id if device_id is not None else os.stat(self.payload_root).st_dev,
+                root_path=root_path,
+                file_count=0,
+                total_bytes=0,
+                status="incomplete",
+                last_built_at=None,
+                fs_uuid=None,
+            )
+
+        runner = CliRunner()
+        with (
+            patch("hashall.payload.build_payload", side_effect=fake_build_payload),
+            patch("hashall.payload.upsert_payload", return_value=1),
+            patch("hashall.payload.upsert_torrent_instance"),
+            patch("hashall.payload.summarize_missing_sha256_for_path", return_value={"files": 0, "bytes": 0}),
+            patch("hashall.payload.upgrade_payload_missing_sha256", side_effect=AssertionError("should not run")),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--source",
+                    "rt",
+                    "--rt-session-dir",
+                    str(session_dir),
+                    "--upgrade-missing",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("zero-file roots skipped: 1", result.output)
+        self.assertIn("upgrade stage completed with zero successful roots", result.output)
 
     def test_payload_sync_rejects_qb_filters_with_rt_source(self):
         session_dir = self.tmp_path / "session"

@@ -557,6 +557,7 @@ def payload_sync(
     from hashall.payload import (
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
         upgrade_payload_missing_sha256, prune_orphan_payloads, count_missing_sha256_for_path,
+        summarize_missing_sha256_for_path,
     )
     from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
 
@@ -747,21 +748,27 @@ def payload_sync(
             if str(root_canon) != root_path:
                 print(f"   Canonical: {root_canon}")
 
-            payload = build_payload(conn, str(root_canon), device_id=None, already_canonical=True)
+            payload = build_payload(conn, str(root_canon), device_id=None, already_canonical=False)
             if payload.file_count == 0:
                 missing_in_catalog += 1
 
             if (not dry_run) and payload.status != 'complete' and upgrade_missing:
                 key = str(root_canon)
                 if key not in upgrade_queue:
+                    missing_stats = {"files": 0, "bytes": 0}
+                    if payload.device_id is not None:
+                        try:
+                            missing_stats = summarize_missing_sha256_for_path(conn, str(root_canon), payload.device_id)
+                        except Exception:
+                            missing_stats = {"files": 0, "bytes": 0}
                     upgrade_queue[key] = {
                         "root_path": key,
                         "device_id": payload.device_id,
                         "first_torrent": str(torrent.get("name") or ""),
                         "first_hash": str(torrent.get("hash") or ""),
                         "first_seen_order": processed,
-                        "file_count": int(payload.file_count or 0),
-                        "total_bytes": int(payload.total_bytes or 0),
+                        "file_count": int(missing_stats.get("files") or payload.file_count or 0),
+                        "total_bytes": int(missing_stats.get("bytes") or payload.total_bytes or 0),
                     }
 
             if not dry_run:
@@ -807,6 +814,7 @@ def payload_sync(
         print("------------------------------------------------------------")
         upgrade_stage_start = time.monotonic()
         queue_items = list(upgrade_queue.values())
+        queued_root_count = len(queue_items)
         order_mode = (upgrade_order or "small-first").lower()
         if order_mode == "small-first":
             queue_items.sort(
@@ -841,6 +849,7 @@ def payload_sync(
         upgrade_state = _load_payload_sync_upgrade_state(upgrade_state_path)
         completed_roots = upgrade_state["completed_roots"]
         skipped_resumed = 0
+        skipped_zero_file_roots = 0
         pending_queue_items = []
         for item in queue_items:
             root_key = _payload_sync_upgrade_root_key(item)
@@ -848,6 +857,20 @@ def payload_sync(
             device_id = int(item.get("device_id") or 0)
             if root_key in completed_roots and count_missing_sha256_for_path(conn, device_id, root_path) == 0:
                 skipped_resumed += 1
+                continue
+            if device_id > 0:
+                try:
+                    missing_stats = summarize_missing_sha256_for_path(conn, root_path, device_id)
+                except Exception:
+                    missing_stats = {"files": 0, "bytes": 0}
+                item["file_count"] = int(missing_stats.get("files") or 0)
+                item["total_bytes"] = int(missing_stats.get("bytes") or 0)
+            if int(item.get("file_count") or 0) <= 0:
+                skipped_zero_file_roots += 1
+                print(
+                    f"   ⚠️  skipping zero-file upgrade root: root={root_path} "
+                    f"device_id={device_id or 'unknown'}"
+                )
                 continue
             pending_queue_items.append(item)
         queue_items = pending_queue_items
@@ -866,6 +889,8 @@ def payload_sync(
                 f"   resume checkpoint: skipped already-complete roots={skipped_resumed} "
                 f"state={upgrade_state_path}"
             )
+        if skipped_zero_file_roots:
+            print(f"   zero-file roots skipped: {skipped_zero_file_roots}")
 
         for root_idx, item in enumerate(queue_items, start=1):
             root_path = str(item.get("root_path") or "")
@@ -973,7 +998,7 @@ def payload_sync(
                     batch_bytes_total=hash_log_state["last_bytes_total"],
                 )
 
-            refreshed = build_payload(conn, root_path, device_id=item.get("device_id"), already_canonical=True)
+            refreshed = build_payload(conn, root_path, device_id=item.get("device_id"), already_canonical=False)
             upsert_payload(conn, refreshed, commit=False)
             write_batch_ops += 1
             if write_batch_ops >= write_batch_threshold:
@@ -1001,6 +1026,11 @@ def payload_sync(
             f"queued={total_upgrade_roots} started={upgrade_started} "
             f"completed={upgrade_completed} failed={upgrade_failed} elapsed_s={upgrade_elapsed}"
         )
+        if queued_root_count > 0 and upgrade_completed == 0 and upgrade_failed == 0:
+            print(
+                "   ⚠️  upgrade stage completed with zero successful roots; "
+                "queued paths may not resolve to scanned files"
+            )
         if upgrade_failed == 0 and total_upgrade_roots == upgrade_completed:
             try:
                 upgrade_state_path.unlink()
