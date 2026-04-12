@@ -6,8 +6,13 @@
 set -euo pipefail
 
 SCRIPT_NAME="run-hashall-upgrade-scans.sh"
-VERSION="0.3.0"
+SEMVER="0.3.0"
 LAST_UPDATED="2026-04-03T15:15:00-04:00"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/script-metadata.sh"
+script_meta_start "$@"
+trap 'script_meta_end "$?"' EXIT
+VERSION="$SEMVER"
 
 DRYRUN=0
 CONTINUE_ON_ERROR=0

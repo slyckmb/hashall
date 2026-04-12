@@ -51,7 +51,7 @@ DOWNLOAD_BAD_STATES = {
     "allocating",
 }
 CHECKING_STATES = {"checkingdl", "checkingup", "checkingresumedata"}
-SEED_READY_STATES = {"stalledup", "uploading", "queu eup", "stoppedup", "pausedup"}
+SEED_READY_STATES = {"stalledup", "uploading", "queuedup", "stoppedup", "pausedup"}
 
 
 @dataclass(frozen=True)
@@ -170,6 +170,86 @@ def manifest_root_name(entries: Sequence[ManifestEntry]) -> Optional[str]:
     if len(roots) == 1:
         return list(roots)[0]
     return None
+
+
+def detect_path_flags(save_path: str, content_path: str) -> List[str]:
+    flags: List[str] = []
+    save = canonical_alias_path(str(save_path or "").strip())
+    content = canonical_alias_path(str(content_path or "").strip())
+    if not save:
+        flags.append("missing_save_path")
+    if not content:
+        flags.append("missing_content_path")
+    lowered = f"{save}\n{content}".lower()
+    if "/_rehome-unique/" in lowered:
+        flags.append("rehome_unique")
+    if "/downloads/complete/" in lowered:
+        flags.append("legacy_downloads_complete")
+    if "/cross-seed-link/" in lowered:
+        flags.append("cross_seed_link")
+    if save and content and not (content == save or content.startswith(save + "/")):
+        flags.append("save_content_mismatch")
+    return flags
+
+
+def choose_repair_strategy(
+    target_manifest: Sequence[ManifestEntry],
+    current_save: str,
+    current_content: str,
+    source_save: str,
+) -> Tuple[str, List[str]]:
+    flags = detect_path_flags(current_save, current_content)
+    if len(target_manifest) == 1:
+        flags.append("single_file_torrent")
+    else:
+        flags.append("multi_file_torrent")
+    if current_save and source_save and canonical_alias_path(current_save) == canonical_alias_path(source_save):
+        flags.append("already_on_donor_save_root")
+    strategy = "split_unique_hardlink"
+    return strategy, sorted(set(flags))
+
+
+def list_existing_rel_files(root: Path) -> List[str]:
+    if not root.exists() or not root.is_dir():
+        return []
+    out: List[str] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            out.append(norm_rel(str(path.relative_to(root))))
+    return out
+
+
+def detect_target_root_conflicts(target_root: Path, expected_rel_paths: Sequence[str]) -> Dict[str, Any]:
+    expected = {norm_rel(p) for p in expected_rel_paths if norm_rel(p)}
+    existing = list_existing_rel_files(target_root)
+    existing_set = set(existing)
+    return {
+        "exists": target_root.exists(),
+        "is_dir": target_root.is_dir(),
+        "existing_files": existing,
+        "expected_files": sorted(expected),
+        "extra_files": sorted(existing_set - expected),
+        "missing_files": sorted(expected - existing_set),
+        "overlap_files": sorted(existing_set & expected),
+    }
+
+
+def expected_rel_paths_for_target_root(
+    target_save: Path,
+    target_root: Path,
+    mapping_keys: Sequence[str],
+) -> List[str]:
+    expected: List[str] = []
+    for key in mapping_keys:
+        rel = norm_rel(key)
+        if not rel:
+            continue
+        abs_target = target_save / rel
+        try:
+            expected.append(norm_rel(str(abs_target.relative_to(target_root))))
+        except ValueError:
+            expected.append(rel)
+    return expected
 
 
 def choose_unique_target_save(source_save: str, torrent_hash: str, subdir: str) -> str:
@@ -554,6 +634,8 @@ def build_plan(args: argparse.Namespace) -> int:
             "target_root": "",
             "qb_location": "",
             "mapping": {},
+            "repair_strategy": "",
+            "edge_flags": [],
         }
 
         target_manifest = get_manifest(qb, manifest_cache, h)
@@ -621,6 +703,12 @@ def build_plan(args: argparse.Namespace) -> int:
             )
             root_name = manifest_root_name(target_manifest)
             target_root = str(Path(target_save) / root_name) if root_name else target_save
+            repair_strategy, edge_flags = choose_repair_strategy(
+                target_manifest,
+                str(b.save_path or ""),
+                str(b.content_path or ""),
+                source_save,
+            )
             matches.append(
                 {
                     "parent_hash": ph,
@@ -637,6 +725,8 @@ def build_plan(args: argparse.Namespace) -> int:
                     "target_root": target_root,
                     "qb_location": choose_qb_location(target_save, str(b.save_path or "")),
                     "mapping": mapping,
+                    "repair_strategy": repair_strategy,
+                    "edge_flags": edge_flags,
                 }
             )
 
@@ -797,6 +887,17 @@ def prepare_from_plan(args: argparse.Namespace) -> int:
         target_exists = target_root_path.exists()
         root_key = canonical_alias_path(str(target_root_path))
         in_use_by = sorted(roots_in_use.get(root_key, set()) - {h})
+        target_scan = detect_target_root_conflicts(
+            target_root_path,
+            expected_rel_paths_for_target_root(target_save_path, target_root_path, list(mapping.keys())),
+        )
+        cur["target_root_scan"] = {
+            "exists": bool(target_scan["exists"]),
+            "is_dir": bool(target_scan["is_dir"]),
+            "extra_files": target_scan["extra_files"][:50],
+            "missing_files": target_scan["missing_files"][:50],
+            "overlap_files": target_scan["overlap_files"][:50],
+        }
 
         if target_exists and args.quarantine_exclusive_root and in_use_by:
             cur["status"] = "prepare_error"
@@ -807,17 +908,27 @@ def prepare_from_plan(args: argparse.Namespace) -> int:
                 f"[{i}/{len(rows)}] {h[:16]} status=prepare_error target root shared count={len(in_use_by)}"
             )
             continue
+        if target_exists and target_scan["extra_files"] and not args.quarantine_exclusive_root:
+            cur["status"] = "prepare_error"
+            cur["reason"] = f"target_root_extra_files:{len(target_scan['extra_files'])}"
+            out_rows.append(cur)
+            print(
+                f"[{i}/{len(rows)}] {h[:16]} status=prepare_error extra target files count={len(target_scan['extra_files'])}"
+            )
+            continue
 
         linked = 0
         skipped_existing = 0
         failed = 0
         errors: List[str] = []
         quarantine_note = ""
+        target_will_be_quarantined = False
 
         try:
             if target_exists and args.quarantine_exclusive_root:
                 ok, note = quarantine_root(target_root_path, h, dryrun=not apply_mode)
                 quarantine_note = note
+                target_will_be_quarantined = bool(ok)
                 if not ok:
                     raise RuntimeError(note)
 
@@ -832,6 +943,9 @@ def prepare_from_plan(args: argparse.Namespace) -> int:
                     continue
                 dst = target_save_path / norm_rel(target_rel)
                 if dst.exists():
+                    if not apply_mode and target_will_be_quarantined:
+                        linked += 1
+                        continue
                     try:
                         sst = src.stat()
                         dstst = dst.stat()
@@ -870,6 +984,7 @@ def prepare_from_plan(args: argparse.Namespace) -> int:
             cur["prepare_linked"] = linked
             cur["prepare_skipped_existing"] = skipped_existing
             cur["prepare_failed"] = failed
+            cur["prepare_strategy"] = str(cur.get("repair_strategy") or "split_unique_hardlink")
             if quarantine_note:
                 cur["prepare_quarantine"] = quarantine_note
             if errors:

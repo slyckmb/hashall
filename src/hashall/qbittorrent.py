@@ -9,6 +9,7 @@ import os
 import requests
 import shutil
 import time
+from requests.exceptions import ConnectionError as RequestsConnectionError
 from urllib.parse import parse_qs, urlsplit
 from typing import Any, List, Dict, Optional, Iterable
 from dataclasses import dataclass, asdict
@@ -246,6 +247,7 @@ class QBittorrentClient:
         self._authenticated = False
         self.last_error: Optional[str] = None
         self.root_path_files_fallback_calls = 0
+        self._auth_cooldown_until = 0.0
         try:
             self.request_timeout = float(os.getenv("HASHALL_QB_HTTP_TIMEOUT", "20"))
         except ValueError:
@@ -267,6 +269,12 @@ class QBittorrentClient:
             )
         except ValueError:
             self.retry_backoff_cap = 8.0
+        try:
+            self.auth_cooldown_seconds = max(
+                1.0, float(os.getenv("HASHALL_QB_AUTH_COOLDOWN_SECONDS", "30"))
+            )
+        except ValueError:
+            self.auth_cooldown_seconds = 30.0
         self.debug_http = os.getenv("HASHALL_REHOME_QB_DEBUG", "0").strip().lower() in {
             "1", "true", "yes", "on"
         }
@@ -281,6 +289,41 @@ class QBittorrentClient:
         self.bt_backup_dir = Path(
             os.getenv("HASHALL_QB_BT_BACKUP_DIR", str(DEFAULT_QB_BT_BACKUP_DIR))
         ).expanduser()
+
+    @staticmethod
+    def _is_transport_reset_error(error: BaseException) -> bool:
+        text = str(error or "").lower()
+        if isinstance(error, (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return True
+        if isinstance(error, RequestsConnectionError):
+            return any(
+                token in text
+                for token in (
+                    "connection reset by peer",
+                    "remote end closed connection without response",
+                    "remote disconnected",
+                    "connection aborted",
+                    "connection refused",
+                )
+            )
+        return any(
+            token in text
+            for token in (
+                "connection reset by peer",
+                "remote end closed connection without response",
+                "remote disconnected",
+                "connection aborted",
+            )
+        )
+
+    def _activate_auth_cooldown(self, reason: str) -> None:
+        remaining = max(self.auth_cooldown_seconds, 1.0)
+        self._auth_cooldown_until = time.monotonic() + remaining
+        self._authenticated = False
+        self.last_error = f"transport_cooldown_active:{reason}"
+
+    def _auth_cooldown_remaining(self) -> float:
+        return max(0.0, self._auth_cooldown_until - time.monotonic())
 
     @staticmethod
     def normalize_state_alias(state: str) -> str:
@@ -450,6 +493,13 @@ class QBittorrentClient:
         Returns:
             True if authentication successful, False otherwise
         """
+        cooldown_remaining = self._auth_cooldown_remaining()
+        if cooldown_remaining > 0:
+            self.last_error = (
+                "transport_cooldown_active:"
+                f"retry_in_s={cooldown_remaining:.1f}"
+            )
+            return False
         last_exception: Optional[requests.RequestException] = None
         for attempt in range(1, self.request_retries + 1):
             try:
@@ -467,16 +517,27 @@ class QBittorrentClient:
                 return False
             except requests.RequestException as e:
                 last_exception = e
-                self.last_error = str(e)
+                if self._is_transport_reset_error(e):
+                    self.last_error = f"transport_reset:{e}"
+                else:
+                    self.last_error = str(e)
                 self._authenticated = False
                 if attempt < self.request_retries:
                     time.sleep(self._retry_delay_seconds(attempt))
                     continue
-                print(f"⚠️ qBittorrent login failed: {e}")
+                if self._is_transport_reset_error(e):
+                    self._activate_auth_cooldown(str(e))
+                    print(f"⚠️ qBittorrent transport reset during login: {e}")
+                else:
+                    print(f"⚠️ qBittorrent login failed: {e}")
                 return False
         if last_exception is not None:
-            self.last_error = str(last_exception)
-            print(f"⚠️ qBittorrent login failed: {last_exception}")
+            if self._is_transport_reset_error(last_exception):
+                self._activate_auth_cooldown(str(last_exception))
+                print(f"⚠️ qBittorrent transport reset during login: {last_exception}")
+            else:
+                self.last_error = str(last_exception)
+                print(f"⚠️ qBittorrent login failed: {last_exception}")
         return False
 
     def is_reachable(self) -> bool:
@@ -595,7 +656,7 @@ class QBittorrentClient:
         """Ensure we're authenticated before making requests."""
         if not self._authenticated:
             if not self.login():
-                raise RuntimeError("Failed to authenticate with qBittorrent")
+                raise RuntimeError(self.last_error or "Failed to authenticate with qBittorrent")
 
     def get_torrents_payload(
         self,
@@ -1526,10 +1587,11 @@ class QBittorrentClient:
             True if connection successful, False otherwise
         """
         try:
-            self.get_server_profile(force_refresh=True)
-            self.last_error = None
-            return True
-        except requests.RequestException as e:
+            ok = self.is_reachable()
+            if ok:
+                self.last_error = None
+            return ok
+        except (requests.RequestException, RuntimeError) as e:
             self.last_error = str(e)
             return False
 def get_qbittorrent_client(base_url: Optional[str] = None,

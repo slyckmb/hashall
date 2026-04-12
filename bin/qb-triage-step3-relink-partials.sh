@@ -12,6 +12,14 @@
 # Usage: bin/qb-triage-step3-relink-partials.sh [--apply]
 set -euo pipefail
 
+
+SCRIPT_NAME="$(basename "$0")"
+SEMVER="0.1.0"
+LAST_UPDATED="2026-04-09T07:05:00-04:00"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/script-metadata.sh"
+script_meta_start "$@"
+trap 'script_meta_end "$?"' EXIT
 set +x
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/qb-cache.sh"

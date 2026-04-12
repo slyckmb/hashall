@@ -16,8 +16,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
+from hashall.script_metadata import register as register_script_metadata
+
+SCRIPT_NAME = Path(__file__).name
 SEMVER = "0.1.0"
+LAST_UPDATED = "2026-04-09T07:05:00-04:00"
+register_script_metadata(SCRIPT_NAME, SEMVER, LAST_UPDATED, argv=" ".join(sys.argv[1:]))
 
 
 def _default_db() -> str:
@@ -120,251 +129,92 @@ def _fetch_qb_progress_map(hashes: Sequence[str]) -> Dict[str, float]:
     except Exception:
         return {}
     out: Dict[str, float] = {}
-    for h, row in info.items():
-        try:
-            out[str(h).lower()] = float(row.progress or 0.0) * 100.0
-        except Exception:
+    for row in info.values():
+        h = str(row.get("hash") or "").strip().lower()
+        if not h:
             continue
+        try:
+            out[h] = float(row.get("progress", 0.0) or 0.0)
+        except Exception:
+            out[h] = 0.0
     return out
 
 
-def _torrent_hashes_and_pct(val: Any, progress_map: Dict[str, float], prefix_len: int = 6) -> Tuple[str, str]:
-    hashes = _parse_hash_list(val)
-    if not hashes:
-        return "-" * max(1, int(prefix_len)), "-"
-    hs: List[str] = []
-    ps: List[str] = []
-    for h in hashes:
-        hs.append(h[:prefix_len])
-        p = progress_map.get(h)
-        ps.append(f"{p:.2f}%" if p is not None else "-")
-    return "|".join(hs) if hs else ("-" * max(1, int(prefix_len))), "|".join(ps) if ps else "-"
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--db", default=_default_db(), help="SQLite DB path")
+    p.add_argument("--pattern", required=True, help="SQL LIKE pattern for path/full_path (supports * as %%)")
+    p.add_argument("--suffix", default="", help="Optional filename suffix filter")
+    p.add_argument("--limit", type=int, default=200, help="Maximum rows to print")
+    p.add_argument("--show-qb-progress", action="store_true", help="Fetch qB progress for matching torrent hashes")
+    return p.parse_args(argv)
 
 
-def _pad_tor_field(val: str, width: int) -> str:
-    v = str(val or "").strip()
-    if not v or v == "-":
-        return "-" * max(1, int(width))
-    if len(v) >= width:
-        return v
-    return v + (" " * (width - len(v)))
-
-
-def _canon_sql(expr: str) -> str:
-    return (
-        "REPLACE(REPLACE(REPLACE(REPLACE("
-        f"{expr}, "
-        "'/stash/media/downloads/torrents/seeding', '/data/media/torrents/seeding'), "
-        "'/pool/data/seeds', '/data/media/torrents/seeding'), "
-        "'/pool/data/cross-seed-link', '/data/media/torrents/seeding/cross-seed-link'), "
-        "'/stash/media', '/data/media')"
-    )
-
-
-def _lookup_torrent_hashes_for_path(conn: sqlite3.Connection, full_path: str) -> str:
-    # Match any torrent whose canonical root path is equal to or ancestor of this file path.
-    full_expr = _canon_sql("?")
-    payload_root_expr = _canon_sql("p.root_path")
-    ti_root_expr = _canon_sql("CASE WHEN COALESCE(ti.root_name,'') != '' THEN ti.save_path || '/' || ti.root_name ELSE ti.save_path END")
-    sql = (
-        "SELECT REPLACE(group_concat(DISTINCT x.torrent_hash), ',', '|') AS torrent_hashes "
-        "FROM ( "
-        "  SELECT ti.torrent_hash AS torrent_hash "
-        "  FROM payloads p "
-        "  JOIN torrent_instances ti ON ti.payload_id = p.payload_id "
-        f" WHERE ({full_expr}) = ({payload_root_expr}) "
-        f"    OR ({full_expr}) LIKE ({payload_root_expr}) || '/%' "
-        "  UNION "
-        "  SELECT ti.torrent_hash AS torrent_hash "
-        "  FROM torrent_instances ti "
-        f" WHERE ({full_expr}) = ({ti_root_expr}) "
-        f"    OR ({full_expr}) LIKE ({ti_root_expr}) || '/%' "
-        ") x"
-    )
-    # full_expr appears 4 times.
-    params = [full_path, full_path, full_path, full_path]
-    row = conn.execute(sql, params).fetchone()
-    return str((row["torrent_hashes"] if row else "") or "")
-
-
-def main() -> int:
-    p = argparse.ArgumentParser(
-        description="Search hashall files_* tables with SQL-style wildcard matching.",
-        epilog=(
-            "Pattern rules:\n"
-            "  - Use '%%' as SQL wildcard (any characters)\n"
-            "  - '*' is accepted and converted to '%'\n"
-            "Examples:\n"
-            "  --pattern 'dexter%%s02%%720p%%x265%%zmnt%%'\n"
-            "  --pattern '*modern*mind*' --suffix .mp3"
-        ),
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    p.add_argument("--db", default=_default_db(), help="SQLite DB path (default: ~/.hashall/catalog.db)")
-    p.add_argument(
-        "--pattern",
-        required=True,
-        help="Path match pattern (SQL LIKE). Use '%%' or '*' as wildcard.",
-    )
-    p.add_argument(
-        "--suffix",
-        default=".mkv",
-        help="Optional file suffix filter (default: .mkv). Use '' to disable.",
-    )
-    p.add_argument(
-        "--exclude-torrent-sidecars",
-        action="store_true",
-        help="Exclude files ending in .torrent.",
-    )
-    p.add_argument(
-        "--include-deleted",
-        action="store_true",
-        help="Include non-active rows (default filters to status='active').",
-    )
-    p.add_argument("--limit", type=int, default=500, help="Max rows (default: 500)")
-    p.add_argument(
-        "--format",
-        choices=("tsv", "json"),
-        default="tsv",
-        help="Output format (default: tsv)",
-    )
-
-    args = p.parse_args()
-
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
     db = os.path.expanduser(args.db)
     if not os.path.exists(db):
-        print(f"ERROR db_not_found path={db}", file=sys.stderr)
+        print(f"DB not found: {db}", file=sys.stderr)
         return 2
 
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
 
     tables = _discover_file_tables(conn)
-    tables = [t for t in tables if _table_exists(conn, t)]
     if not tables:
-        print("ERROR no files_* tables found", file=sys.stderr)
-        return 2
+        print("No files_* tables found.", file=sys.stderr)
+        return 1
 
     union_sql = _build_union_sql(conn, tables)
-    like_pat = _wildcard_to_like(args.pattern).lower()
-    suffix = (args.suffix or "").strip().lower()
-
-    where = ["LOWER(COALESCE(full_path, path, '')) LIKE ?"]
-    params: list[object] = [like_pat]
-
+    pattern = _wildcard_to_like(args.pattern)
+    suffix = str(args.suffix or "")
+    where = "(full_path LIKE ? OR path LIKE ?)"
+    params: list[Any] = [pattern, pattern]
     if suffix:
-        where.append("LOWER(COALESCE(full_path, path, '')) LIKE ?")
+        where += " AND full_path LIKE ?"
         params.append(f"%{suffix}")
-    if args.exclude_torrent_sidecars:
-        where.append("LOWER(COALESCE(full_path, path, '')) NOT LIKE '%.torrent'")
-    if not args.include_deleted:
-        where.append("LOWER(COALESCE(status,'')) = 'active'")
 
     sql = f"""
-WITH u AS (
-{union_sql}
-)
-SELECT
-  inode,
-  ROUND(size/1024.0/1024.0/1024.0, 2) AS size_gib,
-  mtime,
-  quick_hash,
-  sha1,
-  sha256,
-  table_name,
-  full_path,
-  discovered_under,
-  path,
-  status
-FROM u
-WHERE {' AND '.join(where)}
-ORDER BY inode ASC, full_path ASC
-LIMIT ?
-"""
-    params.append(max(1, int(args.limit)))
+    WITH unioned AS (
+    {union_sql}
+    )
+    SELECT *
+    FROM unioned
+    WHERE {where}
+    ORDER BY size DESC, full_path ASC
+    LIMIT ?
+    """
+    params.append(int(args.limit))
     rows = conn.execute(sql, params).fetchall()
-    rows_out: List[Dict[str, Any]] = []
-    all_hashes: List[str] = []
-    seen_hashes = set()
-    for r in rows:
-        fp_raw = str(r["full_path"] or "").strip()
-        p_raw = str(r["path"] or "").strip()
-        d_raw = str(r["discovered_under"] or "").strip()
-        if fp_raw.startswith("/"):
-            fp = fp_raw
-        elif p_raw.startswith("/"):
-            fp = p_raw
-        elif d_raw:
-            fp = f"{d_raw.rstrip('/')}/{p_raw.lstrip('/')}"
-        else:
-            fp = fp_raw or p_raw or "-"
-        th = _lookup_torrent_hashes_for_path(conn, fp) if fp != "-" else ""
-        for h in _parse_hash_list(th):
-            if h in seen_hashes:
-                continue
-            seen_hashes.add(h)
-            all_hashes.append(h)
-        rows_out.append(
-            {
-                "inode": r["inode"],
-                "size_gib": float(r["size_gib"] or 0.0),
-                "mtime": _fmt_time(r["mtime"]),
-                "quick6": _short(r["quick_hash"]),
-                "sha1_6": _short(r["sha1"]),
-                "sha256_6": _short(r["sha256"]),
-                "torrent_hashes": th,
-                "table": r["table_name"] or "-",
-                "status": r["status"] or "-",
-                "full_path": fp,
-            }
+    conn.close()
+
+    qb_progress = {}
+    if args.show_qb_progress and rows:
+        hashes = []
+        for row in rows:
+            hashes.extend(_parse_hash_list(row["quick_hash"]))
+        qb_progress = _fetch_qb_progress_map(hashes)
+
+    print(f"matches={len(rows)} pattern={pattern} suffix={suffix or '-'}")
+    for row in rows:
+        qh = _short(row["quick_hash"])
+        sh1 = _short(row["sha1"])
+        sh256 = _short(row["sha256"])
+        progress_label = ""
+        if qb_progress:
+            hashes = _parse_hash_list(row["quick_hash"])
+            if hashes:
+                prog = max((qb_progress.get(h, 0.0) for h in hashes), default=0.0)
+                progress_label = f" qb_progress={prog:.3f}"
+        print(
+            f"{row['table_name']:>9s}  size={int(row['size'] or 0):>12,d}  "
+            f"mtime={_fmt_time(row['mtime'])}  status={row['status'] or '-':<8s}  "
+            f"q={qh} s1={sh1} s256={sh256}{progress_label}"
         )
-    progress_map = _fetch_qb_progress_map(all_hashes)
-
-    print(f"start ts={datetime.now().strftime('%Y-%m-%dT%H:%M:%S')} script=hashall-db-find-files.py semver={SEMVER}", file=sys.stderr)
-
-    if args.format == "json":
-        import json
-
-        out = []
-        for r in rows_out:
-            tor_h, tor_pct = _torrent_hashes_and_pct(r.get("torrent_hashes"), progress_map, prefix_len=6)
-            r2 = dict(r)
-            r2["tor_hash6"] = tor_h
-            r2["tor_pct"] = tor_pct
-            out.append(r2)
-        print(json.dumps(out, indent=2))
-    else:
-        print("inode\tsize_gib\tmtime\tquick6\tsha1_6\tsha256_6\ttor_hash6\ttor_pct\tfull_path")
-        rendered: List[Dict[str, Any]] = []
-        for r in rows_out:
-            tor_h, tor_pct = _torrent_hashes_and_pct(r.get("torrent_hashes"), progress_map, prefix_len=6)
-            rendered.append({"row": r, "tor_h": tor_h, "tor_pct": tor_pct})
-
-        tor_hash_w = max(len("tor_hash6"), max((len(x["tor_h"]) for x in rendered), default=6))
-        tor_pct_w = max(len("tor_pct"), max((len(x["tor_pct"]) for x in rendered), default=1))
-
-        prev_inode: Any = None
-        for item in rendered:
-            r = item["row"]
-            tor_h = _pad_tor_field(item["tor_h"], tor_hash_w)
-            tor_pct = _pad_tor_field(item["tor_pct"], tor_pct_w)
-            inode = r.get("inode")
-            if prev_inode is not None and inode != prev_inode:
-                print("")
-            print(
-                f"{r['inode']}\t"
-                f"{float(r['size_gib'] or 0.0):.2f}\t"
-                f"{r['mtime']}\t"
-                f"{r['quick6']}\t"
-                f"{r['sha1_6']}\t"
-                f"{r['sha256_6']}\t"
-                f"{tor_h}\t"
-                f"{tor_pct}\t"
-                f"{r['full_path']}"
-            )
-            prev_inode = inode
-
-    print(f"summary rows={len(rows_out)} db={db}", file=sys.stderr)
+        print(f"  path={row['path']}")
+        print(f"  full={row['full_path']}")
+        if row["discovered_under"]:
+            print(f"  under={row['discovered_under']}")
     return 0
 
 

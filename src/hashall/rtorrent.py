@@ -32,6 +32,8 @@ class RTTorrentMeta:
     torrent_hash: str
     info_name: str
     is_multi_file: bool
+    file_count: int
+    total_bytes: int
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,8 @@ class RTTorrentInventoryRow:
     root_name: str
     save_path: str
     content_path: str
+    expected_file_count: int = 0
+    expected_total_bytes: int = 0
 
 
 def rt_path_aligned(
@@ -236,10 +240,31 @@ def load_rt_torrent_meta(session_dir: Path, torrent_hash: str) -> RTTorrentMeta 
         info_name = raw_name.decode("utf-8", "ignore")
     else:
         info_name = ""
+    files = info.get(b"files")
+    if isinstance(files, list):
+        total_bytes = 0
+        file_count = 0
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            try:
+                length = int(item.get(b"length", 0) or 0)
+            except Exception:
+                length = 0
+            total_bytes += max(0, length)
+            file_count += 1
+    else:
+        try:
+            total_bytes = int(info.get(b"length", 0) or 0)
+        except Exception:
+            total_bytes = 0
+        file_count = 1 if total_bytes >= 0 else 0
     return RTTorrentMeta(
         torrent_hash=str(torrent_hash).lower(),
         info_name=info_name,
         is_multi_file=isinstance(info.get(b"files"), list),
+        file_count=file_count,
+        total_bytes=total_bytes,
     )
 
 
@@ -260,7 +285,11 @@ def load_rt_inventory_rows(
             save_path = str(canonicalize_path(Path(save_path)))
         except Exception:
             pass
-        content_path = str(Path(save_path) / root_name)
+        if meta and meta.is_multi_file:
+            # rTorrent's d.directory is already the payload root for multi-file torrents.
+            content_path = save_path
+        else:
+            content_path = str(Path(save_path) / root_name)
         try:
             content_path = str(canonicalize_path(Path(content_path)))
         except Exception:
@@ -271,6 +300,8 @@ def load_rt_inventory_rows(
                 root_name=root_name,
                 save_path=save_path,
                 content_path=content_path,
+                expected_file_count=int(meta.file_count if meta else 0),
+                expected_total_bytes=int(meta.total_bytes if meta else 0),
             )
         )
     rows.sort(key=lambda row: row.torrent_hash)

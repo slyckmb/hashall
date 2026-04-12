@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+
+SCRIPT_NAME="$(basename "$0")"
+SEMVER="0.1.0"
+LAST_UPDATED="2026-04-09T07:05:00-04:00"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/script-metadata.sh"
+script_meta_start "$@"
+trap 'script_meta_end "$?"' EXIT
 # Fix torrent save_path and/or clear the download_path (incomplete download location).
 #
 # The qBittorrent API setDownloadPath returns 400 for paths outside its configured

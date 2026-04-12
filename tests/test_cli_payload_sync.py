@@ -13,12 +13,21 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 import hashall.cli as cli_mod
-from hashall.cli import cli
+from hashall.cli import (
+    cli,
+    _build_rt_repair_assistant_row,
+    _collect_complete_payload_candidates,
+    _collect_sidecar_hits,
+    _find_matching_complete_payload_id,
+    _payload_sync_recount_for_hashes,
+    _prune_unseen_incomplete_rt_instances,
+)
 from hashall.bencode import bencode_encode
 from hashall.device import ensure_files_table
 from hashall.model import connect_db
-from hashall.payload import build_payload
+from hashall.payload import Payload, TorrentInstance, build_payload, upsert_payload, upsert_torrent_instance
 from hashall.qbittorrent import QBitTorrent
+from hashall.rtorrent import RTTorrentInventoryRow, load_rt_inventory_rows
 
 
 class _FakeQbit:
@@ -80,6 +89,801 @@ class TestPayloadSyncCLI(unittest.TestCase):
         except FileNotFoundError:
             pass
         self._tmpdir.cleanup()
+
+    def _write_rt_session_pair(self, torrent_hash: str, directory: Path, info_name: str, *, multi_file: bool) -> None:
+        session_dir = self.tmp_path / "rt-session"
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        rt_payload = {
+            b"directory": str(directory).encode("utf-8"),
+        }
+        info_dict = {
+            b"name": info_name.encode("utf-8"),
+        }
+        if multi_file:
+            info_dict[b"files"] = [{b"path": [b"dummy.bin"], b"length": 1}]
+        else:
+            info_dict[b"length"] = 1
+
+        (session_dir / f"{torrent_hash.upper()}.torrent.rtorrent").write_bytes(bencode_encode(rt_payload))
+        (session_dir / f"{torrent_hash.upper()}.torrent").write_bytes(
+            bencode_encode({b"info": info_dict})
+        )
+
+    def test_load_rt_inventory_rows_uses_directory_as_root_for_multi_file(self):
+        root_name = "Example.Show.S01.1080p"
+        payload_root = self.tmp_path / "library" / root_name
+        payload_root.mkdir(parents=True)
+        self._write_rt_session_pair("abc123", payload_root, root_name, multi_file=True)
+
+        rows = load_rt_inventory_rows(self.tmp_path / "rt-session")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].save_path, str(payload_root))
+        self.assertEqual(rows[0].content_path, str(payload_root))
+
+    def test_load_rt_inventory_rows_appends_filename_for_single_file(self):
+        file_name = "Example.Movie.2024.1080p.mkv"
+        save_dir = self.tmp_path / "single"
+        save_dir.mkdir(parents=True)
+        self._write_rt_session_pair("def456", save_dir, file_name, multi_file=False)
+
+        rows = load_rt_inventory_rows(self.tmp_path / "rt-session")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].save_path, str(save_dir))
+        self.assertEqual(rows[0].content_path, str(save_dir / file_name))
+
+    def test_prune_unseen_incomplete_rt_instances_removes_only_zero_file_rows(self):
+        conn = connect_db(self.db_path)
+        incomplete_payload_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash=None,
+                device_id=None,
+                root_path="/tmp/stale-root",
+                file_count=0,
+                total_bytes=0,
+                status="incomplete",
+                last_built_at=None,
+            ),
+            commit=False,
+        )
+        complete_payload_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="abc123",
+                device_id=None,
+                root_path="/tmp/live-root",
+                file_count=1,
+                total_bytes=1,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_torrent_instance(
+            conn,
+            TorrentInstance(
+                torrent_hash="stale-hash",
+                payload_id=incomplete_payload_id,
+                device_id=None,
+                save_path="/old",
+                root_name="stale",
+                category="",
+                tags="",
+                last_seen_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_torrent_instance(
+            conn,
+            TorrentInstance(
+                torrent_hash="live-hash",
+                payload_id=complete_payload_id,
+                device_id=None,
+                save_path="/live",
+                root_name="live",
+                category="",
+                tags="",
+                last_seen_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+
+        stats = _prune_unseen_incomplete_rt_instances(conn, seen_hashes={"live-hash"})
+        conn.commit()
+
+        self.assertEqual(stats["torrent_instances"], 1)
+        self.assertEqual(stats["payload_candidates"], 1)
+        remaining_hashes = {
+            row[0] for row in conn.execute("SELECT torrent_hash FROM torrent_instances").fetchall()
+        }
+        self.assertEqual(remaining_hashes, {"live-hash"})
+        conn.close()
+
+    def test_payload_sync_recount_for_hashes_uses_current_payload_state(self):
+        conn = connect_db(self.db_path)
+        complete_payload_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="done",
+                device_id=None,
+                root_path="/tmp/done",
+                file_count=1,
+                total_bytes=1,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        incomplete_payload_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash=None,
+                device_id=None,
+                root_path="/tmp/missing",
+                file_count=0,
+                total_bytes=0,
+                status="incomplete",
+                last_built_at=None,
+            ),
+            commit=False,
+        )
+        upsert_torrent_instance(
+            conn,
+            TorrentInstance(
+                torrent_hash="done-hash",
+                payload_id=complete_payload_id,
+                device_id=None,
+                save_path="/tmp",
+                root_name="done",
+                category="",
+                tags="",
+                last_seen_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_torrent_instance(
+            conn,
+            TorrentInstance(
+                torrent_hash="missing-hash",
+                payload_id=incomplete_payload_id,
+                device_id=None,
+                save_path="/tmp",
+                root_name="missing",
+                category="",
+                tags="",
+                last_seen_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+
+        counts = _payload_sync_recount_for_hashes(
+            conn, torrent_hashes={"done-hash", "missing-hash"}
+        )
+        self.assertEqual(counts, {"complete": 1, "incomplete": 1, "missing_in_catalog": 1})
+        conn.close()
+
+    def test_find_matching_complete_payload_id_uses_unique_size_and_count_match(self):
+        conn = connect_db(self.db_path)
+        matched_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="matched",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/TorrentLeech/The.World.At.War",
+                file_count=26,
+                total_bytes=1234,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="other",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/TorrentLeech/Other.Show",
+                file_count=26,
+                total_bytes=1234,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+
+        resolved = _find_matching_complete_payload_id(
+            conn,
+            root_name="The.World.At.War",
+            expected_file_count=26,
+            expected_total_bytes=1234,
+            save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech/The.World.At.War",
+            torrent_hash="",
+        )
+        self.assertEqual(resolved, matched_id)
+        conn.close()
+
+    def test_find_matching_complete_payload_id_requires_unique_match(self):
+        conn = connect_db(self.db_path)
+        upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="one",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/Aither (API)/Movie.mkv",
+                file_count=1,
+                total_bytes=42,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="two",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/seedpool (API)/Movie.mkv",
+                file_count=1,
+                total_bytes=42,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+
+        resolved = _find_matching_complete_payload_id(
+            conn,
+            root_name="Movie.mkv",
+            expected_file_count=1,
+            expected_total_bytes=42,
+            save_path="/downloads/complete/cross-seed/Movie.mkv",
+            torrent_hash="",
+        )
+        self.assertIsNone(resolved)
+        conn.close()
+
+    def test_find_matching_complete_payload_id_prefers_hash_specific_rehome_candidate(self):
+        conn = connect_db(self.db_path)
+        matched_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="hash-specific",
+                device_id=None,
+                root_path="/pool/media/torrents/seeding/_rehome-unique/abc123/Movie.mkv",
+                file_count=1,
+                total_bytes=42,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="other-copy",
+                device_id=None,
+                root_path="/pool/media/torrents/seeding/cross-seed/seedpool (API)/Movie.mkv",
+                file_count=1,
+                total_bytes=42,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+
+        resolved = _find_matching_complete_payload_id(
+            conn,
+            root_name="Movie.mkv",
+            expected_file_count=1,
+            expected_total_bytes=42,
+            save_path="/downloads/complete/cross-seed/Movie.mkv",
+            torrent_hash="abc123",
+        )
+        self.assertEqual(resolved, matched_id)
+        conn.close()
+
+    def test_find_matching_complete_payload_id_ignores_trailing_space_in_root_path(self):
+        conn = connect_db(self.db_path)
+        matched_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="trimmed",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/TorrentLeech/The.World.At.War ",
+                file_count=26,
+                total_bytes=999,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+
+        resolved = _find_matching_complete_payload_id(
+            conn,
+            root_name="The.World.At.War",
+            expected_file_count=26,
+            expected_total_bytes=999,
+            save_path="/data/media/torrents/seeding/cross-seed/TorrentLeech/The.World.At.War",
+            torrent_hash="",
+        )
+        self.assertEqual(resolved, matched_id)
+        conn.close()
+
+    def test_collect_complete_payload_candidates_filters_by_count_size_and_name(self):
+        conn = connect_db(self.db_path)
+        matched_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="match",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/TorrentLeech/Show.Name",
+                file_count=2,
+                total_bytes=1234,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="other",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/TorrentLeech/Other.Name",
+                file_count=2,
+                total_bytes=1234,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+
+        rows = _collect_complete_payload_candidates(
+            conn,
+            root_name="Show.Name",
+            expected_file_count=2,
+            expected_total_bytes=1234,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["payload_id"], matched_id)
+        conn.close()
+
+    def test_collect_sidecar_hits_finds_nfo_txt_and_sample(self):
+        sidecar_root = self.payload_root / "Movie.Name"
+        sidecar_root.mkdir(parents=True, exist_ok=True)
+        files = {
+            sidecar_root / "Movie.Name.nfo": b"nfo",
+            sidecar_root / "Movie.Name.txt": b"txt",
+            sidecar_root / "Sample.mkv": b"sample",
+        }
+        conn = connect_db(self.db_path)
+        device_id = os.stat(self.payload_root).st_dev
+        now = time.time()
+        for path, data in files.items():
+            path.write_bytes(data)
+            st = path.stat()
+            conn.execute(
+                f"""
+                INSERT INTO files_{device_id} (path, size, mtime, sha256, inode, status)
+                VALUES (?, ?, ?, ?, ?, 'active')
+                """,
+                (str(path), st.st_size, now, f"sha256-{path.name}", st.st_ino),
+            )
+        conn.commit()
+
+        hits = _collect_sidecar_hits(conn, root_name="Movie.Name")
+        self.assertTrue(any(hit["size"] > 0 for hit in hits["nfo"]))
+        self.assertTrue(any(hit["size"] > 0 for hit in hits["txt"]))
+        self.assertTrue(any(hit["size"] > 0 for hit in hits["sample_mkv"]))
+        conn.close()
+
+    def test_rt_repair_worksheet_markdown_smoke(self):
+        conn = connect_db(self.db_path)
+        upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="candidate",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/TorrentLeech/Show.Name",
+                file_count=2,
+                total_bytes=1234,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash=None,
+                device_id=None,
+                root_path="/downloads/complete/cross-seed/Show.Name",
+                file_count=0,
+                total_bytes=0,
+                status="incomplete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_torrent_instance(
+            conn,
+            TorrentInstance(
+                torrent_hash="worksheet-hash",
+                payload_id=2,
+                device_id=None,
+                save_path="/downloads/complete/cross-seed",
+                root_name="Show.Name",
+                category="",
+                tags="",
+                last_seen_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+        conn.close()
+
+        fake_rows = [
+            RTTorrentInventoryRow(
+                torrent_hash="worksheet-hash",
+                root_name="Show.Name",
+                save_path="/downloads/complete/cross-seed",
+                content_path="/downloads/complete/cross-seed/Show.Name",
+                expected_file_count=2,
+                expected_total_bytes=1234,
+            )
+        ]
+        runner = CliRunner()
+        with patch("hashall.cli.load_rt_inventory_rows", return_value=fake_rows):
+            result = runner.invoke(
+                cli,
+                [
+                    "rt",
+                    "repair-worksheet",
+                    "--db",
+                    str(self.db_path),
+                    "--session-dir",
+                    str(self.tmp_path),
+                    "--markdown-output",
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("# RT Repair Worksheet", result.output)
+        self.assertIn("worksheet-hash", result.output)
+
+    def test_rt_repair_assistant_row_marks_healthy_item_not_broken(self):
+        healthy_path = self.tmp_path / "healthy" / "Movie.mkv"
+        healthy_path.parent.mkdir(parents=True, exist_ok=True)
+        healthy_path.write_bytes(b"ok")
+
+        decision = _build_rt_repair_assistant_row(
+            {
+                "rt_present": True,
+                "rt_save_path": str(healthy_path.parent),
+                "rt_content_path": str(healthy_path),
+                "expected_file_count": 1,
+                "expected_total_bytes": healthy_path.stat().st_size,
+                "catalog_payload_status": "complete",
+                "complete_candidates": [
+                    {
+                        "payload_id": 1,
+                        "root_path": str(healthy_path),
+                        "file_count": 1,
+                        "total_bytes": healthy_path.stat().st_size,
+                        "status": "complete",
+                    }
+                ],
+            }
+        )
+
+        self.assertFalse(decision["broken_now"])
+        self.assertEqual(decision["safe_to_mutate"], "no")
+        self.assertEqual(decision["best_candidate_path"], "")
+
+    def test_rt_repair_assistant_row_marks_exact_single_candidate_safe(self):
+        current_path = self.tmp_path / "missing" / "Movie.mkv"
+        candidate_path = self.tmp_path / "candidate" / "Movie.mkv"
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_path.write_bytes(b"x" * 42)
+
+        decision = _build_rt_repair_assistant_row(
+            {
+                "rt_present": True,
+                "rt_save_path": str(current_path.parent),
+                "rt_content_path": str(current_path),
+                "expected_file_count": 1,
+                "expected_total_bytes": 42,
+                "catalog_payload_status": "incomplete",
+                "complete_candidates": [
+                    {
+                        "payload_id": 2,
+                        "root_path": str(candidate_path),
+                        "file_count": 1,
+                        "total_bytes": 42,
+                        "status": "complete",
+                    }
+                ],
+            }
+        )
+
+        self.assertTrue(decision["broken_now"])
+        self.assertEqual(decision["best_candidate_path"], str(candidate_path))
+        self.assertEqual(decision["confidence"], "high")
+        self.assertEqual(decision["safe_to_mutate"], "yes")
+
+    def test_rt_repair_assistant_row_marks_ambiguous_candidate_unsafe(self):
+        current_path = self.tmp_path / "missing" / "Show.Name"
+        candidate_a = self.tmp_path / "a" / "Show.Name"
+        candidate_b = self.tmp_path / "b" / "Show.Name"
+        candidate_a.parent.mkdir(parents=True, exist_ok=True)
+        candidate_b.parent.mkdir(parents=True, exist_ok=True)
+        candidate_a.write_bytes(b"a" * 10)
+        candidate_b.write_bytes(b"b" * 10)
+
+        decision = _build_rt_repair_assistant_row(
+            {
+                "rt_present": True,
+                "rt_save_path": str(current_path.parent),
+                "rt_content_path": str(current_path),
+                "expected_file_count": 1,
+                "expected_total_bytes": 10,
+                "catalog_payload_status": "incomplete",
+                "complete_candidates": [
+                    {
+                        "payload_id": 3,
+                        "root_path": str(candidate_a),
+                        "file_count": 1,
+                        "total_bytes": 10,
+                        "status": "complete",
+                    },
+                    {
+                        "payload_id": 4,
+                        "root_path": str(candidate_b),
+                        "file_count": 1,
+                        "total_bytes": 10,
+                        "status": "complete",
+                    },
+                ],
+            }
+        )
+
+        self.assertTrue(decision["broken_now"])
+        self.assertEqual(decision["best_candidate_path"], "")
+        self.assertEqual(decision["safe_to_mutate"], "no")
+        self.assertEqual(decision["confidence"], "low")
+
+    def test_rt_repair_assistant_outputs_only_strict_fields(self):
+        conn = connect_db(self.db_path)
+        payload_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="strict-complete",
+                device_id=None,
+                root_path=str(self.payload_root),
+                file_count=2,
+                total_bytes=2,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_torrent_instance(
+            conn,
+            TorrentInstance(
+                torrent_hash="strict-hash",
+                payload_id=payload_id,
+                device_id=None,
+                save_path="/downloads/complete/cross-seed",
+                root_name=self.payload_root.name,
+                category="",
+                tags="",
+                last_seen_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+        conn.close()
+
+        fake_rows = [
+            RTTorrentInventoryRow(
+                torrent_hash="strict-hash",
+                root_name=self.payload_root.name,
+                save_path="/downloads/complete/cross-seed",
+                content_path="/downloads/complete/cross-seed/payload",
+                expected_file_count=2,
+                expected_total_bytes=2,
+            )
+        ]
+        runner = CliRunner()
+        with patch("hashall.cli.load_rt_inventory_rows", return_value=fake_rows):
+            result = runner.invoke(
+                cli,
+                [
+                    "rt",
+                    "repair-assistant",
+                    "--db",
+                    str(self.db_path),
+                    "--session-dir",
+                    str(self.tmp_path),
+                    "--hash",
+                    "strict-hash",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = cli_mod.json.loads(result.output)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(
+            sorted(payload[0].keys()),
+            sorted(
+                [
+                    "broken_now",
+                    "current_client_path",
+                    "best_candidate_path",
+                    "confidence",
+                    "why",
+                    "safe_to_mutate",
+                ]
+            ),
+        )
+
+    def test_payload_sync_rt_reuses_complete_payload_from_expected_counts(self):
+        conn = connect_db(self.db_path)
+        matched_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="matched-rt",
+                device_id=None,
+                root_path="/stash/media/torrents/seeding/cross-seed/DigitalCore (API)/12.Monkeys",
+                file_count=2,
+                total_bytes=1234,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+        conn.close()
+
+        runner = CliRunner()
+        fake_rows = [
+            RTTorrentInventoryRow(
+                torrent_hash="rt-hash-1",
+                root_name="12.Monkeys",
+                save_path="/data/media/torrents/seeding/cross-seed/DigitalCore (API)/12.Monkeys",
+                content_path="/data/media/torrents/seeding/cross-seed/DigitalCore (API)/12.Monkeys",
+                expected_file_count=2,
+                expected_total_bytes=1234,
+            )
+        ]
+        empty_payload = Payload(
+            payload_id=None,
+            payload_hash=None,
+            device_id=None,
+            root_path="/data/media/torrents/seeding/cross-seed/DigitalCore (API)/12.Monkeys",
+            file_count=0,
+            total_bytes=0,
+            status="incomplete",
+            last_built_at=time.time(),
+        )
+        with patch("hashall.cli.load_rt_inventory_rows", return_value=fake_rows), patch(
+            "hashall.payload.build_payload", return_value=empty_payload
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--source",
+                    "rt",
+                    "--rt-session-dir",
+                    str(self.tmp_path),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Reused complete payload", result.output)
+        conn = connect_db(self.db_path)
+        row = conn.execute(
+            "SELECT payload_id FROM torrent_instances WHERE torrent_hash = ?",
+            ("rt-hash-1",),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], matched_id)
+        conn.close()
+
+    def test_payload_sync_reports_post_upgrade_counts(self):
+        runner = CliRunner()
+        session_dir = self.tmp_path / "rt-session"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        fake_rows = [
+            RTTorrentInventoryRow(
+                torrent_hash="upgraded-hash",
+                root_name="Movie.mkv",
+                save_path="/data/media/torrents/seeding/cross-seed/Aither (API)",
+                content_path="/data/media/torrents/seeding/cross-seed/Aither (API)/Movie.mkv",
+                expected_file_count=1,
+                expected_total_bytes=42,
+            )
+        ]
+        initial_payload = Payload(
+            payload_id=None,
+            payload_hash=None,
+            device_id=46,
+            root_path="/stash/media/torrents/seeding/cross-seed/Aither (API)/Movie.mkv",
+            file_count=0,
+            total_bytes=0,
+            status="incomplete",
+            last_built_at=None,
+            fs_uuid="zfs-test",
+        )
+        upgraded_payload = replace(
+            initial_payload,
+            payload_hash="f" * 64,
+            file_count=1,
+            total_bytes=42,
+            status="complete",
+            last_built_at=time.time(),
+        )
+
+        with patch("hashall.cli.load_rt_inventory_rows", return_value=fake_rows), patch(
+            "hashall.payload.build_payload", side_effect=[initial_payload, upgraded_payload]
+        ), patch(
+            "hashall.payload.summarize_missing_sha256_for_path",
+            return_value={"files": 1, "bytes": 42},
+        ), patch(
+            "hashall.payload.upgrade_payload_missing_sha256",
+            return_value=1,
+        ), patch(
+            "hashall.payload.count_missing_sha256_for_path",
+            return_value=1,
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--source",
+                    "rt",
+                    "--rt-session-dir",
+                    str(session_dir),
+                    "--upgrade-missing",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("upgrade_summary queued=1 started=1 completed=1 failed=0", result.output)
+        self.assertIn("complete payloads: 1", result.output)
+        self.assertIn("incomplete payloads: 0", result.output)
+        self.assertIn("missing in catalog: 0", result.output)
 
     def test_payload_sync_dry_run_no_db_writes(self):
         torrents = [
@@ -381,6 +1185,118 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertIn("processed: 1", result.output)
         self.assertIn("complete payloads: 1", result.output)
         self.assertIn("root path source: rt_session_rows=1", result.output)
+
+    def test_payload_sync_upgrade_uses_alias_aware_build_payload_for_rt_source(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        torrent_hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        root_alias = "/data/media/torrents/seeding/tv/example/example.mkv"
+
+        (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+            bencode_encode({b"directory": b"/data/media/torrents/seeding/tv/example"})
+        )
+        (session_dir / f"{torrent_hash}.torrent").write_bytes(
+            bencode_encode({b"info": {b"name": b"example.mkv"}})
+        )
+
+        build_calls = []
+
+        def fake_build_payload(conn, root_path, device_id=None, *, already_canonical=False):
+            build_calls.append((root_path, device_id, already_canonical))
+            status = "complete" if len(build_calls) > 1 else "incomplete"
+            return Payload(
+                payload_id=None,
+                payload_hash="done-hash" if status == "complete" else None,
+                device_id=device_id if device_id is not None else os.stat(self.payload_root).st_dev,
+                root_path=root_path,
+                file_count=1,
+                total_bytes=1,
+                status=status,
+                last_built_at=None,
+                fs_uuid=None,
+            )
+
+        runner = CliRunner()
+        with (
+            patch("hashall.payload.build_payload", side_effect=fake_build_payload),
+            patch("hashall.payload.upsert_payload", return_value=1),
+            patch("hashall.payload.upsert_torrent_instance"),
+            patch("hashall.payload.summarize_missing_sha256_for_path", return_value={"files": 1, "bytes": 1}),
+            patch("hashall.payload.upgrade_payload_missing_sha256", return_value=1),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--source",
+                    "rt",
+                    "--rt-session-dir",
+                    str(session_dir),
+                    "--upgrade-missing",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertGreaterEqual(len(build_calls), 2)
+        self.assertEqual(build_calls[0][0], root_alias)
+        self.assertFalse(build_calls[0][2], result.output)
+        self.assertFalse(build_calls[1][2], result.output)
+        self.assertIn("✅ Upgrade complete: groups=1", result.output)
+
+    def test_payload_sync_upgrade_skips_zero_file_roots_and_warns(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        torrent_hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+
+        (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+            bencode_encode({b"directory": b"/data/media/torrents/seeding/tv/example"})
+        )
+        (session_dir / f"{torrent_hash}.torrent").write_bytes(
+            bencode_encode({b"info": {b"name": b"example.mkv"}})
+        )
+
+        def fake_build_payload(conn, root_path, device_id=None, *, already_canonical=False):
+            return Payload(
+                payload_id=None,
+                payload_hash=None,
+                device_id=device_id if device_id is not None else os.stat(self.payload_root).st_dev,
+                root_path=root_path,
+                file_count=0,
+                total_bytes=0,
+                status="incomplete",
+                last_built_at=None,
+                fs_uuid=None,
+            )
+
+        runner = CliRunner()
+        with (
+            patch("hashall.payload.build_payload", side_effect=fake_build_payload),
+            patch("hashall.payload.upsert_payload", return_value=1),
+            patch("hashall.payload.upsert_torrent_instance"),
+            patch("hashall.payload.summarize_missing_sha256_for_path", return_value={"files": 0, "bytes": 0}),
+            patch("hashall.payload.upgrade_payload_missing_sha256", side_effect=AssertionError("should not run")),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--source",
+                    "rt",
+                    "--rt-session-dir",
+                    str(session_dir),
+                    "--upgrade-missing",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("zero-file roots skipped: 1", result.output)
+        self.assertIn("upgrade stage completed with zero successful roots", result.output)
 
     def test_payload_sync_rejects_qb_filters_with_rt_source(self):
         session_dir = self.tmp_path / "session"

@@ -104,6 +104,351 @@ def _write_payload_sync_upgrade_state(state_path: Path, state: dict) -> None:
     tmp_path.replace(state_path)
 
 
+def _prune_unseen_incomplete_rt_instances(conn, *, seen_hashes: set[str]) -> dict[str, int]:
+    """
+    Remove stale incomplete RT rows that were not present in the current session load.
+
+    Restrict this to zero-file incomplete payload links so complete mappings and any
+    active content-bearing rows remain untouched.
+    """
+    rows = conn.execute(
+        """
+        SELECT ti.torrent_hash, ti.payload_id
+        FROM torrent_instances ti
+        JOIN payloads p ON p.payload_id = ti.payload_id
+        WHERE p.status = 'incomplete' AND p.file_count = 0
+        """
+    ).fetchall()
+    stale_hashes = [str(row[0]) for row in rows if str(row[0]) not in seen_hashes]
+    stale_payload_ids = {int(row[1]) for row in rows if str(row[0]) not in seen_hashes}
+    if stale_hashes:
+        placeholders = ",".join(["?"] * len(stale_hashes))
+        conn.execute(
+            f"DELETE FROM torrent_instances WHERE torrent_hash IN ({placeholders})",
+            stale_hashes,
+        )
+    return {
+        "torrent_instances": len(stale_hashes),
+        "payload_candidates": len(stale_payload_ids),
+    }
+
+
+def _payload_sync_recount_for_hashes(conn, *, torrent_hashes: set[str]) -> dict[str, int]:
+    if not torrent_hashes:
+        return {"complete": 0, "incomplete": 0, "missing_in_catalog": 0}
+    placeholders = ",".join(["?"] * len(torrent_hashes))
+    row = conn.execute(
+        f"""
+        SELECT
+            SUM(CASE WHEN p.status = 'complete' THEN 1 ELSE 0 END) AS complete_count,
+            SUM(CASE WHEN p.status != 'complete' THEN 1 ELSE 0 END) AS incomplete_count,
+            SUM(CASE WHEN p.file_count = 0 THEN 1 ELSE 0 END) AS missing_count
+        FROM torrent_instances ti
+        JOIN payloads p ON p.payload_id = ti.payload_id
+        WHERE ti.torrent_hash IN ({placeholders})
+        """,
+        sorted(torrent_hashes),
+    ).fetchone()
+    complete_count, incomplete_count, missing_count = row or (0, 0, 0)
+    return {
+        "complete": int(complete_count or 0),
+        "incomplete": int(incomplete_count or 0),
+        "missing_in_catalog": int(missing_count or 0),
+    }
+
+
+def _find_matching_complete_payload_id(
+    conn,
+    *,
+    root_name: str,
+    expected_file_count: int,
+    expected_total_bytes: int,
+    save_path: str,
+    torrent_hash: str = "",
+) -> int | None:
+    """
+    Return a uniquely matching complete payload for a dead RT root when possible.
+
+    Matching is intentionally strict: expected file count and total bytes must match,
+    and the payload root must end with the torrent root name. If a provider hint from
+    the save path narrows the candidate set to one row, use it; otherwise only accept
+    a globally unique match.
+    """
+    root_name = str(root_name or "").strip()
+    if not root_name or expected_file_count <= 0 or expected_total_bytes < 0:
+        return None
+
+    rows = conn.execute(
+        """
+        SELECT payload_id, root_path
+        FROM payloads
+        WHERE status = 'complete' AND file_count = ? AND total_bytes = ?
+        """,
+        (int(expected_file_count), int(expected_total_bytes)),
+    ).fetchall()
+    if not rows:
+        return None
+
+    root_candidates = []
+    suffix = f"/{root_name}"
+    nested_suffix = f"/{root_name}/"
+    normalized_hash = str(torrent_hash or "").strip().lower()
+    for payload_id, root_path in rows:
+        root_path = str(root_path or "")
+        normalized_root = root_path.rstrip(" /")
+        if normalized_root.endswith(suffix) or nested_suffix in normalized_root:
+            root_candidates.append((int(payload_id), root_path))
+    if not root_candidates:
+        return None
+    if len(root_candidates) == 1:
+        return root_candidates[0][0]
+
+    if normalized_hash:
+        hashed = [
+            (payload_id, root_path)
+            for payload_id, root_path in root_candidates
+            if f"/{normalized_hash}/" in str(root_path or "").lower()
+        ]
+        if len(hashed) == 1:
+            return hashed[0][0]
+
+    save_parts = [part for part in Path(str(save_path or "")).parts if part]
+    generic_parts = {
+        "downloads", "complete", "cross-seed", "_qb-finish", "_qb-unique-repair",
+        "seeding", "torrents", "data", "media", "stash", "pool",
+    }
+    provider_hints = [
+        part for part in reversed(save_parts)
+        if part not in generic_parts and part != root_name
+    ]
+    for hint in provider_hints:
+        hinted = [(payload_id, root_path) for payload_id, root_path in root_candidates if hint in root_path]
+        if len(hinted) == 1:
+            return hinted[0][0]
+    return None
+
+
+def _iter_files_tables(conn) -> list[str]:
+    return [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'files_%' ORDER BY name"
+        ).fetchall()
+    ]
+
+
+def _collect_complete_payload_candidates(
+    conn,
+    *,
+    root_name: str,
+    expected_file_count: int,
+    expected_total_bytes: int,
+    limit: int = 10,
+) -> list[dict]:
+    root_name = str(root_name or "").strip()
+    if not root_name:
+        return []
+    rows = conn.execute(
+        """
+        SELECT payload_id, payload_hash, root_path, file_count, total_bytes, status
+        FROM payloads
+        WHERE status = 'complete'
+          AND file_count = ?
+          AND total_bytes = ?
+        ORDER BY payload_id
+        """,
+        (int(expected_file_count or 0), int(expected_total_bytes or 0)),
+    ).fetchall()
+    suffix = f"/{root_name}"
+    nested_suffix = f"/{root_name}/"
+    out = []
+    for row in rows:
+        root_path = str(row[2] or "")
+        normalized_root = root_path.rstrip(" /")
+        if normalized_root.endswith(suffix) or nested_suffix in normalized_root:
+            out.append(
+                {
+                    "payload_id": int(row[0]),
+                    "payload_hash": row[1],
+                    "root_path": root_path,
+                    "file_count": int(row[3] or 0),
+                    "total_bytes": int(row[4] or 0),
+                    "status": row[5],
+                }
+            )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _collect_sidecar_hits(conn, *, root_name: str, limit: int = 20) -> dict[str, list[dict]]:
+    root_name = str(root_name or "").strip()
+    if not root_name:
+        return {"nfo": [], "txt": [], "sample_mkv": []}
+    patterns = {
+        "nfo": f"%{root_name}%.nfo",
+        "txt": f"%{root_name}%.txt",
+        "sample_mkv": f"%{root_name}%Sample.mkv",
+    }
+    tables = _iter_files_tables(conn)
+    out: dict[str, list[dict]] = {key: [] for key in patterns}
+    for label, pattern in patterns.items():
+        hits = []
+        for table in tables:
+            rows = conn.execute(
+                f"SELECT path, size, status, sha256 FROM {table} WHERE path LIKE ? ORDER BY size DESC LIMIT ?",
+                (pattern, int(limit)),
+            ).fetchall()
+            for row in rows:
+                hits.append(
+                    {
+                        "path": str(row[0]),
+                        "size": int(row[1] or 0),
+                        "status": str(row[2] or ""),
+                        "sha256": row[3],
+                    }
+                )
+        hits.sort(key=lambda item: (item["size"], item["path"]), reverse=True)
+        out[label] = hits[:limit]
+    return out
+
+
+def _build_rt_repair_worksheet_rows(conn, *, session_dir: Path, hash_filters: list[str] | None = None) -> list[dict]:
+    rt_rows = {row.torrent_hash: row for row in load_rt_inventory_rows(session_dir)}
+    requested = [str(item).strip().lower() for item in (hash_filters or []) if str(item).strip()]
+    if requested:
+        hashes = requested
+    else:
+        hashes = [
+            str(row[0]).strip().lower()
+            for row in conn.execute(
+                """
+                SELECT ti.torrent_hash
+                FROM torrent_instances ti
+                JOIN payloads p ON p.payload_id = ti.payload_id
+                WHERE p.status = 'incomplete' AND p.file_count = 0
+                ORDER BY ti.torrent_hash
+                """
+            ).fetchall()
+        ]
+
+    out = []
+    for torrent_hash in hashes:
+        rt_row = rt_rows.get(torrent_hash)
+        ti_row = conn.execute(
+            """
+            SELECT ti.torrent_hash, ti.payload_id, ti.save_path, ti.root_name, ti.category, ti.tags,
+                   p.root_path, p.file_count, p.total_bytes, p.status
+            FROM torrent_instances ti
+            LEFT JOIN payloads p ON p.payload_id = ti.payload_id
+            WHERE ti.torrent_hash = ?
+            """,
+            (torrent_hash,),
+        ).fetchone()
+        root_name = ""
+        if rt_row is not None:
+            root_name = str(rt_row.root_name or "").strip()
+        elif ti_row is not None:
+            root_name = str(ti_row[3] or "").strip()
+        expected_file_count = int(getattr(rt_row, "expected_file_count", 0) or 0)
+        expected_total_bytes = int(getattr(rt_row, "expected_total_bytes", 0) or 0)
+        candidate_rows = _collect_complete_payload_candidates(
+            conn,
+            root_name=root_name,
+            expected_file_count=expected_file_count,
+            expected_total_bytes=expected_total_bytes,
+        )
+        sidecar_hits = _collect_sidecar_hits(conn, root_name=root_name)
+        out.append(
+            {
+                "torrent_hash": torrent_hash,
+                "root_name": root_name,
+                "rt_present": rt_row is not None,
+                "rt_save_path": str(getattr(rt_row, "save_path", "") or ""),
+                "rt_content_path": str(getattr(rt_row, "content_path", "") or ""),
+                "expected_file_count": expected_file_count,
+                "expected_total_bytes": expected_total_bytes,
+                "catalog_payload_id": int(ti_row[1]) if ti_row and ti_row[1] is not None else None,
+                "catalog_payload_root": str(ti_row[6] or "") if ti_row else "",
+                "catalog_payload_status": str(ti_row[9] or "") if ti_row else "",
+                "complete_candidates": candidate_rows,
+                "sidecar_hits": sidecar_hits,
+            }
+        )
+    return out
+
+
+def _rt_current_client_path(row: dict) -> str:
+    return str(row.get("rt_content_path") or row.get("rt_save_path") or "").strip()
+
+
+def _build_rt_repair_assistant_row(row: dict) -> dict:
+    current_client_path = _rt_current_client_path(row)
+    current_path_exists = bool(current_client_path and Path(current_client_path).exists())
+    rt_present = bool(row.get("rt_present"))
+    catalog_status = str(row.get("catalog_payload_status") or "").strip()
+    candidates = list(row.get("complete_candidates") or [])
+    exact_candidates = [
+        candidate
+        for candidate in candidates
+        if int(candidate.get("file_count") or 0) == int(row.get("expected_file_count") or 0)
+        and int(candidate.get("total_bytes") or 0) == int(row.get("expected_total_bytes") or 0)
+    ]
+
+    broken_reasons: list[str] = []
+    if not rt_present:
+        broken_reasons.append("rt_missing")
+    if current_client_path and not current_path_exists:
+        broken_reasons.append("current_path_missing")
+    if catalog_status != "complete":
+        broken_reasons.append("catalog_incomplete")
+
+    broken_now = bool(broken_reasons)
+    best_candidate_path = ""
+    confidence = "low"
+    safe_to_mutate = "no"
+    why_parts: list[str] = []
+
+    if not broken_now:
+        why_parts.append("current_rt_path_exists and catalog is complete")
+    elif len(exact_candidates) == 1:
+        best_candidate_path = str(exact_candidates[0].get("root_path") or "").strip()
+        candidate_exists = bool(best_candidate_path and Path(best_candidate_path).exists())
+        if candidate_exists:
+            confidence = "high"
+            why_parts.append("single exact complete candidate")
+            if "current_path_missing" in broken_reasons or current_client_path != best_candidate_path:
+                safe_to_mutate = "yes"
+                why_parts.append("candidate exists and differs from broken current path")
+            else:
+                safe_to_mutate = "no"
+                why_parts.append("candidate matches current path")
+        else:
+            confidence = "medium"
+            why_parts.append("single exact candidate but path missing")
+    elif len(exact_candidates) > 1:
+        confidence = "low"
+        why_parts.append(f"ambiguous exact candidates={len(exact_candidates)}")
+    elif candidates:
+        confidence = "low"
+        why_parts.append("complete candidates exist but exact proof is insufficient")
+    else:
+        confidence = "low"
+        why_parts.append("no complete candidate found")
+
+    if broken_reasons:
+        why_parts.insert(0, "broken:" + ",".join(broken_reasons))
+
+    return {
+        "broken_now": broken_now,
+        "current_client_path": current_client_path,
+        "best_candidate_path": best_candidate_path,
+        "confidence": confidence,
+        "why": "; ".join(why_parts),
+        "safe_to_mutate": safe_to_mutate,
+    }
+
+
 def _apply_low_priority() -> None:
     pid = os.getpid()
     try:
@@ -557,6 +902,7 @@ def payload_sync(
     from hashall.payload import (
         build_payload, upsert_payload, upsert_torrent_instance, TorrentInstance,
         upgrade_payload_missing_sha256, prune_orphan_payloads, count_missing_sha256_for_path,
+        summarize_missing_sha256_for_path, get_payload_by_id,
     )
     from hashall.pathing import canonicalize_path, is_under, remap_to_mount_alias
 
@@ -604,6 +950,8 @@ def payload_sync(
                 "name": row.root_name,
                 "save_path": row.save_path,
                 "content_path": row.content_path,
+                "expected_file_count": row.expected_file_count,
+                "expected_total_bytes": row.expected_total_bytes,
                 "category": "",
                 "tags": "",
             }
@@ -693,6 +1041,11 @@ def payload_sync(
     else:
         print("📥 Using preloaded rTorrent inventory rows...")
         print(f"   Found {len(inventory_rows)} torrents")
+    seen_hashes = {
+        str(torrent.get("hash") or "").strip()
+        for torrent in inventory_rows
+        if str(torrent.get("hash") or "").strip()
+    }
 
     # Process each torrent
     synced_count = 0
@@ -701,7 +1054,9 @@ def payload_sync(
     skipped_prefix = 0
     processed = 0
     checked = 0
+    processed_torrent_hashes: set[str] = set()
     prune_stats = None
+    stale_rt_stats = None
     write_batch_ops = 0
     write_batch_threshold = 400
     upgrade_queue: dict[str, dict] = {}
@@ -739,29 +1094,61 @@ def payload_sync(
                     )
                     continue
 
-            progress.update(desc=f"{str(torrent.get('name') or '')[:60]}", advance=0)
+            torrent_name = str(
+                torrent.get("name")
+                or torrent.get("root_name")
+                or ""
+            ).strip()
+            torrent_hash = str(torrent.get("hash") or "").strip()
+            if torrent_hash:
+                processed_torrent_hashes.add(torrent_hash)
 
-            print(f"\n🔄 Processing: {str(torrent.get('name') or '')[:50]}...")
-            print(f"   Hash: {torrent.get('hash')}")
+            progress.update(desc=f"{torrent_name[:60]}", advance=0)
+
+            print(f"\n🔄 Processing: {torrent_name[:50]}...")
+            print(f"   Hash: {torrent_hash}")
             print(f"   Path: {root_path}")
             if str(root_canon) != root_path:
                 print(f"   Canonical: {root_canon}")
 
-            payload = build_payload(conn, str(root_canon), device_id=None, already_canonical=True)
+            payload = build_payload(conn, str(root_canon), device_id=None, already_canonical=False)
+            if source == "rt" and payload.file_count == 0:
+                matched_payload_id = _find_matching_complete_payload_id(
+                    conn,
+                    root_name=torrent_name,
+                    expected_file_count=int(torrent.get("expected_file_count") or 0),
+                    expected_total_bytes=int(torrent.get("expected_total_bytes") or 0),
+                    save_path=str(torrent.get("save_path") or ""),
+                    torrent_hash=str(torrent.get("hash") or ""),
+                )
+                if matched_payload_id is not None:
+                    matched_payload = get_payload_by_id(conn, matched_payload_id)
+                    if matched_payload is not None:
+                        payload = matched_payload
+                        print(
+                            f"   ♻️  Reused complete payload #{matched_payload_id}: "
+                            f"{matched_payload.root_path}"
+                        )
             if payload.file_count == 0:
                 missing_in_catalog += 1
 
             if (not dry_run) and payload.status != 'complete' and upgrade_missing:
                 key = str(root_canon)
                 if key not in upgrade_queue:
+                    missing_stats = {"files": 0, "bytes": 0}
+                    if payload.device_id is not None:
+                        try:
+                            missing_stats = summarize_missing_sha256_for_path(conn, str(root_canon), payload.device_id)
+                        except Exception:
+                            missing_stats = {"files": 0, "bytes": 0}
                     upgrade_queue[key] = {
                         "root_path": key,
                         "device_id": payload.device_id,
-                        "first_torrent": str(torrent.get("name") or ""),
-                        "first_hash": str(torrent.get("hash") or ""),
+                        "first_torrent": torrent_name,
+                        "first_hash": torrent_hash,
                         "first_seen_order": processed,
-                        "file_count": int(payload.file_count or 0),
-                        "total_bytes": int(payload.total_bytes or 0),
+                        "file_count": int(missing_stats.get("files") or payload.file_count or 0),
+                        "total_bytes": int(missing_stats.get("bytes") or payload.total_bytes or 0),
                     }
 
             if not dry_run:
@@ -770,7 +1157,7 @@ def payload_sync(
 
                 # Insert/update torrent instance
                 torrent_instance = TorrentInstance(
-                    torrent_hash=str(torrent.get("hash") or ""),
+                    torrent_hash=torrent_hash,
                     payload_id=payload_id,
                     device_id=payload.device_id,
                     fs_uuid=payload.fs_uuid,
@@ -807,6 +1194,7 @@ def payload_sync(
         print("------------------------------------------------------------")
         upgrade_stage_start = time.monotonic()
         queue_items = list(upgrade_queue.values())
+        queued_root_count = len(queue_items)
         order_mode = (upgrade_order or "small-first").lower()
         if order_mode == "small-first":
             queue_items.sort(
@@ -841,6 +1229,7 @@ def payload_sync(
         upgrade_state = _load_payload_sync_upgrade_state(upgrade_state_path)
         completed_roots = upgrade_state["completed_roots"]
         skipped_resumed = 0
+        skipped_zero_file_roots = 0
         pending_queue_items = []
         for item in queue_items:
             root_key = _payload_sync_upgrade_root_key(item)
@@ -848,6 +1237,20 @@ def payload_sync(
             device_id = int(item.get("device_id") or 0)
             if root_key in completed_roots and count_missing_sha256_for_path(conn, device_id, root_path) == 0:
                 skipped_resumed += 1
+                continue
+            if device_id > 0:
+                try:
+                    missing_stats = summarize_missing_sha256_for_path(conn, root_path, device_id)
+                except Exception:
+                    missing_stats = {"files": 0, "bytes": 0}
+                item["file_count"] = int(missing_stats.get("files") or 0)
+                item["total_bytes"] = int(missing_stats.get("bytes") or 0)
+            if int(item.get("file_count") or 0) <= 0:
+                skipped_zero_file_roots += 1
+                print(
+                    f"   ⚠️  skipping zero-file upgrade root: root={root_path} "
+                    f"device_id={device_id or 'unknown'}"
+                )
                 continue
             pending_queue_items.append(item)
         queue_items = pending_queue_items
@@ -866,6 +1269,8 @@ def payload_sync(
                 f"   resume checkpoint: skipped already-complete roots={skipped_resumed} "
                 f"state={upgrade_state_path}"
             )
+        if skipped_zero_file_roots:
+            print(f"   zero-file roots skipped: {skipped_zero_file_roots}")
 
         for root_idx, item in enumerate(queue_items, start=1):
             root_path = str(item.get("root_path") or "")
@@ -973,7 +1378,7 @@ def payload_sync(
                     batch_bytes_total=hash_log_state["last_bytes_total"],
                 )
 
-            refreshed = build_payload(conn, root_path, device_id=item.get("device_id"), already_canonical=True)
+            refreshed = build_payload(conn, root_path, device_id=item.get("device_id"), already_canonical=False)
             upsert_payload(conn, refreshed, commit=False)
             write_batch_ops += 1
             if write_batch_ops >= write_batch_threshold:
@@ -1001,6 +1406,11 @@ def payload_sync(
             f"queued={total_upgrade_roots} started={upgrade_started} "
             f"completed={upgrade_completed} failed={upgrade_failed} elapsed_s={upgrade_elapsed}"
         )
+        if queued_root_count > 0 and upgrade_completed == 0 and upgrade_failed == 0:
+            print(
+                "   ⚠️  upgrade stage completed with zero successful roots; "
+                "queued paths may not resolve to scanned files"
+            )
         if upgrade_failed == 0 and total_upgrade_roots == upgrade_completed:
             try:
                 upgrade_state_path.unlink()
@@ -1011,6 +1421,16 @@ def payload_sync(
     if not dry_run and write_batch_ops:
         conn.commit()
 
+    if (not dry_run) and source == "rt":
+        stale_rt_stats = _prune_unseen_incomplete_rt_instances(conn, seen_hashes=seen_hashes)
+        if stale_rt_stats["torrent_instances"]:
+            conn.commit()
+            print(
+                "   🧹 pruned stale unseen rt rows: "
+                f"torrent_instances={stale_rt_stats['torrent_instances']} "
+                f"payload_candidates={stale_rt_stats['payload_candidates']}"
+            )
+
     if (not dry_run) and limit == 0:
         prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
         try:
@@ -1018,6 +1438,12 @@ def payload_sync(
         except Exception as exc:
             print(f"   ⚠️  orphan prune failed (non-fatal): {exc}")
             prune_stats = None
+
+    if not dry_run:
+        recount = _payload_sync_recount_for_hashes(conn, torrent_hashes=processed_torrent_hashes)
+        synced_count = recount["complete"]
+        incomplete_count = recount["incomplete"]
+        missing_in_catalog = recount["missing_in_catalog"]
 
     if dry_run:
         print(f"\n✅ DRY-RUN complete (no DB changes)")
@@ -1045,6 +1471,8 @@ def payload_sync(
         )
     else:
         print(f"   root path source: rt_session_rows={len(inventory_rows)}")
+    if stale_rt_stats is not None:
+        print(f"   stale unseen rt rows pruned: {stale_rt_stats['torrent_instances']}")
     if upgrade_missing and not dry_run:
         print(
             "   upgrade stage: "
@@ -2434,6 +2862,149 @@ def rt_repair_apply_cmd(report_path, session_dir, rpc_url, action_bucket, hash_f
             print(f"      result: ERROR {exc}")
     print(f"   applied: {applied}")
     print(f"   errors: {errors}")
+
+
+@rt.command("repair-worksheet")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict worksheet to specific torrent hash(es).")
+@click.option("--hash-file", type=click.Path(exists=True, dir_okay=False), default=None, help="Read additional hash filters from a newline-delimited file.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+@click.option("--markdown-output", is_flag=True, help="Emit markdown.")
+def rt_repair_worksheet_cmd(db, session_dir, hash_filters, hash_file, limit, json_output, markdown_output):
+    """Build a repair worksheet for RT-linked residuals using current catalog evidence."""
+    from hashall.model import connect_db
+
+    requested = [str(item).strip().lower() for item in hash_filters if str(item).strip()]
+    if hash_file:
+        for raw in Path(hash_file).read_text(encoding="utf-8").splitlines():
+            cleaned = raw.strip().lower()
+            if cleaned and not cleaned.startswith("#"):
+                requested.append(cleaned)
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    rows = _build_rt_repair_worksheet_rows(
+        conn,
+        session_dir=Path(session_dir).expanduser(),
+        hash_filters=requested or None,
+    )
+    if limit > 0:
+        rows = rows[:limit]
+    summary = {
+        "db": str(Path(db).expanduser()),
+        "session_dir": str(Path(session_dir).expanduser()),
+        "rows": len(rows),
+        "requested_hashes": len(requested),
+        "rows_with_candidates": sum(1 for row in rows if row["complete_candidates"]),
+        "rows_with_nonzero_nfo": sum(
+            1
+            for row in rows
+            if any(hit["size"] > 0 for hit in row["sidecar_hits"]["nfo"])
+        ),
+        "rows_with_nonzero_txt": sum(
+            1
+            for row in rows
+            if any(hit["size"] > 0 for hit in row["sidecar_hits"]["txt"])
+        ),
+        "rows_with_nonzero_sample": sum(
+            1
+            for row in rows
+            if any(hit["size"] > 0 for hit in row["sidecar_hits"]["sample_mkv"])
+        ),
+    }
+
+    if json_output:
+        print(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        return
+
+    if markdown_output:
+        print("# RT Repair Worksheet")
+        print()
+        print(f"- db: `{summary['db']}`")
+        print(f"- session_dir: `{summary['session_dir']}`")
+        print(f"- rows: `{summary['rows']}`")
+        print(f"- requested_hashes: `{summary['requested_hashes']}`")
+        print(f"- rows_with_candidates: `{summary['rows_with_candidates']}`")
+        print(f"- rows_with_nonzero_nfo: `{summary['rows_with_nonzero_nfo']}`")
+        print(f"- rows_with_nonzero_txt: `{summary['rows_with_nonzero_txt']}`")
+        print(f"- rows_with_nonzero_sample: `{summary['rows_with_nonzero_sample']}`")
+        print()
+        for idx, row in enumerate(rows, start=1):
+            print(f"## {idx}. {row['root_name'] or row['torrent_hash']}")
+            print()
+            print(f"- hash: `{row['torrent_hash']}`")
+            print(f"- rt_present: `{row['rt_present']}`")
+            print(f"- rt_save_path: `{row['rt_save_path']}`")
+            print(f"- rt_content_path: `{row['rt_content_path']}`")
+            print(f"- expected_file_count: `{row['expected_file_count']}`")
+            print(f"- expected_total_bytes: `{row['expected_total_bytes']}`")
+            print(f"- catalog_payload_id: `{row['catalog_payload_id']}`")
+            print(f"- catalog_payload_root: `{row['catalog_payload_root']}`")
+            print(f"- catalog_payload_status: `{row['catalog_payload_status']}`")
+            print(f"- complete_candidate_count: `{len(row['complete_candidates'])}`")
+            if row["complete_candidates"]:
+                print("- complete_candidates:")
+                for candidate in row["complete_candidates"]:
+                    print(
+                        f"  - `{candidate['payload_id']}` `{candidate['file_count']}` files "
+                        f"`{candidate['total_bytes']}` bytes `{candidate['root_path']}`"
+                    )
+            for label in ("nfo", "txt", "sample_mkv"):
+                hits = row["sidecar_hits"][label]
+                if not hits:
+                    continue
+                print(f"- {label}_hits:")
+                for hit in hits[:5]:
+                    print(f"  - `{hit['size']}` `{hit['status']}` `{hit['path']}`")
+            print()
+        return
+
+    print("🧾 rt repair worksheet")
+    print(f"   db: {summary['db']}")
+    print(f"   session_dir: {summary['session_dir']}")
+    print(f"   rows: {summary['rows']}")
+    print(f"   rows_with_candidates: {summary['rows_with_candidates']}")
+    print(f"   rows_with_nonzero_nfo: {summary['rows_with_nonzero_nfo']}")
+    print(f"   rows_with_nonzero_txt: {summary['rows_with_nonzero_txt']}")
+    print(f"   rows_with_nonzero_sample: {summary['rows_with_nonzero_sample']}")
+    for row in rows:
+        print(
+            f"   {row['torrent_hash'][:16]} candidates={len(row['complete_candidates'])} "
+            f"nfo={sum(1 for hit in row['sidecar_hits']['nfo'] if hit['size'] > 0)} "
+            f"txt={sum(1 for hit in row['sidecar_hits']['txt'] if hit['size'] > 0)} "
+            f"sample={sum(1 for hit in row['sidecar_hits']['sample_mkv'] if hit['size'] > 0)} "
+            f"{row['root_name']}"
+        )
+
+
+@rt.command("repair-assistant")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict output to specific torrent hash(es).")
+@click.option("--hash-file", type=click.Path(exists=True, dir_okay=False), default=None, help="Read additional hash filters from a newline-delimited file.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+def rt_repair_assistant_cmd(db, session_dir, hash_filters, hash_file, limit):
+    """Emit strict read-only repair decisions for RT-linked rows."""
+    from hashall.model import connect_db
+
+    requested = [str(item).strip().lower() for item in hash_filters if str(item).strip()]
+    if hash_file:
+        for raw in Path(hash_file).read_text(encoding="utf-8").splitlines():
+            cleaned = raw.strip().lower()
+            if cleaned and not cleaned.startswith("#"):
+                requested.append(cleaned)
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    rows = _build_rt_repair_worksheet_rows(
+        conn,
+        session_dir=Path(session_dir).expanduser(),
+        hash_filters=requested or None,
+    )
+    if limit > 0:
+        rows = rows[:limit]
+    print(json.dumps([_build_rt_repair_assistant_row(row) for row in rows], indent=2))
+
 
 @payload.command("collisions")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
