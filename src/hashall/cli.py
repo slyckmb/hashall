@@ -378,6 +378,77 @@ def _build_rt_repair_worksheet_rows(conn, *, session_dir: Path, hash_filters: li
     return out
 
 
+def _rt_current_client_path(row: dict) -> str:
+    return str(row.get("rt_content_path") or row.get("rt_save_path") or "").strip()
+
+
+def _build_rt_repair_assistant_row(row: dict) -> dict:
+    current_client_path = _rt_current_client_path(row)
+    current_path_exists = bool(current_client_path and Path(current_client_path).exists())
+    rt_present = bool(row.get("rt_present"))
+    catalog_status = str(row.get("catalog_payload_status") or "").strip()
+    candidates = list(row.get("complete_candidates") or [])
+    exact_candidates = [
+        candidate
+        for candidate in candidates
+        if int(candidate.get("file_count") or 0) == int(row.get("expected_file_count") or 0)
+        and int(candidate.get("total_bytes") or 0) == int(row.get("expected_total_bytes") or 0)
+    ]
+
+    broken_reasons: list[str] = []
+    if not rt_present:
+        broken_reasons.append("rt_missing")
+    if current_client_path and not current_path_exists:
+        broken_reasons.append("current_path_missing")
+    if catalog_status != "complete":
+        broken_reasons.append("catalog_incomplete")
+
+    broken_now = bool(broken_reasons)
+    best_candidate_path = ""
+    confidence = "low"
+    safe_to_mutate = "no"
+    why_parts: list[str] = []
+
+    if not broken_now:
+        why_parts.append("current_rt_path_exists and catalog is complete")
+    elif len(exact_candidates) == 1:
+        best_candidate_path = str(exact_candidates[0].get("root_path") or "").strip()
+        candidate_exists = bool(best_candidate_path and Path(best_candidate_path).exists())
+        if candidate_exists:
+            confidence = "high"
+            why_parts.append("single exact complete candidate")
+            if "current_path_missing" in broken_reasons or current_client_path != best_candidate_path:
+                safe_to_mutate = "yes"
+                why_parts.append("candidate exists and differs from broken current path")
+            else:
+                safe_to_mutate = "no"
+                why_parts.append("candidate matches current path")
+        else:
+            confidence = "medium"
+            why_parts.append("single exact candidate but path missing")
+    elif len(exact_candidates) > 1:
+        confidence = "low"
+        why_parts.append(f"ambiguous exact candidates={len(exact_candidates)}")
+    elif candidates:
+        confidence = "low"
+        why_parts.append("complete candidates exist but exact proof is insufficient")
+    else:
+        confidence = "low"
+        why_parts.append("no complete candidate found")
+
+    if broken_reasons:
+        why_parts.insert(0, "broken:" + ",".join(broken_reasons))
+
+    return {
+        "broken_now": broken_now,
+        "current_client_path": current_client_path,
+        "best_candidate_path": best_candidate_path,
+        "confidence": confidence,
+        "why": "; ".join(why_parts),
+        "safe_to_mutate": safe_to_mutate,
+    }
+
+
 def _apply_low_priority() -> None:
     pid = os.getpid()
     try:
@@ -2905,6 +2976,35 @@ def rt_repair_worksheet_cmd(db, session_dir, hash_filters, hash_file, limit, jso
             f"sample={sum(1 for hit in row['sidecar_hits']['sample_mkv'] if hit['size'] > 0)} "
             f"{row['root_name']}"
         )
+
+
+@rt.command("repair-assistant")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent .torrent.rtorrent session files.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict output to specific torrent hash(es).")
+@click.option("--hash-file", type=click.Path(exists=True, dir_okay=False), default=None, help="Read additional hash filters from a newline-delimited file.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit rows shown; 0 means no limit.")
+def rt_repair_assistant_cmd(db, session_dir, hash_filters, hash_file, limit):
+    """Emit strict read-only repair decisions for RT-linked rows."""
+    from hashall.model import connect_db
+
+    requested = [str(item).strip().lower() for item in hash_filters if str(item).strip()]
+    if hash_file:
+        for raw in Path(hash_file).read_text(encoding="utf-8").splitlines():
+            cleaned = raw.strip().lower()
+            if cleaned and not cleaned.startswith("#"):
+                requested.append(cleaned)
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    rows = _build_rt_repair_worksheet_rows(
+        conn,
+        session_dir=Path(session_dir).expanduser(),
+        hash_filters=requested or None,
+    )
+    if limit > 0:
+        rows = rows[:limit]
+    print(json.dumps([_build_rt_repair_assistant_row(row) for row in rows], indent=2))
+
 
 @payload.command("collisions")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")

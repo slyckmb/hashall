@@ -15,6 +15,7 @@ from click.testing import CliRunner
 import hashall.cli as cli_mod
 from hashall.cli import (
     cli,
+    _build_rt_repair_assistant_row,
     _collect_complete_payload_candidates,
     _collect_sidecar_hits,
     _find_matching_complete_payload_id,
@@ -571,6 +572,183 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("# RT Repair Worksheet", result.output)
         self.assertIn("worksheet-hash", result.output)
+
+    def test_rt_repair_assistant_row_marks_healthy_item_not_broken(self):
+        healthy_path = self.tmp_path / "healthy" / "Movie.mkv"
+        healthy_path.parent.mkdir(parents=True, exist_ok=True)
+        healthy_path.write_bytes(b"ok")
+
+        decision = _build_rt_repair_assistant_row(
+            {
+                "rt_present": True,
+                "rt_save_path": str(healthy_path.parent),
+                "rt_content_path": str(healthy_path),
+                "expected_file_count": 1,
+                "expected_total_bytes": healthy_path.stat().st_size,
+                "catalog_payload_status": "complete",
+                "complete_candidates": [
+                    {
+                        "payload_id": 1,
+                        "root_path": str(healthy_path),
+                        "file_count": 1,
+                        "total_bytes": healthy_path.stat().st_size,
+                        "status": "complete",
+                    }
+                ],
+            }
+        )
+
+        self.assertFalse(decision["broken_now"])
+        self.assertEqual(decision["safe_to_mutate"], "no")
+        self.assertEqual(decision["best_candidate_path"], "")
+
+    def test_rt_repair_assistant_row_marks_exact_single_candidate_safe(self):
+        current_path = self.tmp_path / "missing" / "Movie.mkv"
+        candidate_path = self.tmp_path / "candidate" / "Movie.mkv"
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_path.write_bytes(b"x" * 42)
+
+        decision = _build_rt_repair_assistant_row(
+            {
+                "rt_present": True,
+                "rt_save_path": str(current_path.parent),
+                "rt_content_path": str(current_path),
+                "expected_file_count": 1,
+                "expected_total_bytes": 42,
+                "catalog_payload_status": "incomplete",
+                "complete_candidates": [
+                    {
+                        "payload_id": 2,
+                        "root_path": str(candidate_path),
+                        "file_count": 1,
+                        "total_bytes": 42,
+                        "status": "complete",
+                    }
+                ],
+            }
+        )
+
+        self.assertTrue(decision["broken_now"])
+        self.assertEqual(decision["best_candidate_path"], str(candidate_path))
+        self.assertEqual(decision["confidence"], "high")
+        self.assertEqual(decision["safe_to_mutate"], "yes")
+
+    def test_rt_repair_assistant_row_marks_ambiguous_candidate_unsafe(self):
+        current_path = self.tmp_path / "missing" / "Show.Name"
+        candidate_a = self.tmp_path / "a" / "Show.Name"
+        candidate_b = self.tmp_path / "b" / "Show.Name"
+        candidate_a.parent.mkdir(parents=True, exist_ok=True)
+        candidate_b.parent.mkdir(parents=True, exist_ok=True)
+        candidate_a.write_bytes(b"a" * 10)
+        candidate_b.write_bytes(b"b" * 10)
+
+        decision = _build_rt_repair_assistant_row(
+            {
+                "rt_present": True,
+                "rt_save_path": str(current_path.parent),
+                "rt_content_path": str(current_path),
+                "expected_file_count": 1,
+                "expected_total_bytes": 10,
+                "catalog_payload_status": "incomplete",
+                "complete_candidates": [
+                    {
+                        "payload_id": 3,
+                        "root_path": str(candidate_a),
+                        "file_count": 1,
+                        "total_bytes": 10,
+                        "status": "complete",
+                    },
+                    {
+                        "payload_id": 4,
+                        "root_path": str(candidate_b),
+                        "file_count": 1,
+                        "total_bytes": 10,
+                        "status": "complete",
+                    },
+                ],
+            }
+        )
+
+        self.assertTrue(decision["broken_now"])
+        self.assertEqual(decision["best_candidate_path"], "")
+        self.assertEqual(decision["safe_to_mutate"], "no")
+        self.assertEqual(decision["confidence"], "low")
+
+    def test_rt_repair_assistant_outputs_only_strict_fields(self):
+        conn = connect_db(self.db_path)
+        payload_id = upsert_payload(
+            conn,
+            Payload(
+                payload_id=None,
+                payload_hash="strict-complete",
+                device_id=None,
+                root_path=str(self.payload_root),
+                file_count=2,
+                total_bytes=2,
+                status="complete",
+                last_built_at=time.time(),
+            ),
+            commit=False,
+        )
+        upsert_torrent_instance(
+            conn,
+            TorrentInstance(
+                torrent_hash="strict-hash",
+                payload_id=payload_id,
+                device_id=None,
+                save_path="/downloads/complete/cross-seed",
+                root_name=self.payload_root.name,
+                category="",
+                tags="",
+                last_seen_at=time.time(),
+            ),
+            commit=False,
+        )
+        conn.commit()
+        conn.close()
+
+        fake_rows = [
+            RTTorrentInventoryRow(
+                torrent_hash="strict-hash",
+                root_name=self.payload_root.name,
+                save_path="/downloads/complete/cross-seed",
+                content_path="/downloads/complete/cross-seed/payload",
+                expected_file_count=2,
+                expected_total_bytes=2,
+            )
+        ]
+        runner = CliRunner()
+        with patch("hashall.cli.load_rt_inventory_rows", return_value=fake_rows):
+            result = runner.invoke(
+                cli,
+                [
+                    "rt",
+                    "repair-assistant",
+                    "--db",
+                    str(self.db_path),
+                    "--session-dir",
+                    str(self.tmp_path),
+                    "--hash",
+                    "strict-hash",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = cli_mod.json.loads(result.output)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(
+            sorted(payload[0].keys()),
+            sorted(
+                [
+                    "broken_now",
+                    "current_client_path",
+                    "best_candidate_path",
+                    "confidence",
+                    "why",
+                    "safe_to_mutate",
+                ]
+            ),
+        )
 
     def test_payload_sync_rt_reuses_complete_payload_from_expected_counts(self):
         conn = connect_db(self.db_path)
