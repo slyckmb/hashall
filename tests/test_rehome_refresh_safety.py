@@ -38,6 +38,25 @@ def test_parse_upgrade_summary_extracts_legacy_upgrade_stage_counts() -> None:
     assert parsed == {"queued": 0, "started": 0, "completed": 0, "failed": 0}
 
 
+def test_parse_upgrade_summary_all_zero_file_skips_does_not_inflate_queued() -> None:
+    # Regression: when all queue items are zero-file skips, both summary lines must
+    # report queued=0 (post-filter), not queued=7 (pre-filter).
+    # Before fix, "upgrade stage:" line used len(upgrade_queue)=7 (pre-filter) while
+    # "upgrade_summary" line used total_upgrade_roots=0 (post-filter).
+    # The parser takes the last match, so it saw queued=7 → ratio=0/7=0.0 → FAIL.
+    output = (
+        "upgrade_summary queued=0 started=0 completed=0 failed=0 elapsed_s=0\n"
+        "   upgrade stage: queued=0 started=0 completed=0 failed=0\n"
+    )
+    parsed = _parse_upgrade_summary(output)
+    assert parsed is not None
+    assert parsed["queued"] == 0, (
+        "queued must reflect post-filter count (0), not pre-filter count"
+    )
+    assert parsed["completed"] == 0
+    assert parsed["failed"] == 0
+
+
 def test_parse_link_plan_id_extracts_machine_marker() -> None:
     assert _parse_link_plan_id("noise\nplan_id=12\n") == "12"
 

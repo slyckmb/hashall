@@ -1296,7 +1296,10 @@ class TestPayloadSyncCLI(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("zero-file roots skipped: 1", result.output)
-        self.assertIn("upgrade stage completed with zero successful roots", result.output)
+        # post-filter queued count is 0 (all items were zero-file skips)
+        self.assertIn("upgrade stage: queued=0", result.output)
+        # misleading "zero successful roots" warning must NOT fire when all items were skipped
+        self.assertNotIn("upgrade stage completed with zero successful roots", result.output)
 
     def test_payload_sync_rejects_qb_filters_with_rt_source(self):
         session_dir = self.tmp_path / "session"
