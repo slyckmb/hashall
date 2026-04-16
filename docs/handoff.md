@@ -1,5 +1,43 @@
 # Handoff Notes
 
+## 2026-04-16 Pool Migration: Quality Gate Fix + Orphan GC Limits
+
+### Summary
+Fixed critical refresh bug (false FAIL on quality gate) + made orphan GC limits configurable.
+Full refresh (all roots) ran successfully. 2276 orphan candidates awaiting decision on relocation vs deletion.
+
+### Code changes (commit `506d0ae`)
+- `src/hashall/cli.py` line 1479: upgraded `len(upgrade_queue)` → `total_upgrade_roots` (post-filter count)
+  - Bug: quality gate was using pre-filter count (7 zero-file skips never attempted) → ratio=0.0 → false FAIL
+  - Fix: now uses post-filter count (0 items actually attempted) → ratio=1.0 → PASS
+- `src/hashall/cli.py` line 1409: suppress misleading "zero successful roots" warning when all items were zero-file skipped
+- `src/hashall/payload.py` lines 753–763: `HASHALL_ORPHAN_GC_MAX_PRUNE_COUNT` and `HASHALL_ORPHAN_GC_MAX_PRUNE_FRACTION` now read from env at call time
+  - Was: hardcoded 1000 / 0.25 (blocks 2276 backlog)
+  - Now: defaults same but overridable via env vars for large-scale pruning
+
+### Operational findings
+- Refresh 2026-04-15 18:04: all phases succeeded, quality gate PASS
+- 5254 payloads synced, 1 incomplete (unscanned speakarr item)
+- 4 dedup link plans executed (stash → pool-media consolidation)
+- **Orphan backlog**: 2276 aged candidates, ~250+ GB (qB post-shutdown residue)
+  - **CRITICAL DECISION PENDING**: GC currently deletes DB entries only; needs redesign to RELOCATE files to `/stash/media/orphaned_data/` holding area before any deletion
+
+### Tests (121 passing)
+- Regression: quality gate zero-skip scenario (confirms fix)
+- Regression: orphan GC env var overrides (count + fraction)
+- Full suite: `test_cli_payload_sync.py`, `test_pathing.py`, `test_fs_utils.py`, `test_payload.py`, `test_payload_prune_orphan_scope.py`, `test_rehome_refresh_safety.py`
+
+### For next agent
+If running orphan GC:
+```bash
+HASHALL_ORPHAN_GC_MAX_PRUNE_COUNT=3000 HASHALL_ORPHAN_GC_MAX_PRUNE_FRACTION=0.5 \
+  hashall refresh --scan-hash-mode upgrade --payload-source rt --verbose
+```
+
+**Before executing**: confirm orphan relocation behavior (move-to-holding vs delete). Current code only deletes DB entries.
+
+---
+
 ## 2026-03-21 Rehome Fastresume Rollback Fix (same branch)
 
 ### What changed

@@ -750,16 +750,32 @@ def prune_orphan_payloads(
         "DELETE FROM payload_orphan_gc WHERE payload_id NOT IN (SELECT payload_id FROM payloads)"
     )
 
+    # Limits are configurable at call time via env vars (defaults: count=1000, fraction=0.25).
+    effective_max_prune_count = ORPHAN_GC_MAX_PRUNE_COUNT
+    try:
+        effective_max_prune_count = int(
+            os.environ.get("HASHALL_ORPHAN_GC_MAX_PRUNE_COUNT", str(ORPHAN_GC_MAX_PRUNE_COUNT))
+        )
+    except (ValueError, TypeError):
+        pass
+    effective_max_prune_fraction = ORPHAN_GC_MAX_PRUNE_FRACTION
+    try:
+        effective_max_prune_fraction = float(
+            os.environ.get("HASHALL_ORPHAN_GC_MAX_PRUNE_FRACTION", str(ORPHAN_GC_MAX_PRUNE_FRACTION))
+        )
+    except (ValueError, TypeError):
+        pass
+
     block_reason: Optional[str] = None
     if aged_prunable_ids and total_payloads >= ORPHAN_GC_SPIKE_MIN_TOTAL:
         prune_fraction = len(aged_prunable_ids) / total_payloads
-        if len(aged_prunable_ids) > ORPHAN_GC_MAX_PRUNE_COUNT:
+        if len(aged_prunable_ids) > effective_max_prune_count:
             block_reason = (
-                f"candidate_count_exceeds_limit ({len(aged_prunable_ids)}>{ORPHAN_GC_MAX_PRUNE_COUNT})"
+                f"candidate_count_exceeds_limit ({len(aged_prunable_ids)}>{effective_max_prune_count})"
             )
-        elif prune_fraction > ORPHAN_GC_MAX_PRUNE_FRACTION:
+        elif prune_fraction > effective_max_prune_fraction:
             block_reason = (
-                f"candidate_fraction_exceeds_limit ({prune_fraction:.3f}>{ORPHAN_GC_MAX_PRUNE_FRACTION:.3f})"
+                f"candidate_fraction_exceeds_limit ({prune_fraction:.3f}>{effective_max_prune_fraction:.3f})"
             )
 
     pruned_ids: List[int] = []
@@ -790,8 +806,8 @@ def prune_orphan_payloads(
         "total_payloads": total_payloads,
         "min_seen_runs": ORPHAN_GC_MIN_SEEN_RUNS,
         "min_age_seconds": ORPHAN_GC_MIN_AGE_SECONDS,
-        "max_prune_count": ORPHAN_GC_MAX_PRUNE_COUNT,
-        "max_prune_fraction": ORPHAN_GC_MAX_PRUNE_FRACTION,
+        "max_prune_count": effective_max_prune_count,
+        "max_prune_fraction": effective_max_prune_fraction,
         "spike_min_total": ORPHAN_GC_SPIKE_MIN_TOTAL,
     }
 

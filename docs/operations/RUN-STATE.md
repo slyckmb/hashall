@@ -1,6 +1,36 @@
 # Operational Run State
 
-Last updated: 2026-04-03
+Last updated: 2026-04-16
+
+## 2026-04-15 Full Refresh + Orphan GC Backlog
+
+**Completed:**
+- Full refresh run (all roots): stash, pool-media, pool-data, hotspare6tb
+- 5254 payloads processed, 1 incomplete (scan gap in speakarr)
+- 4 dedup link plans executed (cross-seed consolidation)
+- **Quality gate PASS** (fix for false-FAIL bug confirmed working)
+
+**Current state:**
+- Orphan backlog: 2276 aged candidates (post-qB-shutdown, Feb 2026)
+- Currently blocked by GC hardcoded limit (1000)
+- **Can be unlocked via env vars**: `HASHALL_ORPHAN_GC_MAX_PRUNE_COUNT=3000 HASHALL_ORPHAN_GC_MAX_PRUNE_FRACTION=0.5`
+- Estimated space to free: ~250+ GB (qB leftover residue)
+- **Action required**: Decide whether to RELOCATE (move to `/stash/media/orphaned_data/`) vs DELETE
+
+**Code fixes (committed `506d0ae`):**
+- Quality gate: upgraded `len(upgrade_queue)` → `total_upgrade_roots` (post-filter count)
+- Orphan GC limits: now env-configurable (was hardcoded)
+- Tests: regression suite for both fixes (121 tests green)
+
+**Next steps:**
+1. Run orphan GC with env overrides to free space
+2. Scan unindexed payload (`speakarr/Command and Control`)
+3. Decide on orphan relocation behavior (future enhancement)
+4. Continue pool/data drain once space is freed
+
+---
+
+## 2026-04-03 Residual stash reuse follow-up
 
 ## 2026-04-03 Residual stash reuse follow-up
 

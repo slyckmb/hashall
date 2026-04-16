@@ -1406,7 +1406,7 @@ def payload_sync(
             f"queued={total_upgrade_roots} started={upgrade_started} "
             f"completed={upgrade_completed} failed={upgrade_failed} elapsed_s={upgrade_elapsed}"
         )
-        if queued_root_count > 0 and upgrade_completed == 0 and upgrade_failed == 0:
+        if queued_root_count > 0 and upgrade_completed == 0 and upgrade_failed == 0 and total_upgrade_roots > 0:
             print(
                 "   ⚠️  upgrade stage completed with zero successful roots; "
                 "queued paths may not resolve to scanned files"
@@ -1476,7 +1476,7 @@ def payload_sync(
     if upgrade_missing and not dry_run:
         print(
             "   upgrade stage: "
-            f"queued={len(upgrade_queue)} started={upgrade_started} "
+            f"queued={total_upgrade_roots} started={upgrade_started} "
             f"completed={upgrade_completed} failed={upgrade_failed}"
         )
     if prune_stats is not None:
