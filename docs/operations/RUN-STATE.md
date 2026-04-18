@@ -1,6 +1,55 @@
 # Operational Run State
 
-Last updated: 2026-04-16
+Last updated: 2026-04-18
+
+## 2026-04-18 Torrent Tree Normalization Decisions
+
+Canonical planning doc:
+- `docs/operations/TORRENT-TREE-NORMALIZATION-PLAN-2026-04-18.md`
+
+Settled operator decisions:
+- canonical names are:
+  - `cross-seed`
+  - `orphans`
+- legacy names to retire:
+  - `cross-seed-link`
+  - `orphaned_data`
+- orphans live under `*/media/torrents/orphans`, not under `*/media/torrents/seeding/orphans`
+- each dataset keeps its own local `torrents/orphans` first
+- stash orphans may be rehomed to pool and/or spare later as space allows
+- RT is the operational authority
+- qB remains online as a silent mirror and must be kept in sync for affected torrents
+- if any file in a payload has a hardlink into `/stash/media` libraries, keep the whole sibling payload group on stash
+- otherwise, rehome the whole sibling payload group to pool
+- `/pool/data` is not a final torrent-payload home and should drain to zero torrent payloads
+
+Execution policy:
+- no blind bulk loops
+- every mutating phase should use:
+  - sim code walk
+  - dry-run
+  - tiny pilot
+  - code/fix/code/fix loops before widening
+- stop for manual review on:
+  - same names with different hashes
+  - conflicting verified stash/pool copies
+  - mixed hardlink-anchor evidence
+  - incomplete sibling groups
+  - any unexpected state
+
+Current progress:
+- operator policy answers are now captured in repo docs
+- `payload orphan-sweep` gained staged controls:
+  - `--order`
+  - `--reserve-gib`
+  - `--dataset`
+- live pilot work exposed and fixed an empty-dir `--limit` bug
+- current `/pool/data/media/torrents/seeding` pilot state shows no remaining orphan-sweep candidates there after empty-dir cleanup
+- next lane is planning and auditing, not another blind mutation run
+
+Cross-repo requirement:
+- before any tree-normalization batch, audit `~/dev` for path-sensitive code/docs referencing old names or old canonical roots
+- plan updates in the owning repo/worktree rather than treating hashall-only changes as sufficient
 
 ## 2026-04-15 Full Refresh + Orphan GC Backlog
 

@@ -1,6 +1,6 @@
 # Project Plan (Canonical)
 
-Last updated: 2026-03-07
+Last updated: 2026-04-18
 Status: active
 
 ## Purpose
@@ -9,18 +9,42 @@ Unified roadmap + active backlog for development and operations.
 
 ## Current Objectives
 
-1. Finish `/pool/data/media/torrents/seeding -> /pool/media/torrents/seeding`.
-2. Keep qB out of the byte-move path.
-3. Use one shared attach/repoint constructor for both `REUSE` and `MOVE`.
-4. Keep `hashall refresh` healthy and catalog identity stable.
-5. Resume `~noHL` only after the pool migration path is operationally proven.
-6. Use the `Alien Romulus` sibling group as the next targeted proving lane for:
+1. Canonicalize the stash/pool torrent trees:
+   - `cross-seed-link -> cross-seed`
+   - `orphaned_data -> orphans`
+2. Keep RT authoritative and qB mirrored for any affected live torrent metadata.
+3. Drain `/pool/data` into canonical stash/pool torrent homes.
+4. Apply the stash-vs-pool sibling-group placement rule:
+   - hardlink-anchored into `/stash/media` libraries stays on stash
+   - otherwise rehome the whole sibling group to pool
+5. Audit `~/dev` for path-sensitive code/docs before any rename batches.
+6. Keep qB out of the byte-move path.
+7. Use one shared attach/repoint constructor for both `REUSE` and `MOVE`.
+8. Keep `hashall refresh` healthy and catalog identity stable.
+9. Resume `~noHL` only after the pool migration path is operationally proven.
+10. Use the `Alien Romulus` sibling group as the next targeted proving lane for:
    - `~noHL` sibling expansion,
    - guarded repair vs rehome decisioning,
    - and de-hitchhiked per-item target-tree construction on `pool-media`.
-7. Investigate the incomplete `V for Vendetta` refresh-upgrade root when the active migration/cleanup lane is idle:
+11. Investigate the incomplete `V for Vendetta` refresh-upgrade root when the active migration/cleanup lane is idle:
    - refresh `20260313-172217` ended `OK`, but root `99/99` for `/pool/media/torrents/seeding/cross-seed/hawke-uno/V.for.Vendetta...` logged `files=0 bytes=0`
    - treat this as a follow-up refresh/catalog/upgrade anomaly, not as proof that refresh itself failed
+
+## 2026-04-18 Canonical Torrent Tree Normalization
+
+Canonical planning doc:
+- `docs/operations/TORRENT-TREE-NORMALIZATION-PLAN-2026-04-18.md`
+
+Immediate planning rules:
+- do path normalization first, then compare/rebuild inventory, then drain `/pool/data`
+- treat `*/media/torrents/orphans` as the canonical orphan location
+- keep local dataset orphan moves atomic first; rehome stash orphans outward later
+- stop for manual review on conflicting verified copies, mixed hardlink-anchor evidence, incomplete sibling groups, or any unexpected state
+- every mutating phase must use:
+  - sim code walk
+  - dry-run
+  - tiny pilot
+  - code/fix/code/fix loops before widening
 
 ## Ranked Priorities
 

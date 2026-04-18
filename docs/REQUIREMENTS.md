@@ -1,8 +1,8 @@
 # Seed Data Management System - Requirements & Implementation
 
-**Version:** 1.1 (Living Document)
-**Last Updated:** 2026-03-18
-**Status:** Active Development - Core features implemented, pool dataset migration in progress
+**Version:** 1.2 (Living Document)
+**Last Updated:** 2026-04-18
+**Status:** Active Development - Core features implemented, canonical torrent-tree normalization planning active
 
 ---
 
@@ -166,6 +166,28 @@ Container View          Real ZFS Path
   └── [tracker categories]/
 ```
 
+**Target Canonical Torrent Trees (Policy):**
+```
+/stash/media/torrents/
+  ├── seeding/
+  │   ├── cross-seed/
+  │   └── [tracker categories]/
+  └── orphans/
+
+/pool/media/torrents/
+  ├── seeding/
+  │   ├── cross-seed/
+  │   ├── _rehome-unique/<hash>/
+  │   └── [tracker categories]/
+  └── orphans/
+```
+
+Steady-state policy:
+- `cross-seed-link` is a legacy name; `cross-seed` is canonical
+- `orphaned_data` is a legacy name; `orphans` is canonical
+- `orphans` live under `*/media/torrents/orphans`, not under `*/media/torrents/seeding/orphans`
+- `/pool/data` is a migration source and residue lane, not a final torrent-payload home
+
 **Media Libraries (External Consumers - Stash):**
 ```
 /stash/media/books/                     (Readarr, Speakarr libraries)
@@ -325,24 +347,33 @@ linkCategory: "cross-seed"
 
 **Rule: Must Stay on Stash**
 
-A torrent's data **must remain on `/stash`** if:
-- Any inode associated with the torrent has hardlink children in external consumer paths
+A sibling payload group **must remain on `/stash`** if:
+- Any file in any member payload has hardlink children in external consumer paths
 - Example:
   ```
   Torrent file: /stash/media/torrents/seeding/radarr/Movie.2024/video.mkv (inode 1234)
   Hardlink:     /stash/media/movies/Movie (2024)/video.mkv (inode 1234)
 
-  Result: MUST stay on stash (external consumer exists)
+  Result: the whole sibling payload group MUST stay on stash (external consumer exists)
   ```
 
 **Rule: Eligible for Pool Migration**
 
-A torrent's data is **eligible to move to `/pool`** if:
+A sibling payload group is **eligible to move to `/pool`** if:
 - All hardlinks are siblings within the seeding domain only
 - No hardlinks exist in external consumer paths
 - Typically identified by `~noHL` tag from qbit_manage
 
 **Important: `~noHL` is advisory only.** The tag reflects qbit_manage's scan at a specific point in time. A `*arr` import between the qbit_manage scan and a rehome plan execution can create a new external hardlink. The authoritative external consumer check is always the plan-time scan of current catalog/filesystem state. The `~noHL` tag is a pre-filter that narrows candidates; it does not bypass the external consumer check.
+
+#### 4.1.2 Manual-Review Stop Conditions
+
+The system must stop for manual review instead of auto-deciding when:
+- the same path/name exists with different file hashes
+- stash and pool both have fully verified copies but placement signals disagree
+- hardlink-anchor evidence is mixed or unclear
+- a sibling payload group is incomplete or only partially verified
+- any other unexpected state appears during execution
 
 ### 4.2 Payload Identity
 
@@ -370,6 +401,17 @@ A torrent's data is **eligible to move to `/pool`** if:
 - This system works per-payload (all siblings rehomed together)
 - More efficient than moving siblings individually
 - Prevents partial moves (some siblings on stash, others on pool)
+
+### 4.2.1 Sibling Payload Group
+
+For placement and stash-vs-pool residency decisions, hashall uses a broader **sibling payload group** concept than exact `payload_hash` equality:
+- non-duplicate payloads that mostly share inodes on the same filesystem
+- or would share inodes if rehomed onto the same filesystem
+
+This broader sibling-group concept is the placement unit for:
+- keeping hardlink-anchored groups on stash
+- rehoming non-anchored groups to pool
+- surfacing manual-review conflicts when sibling-group evidence is mixed
 
 ### 4.2.1 Broader Content Inventory Requirement
 
@@ -929,6 +971,12 @@ Libtorrent verification (`checking_files`) that shows no progress for longer tha
 
 ### 8.4 qBittorrent Integration
 
+**Client authority during the RT transition:**
+- RT is the operational authority for live path truth and repair intent
+- qB remains online as a silent mirror because its metadata is still valuable during the transition
+- when a live torrent path changes, any corresponding RT and qB entries must be kept aligned
+- do not treat a qB-only path change as success if RT still points elsewhere
+
 **Authentication:**
 - Environment variables: `QBITTORRENT_URL`, `QBITTORRENT_USER`, `QBITTORRENT_PASS`
 - Session-based authentication via Web API
@@ -1119,11 +1167,13 @@ The system must be:
 
 **Payload Siblings:** Multiple torrents (different infohashes) with identical payload_hash. Examples: v1 vs v2, different piece sizes, different trackers.
 
-**Payload-Group:** The set of sibling torrents that share a payload_hash. Rehomed together as a unit.
+**Payload-Group:** The set of sibling torrents that share a payload_hash. Exact-content unit for identity and many rehome operations.
+
+**Sibling Payload Group:** The broader placement unit used for stash-vs-pool decisions. May include non-duplicate payloads that mostly share inodes on the same filesystem, or would do so if co-located.
 
 **Promotion:** Moving payloads from cold storage (pool) to warm storage (stash). Only occurs when payload already exists on stash (reuse-only, no blind copy).
 
-**Seeding Domain:** Paths where torrent data resides for seeding. Primary: `/stash/media/torrents/seeding/`, Pool: `/pool/data/cross-seed/`. Excludes media library paths.
+**Seeding Domain:** Paths where torrent data resides for seeding. Canonical roots are `/stash/media/torrents/seeding/` and `/pool/media/torrents/seeding/`; legacy migration roots may still participate temporarily. Excludes media library paths and `*/media/torrents/orphans`.
 
 **`~noHL` Tag:** qBittorrent tag applied by qbit_manage indicating "no hardlinks". Torrents with this tag have no external consumers (not hardlinked to media libraries). Prime candidates for demotion.
 

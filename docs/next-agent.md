@@ -1,5 +1,37 @@
 # Next Agent Entry (Compact-Safe)
 
+## 2026-04-18 Canonical Torrent Tree Normalization
+
+- Canonical planning doc:
+  - `docs/operations/TORRENT-TREE-NORMALIZATION-PLAN-2026-04-18.md`
+- Start there before planning any stash/pool tree rewrite, `/pool/data` drain, or orphan relocation work.
+- Settled policy:
+  - `cross-seed-link` is legacy; `cross-seed` is canonical
+  - `orphaned_data` is legacy; `orphans` is canonical
+  - orphans live under `*/media/torrents/orphans`
+  - each dataset keeps its own local `torrents/orphans` first
+  - RT is authoritative; qB is the silent mirror and must stay in sync for affected items
+  - if any file in a payload has a hardlink into `/stash/media` libraries, keep the whole sibling payload group on stash
+  - otherwise rehome the whole sibling payload group to pool
+  - `/pool/data` should end at zero torrent payloads
+- Required execution pattern for every mutating phase:
+  1. sim code walk
+  2. dry-run
+  3. tiny pilot
+  4. code/fix/code/fix loops before widening
+- Stop for manual review on:
+  - same names with different hashes
+  - conflicting verified stash/pool copies
+  - mixed hardlink-anchor evidence
+  - incomplete sibling groups
+  - anything unexpected
+- Before any rename batch, audit `~/dev` for path-sensitive code/docs that still reference old names or old canonical roots.
+- Recent progress:
+  - `payload orphan-sweep` now supports staged controls (`--order`, `--reserve-gib`, `--dataset`)
+  - an empty-dir `--limit` bug was fixed and regression-tested
+  - the current `/pool/data/media/torrents/seeding` orphan-sweep pilot lane is empty after the empty-dir cleanup
+- Do not restart broad unattended loops while this normalization plan is still in the planning/audit stage.
+
 ## 2026-04-03 Residual stash reuse repair
 
 - The residual `dest_missing` loop is materially fixed for the `Bullet Train` family.

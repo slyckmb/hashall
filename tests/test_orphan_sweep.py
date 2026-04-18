@@ -118,3 +118,57 @@ def test_payload_orphan_sweep_cli_accepts_new_flags(monkeypatch) -> None:
     assert captured["reserve_gib"] == 25
     assert captured["dataset_names"] == {"pool-data", "stash"}
     assert "skipped (space):      0" in result.output
+
+
+def test_run_orphan_sweep_surfaces_empty_cross_seed_tracker_dirs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    seeding_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    (seeding_root / "cross-seed" / "Tracker.One").mkdir(parents=True, exist_ok=True)
+
+    dataset = DatasetConfig(
+        name="pool-data",
+        seeding_roots=[seeding_root],
+        dest=tmp_path / "pool-media" / "torrents" / "orphaned_data",
+        cross_dataset=True,
+    )
+
+    monkeypatch.setattr("hashall.orphan_sweep.build_live_content_paths", lambda **_: (set(), {"rt_rows": 0, "qb_rows": 0, "warnings": []}))
+
+    summary = run_orphan_sweep(
+        dry_run=True,
+        datasets=[dataset],
+        dataset_names={"pool-data"},
+    )
+
+    assert len(summary["items"]) == 1
+    assert summary["items"][0].path == seeding_root / "cross-seed" / "Tracker.One"
+    assert summary["items"][0].skip_reason == "empty_dir"
+    assert summary["items"][0].action == "dryrun_delete"
+
+
+def test_run_orphan_sweep_limit_applies_to_empty_dir_cleanup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    seeding_root = tmp_path / "pool-data" / "media" / "torrents" / "seeding"
+    (seeding_root / "cross-seed" / "Tracker.One").mkdir(parents=True, exist_ok=True)
+    (seeding_root / "cross-seed" / "Tracker.Two").mkdir(parents=True, exist_ok=True)
+
+    dataset = DatasetConfig(
+        name="pool-data",
+        seeding_roots=[seeding_root],
+        dest=tmp_path / "pool-media" / "torrents" / "orphaned_data",
+        cross_dataset=True,
+    )
+
+    monkeypatch.setattr("hashall.orphan_sweep.build_live_content_paths", lambda **_: (set(), {"rt_rows": 0, "qb_rows": 0, "warnings": []}))
+
+    summary = run_orphan_sweep(
+        dry_run=True,
+        limit=1,
+        datasets=[dataset],
+        dataset_names={"pool-data"},
+    )
+
+    assert len(summary["items"]) == 1
+    assert summary["items"][0].action == "dryrun_delete"

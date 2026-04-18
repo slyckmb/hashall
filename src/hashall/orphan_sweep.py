@@ -309,7 +309,21 @@ def iter_seeding_items(
             for tracker_dir in sorted(entry.iterdir()):
                 if not tracker_dir.is_dir() or tracker_dir.name.startswith("."):
                     continue
-                for item in sorted(tracker_dir.iterdir()):
+                try:
+                    tracker_children = sorted(tracker_dir.iterdir())
+                except PermissionError:
+                    continue
+                if not tracker_children:
+                    yield SweepItem(
+                        path=tracker_dir,
+                        tracker_label=tracker_dir.name,
+                        dataset_name=dataset_name,
+                        cross_dataset=cross_dataset,
+                        is_orphan=True,
+                        skip_reason="empty_dir",
+                    )
+                    continue
+                for item in tracker_children:
                     if item.name.startswith("."):
                         continue
                     is_live = str(item).rstrip("/") in live_paths
@@ -461,38 +475,25 @@ def run_orphan_sweep(
                     results.append(item)
                     continue
 
-                # Empty dirs: delete, not move
-                if item.skip_reason == "empty_dir":
-                    if dry_run:
-                        item.action = "dryrun_delete"
-                    else:
-                        try:
-                            item.path.rmdir()
-                            item.action = "deleted"
-                        except OSError as exc:
-                            item.action = "skipped"
-                            item.skip_reason = f"rmdir failed: {exc}"
-                    skipped += 1
-                    results.append(item)
-                    continue
-
                 # Check catalog refs (hitchhiker guard)
-                refs = _get_payload_refs(item.path, conn)
-                item.catalog_refs = refs
-                if refs > 0:
-                    item.skip_reason = f"catalog refs={refs} (hitchhiker group, Docker's lane)"
-                    item.action = "skipped"
-                    skipped += 1
-                    results.append(item)
-                    continue
+                if item.skip_reason != "empty_dir":
+                    refs = _get_payload_refs(item.path, conn)
+                    item.catalog_refs = refs
+                    if refs > 0:
+                        item.skip_reason = f"catalog refs={refs} (hitchhiker group, Docker's lane)"
+                        item.action = "skipped"
+                        skipped += 1
+                        results.append(item)
+                        continue
 
                 # Check nlinks
-                max_nl = _get_max_nlinks(item.path)
-                if max_nl > 1:
-                    item.warn_nlinks = True
-                    warned += 1
+                if item.skip_reason != "empty_dir":
+                    max_nl = _get_max_nlinks(item.path)
+                    if max_nl > 1:
+                        item.warn_nlinks = True
+                        warned += 1
 
-                item.size_bytes = _get_item_size_bytes(item.path)
+                    item.size_bytes = _get_item_size_bytes(item.path)
                 orphan_candidates.append(item)
 
     selected_candidates = _sort_orphan_candidates(orphan_candidates, order=order)
@@ -503,6 +504,20 @@ def run_orphan_sweep(
         ds = next(ds for ds in datasets if ds.name == item.dataset_name)
         dest_tracker_dir = ds.dest / item.tracker_label
         item.dest_path = dest_tracker_dir / item.path.name
+
+        if item.skip_reason == "empty_dir":
+            if dry_run:
+                item.action = "dryrun_delete"
+            else:
+                try:
+                    item.path.rmdir()
+                    item.action = "deleted"
+                except OSError as exc:
+                    item.action = "skipped"
+                    item.skip_reason = f"rmdir failed: {exc}"
+            skipped += 1
+            results.append(item)
+            continue
 
         available = _free_bytes(dest_tracker_dir)
         budget = max(0, available - reserve_bytes)
