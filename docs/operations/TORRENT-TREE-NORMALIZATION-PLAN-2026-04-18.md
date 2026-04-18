@@ -147,10 +147,10 @@ Legacy roots currently present on disk:
 
 Live client rows still on legacy names:
 - `cross-seed-link`
-  - RT: `26`
-  - qB: `26`
+  - RT: `24`
+  - qB: `24`
   - placement split:
-    - `25` under `/pool/media/...`
+    - `22` under `/pool/media/...`
     - `2` under `/data/media/...` (stash bind mount)
 - `orphaned_data`
   - RT: `1`
@@ -225,10 +225,59 @@ Pilot result:
   - RT `cross-seed-link`: `27 -> 26`
   - qB `cross-seed-link`: `27 -> 26`
 
+Additional successful pilots:
+- `55a3df42dcf14d250117d811b52dca658fd05f73`
+  - multi-file / RT content-directory case under `DigitalCore (API)`
+  - final qB save path:
+    - `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)`
+  - final RT directory:
+    - `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)/Elemental.2023.1080p.BluRay.x265.10bit.DTS-HD.MA.7.1-UnKn0wnTORRENTLEECH`
+- `8779246eebcf9135f272d24cdff643887700ffe1`
+  - single-file / RT root-directory case under `Darkpeers (API)`
+  - final qB save path:
+    - `/pool/media/torrents/seeding/cross-seed/Darkpeers (API)`
+  - final RT directory:
+    - `/pool/media/torrents/seeding/cross-seed/Darkpeers (API)`
+
+Legacy-name counts after 3 successful pilots total:
+- RT `cross-seed-link`: `27 -> 24`
+- qB `cross-seed-link`: `27 -> 24`
+
+Operator wrapper now available:
+- `scripts/pilot-normalization.sh`
+- wrapper behavior:
+  - no unrelated orphan cleanup or broad mutation side effects
+  - dry-run/list by default
+  - only `/pool/media` rows with stopped qB state are treated as safe apply candidates
+  - apply is still one-hash-at-a-time and delegates the mutation to `payload normalize-cross-seed-link`
+  - watch-only mode works for already-selected hashes
+  - each run prints post-check state, residue classification, and remaining live legacy counts
+
+First wrapper-driven live pilot:
+- `5bf579e7c4c98daeb66c87da1f6068512f35c3cd`
+  - qB final save path:
+    - `/pool/media/torrents/seeding/cross-seed/DocsPedia`
+  - RT final directory:
+    - `/pool/media/torrents/seeding/cross-seed/DocsPedia/How It's Made S01-S32 480p DVDRip 1080p WEBRip AAC 2.0 x264-MIXED`
+  - wrapper watch hit `ambiguous_needs_review` because RT stayed in `checking` beyond the 120s watch budget
+  - immediate post-watch verification still showed both clients on the canonical path
+
+Legacy-name counts after the wrapper pilot:
+- RT `cross-seed-link`: `27 -> 21`
+- qB `cross-seed-link`: `27 -> 21`
+
 Logic bugs rooted out during the pilot loop:
 - qB wait/retry originally treated "torrent row still exists" as success even when the target path never matched
 - RT apply originally used the wrong path shape for multi-file torrents, which produced a doubled runtime directory on the first failed pilot
 - RT verification now accepts the aligned runtime form after repoint instead of assuming only one exact string shape
+- RT timeout handling now treats post-mutation timeouts as ambiguous:
+  - wait for RT verification before deciding failure
+  - do not immediately roll qB back on RT timeout
+
+Operational lesson from the `DigitalCore (API)` retry:
+- RT SCGI / XMLRPC can stall long enough to trip the 20s request timeout even when the repoint eventually lands
+- immediate qB rollback after that timeout is unsafe because it can create temporary split state
+- the helper now waits through that ambiguity and only proceeds after RT verification recovers
 
 Important residue note:
 - the failed first pilot left a stale on-disk legacy directory at:

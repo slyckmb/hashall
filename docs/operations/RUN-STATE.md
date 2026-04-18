@@ -83,13 +83,40 @@ Current progress:
     - `/pool/media/torrents/seeding/cross-seed/FileList.io/The.Roman.Invasion.of.Britain.S01.720p.HDTV.x264-BTN`
   - RT recovered from `error` back to `stalledUP`
 - live legacy-name scope after the pilot:
-  - `26` live RT rows on `cross-seed-link`
-  - `26` live qB rows on `cross-seed-link`
+  - `24` live RT rows on `cross-seed-link`
+  - `24` live qB rows on `cross-seed-link`
   - `1` live RT row on `orphaned_data`
   - `1` live qB row on `orphaned_data`
 - important follow-up:
   - the failed first pilot left a stale on-disk legacy residue under `/pool/media/torrents/seeding/cross-seed-link/...`
   - it is not referenced by qB or RT anymore and needs an explicit cleanup decision, not silent removal during helper apply
+- additional live pilot coverage now exists:
+  - `55a3df42dcf14d250117d811b52dca658fd05f73`
+    - multi-file / RT content-directory case
+  - `8779246eebcf9135f272d24cdff643887700ffe1`
+    - single-file / RT root-directory case
+- a hardened operator wrapper now exists:
+  - `scripts/pilot-normalization.sh`
+  - list/dry-run by default
+  - refuses apply outside a worktree / `cr/` branch
+  - filters safe apply candidates to stopped `/pool/media` rows
+  - prints post-check state, residue classification, and remaining live legacy counts
+- first wrapper-driven live pilot succeeded for:
+  - `5bf579e7c4c98daeb66c87da1f6068512f35c3cd`
+  - qB canonical save path:
+    - `/pool/media/torrents/seeding/cross-seed/DocsPedia`
+  - RT canonical directory:
+    - `/pool/media/torrents/seeding/cross-seed/DocsPedia/How It's Made S01-S32 480p DVDRip 1080p WEBRip AAC 2.0 x264-MIXED`
+  - wrapper watch timed out as `ambiguous_needs_review` because RT remained `checking` longer than the 120s budget
+  - immediate follow-up state still showed both clients aligned on the canonical path
+- live legacy-name scope after the wrapper pilot:
+  - `21` live RT rows on `cross-seed-link`
+  - `21` live qB rows on `cross-seed-link`
+  - `1` live RT row on `orphaned_data`
+  - `1` live qB row on `orphaned_data`
+- timeout hardening landed after the `DigitalCore (API)` retry:
+  - RT XMLRPC can time out after qB has already moved
+  - helper now treats RT timeout as ambiguous and waits for RT verification instead of immediately rolling qB back
 
 Cross-repo requirement:
 - before any tree-normalization batch, audit `~/dev` for path-sensitive code/docs referencing old names or old canonical roots

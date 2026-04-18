@@ -59,9 +59,28 @@
   - RT final directory:
     - `/pool/media/torrents/seeding/cross-seed/FileList.io/The.Roman.Invasion.of.Britain.S01.720p.HDTV.x264-BTN`
   - RT recovered from `error` to `stalledUP`
+- more live helper pilots succeeded for:
+  - `55a3df42dcf14d250117d811b52dca658fd05f73`
+    - multi-file / RT content-directory case under `DigitalCore (API)`
+  - `8779246eebcf9135f272d24cdff643887700ffe1`
+    - single-file / RT root-directory case under `Darkpeers (API)`
+- a hardened operator wrapper now exists:
+  - `scripts/pilot-normalization.sh`
+  - list/dry-run by default
+  - safe apply lane restricted to stopped `/pool/media` candidates
+  - delegates mutations to `payload normalize-cross-seed-link`
+  - prints residue status and remaining live legacy counts
+- first wrapper-driven live pilot succeeded for:
+  - `5bf579e7c4c98daeb66c87da1f6068512f35c3cd`
+  - qB canonical save path:
+    - `/pool/media/torrents/seeding/cross-seed/DocsPedia`
+  - RT canonical directory:
+    - `/pool/media/torrents/seeding/cross-seed/DocsPedia/How It's Made S01-S32 480p DVDRip 1080p WEBRip AAC 2.0 x264-MIXED`
+  - wrapper watch timed out as `ambiguous_needs_review` because RT remained `checking` beyond the 120s budget
+  - immediate follow-up state still showed both clients aligned on the canonical path
 - live legacy-name scope is now:
-  - `26` RT rows on `cross-seed-link`
-  - `26` qB rows on `cross-seed-link`
+  - `21` RT rows on `cross-seed-link`
+  - `21` qB rows on `cross-seed-link`
   - `1` RT row on `orphaned_data`
   - `1` qB row on `orphaned_data`
 - first concrete `cross-seed-link -> cross-seed` dry-run / pilot findings:
@@ -73,10 +92,12 @@
     - RT runtime directory
     - RT `d.directory.set` apply path
   - RT verification should allow aligned runtime forms after repoint
+  - RT XMLRPC timeouts can happen after qB has already moved
+  - helper now waits through RT timeout ambiguity instead of immediately rolling qB back
 - qB and RT were both found down during the first dry-run attempt and were recovered with:
   - `docker compose -f /home/michael/dev/sys/docker/gluetun_qbit/docker-compose.yml up -d qbittorrent_vpn rtorrent_vpn`
 - Immediate next action:
-  - run the next one-hash `cross-seed-link -> cross-seed` pilot with the new helper
+  - continue one-hash `cross-seed-link -> cross-seed` pilots with `scripts/pilot-normalization.sh`, prioritizing stopped `/pool/media` candidates
   - separately decide how to clean the stale legacy residue left by the failed first pilot under `/pool/media/torrents/seeding/cross-seed-link/...`
 - Do not restart broad unattended loops while this normalization plan is still in the planning/audit stage.
 

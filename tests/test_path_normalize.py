@@ -214,6 +214,62 @@ def test_build_cross_seed_link_plan_uses_rt_apply_parent_for_multi_file(tmp_path
     assert plan.rt_new_apply_directory == str(target_root)
 
 
+def test_apply_cross_seed_link_normalization_tolerates_rt_timeout_then_verifies(tmp_path: Path, monkeypatch) -> None:
+    source_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed-link" / "FileList.io"
+    source_content = source_root / "Release.One"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed" / "FileList.io"
+    source_content.mkdir(parents=True, exist_ok=True)
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    info = QBitTorrent(
+        hash="abc123",
+        name="Release.One",
+        save_path=str(source_root),
+        content_path=str(source_content),
+        category="cross-seed",
+        tags="",
+        state="stoppedUP",
+        size=10,
+        progress=1.0,
+        amount_left=0,
+        auto_tmm=False,
+    )
+    rt_row = {
+        "hash": "abc123",
+        "directory": str(source_content),
+        "state": "stoppedUP",
+    }
+    plan = build_cross_seed_link_normalization_plan("abc123", qb_torrent=info, rt_row=rt_row)
+    fake_qb = _FakeQBClient(info)
+    wait_calls: list[float] = []
+
+    def fake_rt_apply(torrent_hash: str, target_directory: str, *, rpc_url: str, restart: bool = True):
+        raise RuntimeError("HTTPConnectionPool(host='127.0.0.1', port=18000): Read timed out. (read timeout=20)")
+
+    def fake_wait_rt(
+        torrent_hash: str,
+        *,
+        expected_directory: str,
+        expected_save_path: str = "",
+        expected_content_path: str = "",
+        rpc_url: str,
+        timeout_seconds: float = 10.0,
+        interval_seconds: float = 0.5,
+    ):
+        wait_calls.append(timeout_seconds)
+        return {"hash": torrent_hash, "directory": expected_directory, "state": "checking"}
+
+    monkeypatch.setattr("hashall.path_normalize.rt_apply_directory_repoint", fake_rt_apply)
+    monkeypatch.setattr("hashall.path_normalize._wait_for_rt_target", fake_wait_rt)
+
+    result = apply_cross_seed_link_normalization(plan, qb_client=fake_qb)
+
+    assert fake_qb.set_location_calls == [plan.qb_new_save_path]
+    assert result.actions == ["qb.pause", "qb.set_location", "rt.repoint"]
+    assert result.warnings and result.warnings[0].startswith("rt_apply_timeout:")
+    assert 45.0 in wait_calls
+
+
 def test_payload_normalize_cross_seed_link_cli_dry_run(monkeypatch) -> None:
     fake_plan = CrossSeedLinkNormalizationPlan(
         torrent_hash="abc123",

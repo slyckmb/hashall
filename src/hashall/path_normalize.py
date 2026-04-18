@@ -150,6 +150,11 @@ def _derive_expected_rt_runtime_directory(
     return _normalize_path_text(qb_save_path)
 
 
+def _looks_like_timeout(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return "read timed out" in text or "readtimeout" in text or "timed out" in text
+
+
 def build_cross_seed_link_normalization_plan(
     torrent_hash: str,
     *,
@@ -392,6 +397,7 @@ def apply_cross_seed_link_normalization(
     warnings: list[str] = []
     qb_moved = False
     rt_moved = False
+    rt_apply_ambiguous = False
 
     try:
         if not client.pause_torrent(plan.torrent_hash):
@@ -417,14 +423,20 @@ def apply_cross_seed_link_normalization(
         if verified_qb is None:
             raise RuntimeError("qb_verify_failed")
 
-        rt_apply_directory_repoint(
-            plan.torrent_hash,
-            plan.rt_new_apply_directory,
-            rpc_url=rpc_url,
-            restart=plan.rt_should_restart,
-        )
-        rt_moved = True
-        actions.append("rt.repoint")
+        try:
+            rt_apply_directory_repoint(
+                plan.torrent_hash,
+                plan.rt_new_apply_directory,
+                rpc_url=rpc_url,
+                restart=plan.rt_should_restart,
+            )
+            rt_moved = True
+            actions.append("rt.repoint")
+        except Exception as rt_exc:
+            if not _looks_like_timeout(rt_exc):
+                raise
+            rt_apply_ambiguous = True
+            warnings.append(f"rt_apply_timeout:{rt_exc}")
 
         verified_rt = _wait_for_rt_target(
             plan.torrent_hash,
@@ -432,9 +444,13 @@ def apply_cross_seed_link_normalization(
             expected_save_path=plan.qb_new_save_path,
             expected_content_path=plan.qb_new_content_path,
             rpc_url=rpc_url,
+            timeout_seconds=45.0 if rt_apply_ambiguous else 10.0,
         )
         if verified_rt is None:
             raise RuntimeError("rt_verify_failed")
+        if rt_apply_ambiguous:
+            actions.append("rt.repoint")
+            rt_moved = True
 
         if plan.qb_should_resume:
             if client.resume_torrent(plan.torrent_hash):
@@ -482,7 +498,7 @@ def apply_cross_seed_link_normalization(
             except Exception as rollback_exc:
                 rollback_errors.append(f"rt.rollback:{rollback_exc}")
 
-        if qb_moved:
+        if qb_moved and not rt_apply_ambiguous:
             try:
                 if _set_qb_location_with_retry(
                     client,
@@ -496,7 +512,7 @@ def apply_cross_seed_link_normalization(
             except Exception as rollback_exc:
                 rollback_errors.append(f"qb.rollback:{rollback_exc}")
 
-        if plan.qb_should_resume:
+        if plan.qb_should_resume and not rt_apply_ambiguous:
             try:
                 if client.resume_torrent(plan.torrent_hash):
                     rollback_steps.append("qb.resume")
