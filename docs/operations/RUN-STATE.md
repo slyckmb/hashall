@@ -45,7 +45,9 @@ Current progress:
   - `--dataset`
 - live pilot work exposed and fixed an empty-dir `--limit` bug
 - current `/pool/data/media/torrents/seeding` pilot state shows no remaining orphan-sweep candidates there after empty-dir cleanup
+- canonical docs and continuation notes are now committed in-repo
 - next lane is planning and auditing, not another blind mutation run
+- immediate next action is the `~/dev` path-reference audit before any rename batch
 
 Cross-repo requirement:
 - before any tree-normalization batch, audit `~/dev` for path-sensitive code/docs referencing old names or old canonical roots

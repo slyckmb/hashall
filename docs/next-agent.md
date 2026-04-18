@@ -30,6 +30,9 @@
   - `payload orphan-sweep` now supports staged controls (`--order`, `--reserve-gib`, `--dataset`)
   - an empty-dir `--limit` bug was fixed and regression-tested
   - the current `/pool/data/media/torrents/seeding` orphan-sweep pilot lane is empty after the empty-dir cleanup
+  - canonical docs and continuation context are now committed in-repo
+- Immediate next action:
+  - audit `~/dev` for code/docs/scripts that still reference `cross-seed-link`, `orphaned_data`, or old canonical torrent roots
 - Do not restart broad unattended loops while this normalization plan is still in the planning/audit stage.
 
 ## 2026-04-03 Residual stash reuse repair

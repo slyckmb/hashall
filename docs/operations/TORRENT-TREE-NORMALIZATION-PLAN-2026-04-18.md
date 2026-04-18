@@ -131,12 +131,18 @@ Every mutating phase should follow the same loop:
 
 Completed:
 - Operator policy answers were captured and reconciled into this plan.
+- Canonical docs were updated to carry this policy forward:
+  - `docs/REQUIREMENTS.md`
+  - `docs/project/PLAN.md`
+  - `docs/operations/RUN-STATE.md`
+  - `docs/next-agent.md`
 - `payload orphan-sweep` gained staged controls:
   - `--order`
   - `--reserve-gib`
   - `--dataset`
 - The `payload orphan-sweep` empty-dir `--limit` bug was fixed and regression-tested.
 - A live `pool-data` orphan-sweep pilot removed current empty seeding dirs under `/pool/data/media/torrents/seeding`.
+- The current worktree state after those doc/code updates is clean, so the next thread can start directly on the audit lane.
 
 Pending:
 - Audit `~/dev` for path-sensitive references before any tree normalization batch.
@@ -154,3 +160,10 @@ Pending:
 3. Sim the code and metadata flow for a rename-only batch.
 4. Dry-run the first smallest normalization slice.
 5. Pilot exactly one small rename/update batch.
+
+## Thread Resume Note
+
+If a future thread resumes from this plan:
+- start with the `~/dev` path-reference audit
+- do not mutate stash/pool tree names until that audit is classified
+- treat the first rename batch as a path-normalization pilot only, not a dedupe/consolidation batch
