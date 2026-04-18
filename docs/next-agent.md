@@ -69,6 +69,7 @@
   - list/dry-run by default
   - safe apply lane restricted to stopped `/pool/media` candidates
   - delegates mutations to `payload normalize-cross-seed-link`
+  - uses the shared qB/RT cache helpers for watch/list/post-check reads where possible
   - prints residue status and remaining live legacy counts
 - first wrapper-driven live pilot succeeded for:
   - `5bf579e7c4c98daeb66c87da1f6068512f35c3cd`
@@ -81,6 +82,20 @@
 - live legacy-name scope is now:
   - `21` RT rows on `cross-seed-link`
   - `21` qB rows on `cross-seed-link`
+  - `1` RT row on `orphaned_data`
+  - `1` qB row on `orphaned_data`
+- cache-backed auto-pick now works:
+  - `scripts/pilot-normalization.sh --pick-safe`
+  - `scripts/pilot-normalization.sh --apply --watch`
+- first cache-backed auto-pick pilot succeeded for:
+  - `fad3310db364ee7a8e97d511a85cf4df1eab4813`
+  - canonical tracker root:
+    - `/pool/media/torrents/seeding/cross-seed/FearNoPeer`
+  - canonical payload path:
+    - `/pool/media/torrents/seeding/cross-seed/FearNoPeer/The Last Stop in Yuma County 2023 1080p AMZN WEB-DL DDP5 1 H 264-BYNDR.mkv`
+- live legacy-name scope is now:
+  - `20` RT rows on `cross-seed-link`
+  - `20` qB rows on `cross-seed-link`
   - `1` RT row on `orphaned_data`
   - `1` qB row on `orphaned_data`
 - first concrete `cross-seed-link -> cross-seed` dry-run / pilot findings:

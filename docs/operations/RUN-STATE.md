@@ -100,6 +100,8 @@ Current progress:
   - list/dry-run by default
   - refuses apply outside a worktree / `cr/` branch
   - filters safe apply candidates to stopped `/pool/media` rows
+  - uses shared qB/RT cache reads for list, watch, post-check, and live legacy counts where possible
+  - leaves the actual mutation to the direct `payload normalize-cross-seed-link` helper
   - prints post-check state, residue classification, and remaining live legacy counts
 - first wrapper-driven live pilot succeeded for:
   - `5bf579e7c4c98daeb66c87da1f6068512f35c3cd`
@@ -112,6 +114,22 @@ Current progress:
 - live legacy-name scope after the wrapper pilot:
   - `21` live RT rows on `cross-seed-link`
   - `21` live qB rows on `cross-seed-link`
+  - `1` live RT row on `orphaned_data`
+  - `1` live qB row on `orphaned_data`
+- wrapper auto-pick/cache-read hardening is now in place:
+  - qB cache reads go through `bin/lib/qb-cache.sh`
+  - RT status reads go through the shared RT cache snapshot
+  - this avoids direct read-heavy qB/RT polling in the wrapper watch/list loops
+- first cache-backed auto-pick pilot succeeded for:
+  - `fad3310db364ee7a8e97d511a85cf4df1eab4813`
+  - tracker root:
+    - `/pool/media/torrents/seeding/cross-seed/FearNoPeer`
+  - qB content path:
+    - `/pool/media/torrents/seeding/cross-seed/FearNoPeer/The Last Stop in Yuma County 2023 1080p AMZN WEB-DL DDP5 1 H 264-BYNDR.mkv`
+  - RT runtime directory converged to the same canonical root and reached `checkingUP`
+- live legacy-name scope after the cache-backed auto-pick pilot:
+  - `20` live RT rows on `cross-seed-link`
+  - `20` live qB rows on `cross-seed-link`
   - `1` live RT row on `orphaned_data`
   - `1` live qB row on `orphaned_data`
 - timeout hardening landed after the `DigitalCore (API)` retry:
