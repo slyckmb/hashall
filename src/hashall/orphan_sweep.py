@@ -18,7 +18,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE, DEFAULT_RT_SHARED_CACHE_META_FILE, load_rt_cache_snapshot
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
@@ -87,6 +87,7 @@ class SweepItem:
     bad_files_deleted: list[Path] = field(default_factory=list)
     action: str = ""               # "moved", "deleted", "skipped", "dryrun_move", "dryrun_delete"
     dest_path: Path | None = None
+    size_bytes: int = 0
 
 
 def _normalize_container_path(path_str: str) -> str:
@@ -239,6 +240,46 @@ def _get_payload_refs(root_path: Path, conn) -> int:
         return 0
 
 
+def _get_item_size_bytes(path: Path) -> int:
+    """Return total bytes for a file or directory tree."""
+    if not path.exists():
+        return 0
+    if path.is_file():
+        try:
+            return int(path.stat().st_size)
+        except OSError:
+            return 0
+
+    total = 0
+    for dirpath, _, filenames in os.walk(path):
+        for fname in filenames:
+            file_path = Path(dirpath) / fname
+            try:
+                total += int(file_path.stat().st_size)
+            except OSError:
+                continue
+    return total
+
+
+def _free_bytes(path: Path) -> int:
+    """Return available bytes on the destination filesystem."""
+    try:
+        target = path if path.exists() else path.parent
+        return int(shutil.disk_usage(target).free)
+    except OSError:
+        return 0
+
+
+def _sort_orphan_candidates(
+    items: list[SweepItem],
+    order: Literal["small-first", "large-first", "input"],
+) -> list[SweepItem]:
+    if order == "input":
+        return list(items)
+    reverse = order == "large-first"
+    return sorted(items, key=lambda item: (item.size_bytes, str(item.path)), reverse=reverse)
+
+
 def iter_seeding_items(
     seeding_root: Path,
     live_paths: set[str],
@@ -362,6 +403,9 @@ def run_orphan_sweep(
     datasets: list[DatasetConfig] | None = None,
     skip_live_warn: bool = False,
     verbose: bool = False,
+    order: Literal["small-first", "large-first", "input"] = "input",
+    reserve_gib: int = 0,
+    dataset_names: set[str] | None = None,
 ) -> dict:
     """
     Main entry point for orphan sweep.
@@ -385,12 +429,20 @@ def run_orphan_sweep(
             pass
 
     results: list[SweepItem] = []
+    orphan_candidates: list[SweepItem] = []
     moved = 0
     skipped = 0
+    skipped_space = 0
     warned = 0
     bad_deleted = 0
+    bytes_planned = 0
+    bytes_moved = 0
+
+    reserve_bytes = max(0, int(reserve_gib)) * 1024 * 1024 * 1024
 
     for ds in datasets:
+        if dataset_names and ds.name not in dataset_names:
+            continue
         for seeding_root in ds.seeding_roots:
             if not seeding_root.is_dir():
                 if verbose:
@@ -398,9 +450,6 @@ def run_orphan_sweep(
                 continue
 
             for item in iter_seeding_items(seeding_root, live_paths, ds.name, ds.cross_dataset):
-                if limit is not None and (moved + skipped) >= limit:
-                    break
-
                 # Always clean bad files regardless of live status
                 bad = _delete_bad_files(item.path, dry_run=dry_run)
                 item.bad_files_deleted = bad
@@ -443,29 +492,53 @@ def run_orphan_sweep(
                     item.warn_nlinks = True
                     warned += 1
 
-                dest_tracker_dir = ds.dest / item.tracker_label
+                item.size_bytes = _get_item_size_bytes(item.path)
+                orphan_candidates.append(item)
 
-                if dry_run:
-                    item.action = "dryrun_move"
-                    item.dest_path = dest_tracker_dir / item.path.name
-                    moved += 1
-                    results.append(item)
-                    continue
+    selected_candidates = _sort_orphan_candidates(orphan_candidates, order=order)
+    if limit is not None:
+        selected_candidates = selected_candidates[: max(0, int(limit))]
 
-                try:
-                    if item.cross_dataset:
-                        _move_cross_dataset(item.path, dest_tracker_dir, dry_run=False, rsync_script=rsync_script)
-                        item.dest_path = dest_tracker_dir / item.path.name
-                    else:
-                        item.dest_path = _move_same_dataset(item.path, dest_tracker_dir, dry_run=False)
-                    item.action = "moved"
-                    moved += 1
-                except Exception as exc:
-                    item.skip_reason = f"move failed: {exc}"
-                    item.action = "skipped"
-                    skipped += 1
+    for item in selected_candidates:
+        ds = next(ds for ds in datasets if ds.name == item.dataset_name)
+        dest_tracker_dir = ds.dest / item.tracker_label
+        item.dest_path = dest_tracker_dir / item.path.name
 
-                results.append(item)
+        available = _free_bytes(dest_tracker_dir)
+        budget = max(0, available - reserve_bytes)
+        if item.cross_dataset and item.size_bytes > budget:
+            item.skip_reason = (
+                f"insufficient destination space: need {item.size_bytes} bytes, budget {budget} bytes"
+            )
+            item.action = "skipped"
+            skipped += 1
+            skipped_space += 1
+            results.append(item)
+            continue
+
+        bytes_planned += item.size_bytes
+
+        if dry_run:
+            item.action = "dryrun_move"
+            moved += 1
+            bytes_moved += item.size_bytes
+            results.append(item)
+            continue
+
+        try:
+            if item.cross_dataset:
+                _move_cross_dataset(item.path, dest_tracker_dir, dry_run=False, rsync_script=rsync_script)
+            else:
+                item.dest_path = _move_same_dataset(item.path, dest_tracker_dir, dry_run=False)
+            item.action = "moved"
+            moved += 1
+            bytes_moved += item.size_bytes
+        except Exception as exc:
+            item.skip_reason = f"move failed: {exc}"
+            item.action = "skipped"
+            skipped += 1
+
+        results.append(item)
 
     if conn:
         conn.close()
@@ -476,6 +549,9 @@ def run_orphan_sweep(
         "items": results,
         "moved": moved,
         "skipped": skipped,
+        "skipped_space": skipped_space,
         "warned_nlinks": warned,
         "bad_deleted": bad_deleted,
+        "bytes_planned": bytes_planned,
+        "bytes_moved": bytes_moved,
     }

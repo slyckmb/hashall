@@ -1996,6 +1996,27 @@ def payload_orphan_audit_cmd(db, path_prefixes, samples, json_output):
     help="Process at most N orphan items (for staged runs).",
 )
 @click.option(
+    "--order",
+    type=click.Choice(["small-first", "large-first", "input"]),
+    default="input",
+    show_default=True,
+    help="Order orphan move candidates before applying --limit.",
+)
+@click.option(
+    "--reserve-gib",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Keep at least this many GiB free on destination before cross-dataset moves.",
+)
+@click.option(
+    "--dataset",
+    "datasets",
+    multiple=True,
+    type=click.Choice(["pool-data", "pool-media", "stash"]),
+    help="Restrict sweep to one or more datasets.",
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Print live (non-orphan) items too.",
@@ -2012,7 +2033,7 @@ def payload_orphan_audit_cmd(db, path_prefixes, samples, json_output):
     show_default=True,
     help="hashall qB shared cache file.",
 )
-def payload_orphan_sweep_cmd(db, dry_run, limit, verbose, rt_cache_file, qb_cache_file):
+def payload_orphan_sweep_cmd(db, dry_run, limit, order, reserve_gib, datasets, verbose, rt_cache_file, qb_cache_file):
     """
     Sweep seeding trees and relocate orphaned content to orphaned_data/.
 
@@ -2040,6 +2061,9 @@ def payload_orphan_sweep_cmd(db, dry_run, limit, verbose, rt_cache_file, qb_cach
         db_path=_Path(db) if db else None,
         rt_cache_file=_Path(rt_cache_file),
         qb_cache_file=_Path(qb_cache_file),
+        order=order,
+        reserve_gib=reserve_gib,
+        dataset_names=set(datasets) if datasets else None,
         verbose=verbose,
     )
 
@@ -2062,8 +2086,11 @@ def payload_orphan_sweep_cmd(db, dry_run, limit, verbose, rt_cache_file, qb_cach
     print(f"   orphaned:             {len(orphans)}")
     print(f"   moved:                {summary['moved']}")
     print(f"   skipped:              {summary['skipped']}")
+    print(f"   skipped (space):      {summary['skipped_space']}")
     print(f"   nlinks>1 warnings:    {summary['warned_nlinks']}")
     print(f"   bad files deleted:    {summary['bad_deleted']}")
+    print(f"   bytes planned:        {summary['bytes_planned']}")
+    print(f"   bytes moved:          {summary['bytes_moved']}")
 
     empty_dirs = [i for i in orphans if i.skip_reason == "empty_dir"]
     movers = [i for i in orphans if i.skip_reason != "empty_dir"]
