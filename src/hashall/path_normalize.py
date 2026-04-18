@@ -1,0 +1,513 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+import time
+
+from hashall.pathing import canonicalize_path
+from hashall.qbittorrent import QBitTorrent, QBittorrentClient, get_qbittorrent_client
+from hashall.rtorrent import (
+    DEFAULT_RT_RPC_URL,
+    DEFAULT_RT_SESSION_DIR,
+    RTTorrentMeta,
+    fetch_rt_status_rows,
+    load_rt_torrent_meta,
+    normalize_rt_target_directory,
+    rt_path_aligned,
+    rt_apply_directory_repoint,
+)
+
+
+LEGACY_SEGMENT = "cross-seed-link"
+CANONICAL_SEGMENT = "cross-seed"
+_STOPPED_QB_STATES = {"stoppedup", "stoppeddl"}
+_STOPPED_RT_STATES = {"stoppedup", "stoppeddl"}
+
+
+@dataclass(frozen=True)
+class CrossSeedLinkNormalizationPlan:
+    torrent_hash: str
+    qb_state: str
+    qb_should_resume: bool
+    qb_old_save_path: str
+    qb_new_save_path: str
+    qb_old_content_path: str
+    qb_new_content_path: str
+    rt_state: str
+    rt_should_restart: bool
+    rt_old_directory: str
+    rt_new_directory: str
+    rt_old_apply_directory: str
+    rt_new_apply_directory: str
+    source_exists: bool
+    target_exists: bool
+    same_filesystem: bool
+    source_device: int | None
+    target_device: int | None
+    issues: list[str] = field(default_factory=list)
+
+    @property
+    def ready(self) -> bool:
+        return not self.issues
+
+    def to_dict(self) -> dict:
+        payload = asdict(self)
+        payload["ready"] = self.ready
+        return payload
+
+
+@dataclass(frozen=True)
+class CrossSeedLinkNormalizationResult:
+    plan: CrossSeedLinkNormalizationPlan
+    actions: list[str]
+    warnings: list[str]
+    qb_final_state: str
+    qb_final_save_path: str
+    qb_final_content_path: str
+    rt_final_state: str
+    rt_final_directory: str
+
+    def to_dict(self) -> dict:
+        payload = asdict(self)
+        payload["plan"] = self.plan.to_dict()
+        return payload
+
+
+def _normalize_path_text(path_text: str | None) -> str:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw)
+    try:
+        if path.exists():
+            return str(canonicalize_path(path))
+    except Exception:
+        pass
+    return str(path)
+
+
+def _replace_path_segment(path_text: str, old_segment: str, new_segment: str) -> str:
+    path = Path(str(path_text or "").strip())
+    parts = list(path.parts)
+    if old_segment not in parts:
+        raise ValueError(f"missing_segment:{old_segment}")
+    replaced = [new_segment if part == old_segment else part for part in parts]
+    return str(Path(*replaced))
+
+
+def _existing_parent(path: Path) -> Path | None:
+    current = path if path.exists() else path.parent
+    while True:
+        if current.exists():
+            return current
+        if current == current.parent:
+            return None
+        current = current.parent
+
+
+def _device_for_path(path_text: str | None) -> tuple[int | None, Path | None]:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return None, None
+    existing = _existing_parent(Path(raw))
+    if existing is None:
+        return None, None
+    try:
+        return int(existing.stat().st_dev), existing
+    except Exception:
+        return None, existing
+
+
+def _should_resume_qb(state: str) -> bool:
+    return str(state or "").strip().lower() not in _STOPPED_QB_STATES
+
+
+def _should_restart_rt(state: str) -> bool:
+    return str(state or "").strip().lower() not in _STOPPED_RT_STATES
+
+
+def _find_rt_row(torrent_hash: str, rows: list[dict] | None = None) -> dict | None:
+    torrent_key = str(torrent_hash or "").strip().lower()
+    for row in rows or fetch_rt_status_rows():
+        if str(row.get("hash") or "").strip().lower() == torrent_key:
+            return row
+    return None
+
+
+def _derive_expected_rt_runtime_directory(
+    *,
+    qb_save_path: str,
+    qb_content_path: str,
+    rt_meta: RTTorrentMeta | None,
+) -> str:
+    if rt_meta is None:
+        return _normalize_path_text(qb_content_path or qb_save_path)
+    if rt_meta and rt_meta.is_multi_file:
+        return _normalize_path_text(qb_content_path or qb_save_path)
+    content_path = Path(str(qb_content_path or "").strip())
+    if str(content_path):
+        return _normalize_path_text(str(content_path.parent))
+    return _normalize_path_text(qb_save_path)
+
+
+def build_cross_seed_link_normalization_plan(
+    torrent_hash: str,
+    *,
+    qb_torrent: QBitTorrent | None,
+    rt_row: dict | None,
+    rt_meta: RTTorrentMeta | None = None,
+) -> CrossSeedLinkNormalizationPlan:
+    torrent_key = str(torrent_hash or "").strip().lower()
+    issues: list[str] = []
+
+    qb_state = str(getattr(qb_torrent, "state", "") or "")
+    qb_old_save_path = _normalize_path_text(getattr(qb_torrent, "save_path", ""))
+    qb_old_content_path = _normalize_path_text(getattr(qb_torrent, "content_path", ""))
+
+    if qb_torrent is None:
+        issues.append("qb_torrent_missing")
+    if not qb_old_save_path:
+        issues.append("qb_save_path_missing")
+    if not qb_old_content_path:
+        issues.append("qb_content_path_missing")
+    if getattr(qb_torrent, "auto_tmm", False):
+        issues.append("qb_auto_tmm_enabled")
+    if float(getattr(qb_torrent, "progress", 0.0) or 0.0) < 1.0 or int(getattr(qb_torrent, "amount_left", 0) or 0) > 0:
+        issues.append("qb_not_complete")
+
+    try:
+        qb_new_save_path = _normalize_path_text(
+            _replace_path_segment(qb_old_save_path, LEGACY_SEGMENT, CANONICAL_SEGMENT)
+        )
+    except ValueError:
+        qb_new_save_path = qb_old_save_path
+        issues.append("qb_save_path_missing_legacy_segment")
+    try:
+        qb_new_content_path = _normalize_path_text(
+            _replace_path_segment(qb_old_content_path, LEGACY_SEGMENT, CANONICAL_SEGMENT)
+        )
+    except ValueError:
+        qb_new_content_path = qb_old_content_path
+        issues.append("qb_content_path_missing_legacy_segment")
+
+    rt_state = str((rt_row or {}).get("state") or "")
+    rt_old_directory = _normalize_path_text((rt_row or {}).get("directory") or "")
+    if rt_row is None:
+        issues.append("rt_row_missing")
+    try:
+        rt_replaced_directory = _normalize_path_text(
+            _replace_path_segment(rt_old_directory, LEGACY_SEGMENT, CANONICAL_SEGMENT)
+        )
+    except ValueError:
+        rt_replaced_directory = rt_old_directory
+        issues.append("rt_directory_missing_legacy_segment")
+    rt_new_directory = _derive_expected_rt_runtime_directory(
+        qb_save_path=qb_new_save_path,
+        qb_content_path=qb_new_content_path,
+        rt_meta=rt_meta,
+    ) or rt_replaced_directory
+    rt_old_apply_directory = _normalize_path_text(normalize_rt_target_directory(rt_old_directory, rt_meta))
+    rt_new_apply_directory = _normalize_path_text(normalize_rt_target_directory(rt_new_directory, rt_meta))
+    if not rt_old_apply_directory or not rt_new_apply_directory:
+        issues.append("rt_apply_directory_missing")
+
+    source_exists = bool(qb_old_content_path and Path(qb_old_content_path).exists())
+    target_exists = bool(qb_new_content_path and Path(qb_new_content_path).exists())
+    if not source_exists:
+        issues.append("source_content_missing")
+    if target_exists:
+        issues.append("target_content_already_exists")
+
+    source_device, _ = _device_for_path(qb_old_content_path)
+    target_device, _ = _device_for_path(qb_new_content_path)
+    same_filesystem = source_device is not None and target_device is not None and source_device == target_device
+    if not same_filesystem:
+        issues.append("cross_filesystem_move_not_supported")
+
+    return CrossSeedLinkNormalizationPlan(
+        torrent_hash=torrent_key,
+        qb_state=qb_state,
+        qb_should_resume=_should_resume_qb(qb_state),
+        qb_old_save_path=qb_old_save_path,
+        qb_new_save_path=qb_new_save_path,
+        qb_old_content_path=qb_old_content_path,
+        qb_new_content_path=qb_new_content_path,
+        rt_state=rt_state,
+        rt_should_restart=_should_restart_rt(rt_state),
+        rt_old_directory=rt_old_directory,
+        rt_new_directory=rt_new_directory,
+        rt_old_apply_directory=rt_old_apply_directory,
+        rt_new_apply_directory=rt_new_apply_directory,
+        source_exists=source_exists,
+        target_exists=target_exists,
+        same_filesystem=same_filesystem,
+        source_device=source_device,
+        target_device=target_device,
+        issues=issues,
+    )
+
+
+def plan_cross_seed_link_normalization(
+    torrent_hash: str,
+    *,
+    qb_client: QBittorrentClient | None = None,
+    rt_rows: list[dict] | None = None,
+) -> CrossSeedLinkNormalizationPlan:
+    client = qb_client or get_qbittorrent_client()
+    torrent_key = str(torrent_hash or "").strip().lower()
+    info = client.get_torrent_info(torrent_key)
+    row = _find_rt_row(torrent_key, rows=rt_rows)
+    rt_meta = load_rt_torrent_meta(DEFAULT_RT_SESSION_DIR, torrent_key)
+    return build_cross_seed_link_normalization_plan(
+        torrent_key,
+        qb_torrent=info,
+        rt_row=row,
+        rt_meta=rt_meta,
+    )
+
+
+def _wait_for_qb_target(
+    qb_client: QBittorrentClient,
+    torrent_hash: str,
+    *,
+    expected_save_path: str,
+    expected_content_path: str,
+    timeout_seconds: float = 10.0,
+    interval_seconds: float = 0.5,
+) -> QBitTorrent | None:
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    expected_save = _normalize_path_text(expected_save_path)
+    expected_content = _normalize_path_text(expected_content_path)
+
+    while True:
+        info = qb_client.get_torrent_info(torrent_hash)
+        if info:
+            actual_save = _normalize_path_text(getattr(info, "save_path", ""))
+            actual_content = _normalize_path_text(getattr(info, "content_path", ""))
+            if actual_save == expected_save and actual_content == expected_content:
+                return info
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval_seconds)
+
+
+def _set_qb_location_with_retry(
+    qb_client: QBittorrentClient,
+    torrent_hash: str,
+    *,
+    target_save_path: str,
+    target_content_path: str,
+    attempts: int = 5,
+    delay_seconds: float = 0.5,
+) -> bool:
+    current = _wait_for_qb_target(
+        qb_client,
+        torrent_hash,
+        expected_save_path=target_save_path,
+        expected_content_path=target_content_path,
+        timeout_seconds=0.0,
+        interval_seconds=0.0,
+    )
+    if current is not None:
+        return True
+
+    for attempt in range(1, attempts + 1):
+        if qb_client.set_location(torrent_hash, target_save_path):
+            info = _wait_for_qb_target(
+                qb_client,
+                torrent_hash,
+                expected_save_path=target_save_path,
+                expected_content_path=target_content_path,
+                timeout_seconds=8.0,
+                interval_seconds=0.5,
+            )
+            if info is not None:
+                return True
+        else:
+            info = _wait_for_qb_target(
+                qb_client,
+                torrent_hash,
+                expected_save_path=target_save_path,
+                expected_content_path=target_content_path,
+                timeout_seconds=2.0,
+                interval_seconds=0.5,
+            )
+            if info is not None:
+                return True
+        if attempt < attempts:
+            time.sleep(min(delay_seconds * (2 ** (attempt - 1)), 8.0))
+
+    final = _wait_for_qb_target(
+        qb_client,
+        torrent_hash,
+        expected_save_path=target_save_path,
+        expected_content_path=target_content_path,
+        timeout_seconds=5.0,
+        interval_seconds=0.5,
+    )
+    return final is not None
+
+
+def _wait_for_rt_target(
+    torrent_hash: str,
+    *,
+    expected_directory: str,
+    expected_save_path: str = "",
+    expected_content_path: str = "",
+    rpc_url: str = DEFAULT_RT_RPC_URL,
+    timeout_seconds: float = 10.0,
+    interval_seconds: float = 0.5,
+) -> dict | None:
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    expected = _normalize_path_text(expected_directory)
+
+    while True:
+        for row in fetch_rt_status_rows(rpc_url=rpc_url):
+            if str(row.get("hash") or "").strip().lower() != str(torrent_hash or "").strip().lower():
+                continue
+            actual = _normalize_path_text(row.get("directory") or "")
+            if actual == expected or rt_path_aligned(
+                actual,
+                qb_save_path=expected_save_path,
+                qb_content_path=expected_content_path,
+            ):
+                return row
+            break
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval_seconds)
+
+
+def apply_cross_seed_link_normalization(
+    plan: CrossSeedLinkNormalizationPlan,
+    *,
+    qb_client: QBittorrentClient | None = None,
+    rpc_url: str = DEFAULT_RT_RPC_URL,
+) -> CrossSeedLinkNormalizationResult:
+    if not plan.ready:
+        raise RuntimeError(f"plan_not_ready issues={','.join(plan.issues)}")
+
+    client = qb_client or get_qbittorrent_client()
+    actions: list[str] = []
+    warnings: list[str] = []
+    qb_moved = False
+    rt_moved = False
+
+    try:
+        if not client.pause_torrent(plan.torrent_hash):
+            raise RuntimeError(f"qb_pause_failed error={client.last_error or 'unknown'}")
+        actions.append("qb.pause")
+
+        if not _set_qb_location_with_retry(
+            client,
+            plan.torrent_hash,
+            target_save_path=plan.qb_new_save_path,
+            target_content_path=plan.qb_new_content_path,
+        ):
+            raise RuntimeError(f"qb_set_location_failed error={client.last_error or 'unknown'}")
+        qb_moved = True
+        actions.append("qb.set_location")
+
+        verified_qb = _wait_for_qb_target(
+            client,
+            plan.torrent_hash,
+            expected_save_path=plan.qb_new_save_path,
+            expected_content_path=plan.qb_new_content_path,
+        )
+        if verified_qb is None:
+            raise RuntimeError("qb_verify_failed")
+
+        rt_apply_directory_repoint(
+            plan.torrent_hash,
+            plan.rt_new_apply_directory,
+            rpc_url=rpc_url,
+            restart=plan.rt_should_restart,
+        )
+        rt_moved = True
+        actions.append("rt.repoint")
+
+        verified_rt = _wait_for_rt_target(
+            plan.torrent_hash,
+            expected_directory=plan.rt_new_directory,
+            expected_save_path=plan.qb_new_save_path,
+            expected_content_path=plan.qb_new_content_path,
+            rpc_url=rpc_url,
+        )
+        if verified_rt is None:
+            raise RuntimeError("rt_verify_failed")
+
+        if plan.qb_should_resume:
+            if client.resume_torrent(plan.torrent_hash):
+                actions.append("qb.resume")
+                qb_final = client.get_torrent_info(plan.torrent_hash) or verified_qb
+            else:
+                warnings.append(f"qb_resume_failed:{client.last_error or 'unknown'}")
+                qb_final = client.get_torrent_info(plan.torrent_hash) or verified_qb
+        else:
+            qb_final = client.get_torrent_info(plan.torrent_hash) or verified_qb
+
+        rt_final = _wait_for_rt_target(
+            plan.torrent_hash,
+            expected_directory=plan.rt_new_directory,
+            expected_save_path=plan.qb_new_save_path,
+            expected_content_path=plan.qb_new_content_path,
+            rpc_url=rpc_url,
+            timeout_seconds=0.0,
+            interval_seconds=0.0,
+        ) or verified_rt
+
+        return CrossSeedLinkNormalizationResult(
+            plan=plan,
+            actions=actions,
+            warnings=warnings,
+            qb_final_state=str(getattr(qb_final, "state", "") or ""),
+            qb_final_save_path=_normalize_path_text(getattr(qb_final, "save_path", "")),
+            qb_final_content_path=_normalize_path_text(getattr(qb_final, "content_path", "")),
+            rt_final_state=str((rt_final or {}).get("state") or ""),
+            rt_final_directory=_normalize_path_text((rt_final or {}).get("directory") or ""),
+        )
+    except Exception as exc:
+        rollback_steps: list[str] = []
+        rollback_errors: list[str] = []
+
+        if rt_moved:
+            try:
+                rt_apply_directory_repoint(
+                    plan.torrent_hash,
+                    plan.rt_old_apply_directory,
+                    rpc_url=rpc_url,
+                    restart=plan.rt_should_restart,
+                )
+                rollback_steps.append("rt.rollback")
+            except Exception as rollback_exc:
+                rollback_errors.append(f"rt.rollback:{rollback_exc}")
+
+        if qb_moved:
+            try:
+                if _set_qb_location_with_retry(
+                    client,
+                    plan.torrent_hash,
+                    target_save_path=plan.qb_old_save_path,
+                    target_content_path=plan.qb_old_content_path,
+                ):
+                    rollback_steps.append("qb.rollback")
+                else:
+                    rollback_errors.append(f"qb.rollback:{client.last_error or 'unknown'}")
+            except Exception as rollback_exc:
+                rollback_errors.append(f"qb.rollback:{rollback_exc}")
+
+        if plan.qb_should_resume:
+            try:
+                if client.resume_torrent(plan.torrent_hash):
+                    rollback_steps.append("qb.resume")
+                else:
+                    rollback_errors.append(f"qb.resume:{client.last_error or 'unknown'}")
+            except Exception as rollback_exc:
+                rollback_errors.append(f"qb.resume:{rollback_exc}")
+
+        detail = str(exc)
+        if rollback_steps:
+            detail += f" rollback={','.join(rollback_steps)}"
+        if rollback_errors:
+            detail += f" rollback_errors={';'.join(rollback_errors)}"
+        raise RuntimeError(detail) from exc

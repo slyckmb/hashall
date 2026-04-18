@@ -26,13 +26,58 @@
   - incomplete sibling groups
   - anything unexpected
 - Before any rename batch, audit `~/dev` for path-sensitive code/docs that still reference old names or old canonical roots.
+- That audit is now partially classified:
+  - Docker repo RT hooks that participate in live path setting:
+    - `gluetun_qbit/rtorrent_vpn/rt_sync_imported_path.sh`
+    - `gluetun_qbit/rtorrent_vpn/rt_set_label_path.sh`
+    - `gluetun_qbit/rtorrent_vpn/rt_repair_legacy_path.sh`
+  - Docker repo qB-side active legacy-name consumers:
+    - `qbit_manage/config.yml`
+    - `qbit_manage/config-seeds.yml`
+    - `qbit_manage/bin/promote_recycle_to_seeds.sh`
+    - `qbit_manage/bin/check_pool_orphans.sh`
+    - `gluetun_qbit/qbittorrent_vpn/bin/qb-to-rt-migrate.py`
+  - Other active repos still carrying rename-sensitive settings:
+    - `work/hiker/docker/cross-seed-v6/config.js`
+    - `work/hiker/docker/qbit_manage/config.yml`
+    - `tools/traktor/config/tracker-registry.yml`
+    - `tools/traktor/bin/tracker-ctl.sh`
 - Recent progress:
   - `payload orphan-sweep` now supports staged controls (`--order`, `--reserve-gib`, `--dataset`)
   - an empty-dir `--limit` bug was fixed and regression-tested
   - the current `/pool/data/media/torrents/seeding` orphan-sweep pilot lane is empty after the empty-dir cleanup
   - canonical docs and continuation context are now committed in-repo
+- a dedicated one-hash same-FS helper now exists:
+  - `python -m hashall.cli payload normalize-cross-seed-link --hash <HASH>`
+  - use `--apply` only after the dry-run plan is clean
+  - focused tests:
+    - `pytest -q tests/test_path_normalize.py`
+- first live helper pilot succeeded for:
+  - `b95856e0a29bf045e76a95f4ea3cacf6e4b02add`
+  - qB final save path:
+    - `/pool/media/torrents/seeding/cross-seed/FileList.io`
+  - RT final directory:
+    - `/pool/media/torrents/seeding/cross-seed/FileList.io/The.Roman.Invasion.of.Britain.S01.720p.HDTV.x264-BTN`
+  - RT recovered from `error` to `stalledUP`
+- live legacy-name scope is now:
+  - `26` RT rows on `cross-seed-link`
+  - `26` qB rows on `cross-seed-link`
+  - `1` RT row on `orphaned_data`
+  - `1` qB row on `orphaned_data`
+- first concrete `cross-seed-link -> cross-seed` dry-run / pilot findings:
+  - RT and qB do not use the same target path shape for a given hash
+  - RT may store the full content directory while qB stores the tracker save root
+  - `qb-zfs-relocate plan` is useful to prove the qB mapping for a selected hash
+  - `qb-zfs-relocate validate` is not useful as same-FS rename preflight because it expects a copied destination payload
+  - the helper must distinguish:
+    - RT runtime directory
+    - RT `d.directory.set` apply path
+  - RT verification should allow aligned runtime forms after repoint
+- qB and RT were both found down during the first dry-run attempt and were recovered with:
+  - `docker compose -f /home/michael/dev/sys/docker/gluetun_qbit/docker-compose.yml up -d qbittorrent_vpn rtorrent_vpn`
 - Immediate next action:
-  - audit `~/dev` for code/docs/scripts that still reference `cross-seed-link`, `orphaned_data`, or old canonical torrent roots
+  - run the next one-hash `cross-seed-link -> cross-seed` pilot with the new helper
+  - separately decide how to clean the stale legacy residue left by the failed first pilot under `/pool/media/torrents/seeding/cross-seed-link/...`
 - Do not restart broad unattended loops while this normalization plan is still in the planning/audit stage.
 
 ## 2026-04-03 Residual stash reuse repair

@@ -48,6 +48,48 @@ Current progress:
 - canonical docs and continuation notes are now committed in-repo
 - next lane is planning and auditing, not another blind mutation run
 - immediate next action is the `~/dev` path-reference audit before any rename batch
+- broad `~/dev` audit is now complete
+- Docker-repo live path-setting scripts have been identified:
+  - RT hooks:
+    - `gluetun_qbit/rtorrent_vpn/rt_sync_imported_path.sh`
+    - `gluetun_qbit/rtorrent_vpn/rt_set_label_path.sh`
+    - `gluetun_qbit/rtorrent_vpn/rt_repair_legacy_path.sh`
+  - qB-side active legacy-name consumers:
+    - `qbit_manage/config.yml`
+    - `qbit_manage/config-seeds.yml`
+    - `qbit_manage/bin/promote_recycle_to_seeds.sh`
+    - `qbit_manage/bin/check_pool_orphans.sh`
+    - `gluetun_qbit/qbittorrent_vpn/bin/qb-to-rt-migrate.py`
+- live legacy-name scope is now quantified:
+  - `27` live RT rows on `cross-seed-link`
+  - `27` live qB rows on `cross-seed-link`
+  - `1` live RT row on `orphaned_data`
+  - `1` live qB row on `orphaned_data`
+- first concrete dry-run proved the qB/RT target mapping for a `cross-seed-link -> cross-seed` candidate, but also exposed a tooling gap:
+  - RT target semantics are full content-directory based
+  - qB target semantics are save-root based
+  - `qb-zfs-relocate validate` is not suitable as a same-FS rename preflight
+- qB and RT were both down during the first dry-run attempt and had to be recreated from the Docker compose stack before live dry-run work could continue
+- a dedicated one-hash same-FS helper now exists:
+  - `payload normalize-cross-seed-link`
+- focused helper tests now pass:
+  - `pytest -q tests/test_path_normalize.py`
+- first live one-hash `cross-seed-link -> cross-seed` pilot succeeded for:
+  - `b95856e0a29bf045e76a95f4ea3cacf6e4b02add`
+- post-pilot live state:
+  - qB canonical save path:
+    - `/pool/media/torrents/seeding/cross-seed/FileList.io`
+  - RT canonical directory:
+    - `/pool/media/torrents/seeding/cross-seed/FileList.io/The.Roman.Invasion.of.Britain.S01.720p.HDTV.x264-BTN`
+  - RT recovered from `error` back to `stalledUP`
+- live legacy-name scope after the pilot:
+  - `26` live RT rows on `cross-seed-link`
+  - `26` live qB rows on `cross-seed-link`
+  - `1` live RT row on `orphaned_data`
+  - `1` live qB row on `orphaned_data`
+- important follow-up:
+  - the failed first pilot left a stale on-disk legacy residue under `/pool/media/torrents/seeding/cross-seed-link/...`
+  - it is not referenced by qB or RT anymore and needs an explicit cleanup decision, not silent removal during helper apply
 
 Cross-repo requirement:
 - before any tree-normalization batch, audit `~/dev` for path-sensitive code/docs referencing old names or old canonical roots

@@ -376,6 +376,7 @@ def rt_apply_directory_repoint(
     target_directory: str,
     *,
     rpc_url: str = DEFAULT_RT_RPC_URL,
+    restart: bool = True,
 ) -> list[str]:
     calls = [
         ("d.stop", torrent_hash),
@@ -384,18 +385,20 @@ def rt_apply_directory_repoint(
         ("d.save_full_session", torrent_hash),
         ("session.save",),
         ("d.open", torrent_hash),
-        ("d.start", torrent_hash),
     ]
+    if restart:
+        calls.append(("d.start", torrent_hash))
     completed: list[str] = []
     try:
         for method, *args in calls:
             rt_xmlrpc_call(method, *args, rpc_url=rpc_url)
             completed.append(method)
     except Exception:
-        try:
-            rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url)
-        except Exception:
-            pass
+        if restart:
+            try:
+                rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url)
+            except Exception:
+                pass
         raise
     return completed
 
