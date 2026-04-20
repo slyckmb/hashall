@@ -2180,7 +2180,10 @@ def payload_normalize_cross_seed_link_cmd(torrent_hash, rpc_url, do_apply, json_
     if result is None:
         return
 
+    print(f"   outcome: {result.outcome}")
     print(f"   actions: {', '.join(result.actions) if result.actions else '(none)'}")
+    if result.error:
+        print(f"   error: {result.error}")
     if result.warnings:
         print(f"   warnings: {', '.join(result.warnings)}")
     else:

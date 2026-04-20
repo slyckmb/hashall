@@ -694,6 +694,21 @@ A **hitchhiker** is when two or more torrents with different payload content sha
 
 Existing legacy hitchhiker groups may persist until explicitly de-hitchhiked. Do not create new hitchhiker targets even as a workaround.
 
+**Legacy Hitchhiker Remediation Requirement:**
+
+Hashall must provide a dedicated hitchhiker audit and de-hitchhike lane for existing N→1 payload trees. That lane must:
+- identify when two or more hashes share one physical payload tree or share files in a way that violates the unique per-item payload-tree invariant
+- classify safe shared-byte reuse separately from incorrect shared payload-tree layout
+- construct per-hash unique payload trees using hardlinks where possible, rather than duplicate byte copies
+- repoint affected qB/RT items to those unique payload roots
+
+Mandatory stop conditions for de-hitchhike apply:
+- partial or inconsistent inode overlap between candidate hashes
+- conflicting file hashes at the same relative path
+- cross-filesystem cases where hardlink-backed unique trees cannot be built safely
+- incomplete or partially verified torrents in the candidate group
+- any ambiguous owner/donor relationship
+
 **Cross-Filesystem Donor Prohibition:**
 
 When building a view via hardlinks, the donor payload must be on the **same filesystem** as the target. Selecting a stash donor to build a pool view — or vice versa — is not allowed because hardlinks cannot span filesystems. This check must be enforced before any view-building mutation. Cross-filesystem donor selection requires explicit operator override and produces physical copies, not hardlinks.
@@ -1008,6 +1023,28 @@ A local cache (`src/hashall/qb_cache.py`, `~/.cache/hashall-qb/`) reduces load o
 - Read-heavy operations (list/status queries, triage, dashboards) should use the cache by default
 - Write/mutation operations (stop, start, patch) hit qB directly for immediate freshness
 - The cache also stores server profile info (`app_version`, `webapi_version`, `libtorrent_version`) detected at startup
+
+**Normalization Success Contract:**
+
+Torrent path-normalization helpers must distinguish between:
+- `path_converged`
+  - qB save/content path matches expected
+  - RT directory matches expected/aligned target
+- `verifying`
+  - path convergence is complete, but RT and/or qB are still in `checking*` or equivalent verification states
+- `verified`
+  - path convergence is complete and the torrent has left verification states into a terminal non-checking state
+- `ambiguous_needs_review`
+  - convergence or verification state cannot be proven within the configured timeout budget
+- `partial_state`
+  - one client moved and the other did not, or rollback/recovery was required
+
+Default automation requirement:
+- require qB canonical path match
+- require RT canonical path match
+- require RT to leave `checking*` before reporting strongest success
+
+Optional stricter mode may additionally require explicit qB/RT recheck completion before final success is reported.
 - If qB is temporarily unavailable or authentication is slow, the client falls back to cached data for read operations
 
 ### 8.5 Safety Features

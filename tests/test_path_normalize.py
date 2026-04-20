@@ -5,8 +5,14 @@ from click.testing import CliRunner
 from hashall.cli import cli
 from hashall.path_normalize import (
     CrossSeedLinkNormalizationPlan,
+    _derive_expected_rt_runtime_directory,
     apply_cross_seed_link_normalization,
     build_cross_seed_link_normalization_plan,
+    derive_normalization_outcome,
+    derive_normalization_outcome_with_context,
+    is_qb_verifying_state,
+    is_rt_verifying_state,
+    plan_cross_seed_link_normalization,
 )
 from hashall.qbittorrent import QBitTorrent
 from hashall.rtorrent import RTTorrentMeta
@@ -171,6 +177,7 @@ def test_apply_cross_seed_link_normalization_preserves_stopped_qb(tmp_path: Path
     assert fake_qb.set_location_calls == [plan.qb_new_save_path]
     assert rt_calls == [("abc123", plan.rt_new_apply_directory, False)]
     assert result.actions == ["qb.pause", "qb.set_location", "rt.repoint"]
+    assert result.outcome == "verified"
     assert result.qb_final_save_path == plan.qb_new_save_path
     assert result.rt_final_directory == plan.rt_new_directory
 
@@ -266,8 +273,187 @@ def test_apply_cross_seed_link_normalization_tolerates_rt_timeout_then_verifies(
 
     assert fake_qb.set_location_calls == [plan.qb_new_save_path]
     assert result.actions == ["qb.pause", "qb.set_location", "rt.repoint"]
+    assert result.outcome == "verifying"
     assert result.warnings and result.warnings[0].startswith("rt_apply_timeout:")
     assert 45.0 in wait_calls
+
+
+def test_verification_state_helpers() -> None:
+    assert is_qb_verifying_state("checkingUP") is True
+    assert is_qb_verifying_state("stoppedUP") is False
+    assert is_rt_verifying_state("checking") is True
+    assert is_rt_verifying_state("stalledUP") is False
+    assert derive_normalization_outcome(qb_state="stoppedUP", rt_state="stalledUP") == "verified"
+    assert derive_normalization_outcome(qb_state="stoppedUP", rt_state="checkingUP") == "verifying"
+    assert derive_normalization_outcome_with_context(
+        qb_state="",
+        rt_state="stalledUP",
+        qb_path_converged=True,
+        rt_path_converged=True,
+        recovery_performed=False,
+        ambiguous=False,
+    ) == "path_converged"
+    assert derive_normalization_outcome_with_context(
+        qb_state="stoppedUP",
+        rt_state="stalledUP",
+        qb_path_converged=False,
+        rt_path_converged=True,
+        recovery_performed=False,
+        ambiguous=True,
+    ) == "ambiguous_needs_review"
+    assert derive_normalization_outcome_with_context(
+        qb_state="stoppedUP",
+        rt_state="stalledUP",
+        qb_path_converged=True,
+        rt_path_converged=True,
+        recovery_performed=True,
+        ambiguous=False,
+    ) == "partial_state"
+
+
+def test_derive_expected_rt_runtime_directory_ignores_empty_qb_paths() -> None:
+    assert _derive_expected_rt_runtime_directory(
+        qb_save_path="",
+        qb_content_path="",
+        rt_meta=None,
+    ) == ""
+
+
+def test_apply_cross_seed_link_normalization_marks_qb_checking_as_verifying(tmp_path: Path, monkeypatch) -> None:
+    source_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed-link" / "FearNoPeer"
+    source_content = source_root / "Movie.mkv"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed" / "FearNoPeer"
+    source_content.parent.mkdir(parents=True, exist_ok=True)
+    source_content.write_text("x", encoding="utf-8")
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    info = QBitTorrent(
+        hash="abc123",
+        name="Movie.mkv",
+        save_path=str(source_root),
+        content_path=str(source_content),
+        category="cross-seed",
+        tags="",
+        state="stoppedUP",
+        size=10,
+        progress=1.0,
+        amount_left=0,
+        auto_tmm=False,
+    )
+    rt_row = {
+        "hash": "abc123",
+        "directory": str(source_root),
+        "state": "stalledUP",
+    }
+    plan = build_cross_seed_link_normalization_plan("abc123", qb_torrent=info, rt_row=rt_row)
+    fake_qb = _FakeQBClient(info)
+    rt_calls: list[tuple[str, str, bool]] = []
+
+    def fake_rt_apply(torrent_hash: str, target_directory: str, *, rpc_url: str, restart: bool = True):
+        rt_calls.append((torrent_hash, target_directory, restart))
+        return ["d.stop", "d.close", "d.directory.set", "d.save_full_session", "session.save", "d.open"]
+
+    def fake_wait_rt(
+        torrent_hash: str,
+        *,
+        expected_directory: str,
+        expected_save_path: str = "",
+        expected_content_path: str = "",
+        rpc_url: str,
+        timeout_seconds: float = 10.0,
+        interval_seconds: float = 0.5,
+    ):
+        fake_qb.info.state = "checkingUP"
+        return {"hash": torrent_hash, "directory": expected_directory, "state": "stalledUP"}
+
+    monkeypatch.setattr("hashall.path_normalize.rt_apply_directory_repoint", fake_rt_apply)
+    monkeypatch.setattr("hashall.path_normalize._wait_for_rt_target", fake_wait_rt)
+
+    result = apply_cross_seed_link_normalization(plan, qb_client=fake_qb)
+
+    assert rt_calls == [("abc123", plan.rt_new_apply_directory, True)]
+    assert result.outcome == "verifying"
+    assert result.error is None
+
+
+def test_apply_cross_seed_link_normalization_returns_partial_state_on_rt_failure(tmp_path: Path, monkeypatch) -> None:
+    source_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed-link" / "FileList.io"
+    source_content = source_root / "Release.One"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed" / "FileList.io"
+    source_content.mkdir(parents=True, exist_ok=True)
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    info = QBitTorrent(
+        hash="abc123",
+        name="Release.One",
+        save_path=str(source_root),
+        content_path=str(source_content),
+        category="cross-seed",
+        tags="",
+        state="stoppedUP",
+        size=10,
+        progress=1.0,
+        amount_left=0,
+        auto_tmm=False,
+    )
+    rt_row = {
+        "hash": "abc123",
+        "directory": str(source_content),
+        "state": "stoppedUP",
+    }
+    plan = build_cross_seed_link_normalization_plan("abc123", qb_torrent=info, rt_row=rt_row)
+    fake_qb = _FakeQBClient(info)
+
+    def fake_rt_apply(torrent_hash: str, target_directory: str, *, rpc_url: str, restart: bool = True):
+        if target_directory == plan.rt_new_apply_directory:
+            raise RuntimeError("rt_repoint_failed")
+        return ["d.stop", "d.close", "d.directory.set", "d.save_full_session", "session.save", "d.open"]
+
+    monkeypatch.setattr("hashall.path_normalize.rt_apply_directory_repoint", fake_rt_apply)
+
+    result = apply_cross_seed_link_normalization(plan, qb_client=fake_qb)
+
+    assert result.outcome == "partial_state"
+    assert result.error is not None and "rt_repoint_failed" in result.error
+    assert "qb.rollback" in result.actions
+
+
+def test_apply_cross_seed_link_normalization_returns_ambiguous_on_pre_mutation_failure(tmp_path: Path) -> None:
+    source_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed-link" / "FileList.io"
+    source_content = source_root / "Release.One"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed" / "FileList.io"
+    source_content.mkdir(parents=True, exist_ok=True)
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    info = QBitTorrent(
+        hash="abc123",
+        name="Release.One",
+        save_path=str(source_root),
+        content_path=str(source_content),
+        category="cross-seed",
+        tags="",
+        state="stoppedUP",
+        size=10,
+        progress=1.0,
+        amount_left=0,
+        auto_tmm=False,
+    )
+    rt_row = {
+        "hash": "abc123",
+        "directory": str(source_content),
+        "state": "stoppedUP",
+    }
+    plan = build_cross_seed_link_normalization_plan("abc123", qb_torrent=info, rt_row=rt_row)
+
+    class _PauseFailQB(_FakeQBClient):
+        def pause_torrent(self, torrent_hash: str) -> bool:
+            self.last_error = "nope"
+            return False
+
+    result = apply_cross_seed_link_normalization(plan, qb_client=_PauseFailQB(info))
+
+    assert result.outcome == "ambiguous_needs_review"
+    assert result.error is not None and "qb_pause_failed" in result.error
 
 
 def test_payload_normalize_cross_seed_link_cli_dry_run(monkeypatch) -> None:
@@ -302,3 +488,21 @@ def test_payload_normalize_cross_seed_link_cli_dry_run(monkeypatch) -> None:
     assert "payload normalize-cross-seed-link" in result.output
     assert "ready: True" in result.output
     assert "lane: cross-seed-link -> cross-seed" in result.output
+
+
+def test_plan_cross_seed_link_normalization_handles_qb_info_unavailable(monkeypatch) -> None:
+    class _FailingQB:
+        def get_torrent_info(self, _torrent_hash: str):
+            raise RuntimeError("transport_cooldown_active:login reset")
+
+    monkeypatch.setattr("hashall.path_normalize.load_rt_torrent_meta", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("hashall.path_normalize.fetch_rt_status_rows", lambda: [])
+
+    plan = plan_cross_seed_link_normalization(
+        "abc123",
+        qb_client=_FailingQB(),
+    )
+
+    assert plan.ready is False
+    assert plan.issues[0] == "qb_info_unavailable:transport_cooldown_active:login reset"
+    assert "qb_torrent_missing" in plan.issues

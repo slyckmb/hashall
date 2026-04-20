@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 import time
 
 from hashall.pathing import canonicalize_path
 from hashall.qbittorrent import QBitTorrent, QBittorrentClient, get_qbittorrent_client
+from hashall.rt_cache import load_rt_cache_snapshot
 from hashall.rtorrent import (
     DEFAULT_RT_RPC_URL,
     DEFAULT_RT_SESSION_DIR,
@@ -22,6 +23,55 @@ LEGACY_SEGMENT = "cross-seed-link"
 CANONICAL_SEGMENT = "cross-seed"
 _STOPPED_QB_STATES = {"stoppedup", "stoppeddl"}
 _STOPPED_RT_STATES = {"stoppedup", "stoppeddl"}
+_VERIFYING_QB_STATES = {"checkingdl", "checkingup", "checkingresumedata", "moving"}
+_VERIFYING_RT_STATES = {"checking", "checkingup", "checkingdl", "checkup", "checkpending"}
+
+
+def _normalized_state_text(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def is_qb_verifying_state(state: str | None) -> bool:
+    return _normalized_state_text(state) in _VERIFYING_QB_STATES
+
+
+def is_rt_verifying_state(state: str | None) -> bool:
+    return _normalized_state_text(state) in _VERIFYING_RT_STATES
+
+
+def derive_normalization_outcome(*, qb_state: str | None, rt_state: str | None) -> str:
+    return derive_normalization_outcome_with_context(
+        qb_state=qb_state,
+        rt_state=rt_state,
+        qb_path_converged=True,
+        rt_path_converged=True,
+        recovery_performed=False,
+        ambiguous=False,
+    )
+
+
+def derive_normalization_outcome_with_context(
+    *,
+    qb_state: str | None,
+    rt_state: str | None,
+    qb_path_converged: bool,
+    rt_path_converged: bool,
+    recovery_performed: bool,
+    ambiguous: bool,
+) -> str:
+    if recovery_performed:
+        return "partial_state"
+    if not qb_path_converged or not rt_path_converged:
+        if ambiguous:
+            return "ambiguous_needs_review"
+        return "partial_state"
+    qb_checking = is_qb_verifying_state(qb_state)
+    rt_checking = is_rt_verifying_state(rt_state)
+    if qb_checking or rt_checking:
+        return "verifying"
+    if not _normalized_state_text(qb_state) or not _normalized_state_text(rt_state):
+        return "path_converged"
+    return "verified"
 
 
 @dataclass(frozen=True)
@@ -61,6 +111,8 @@ class CrossSeedLinkNormalizationResult:
     plan: CrossSeedLinkNormalizationPlan
     actions: list[str]
     warnings: list[str]
+    outcome: str
+    error: str | None
     qb_final_state: str
     qb_final_save_path: str
     qb_final_content_path: str
@@ -128,7 +180,11 @@ def _should_restart_rt(state: str) -> bool:
 
 def _find_rt_row(torrent_hash: str, rows: list[dict] | None = None) -> dict | None:
     torrent_key = str(torrent_hash or "").strip().lower()
-    for row in rows or fetch_rt_status_rows():
+    candidate_rows = rows
+    if candidate_rows is None:
+        snapshot_rows = list(load_rt_cache_snapshot().get("rows") or [])
+        candidate_rows = snapshot_rows or fetch_rt_status_rows()
+    for row in candidate_rows:
         if str(row.get("hash") or "").strip().lower() == torrent_key:
             return row
     return None
@@ -140,19 +196,113 @@ def _derive_expected_rt_runtime_directory(
     qb_content_path: str,
     rt_meta: RTTorrentMeta | None,
 ) -> str:
+    normalized_save = _normalize_path_text(qb_save_path or "")
+    normalized_content = _normalize_path_text(qb_content_path or "")
+    if not normalized_save and not normalized_content:
+        return ""
     if rt_meta is None:
-        return _normalize_path_text(qb_content_path or qb_save_path)
+        return normalized_content or normalized_save
     if rt_meta and rt_meta.is_multi_file:
-        return _normalize_path_text(qb_content_path or qb_save_path)
-    content_path = Path(str(qb_content_path or "").strip())
-    if str(content_path):
+        return normalized_content or normalized_save
+    if normalized_content:
+        content_path = Path(normalized_content)
         return _normalize_path_text(str(content_path.parent))
-    return _normalize_path_text(qb_save_path)
+    return normalized_save
 
 
 def _looks_like_timeout(exc: Exception) -> bool:
     text = str(exc or "").lower()
     return "read timed out" in text or "readtimeout" in text or "timed out" in text
+
+
+def _qb_paths_converged(
+    plan: CrossSeedLinkNormalizationPlan,
+    qb_torrent: QBitTorrent | None,
+) -> bool:
+    if qb_torrent is None:
+        return False
+    actual_save = _normalize_path_text(getattr(qb_torrent, "save_path", ""))
+    actual_content = _normalize_path_text(getattr(qb_torrent, "content_path", ""))
+    return actual_save == plan.qb_new_save_path and actual_content == plan.qb_new_content_path
+
+
+def _rt_paths_converged(
+    plan: CrossSeedLinkNormalizationPlan,
+    rt_row: dict | None,
+) -> bool:
+    if not rt_row:
+        return False
+    actual = _normalize_path_text((rt_row or {}).get("directory") or "")
+    return actual == plan.rt_new_directory or rt_path_aligned(
+        actual,
+        qb_save_path=plan.qb_new_save_path,
+        qb_content_path=plan.qb_new_content_path,
+    )
+
+
+def _best_effort_qb_info(
+    qb_client: QBittorrentClient,
+    torrent_hash: str,
+) -> QBitTorrent | None:
+    try:
+        return qb_client.get_torrent_info(torrent_hash)
+    except Exception:
+        return None
+
+
+def _best_effort_rt_row(
+    torrent_hash: str,
+    *,
+    rpc_url: str = DEFAULT_RT_RPC_URL,
+) -> dict | None:
+    try:
+        return _find_rt_row(torrent_hash)
+    except Exception:
+        try:
+            for row in fetch_rt_status_rows(rpc_url=rpc_url):
+                if str(row.get("hash") or "").strip().lower() == str(torrent_hash or "").strip().lower():
+                    return row
+        except Exception:
+            return None
+    return None
+
+
+def _build_normalization_result(
+    plan: CrossSeedLinkNormalizationPlan,
+    *,
+    actions: list[str],
+    warnings: list[str],
+    qb_final: QBitTorrent | None,
+    rt_final: dict | None,
+    error: str | None = None,
+    recovery_performed: bool = False,
+    ambiguous: bool = False,
+) -> CrossSeedLinkNormalizationResult:
+    qb_final_state = str(getattr(qb_final, "state", "") or "")
+    qb_final_save_path = _normalize_path_text(getattr(qb_final, "save_path", ""))
+    qb_final_content_path = _normalize_path_text(getattr(qb_final, "content_path", ""))
+    rt_final_state = str((rt_final or {}).get("state") or "")
+    rt_final_directory = _normalize_path_text((rt_final or {}).get("directory") or "")
+    outcome = derive_normalization_outcome_with_context(
+        qb_state=qb_final_state,
+        rt_state=rt_final_state,
+        qb_path_converged=_qb_paths_converged(plan, qb_final),
+        rt_path_converged=_rt_paths_converged(plan, rt_final),
+        recovery_performed=recovery_performed,
+        ambiguous=ambiguous,
+    )
+    return CrossSeedLinkNormalizationResult(
+        plan=plan,
+        actions=actions,
+        warnings=warnings,
+        outcome=outcome,
+        error=error,
+        qb_final_state=qb_final_state,
+        qb_final_save_path=qb_final_save_path,
+        qb_final_content_path=qb_final_content_path,
+        rt_final_state=rt_final_state,
+        rt_final_directory=rt_final_directory,
+    )
 
 
 def build_cross_seed_link_normalization_plan(
@@ -260,15 +410,33 @@ def plan_cross_seed_link_normalization(
 ) -> CrossSeedLinkNormalizationPlan:
     client = qb_client or get_qbittorrent_client()
     torrent_key = str(torrent_hash or "").strip().lower()
-    info = client.get_torrent_info(torrent_key)
-    row = _find_rt_row(torrent_key, rows=rt_rows)
+    qb_issue: str | None = None
+    rt_issue: str | None = None
+    try:
+        info = client.get_torrent_info(torrent_key)
+    except RuntimeError as exc:
+        info = None
+        qb_issue = f"qb_info_unavailable:{exc}"
+    try:
+        row = _find_rt_row(torrent_key, rows=rt_rows)
+    except Exception as exc:
+        row = None
+        rt_issue = f"rt_status_unavailable:{exc}"
     rt_meta = load_rt_torrent_meta(DEFAULT_RT_SESSION_DIR, torrent_key)
-    return build_cross_seed_link_normalization_plan(
+    plan = build_cross_seed_link_normalization_plan(
         torrent_key,
         qb_torrent=info,
         rt_row=row,
         rt_meta=rt_meta,
     )
+    issues = [*plan.issues]
+    if rt_issue is not None:
+        issues.insert(0, rt_issue)
+    if qb_issue is not None:
+        issues.insert(0, qb_issue)
+    if issues != plan.issues:
+        return replace(plan, issues=issues)
+    return plan
 
 
 def _wait_for_qb_target(
@@ -398,6 +566,8 @@ def apply_cross_seed_link_normalization(
     qb_moved = False
     rt_moved = False
     rt_apply_ambiguous = False
+    verified_qb: QBitTorrent | None = None
+    verified_rt: dict | None = None
 
     try:
         if not client.pause_torrent(plan.torrent_hash):
@@ -472,15 +642,12 @@ def apply_cross_seed_link_normalization(
             interval_seconds=0.0,
         ) or verified_rt
 
-        return CrossSeedLinkNormalizationResult(
+        return _build_normalization_result(
             plan=plan,
             actions=actions,
             warnings=warnings,
-            qb_final_state=str(getattr(qb_final, "state", "") or ""),
-            qb_final_save_path=_normalize_path_text(getattr(qb_final, "save_path", "")),
-            qb_final_content_path=_normalize_path_text(getattr(qb_final, "content_path", "")),
-            rt_final_state=str((rt_final or {}).get("state") or ""),
-            rt_final_directory=_normalize_path_text((rt_final or {}).get("directory") or ""),
+            qb_final=qb_final,
+            rt_final=rt_final,
         )
     except Exception as exc:
         rollback_steps: list[str] = []
@@ -526,4 +693,26 @@ def apply_cross_seed_link_normalization(
             detail += f" rollback={','.join(rollback_steps)}"
         if rollback_errors:
             detail += f" rollback_errors={';'.join(rollback_errors)}"
-        raise RuntimeError(detail) from exc
+        warnings.extend(rollback_errors)
+        final_actions = [*actions, *rollback_steps]
+        qb_final = _best_effort_qb_info(client, plan.torrent_hash) or verified_qb
+        rt_final = _best_effort_rt_row(plan.torrent_hash, rpc_url=rpc_url) or verified_rt
+        recovery_performed = bool(
+            rollback_steps
+            or rollback_errors
+            or ((qb_moved or rt_moved) and qb_moved != rt_moved)
+        )
+        ambiguous = bool(
+            rt_apply_ambiguous
+            or (not qb_moved and not rt_moved and not rollback_steps and not rollback_errors)
+        )
+        return _build_normalization_result(
+            plan=plan,
+            actions=final_actions,
+            warnings=warnings,
+            qb_final=qb_final,
+            rt_final=rt_final,
+            error=detail,
+            recovery_performed=recovery_performed,
+            ambiguous=ambiguous,
+        )

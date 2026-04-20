@@ -297,6 +297,73 @@ Current blocker to widening the batch:
 - do not use the orphan rename as the first broad live batch:
   - too much active code/config still assumes `orphaned_data`
 
+## 2026-04-19 Next Code Plan
+
+Two new code issues are now explicitly in scope.
+
+### Issue 1: normalization success is weaker than desired
+
+Current state:
+- `src/hashall/path_normalize.py` proves qB path convergence and RT path alignment
+- helper success can still occur while RT is in `checking*`
+- wrapper watch can surface that nuance, but the helper-level result does not model it strongly enough
+
+Planned change:
+1. add explicit normalization result semantics:
+   - `path_converged`
+   - `verifying`
+   - `verified`
+   - `ambiguous_needs_review`
+   - `partial_state`
+2. add shared RT/qB verification-state predicates in Python
+3. require stronger helper-level post-apply verification:
+   - qB canonical path match
+   - RT canonical path match
+   - RT leaves `checking*` before strongest success is returned
+4. optionally support stricter recheck-complete gating as a higher-assurance mode
+5. keep the wrapper aligned to the helper contract rather than inventing its own success rules
+
+Execution order for issue 1:
+1. sim/code walkthrough of helper return paths and current success conditions
+2. dry-run against current canonical and legacy hashes
+3. tiny pilot on one stopped `/pool/media` candidate
+4. code/fix/test loop until helper status semantics are boring and deterministic
+
+### Issue 2: legacy hitchhiker groups need first-class handling
+
+Current state:
+- repo terminology and requirements already recognize hitchhikers and `_rehome-unique/<hash>/...`
+- rehome/link tooling already has inode-aware building blocks
+- there is not yet a focused hashall lane that audits and de-hitchhikes existing legacy groups on demand
+
+Planned change:
+1. add explicit hitchhiker audit logic:
+   - detect N->1 shared payload trees
+   - measure inode/file overlap between hashes
+   - classify safe shared-byte reuse vs incorrect shared payload-tree layout
+2. add a dedicated de-hitchhike apply lane:
+   - build per-hash unique payload trees using hardlinks where possible
+   - route into `_rehome-unique/<hash>/...` where canonical tracker roots would collide
+   - repoint affected qB/RT items to those unique payload roots
+3. add strict stop conditions:
+   - partial/inconsistent inode overlap
+   - conflicting hashes at the same relative path
+   - cross-filesystem hardlink impossibility
+   - incomplete/partially verified torrents
+   - ambiguous owner/donor relationships
+
+Execution order for issue 2:
+1. sim walkthrough on known inode-sharing / shared-root families
+2. dry-run audit output only
+3. tiny pilot split on one safe same-filesystem hitchhiker family
+4. verify each affected hash gets its own payload tree while still reusing bytes via hardlinks where intended
+5. only then widen to more groups
+
+Sequencing decision:
+- implement issue 1 first, because it hardens the active normalization lane already in use
+- then implement hitchhiker audit
+- then implement hitchhiker split/apply
+
 ## Phase Order
 
 This is the least-friction order with the lowest churn:
@@ -390,3 +457,38 @@ If a future thread resumes from this plan:
 - start with the `~/dev` path-reference audit
 - do not mutate stash/pool tree names until that audit is classified
 - treat the first rename batch as a path-normalization pilot only, not a dedupe/consolidation batch
+
+## 2026-04-19 Multi-Pass Loop Findings
+
+- Sim/code loop:
+  - `payload normalize-cross-seed-link` now returns an explicit `outcome` field.
+  - current modeled outcomes are:
+    - `verified`
+    - `verifying`
+- Dry-run loop fixes landed:
+  - qB read-only planning no longer crashes when login/reset happens before live `torrents/info`.
+  - RT planning now prefers the shared RT cache before live XMLRPC.
+  - planning now degrades to explicit issues instead of tracebacks:
+    - `qb_info_unavailable:...`
+    - `rt_status_unavailable:...`
+  - empty qB save/content paths no longer collapse into the worktree cwd for RT target derivation.
+- Wrapper loop fixes landed:
+  - `scripts/pilot-normalization.sh` candidate classification now falls back to RT path scope when qB path fields are blank.
+- Current operational blocker after the dry-run loops:
+  - qB login was still resetting during direct helper planning.
+  - RT shared cache reported `freshness=stale_error`.
+  - wrapper dry-run stayed safe and refused auto-pick when no candidate met the stopped `/pool/media` policy with usable qB metadata.
+- Current result:
+  - sim loop: clean
+  - dry-run loop: clean, no tracebacks
+  - stricter outcome alignment now landed:
+    - helper-level apply results can express:
+      - `path_converged`
+      - `verifying`
+      - `verified`
+      - `ambiguous_needs_review`
+      - `partial_state`
+    - wrapper now consumes helper outcomes and prints helper error/outcome after apply
+    - wrapper now fails closed for `--pick-safe` / `--apply` when RT cache freshness is `stale_error`
+    - wrapper now surfaces degraded plan issues before stopped-state gating
+  - live pilot loop: not executed in this pass because the repaired wrapper correctly blocked auto-pick/apply under current controller/cache conditions

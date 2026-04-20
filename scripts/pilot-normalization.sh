@@ -177,10 +177,17 @@ except Exception as exc:
 PY
     )"
     rt_freshness="$(jq -r '.freshness // "error"' <<<"$rt_json")"
-    case "$rt_freshness" in
-      fresh|stale|stale_error) rt_ok="ok" ;;
-      *) rt_ok="fail" ;;
-    esac
+    if [[ "$APPLY" -eq 1 || "$PICK_SAFE" -eq 1 ]]; then
+      case "$rt_freshness" in
+        fresh|stale) rt_ok="ok" ;;
+        *) rt_ok="fail" ;;
+      esac
+    else
+      case "$rt_freshness" in
+        fresh|stale|stale_error) rt_ok="ok" ;;
+        *) rt_ok="fail" ;;
+      esac
+    fi
     echo "  cache_reads[$attempt/$max_attempts]: qb=$qb_ok rt=$rt_ok rt_freshness=$rt_freshness"
     if [[ "$qb_ok" == "ok" && "$rt_ok" == "ok" ]]; then
       return 0
@@ -235,18 +242,27 @@ get_audit_json() {
 
 classify_plan() {
   local plan_json="$1"
-  local ready qb_state rt_state qb_old_save issue_text
+  local ready qb_state rt_state qb_old_save rt_old_dir scope_path issue_text
   ready="$(jq -r '.plan.ready' <<<"$plan_json")"
   qb_state="$(jq -r '.plan.qb_state' <<<"$plan_json")"
   rt_state="$(jq -r '.plan.rt_state' <<<"$plan_json")"
   qb_old_save="$(jq -r '.plan.qb_old_save_path' <<<"$plan_json")"
+  rt_old_dir="$(jq -r '.plan.rt_old_directory' <<<"$plan_json")"
+  scope_path="$qb_old_save"
+  if [[ -z "$scope_path" ]]; then
+    scope_path="$rt_old_dir"
+  fi
   issue_text="$(jq -r '.plan.issues | join(",")' <<<"$plan_json")"
-  if [[ "$qb_old_save" == *"/cross-seed/"* && "$qb_old_save" != *"/cross-seed-link/"* ]]; then
+  if [[ "$scope_path" == *"/cross-seed/"* && "$scope_path" != *"/cross-seed-link/"* ]]; then
     echo "skip:already_canonical"
     return
   fi
-  if [[ "$qb_old_save" != /pool/media/* ]]; then
+  if [[ "$scope_path" != /pool/media/* ]]; then
     echo "skip:not_pool_media"
+    return
+  fi
+  if [[ "$ready" != "true" ]]; then
+    echo "skip:issues:${issue_text:-unknown}"
     return
   fi
   case "${qb_state,,}" in
@@ -262,11 +278,21 @@ classify_plan() {
       return
       ;;
   esac
-  if [[ "$ready" != "true" ]]; then
-    echo "skip:issues:${issue_text:-unknown}"
-    return
-  fi
   echo "safe"
+}
+
+is_qb_verifying_state() {
+  case "${1,,}" in
+    checkingdl|checkingup|checkingresumedata|moving) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_rt_verifying_state() {
+  case "${1,,}" in
+    checking|checkingup|checkingdl|checkup|checkpending) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 print_candidate_table() {
@@ -498,17 +524,20 @@ print_residue_check() {
 }
 
 watch_hash() {
-  local hash="$1" expected_qb="$2" expected_rt="$3" deadline now state_json qb_path rt_path rt_state
+  local hash="$1" expected_qb="$2" expected_rt="$3" deadline now state_json qb_path qb_state rt_path rt_state
   deadline=$(( $(date +%s) + WATCH_SECONDS ))
   echo "Watch"
   while true; do
     state_json="$(post_state_json "$hash")"
     qb_path="$(jq -r '.qb.save_path' <<<"$state_json")"
+    qb_state="$(jq -r '.qb.state // ""' <<<"$state_json")"
     rt_path="$(jq -r '.rt.directory // ""' <<<"$state_json")"
     rt_state="$(jq -r '.rt.state // ""' <<<"$state_json")"
-    echo "  qb: $qb_path"
+    echo "  qb: $qb_path [$qb_state]"
     echo "  rt: $rt_path [$rt_state]"
-    if [[ "$qb_path" == "$expected_qb" && "$rt_path" == "$expected_rt" && "${rt_state,,}" != "checking" ]]; then
+    if [[ "$qb_path" == "$expected_qb" && "$rt_path" == "$expected_rt" ]] \
+      && ! is_qb_verifying_state "$qb_state" \
+      && ! is_rt_verifying_state "$rt_state"; then
       echo "  verdict: success"
       return 0
     fi
@@ -549,6 +578,7 @@ print_hash_plan "$HASH"
 
 expected_qb="$(jq -r '.plan.qb_new_save_path' <<<"$plan_json")"
 expected_rt="$(jq -r '.plan.rt_new_directory' <<<"$plan_json")"
+wrapper_exit=0
 
 if [[ "$APPLY" -eq 1 ]]; then
   if [[ "$status" != "safe" ]]; then
@@ -560,8 +590,17 @@ if [[ "$APPLY" -eq 1 ]]; then
   apply_json="$(cli_json payload normalize-cross-seed-link --hash "$HASH" --apply)"
   echo "$apply_json" | jq '.'
 
+  apply_outcome="$(jq -r '.result.outcome // ""' <<<"$apply_json")"
+  apply_error="$(jq -r '.result.error // ""' <<<"$apply_json")"
   expected_qb="$(jq -r '.result.qb_final_save_path // .plan.qb_new_save_path' <<<"$apply_json")"
   expected_rt="$(jq -r '.result.rt_final_directory // .plan.rt_new_directory' <<<"$apply_json")"
+  echo "  helper_outcome: ${apply_outcome:-unknown}"
+  if [[ -n "$apply_error" ]]; then
+    echo "  helper_error: $apply_error"
+  fi
+  case "$apply_outcome" in
+    ambiguous_needs_review|partial_state) wrapper_exit=1 ;;
+  esac
 fi
 
   echo "Post-Check"
@@ -570,5 +609,7 @@ fi
   print_legacy_counts "$(legacy_counts_json)"
 
 if [[ "$WATCH" -eq 1 ]]; then
-  watch_hash "$HASH" "$expected_qb" "$expected_rt"
+  watch_hash "$HASH" "$expected_qb" "$expected_rt" || wrapper_exit=1
 fi
+
+exit "$wrapper_exit"

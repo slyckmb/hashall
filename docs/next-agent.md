@@ -98,6 +98,17 @@
   - `20` qB rows on `cross-seed-link`
   - `1` RT row on `orphaned_data`
   - `1` qB row on `orphaned_data`
+- next code priorities are now explicit:
+  - first: tighten helper-level normalization success semantics so `checking*` is modeled explicitly instead of being treated as the strongest form of success
+  - second: add a first-class hitchhiker audit/de-hitchhike lane for legacy N->1 shared payload trees
+- key code reality for issue 1:
+  - `src/hashall/path_normalize.py` currently proves path convergence, but not completed verification as the strongest helper success contract
+- key code reality for issue 2:
+  - repo already has inode-aware and `_rehome-unique/<hash>` concepts; what is missing is a focused audit/apply lane for legacy hitchhiker groups
+- execution sequence:
+  - implement issue 1 first
+  - then implement hitchhiker audit
+  - then implement hitchhiker split/apply
 - first concrete `cross-seed-link -> cross-seed` dry-run / pilot findings:
   - RT and qB do not use the same target path shape for a given hash
   - RT may store the full content directory while qB stores the tracker save root
@@ -836,6 +847,49 @@ If context is compacted, recover with this sequence:
 
 Historical snapshot:
 `docs/archive/2026-doc-reduction/snapshot/docs/next-agent.md`
+
+## 2026-04-19 Normalization Loop Status
+
+- `hashall` is now `0.8.12`
+- Code changes in progress:
+  - `src/hashall/qbittorrent.py`
+    - read-only `get_torrent_info()` and `get_torrents_payload()` now fall back to cached rows on auth/login failure before live reads.
+  - `src/hashall/path_normalize.py`
+    - plans no longer crash on transient qB/RT read failures
+    - RT row lookup now prefers the shared RT cache
+    - helper result now includes `outcome`
+    - empty qB path fields no longer derive the worktree cwd as an RT target
+  - `scripts/pilot-normalization.sh`
+    - candidate classification now uses RT path scope when qB path fields are blank
+- Verification completed this pass:
+  - `pytest -q tests/test_qbittorrent.py tests/test_path_normalize.py`
+  - result: `32 passed`
+- Additional outcome/wrapper hardening now landed:
+  - helper result can now report:
+    - `path_converged`
+    - `verifying`
+    - `verified`
+    - `ambiguous_needs_review`
+    - `partial_state`
+  - apply failures that previously raised now return structured results with `result.error` where possible
+  - wrapper now:
+    - fails closed for `--pick-safe` / `--apply` when RT cache freshness is `stale_error`
+    - surfaces `skip:issues:...` before `qb_not_stopped:unknown` in degraded qB-read cases
+    - uses broader qB/RT `checking*` semantics in watch mode
+    - records helper outcome/error after apply instead of relying only on ad-hoc watch logic
+- Dry-run outcome:
+  - direct `payload normalize-cross-seed-link --hash ...` now returns a non-ready plan with explicit issues instead of traceback when qB login resets
+  - wrapper dry-run/list mode stays safe under:
+    - qB login resets
+    - RT cache `stale_error`
+- Current blocker:
+  - no safe candidate was available for wrapper auto-pick because:
+    - qB login was still resetting during plan reads
+    - RT cache remained `stale_error`
+  - wrapper preflight now exits before auto-pick/apply under that RT cache condition
+- Next step:
+  - rerun wrapper dry-run / auto-pick after qB and RT cache health recover
+  - only then resume the tiny live pilot loop
 
 ## 2026-03-24 Current TODO Split
 

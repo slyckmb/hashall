@@ -1456,3 +1456,22 @@ Last updated: 2026-03-13 (historical section below)
    - payload `a1041c6049c66abe...` (`Longlegs...`) is still a real live failure because one member remains on `/pool/data/...` and reports `save_path_mismatch`
 10. Remaining live remediation gap:
    - add a direct reconcile/remediate path for stale sibling-root drift groups so the `6` old `/data == /stash` hashes can be repointed onto their surviving `/pool/media/...` payload groups without another copy
+
+## 2026-04-19 Normalization Loop Update
+
+- `hashall=0.8.12`
+- Multi-pass sim/dry-run loop completed for the current normalization helper and wrapper changes.
+- New fixes from this pass:
+  - qB read-only planning falls back to cached rows on auth/login failure.
+  - normalization planning prefers shared RT cache rows before live XMLRPC.
+  - transient qB/RT planning failures now become explicit non-ready plan issues instead of tracebacks.
+  - empty qB path fields no longer derive the worktree cwd as an RT target.
+  - wrapper candidate classification now falls back to RT path scope when qB path fields are blank.
+- Verification:
+  - `pytest -q tests/test_qbittorrent.py tests/test_path_normalize.py`
+  - result: `30 passed`
+- Current operational state:
+  - direct helper dry-run is safe again, but qB login was still resetting during planning
+  - RT cache freshness was `stale_error`
+  - wrapper auto-pick correctly refused to select a live candidate under those conditions
+- This means the next live normalization pilot should wait for healthy qB/RT cache/controller state rather than forcing apply during degraded reads.
