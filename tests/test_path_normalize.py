@@ -51,8 +51,8 @@ def test_build_cross_seed_link_plan_ready_same_fs(tmp_path: Path) -> None:
     assert plan.rt_should_restart is True
     assert plan.qb_new_save_path == str(target_root)
     assert plan.qb_new_content_path == str(target_root / "Release.One")
-    assert plan.rt_new_directory == str(target_root / "Release.One")
-    assert plan.rt_new_apply_directory == str(target_root / "Release.One")
+    assert plan.rt_new_directory == str(target_root)
+    assert plan.rt_new_apply_directory == str(target_root)
     assert plan.same_filesystem is True
     assert plan.issues == []
 
@@ -164,6 +164,7 @@ def test_apply_cross_seed_link_normalization_preserves_stopped_qb(tmp_path: Path
         rpc_url: str,
         timeout_seconds: float = 10.0,
         interval_seconds: float = 0.5,
+        reject_bad_state: bool = False,
     ):
         return {"hash": torrent_hash, "directory": expected_directory, "state": "stoppedUP"}
 
@@ -217,7 +218,7 @@ def test_build_cross_seed_link_plan_uses_rt_apply_parent_for_multi_file(tmp_path
 
     plan = build_cross_seed_link_normalization_plan("abc123", qb_torrent=qb, rt_row=rt_row, rt_meta=rt_meta)
 
-    assert plan.rt_new_directory == str(target_root / "Release.One")
+    assert plan.rt_new_directory == str(target_root)
     assert plan.rt_new_apply_directory == str(target_root)
 
 
@@ -262,6 +263,7 @@ def test_apply_cross_seed_link_normalization_tolerates_rt_timeout_then_verifies(
         rpc_url: str,
         timeout_seconds: float = 10.0,
         interval_seconds: float = 0.5,
+        reject_bad_state: bool = False,
     ):
         wait_calls.append(timeout_seconds)
         return {"hash": torrent_hash, "directory": expected_directory, "state": "checking"}
@@ -285,6 +287,7 @@ def test_verification_state_helpers() -> None:
     assert is_rt_verifying_state("stalledUP") is False
     assert derive_normalization_outcome(qb_state="stoppedUP", rt_state="stalledUP") == "verified"
     assert derive_normalization_outcome(qb_state="stoppedUP", rt_state="checkingUP") == "verifying"
+    assert derive_normalization_outcome(qb_state="stoppedUP", rt_state="error") == "ambiguous_needs_review"
     assert derive_normalization_outcome_with_context(
         qb_state="",
         rt_state="stalledUP",
@@ -317,6 +320,22 @@ def test_derive_expected_rt_runtime_directory_ignores_empty_qb_paths() -> None:
         qb_content_path="",
         rt_meta=None,
     ) == ""
+
+
+def test_derive_expected_rt_runtime_directory_uses_rtorrent_target_rules_for_single_file_multifile() -> None:
+    meta = RTTorrentMeta(
+        torrent_hash="abc123",
+        info_name="Release.One",
+        is_multi_file=True,
+        file_count=1,
+        total_bytes=10,
+    )
+
+    assert _derive_expected_rt_runtime_directory(
+        qb_save_path="/pool/media/torrents/seeding/cross-seed/FileList.io/Release.One",
+        qb_content_path="/pool/media/torrents/seeding/cross-seed/FileList.io/Release.One/Release.One/Movie.mkv",
+        rt_meta=meta,
+    ) == "/pool/media/torrents/seeding/cross-seed/FileList.io/Release.One"
 
 
 def test_apply_cross_seed_link_normalization_marks_qb_checking_as_verifying(tmp_path: Path, monkeypatch) -> None:
@@ -362,6 +381,7 @@ def test_apply_cross_seed_link_normalization_marks_qb_checking_as_verifying(tmp_
         rpc_url: str,
         timeout_seconds: float = 10.0,
         interval_seconds: float = 0.5,
+        reject_bad_state: bool = False,
     ):
         fake_qb.info.state = "checkingUP"
         return {"hash": torrent_hash, "directory": expected_directory, "state": "stalledUP"}
@@ -416,6 +436,66 @@ def test_apply_cross_seed_link_normalization_returns_partial_state_on_rt_failure
     assert result.outcome == "partial_state"
     assert result.error is not None and "rt_repoint_failed" in result.error
     assert "qb.rollback" in result.actions
+
+
+def test_apply_cross_seed_link_normalization_prefers_verified_rt_row_over_bad_terminal_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed-link" / "FileList.io"
+    source_content = source_root / "Release.One"
+    target_root = tmp_path / "pool-media" / "torrents" / "seeding" / "cross-seed" / "FileList.io"
+    source_content.mkdir(parents=True, exist_ok=True)
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    info = QBitTorrent(
+        hash="abc123",
+        name="Release.One",
+        save_path=str(source_root),
+        content_path=str(source_content),
+        category="cross-seed",
+        tags="",
+        state="stoppedUP",
+        size=10,
+        progress=1.0,
+        amount_left=0,
+        auto_tmm=False,
+    )
+    rt_row = {
+        "hash": "abc123",
+        "directory": str(source_content),
+        "state": "stoppedUP",
+    }
+    plan = build_cross_seed_link_normalization_plan("abc123", qb_torrent=info, rt_row=rt_row)
+    fake_qb = _FakeQBClient(info)
+
+    def fake_rt_apply(torrent_hash: str, target_directory: str, *, rpc_url: str, restart: bool = True):
+        return ["d.stop", "d.close", "d.directory.set", "d.save_full_session", "session.save", "d.open"]
+
+    def fake_wait_rt(
+        torrent_hash: str,
+        *,
+        expected_directory: str,
+        expected_save_path: str = "",
+        expected_content_path: str = "",
+        rpc_url: str,
+        timeout_seconds: float = 10.0,
+        interval_seconds: float = 0.5,
+        reject_bad_state: bool = False,
+    ):
+        if timeout_seconds > 0.0:
+            return {"hash": torrent_hash, "directory": expected_directory, "state": "checkingDL"}
+        if reject_bad_state:
+            return None
+        return {"hash": torrent_hash, "directory": expected_directory, "state": "error"}
+
+    monkeypatch.setattr("hashall.path_normalize.rt_apply_directory_repoint", fake_rt_apply)
+    monkeypatch.setattr("hashall.path_normalize._wait_for_rt_target", fake_wait_rt)
+
+    result = apply_cross_seed_link_normalization(plan, qb_client=fake_qb)
+
+    assert result.outcome == "verifying"
+    assert result.rt_final_state == "checkingDL"
 
 
 def test_apply_cross_seed_link_normalization_returns_ambiguous_on_pre_mutation_failure(tmp_path: Path) -> None:

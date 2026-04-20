@@ -295,6 +295,20 @@ is_rt_verifying_state() {
   esac
 }
 
+is_qb_bad_terminal_state() {
+  case "${1,,}" in
+    error|missingfiles) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_rt_bad_terminal_state() {
+  case "${1,,}" in
+    error) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 print_candidate_table() {
   local audit_json="$1" shown=0 rt_cache_json
   rt_cache_json="$(rt_cache_snapshot)"
@@ -411,6 +425,9 @@ post_state_json() {
   "$PYTHON_BIN" - "$hash" "$qb_tmp" "$rt_tmp" <<'PY'
 import json
 import sys
+from hashall.qbittorrent import get_qbittorrent_client
+from hashall.rtorrent import fetch_rt_status_rows
+
 h = sys.argv[1].strip().lower()
 with open(sys.argv[2], encoding="utf-8") as fh:
     qb_payload = json.load(fh)
@@ -418,15 +435,34 @@ with open(sys.argv[3], encoding="utf-8") as fh:
     rt_payload = json.load(fh)
 
 qb = None
-for row in qb_payload:
-    if str(row.get("hash") or "").strip().lower() == h:
-        qb = row
-        break
+try:
+    qb_live = get_qbittorrent_client().get_torrent_info(h)
+except Exception:
+    qb_live = None
+if qb_live is not None:
+    qb = {
+        "save_path": getattr(qb_live, "save_path", ""),
+        "content_path": getattr(qb_live, "content_path", ""),
+        "state": getattr(qb_live, "state", ""),
+    }
+else:
+    for row in qb_payload:
+        if str(row.get("hash") or "").strip().lower() == h:
+            qb = row
+            break
 rt = None
-for row in rt_payload.get("rows", []):
-    if (row.get("hash") or "").lower() == h:
-        rt = row
-        break
+try:
+    for row in fetch_rt_status_rows():
+        if str(row.get("hash") or "").strip().lower() == h:
+            rt = row
+            break
+except Exception:
+    rt = None
+if rt is None:
+    for row in rt_payload.get("rows", []):
+        if (row.get("hash") or "").lower() == h:
+            rt = row
+            break
 
 payload = {
     "qb": {
@@ -537,7 +573,9 @@ watch_hash() {
     echo "  rt: $rt_path [$rt_state]"
     if [[ "$qb_path" == "$expected_qb" && "$rt_path" == "$expected_rt" ]] \
       && ! is_qb_verifying_state "$qb_state" \
-      && ! is_rt_verifying_state "$rt_state"; then
+      && ! is_rt_verifying_state "$rt_state" \
+      && ! is_qb_bad_terminal_state "$qb_state" \
+      && ! is_rt_bad_terminal_state "$rt_state"; then
       echo "  verdict: success"
       return 0
     fi

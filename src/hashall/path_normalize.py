@@ -11,6 +11,7 @@ from hashall.rtorrent import (
     DEFAULT_RT_RPC_URL,
     DEFAULT_RT_SESSION_DIR,
     RTTorrentMeta,
+    derive_rt_target_directory,
     fetch_rt_status_rows,
     load_rt_torrent_meta,
     normalize_rt_target_directory,
@@ -25,6 +26,8 @@ _STOPPED_QB_STATES = {"stoppedup", "stoppeddl"}
 _STOPPED_RT_STATES = {"stoppedup", "stoppeddl"}
 _VERIFYING_QB_STATES = {"checkingdl", "checkingup", "checkingresumedata", "moving"}
 _VERIFYING_RT_STATES = {"checking", "checkingup", "checkingdl", "checkup", "checkpending"}
+_BAD_QB_STATES = {"error", "missingfiles"}
+_BAD_RT_STATES = {"error"}
 
 
 def _normalized_state_text(value: str | None) -> str:
@@ -37,6 +40,14 @@ def is_qb_verifying_state(state: str | None) -> bool:
 
 def is_rt_verifying_state(state: str | None) -> bool:
     return _normalized_state_text(state) in _VERIFYING_RT_STATES
+
+
+def is_qb_bad_terminal_state(state: str | None) -> bool:
+    return _normalized_state_text(state) in _BAD_QB_STATES
+
+
+def is_rt_bad_terminal_state(state: str | None) -> bool:
+    return _normalized_state_text(state) in _BAD_RT_STATES
 
 
 def derive_normalization_outcome(*, qb_state: str | None, rt_state: str | None) -> str:
@@ -69,6 +80,8 @@ def derive_normalization_outcome_with_context(
     rt_checking = is_rt_verifying_state(rt_state)
     if qb_checking or rt_checking:
         return "verifying"
+    if is_qb_bad_terminal_state(qb_state) or is_rt_bad_terminal_state(rt_state):
+        return "ambiguous_needs_review"
     if not _normalized_state_text(qb_state) or not _normalized_state_text(rt_state):
         return "path_converged"
     return "verified"
@@ -196,18 +209,13 @@ def _derive_expected_rt_runtime_directory(
     qb_content_path: str,
     rt_meta: RTTorrentMeta | None,
 ) -> str:
-    normalized_save = _normalize_path_text(qb_save_path or "")
-    normalized_content = _normalize_path_text(qb_content_path or "")
-    if not normalized_save and not normalized_content:
-        return ""
-    if rt_meta is None:
-        return normalized_content or normalized_save
-    if rt_meta and rt_meta.is_multi_file:
-        return normalized_content or normalized_save
-    if normalized_content:
-        content_path = Path(normalized_content)
-        return _normalize_path_text(str(content_path.parent))
-    return normalized_save
+    return _normalize_path_text(
+        derive_rt_target_directory(
+            qb_save_path=_normalize_path_text(qb_save_path or ""),
+            qb_content_path=_normalize_path_text(qb_content_path or ""),
+            torrent_meta=rt_meta,
+        )
+    )
 
 
 def _looks_like_timeout(exc: Exception) -> bool:
@@ -530,6 +538,7 @@ def _wait_for_rt_target(
     rpc_url: str = DEFAULT_RT_RPC_URL,
     timeout_seconds: float = 10.0,
     interval_seconds: float = 0.5,
+    reject_bad_state: bool = False,
 ) -> dict | None:
     deadline = time.monotonic() + max(0.0, float(timeout_seconds))
     expected = _normalize_path_text(expected_directory)
@@ -544,6 +553,8 @@ def _wait_for_rt_target(
                 qb_save_path=expected_save_path,
                 qb_content_path=expected_content_path,
             ):
+                if reject_bad_state and is_rt_bad_terminal_state(row.get("state")):
+                    break
                 return row
             break
         if time.monotonic() >= deadline:
@@ -615,6 +626,7 @@ def apply_cross_seed_link_normalization(
             expected_content_path=plan.qb_new_content_path,
             rpc_url=rpc_url,
             timeout_seconds=45.0 if rt_apply_ambiguous else 10.0,
+            reject_bad_state=True,
         )
         if verified_rt is None:
             raise RuntimeError("rt_verify_failed")
@@ -640,6 +652,7 @@ def apply_cross_seed_link_normalization(
             rpc_url=rpc_url,
             timeout_seconds=0.0,
             interval_seconds=0.0,
+            reject_bad_state=True,
         ) or verified_rt
 
         return _build_normalization_result(

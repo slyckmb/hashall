@@ -850,7 +850,7 @@ Historical snapshot:
 
 ## 2026-04-19 Normalization Loop Status
 
-- `hashall` is now `0.8.12`
+- `hashall` is now `0.8.13`
 - Code changes in progress:
   - `src/hashall/qbittorrent.py`
     - read-only `get_torrent_info()` and `get_torrents_payload()` now fall back to cached rows on auth/login failure before live reads.
@@ -890,6 +890,42 @@ Historical snapshot:
 - Next step:
   - rerun wrapper dry-run / auto-pick after qB and RT cache health recover
   - only then resume the tiny live pilot loop
+
+## 2026-04-19 Post-Recovery Normalization Status
+
+- Environment recovered:
+  - `qbittorrent_vpn` and `rtorrent_vpn` were recreated from docker compose after both had died
+  - wrapper preflight is healthy again: `qb=ok rt=ok rt_freshness=fresh`
+- Live pilots completed successfully after controller recovery:
+  - `5b13542670579f80881b496032cb95db09e352af`
+  - `e04e524750c999acfc9afd5c9a604e12fbaee0d8`
+  - `5c877f46f4d9fa0d8ea18bf72fe6711680d03cf6`
+- Current live legacy count:
+  - qB `cross-seed-link`: `16`
+  - RT `cross-seed-link`: `16`
+- Additional uncommitted fixes after `10f54f9` / `0.8.13`:
+  - `src/hashall/path_normalize.py`
+    - RT runtime target derivation now uses shared `derive_rt_target_directory(...)`
+    - helper no longer upgrades bad RT/qB terminal states like `error` to `verified`
+    - final RT verification now prefers the last good aligned RT row over a later bad terminal read
+  - `scripts/pilot-normalization.sh`
+    - post-check and watch now try live qB / live RT reads for the selected hash before falling back to cache snapshots
+    - this fixes false `ambiguous_needs_review` watch results caused only by stale RT cache rows
+  - `tests/test_path_normalize.py`
+    - added coverage for one-file multi-file RT target derivation
+    - added coverage for preferring a good aligned RT row over a later bad terminal read
+- Verification for the current uncommitted slice:
+  - `pytest -q tests/test_path_normalize.py tests/test_qbittorrent.py`
+    - `34 passed`
+  - `bash -n scripts/pilot-normalization.sh`
+- Important nuance from the `5c877...` pilot:
+  - the normalization itself succeeded
+  - direct live qB and RT both show canonical `cross-seed` paths and RT `stalledUP`
+  - the old watch implementation misreported `ambiguous_needs_review` because it was still reading stale RT cache state
+  - the wrapper fix above addresses that observability bug
+- Next recommended step:
+  - commit the current helper/watch fixes with a patch bump
+  - then continue the one-hash `/pool/media` normalization lane with the wrapper
 
 ## 2026-03-24 Current TODO Split
 

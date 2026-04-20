@@ -492,3 +492,32 @@ If a future thread resumes from this plan:
     - wrapper now fails closed for `--pick-safe` / `--apply` when RT cache freshness is `stale_error`
     - wrapper now surfaces degraded plan issues before stopped-state gating
   - live pilot loop: not executed in this pass because the repaired wrapper correctly blocked auto-pick/apply under current controller/cache conditions
+
+## 2026-04-19 Post-Recovery Execution Notes
+
+- Controller recovery:
+  - `qbittorrent_vpn` and `rtorrent_vpn` were recreated from docker compose
+  - wrapper preflight is healthy again (`qb=ok rt=ok rt_freshness=fresh`)
+- Live normalization resumed after recovery and succeeded for:
+  - `5b13542670579f80881b496032cb95db09e352af`
+  - `e04e524750c999acfc9afd5c9a604e12fbaee0d8`
+  - `5c877f46f4d9fa0d8ea18bf72fe6711680d03cf6`
+- Current live legacy scope:
+  - qB `cross-seed-link`: `16`
+  - RT `cross-seed-link`: `16`
+- New issues exposed by the resumed live lane:
+  1. RT runtime target derivation still had an old custom path rule that was wrong for one-file multi-file payload layouts.
+  2. Helper outcome logic was still willing to call bad terminal RT/qB states `verified` if paths converged.
+  3. Wrapper watch/post-check could misreport `ambiguous_needs_review` because it was reading stale RT cache rows even when live RT had already converged.
+- Follow-up fixes now in progress:
+  - helper uses shared `derive_rt_target_directory(...)`
+  - helper no longer treats bad RT/qB terminal states as verified
+  - final RT verification prefers a last known good aligned row over a later bad terminal read
+  - wrapper watch/post-check tries live qB/RT reads first and uses cache only as fallback
+- Verification after these follow-up fixes:
+  - `pytest -q tests/test_path_normalize.py tests/test_qbittorrent.py`
+    - `34 passed`
+  - `bash -n scripts/pilot-normalization.sh`
+- Immediate next step:
+  - commit the current helper/watch fixes with a patch bump
+  - then continue one-hash `/pool/media` normalization pilots
