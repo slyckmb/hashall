@@ -1,8 +1,8 @@
 # Seed Data Management System - Requirements & Implementation
 
-**Version:** 1.1 (Living Document)
-**Last Updated:** 2026-03-18
-**Status:** Active Development - Core features implemented, pool dataset migration in progress
+**Version:** 1.2 (Living Document)
+**Last Updated:** 2026-04-18
+**Status:** Active Development - Core features implemented, canonical torrent-tree normalization planning active
 
 ---
 
@@ -166,6 +166,28 @@ Container View          Real ZFS Path
   └── [tracker categories]/
 ```
 
+**Target Canonical Torrent Trees (Policy):**
+```
+/stash/media/torrents/
+  ├── seeding/
+  │   ├── cross-seed/
+  │   └── [tracker categories]/
+  └── orphans/
+
+/pool/media/torrents/
+  ├── seeding/
+  │   ├── cross-seed/
+  │   ├── _rehome-unique/<hash>/
+  │   └── [tracker categories]/
+  └── orphans/
+```
+
+Steady-state policy:
+- `cross-seed-link` is a legacy name; `cross-seed` is canonical
+- `orphaned_data` is a legacy name; `orphans` is canonical
+- `orphans` live under `*/media/torrents/orphans`, not under `*/media/torrents/seeding/orphans`
+- `/pool/data` is a migration source and residue lane, not a final torrent-payload home
+
 **Media Libraries (External Consumers - Stash):**
 ```
 /stash/media/books/                     (Readarr, Speakarr libraries)
@@ -325,24 +347,33 @@ linkCategory: "cross-seed"
 
 **Rule: Must Stay on Stash**
 
-A torrent's data **must remain on `/stash`** if:
-- Any inode associated with the torrent has hardlink children in external consumer paths
+A sibling payload group **must remain on `/stash`** if:
+- Any file in any member payload has hardlink children in external consumer paths
 - Example:
   ```
   Torrent file: /stash/media/torrents/seeding/radarr/Movie.2024/video.mkv (inode 1234)
   Hardlink:     /stash/media/movies/Movie (2024)/video.mkv (inode 1234)
 
-  Result: MUST stay on stash (external consumer exists)
+  Result: the whole sibling payload group MUST stay on stash (external consumer exists)
   ```
 
 **Rule: Eligible for Pool Migration**
 
-A torrent's data is **eligible to move to `/pool`** if:
+A sibling payload group is **eligible to move to `/pool`** if:
 - All hardlinks are siblings within the seeding domain only
 - No hardlinks exist in external consumer paths
 - Typically identified by `~noHL` tag from qbit_manage
 
 **Important: `~noHL` is advisory only.** The tag reflects qbit_manage's scan at a specific point in time. A `*arr` import between the qbit_manage scan and a rehome plan execution can create a new external hardlink. The authoritative external consumer check is always the plan-time scan of current catalog/filesystem state. The `~noHL` tag is a pre-filter that narrows candidates; it does not bypass the external consumer check.
+
+#### 4.1.2 Manual-Review Stop Conditions
+
+The system must stop for manual review instead of auto-deciding when:
+- the same path/name exists with different file hashes
+- stash and pool both have fully verified copies but placement signals disagree
+- hardlink-anchor evidence is mixed or unclear
+- a sibling payload group is incomplete or only partially verified
+- any other unexpected state appears during execution
 
 ### 4.2 Payload Identity
 
@@ -370,6 +401,17 @@ A torrent's data is **eligible to move to `/pool`** if:
 - This system works per-payload (all siblings rehomed together)
 - More efficient than moving siblings individually
 - Prevents partial moves (some siblings on stash, others on pool)
+
+### 4.2.1 Sibling Payload Group
+
+For placement and stash-vs-pool residency decisions, hashall uses a broader **sibling payload group** concept than exact `payload_hash` equality:
+- non-duplicate payloads that mostly share inodes on the same filesystem
+- or would share inodes if rehomed onto the same filesystem
+
+This broader sibling-group concept is the placement unit for:
+- keeping hardlink-anchored groups on stash
+- rehoming non-anchored groups to pool
+- surfacing manual-review conflicts when sibling-group evidence is mixed
 
 ### 4.2.1 Broader Content Inventory Requirement
 
@@ -652,6 +694,21 @@ A **hitchhiker** is when two or more torrents with different payload content sha
 
 Existing legacy hitchhiker groups may persist until explicitly de-hitchhiked. Do not create new hitchhiker targets even as a workaround.
 
+**Legacy Hitchhiker Remediation Requirement:**
+
+Hashall must provide a dedicated hitchhiker audit and de-hitchhike lane for existing N→1 payload trees. That lane must:
+- identify when two or more hashes share one physical payload tree or share files in a way that violates the unique per-item payload-tree invariant
+- classify safe shared-byte reuse separately from incorrect shared payload-tree layout
+- construct per-hash unique payload trees using hardlinks where possible, rather than duplicate byte copies
+- repoint affected qB/RT items to those unique payload roots
+
+Mandatory stop conditions for de-hitchhike apply:
+- partial or inconsistent inode overlap between candidate hashes
+- conflicting file hashes at the same relative path
+- cross-filesystem cases where hardlink-backed unique trees cannot be built safely
+- incomplete or partially verified torrents in the candidate group
+- any ambiguous owner/donor relationship
+
 **Cross-Filesystem Donor Prohibition:**
 
 When building a view via hardlinks, the donor payload must be on the **same filesystem** as the target. Selecting a stash donor to build a pool view — or vice versa — is not allowed because hardlinks cannot span filesystems. This check must be enforced before any view-building mutation. Cross-filesystem donor selection requires explicit operator override and produces physical copies, not hardlinks.
@@ -929,6 +986,12 @@ Libtorrent verification (`checking_files`) that shows no progress for longer tha
 
 ### 8.4 qBittorrent Integration
 
+**Client authority during the RT transition:**
+- RT is the operational authority for live path truth and repair intent
+- qB remains online as a silent mirror because its metadata is still valuable during the transition
+- when a live torrent path changes, any corresponding RT and qB entries must be kept aligned
+- do not treat a qB-only path change as success if RT still points elsewhere
+
 **Authentication:**
 - Environment variables: `QBITTORRENT_URL`, `QBITTORRENT_USER`, `QBITTORRENT_PASS`
 - Session-based authentication via Web API
@@ -960,6 +1023,28 @@ A local cache (`src/hashall/qb_cache.py`, `~/.cache/hashall-qb/`) reduces load o
 - Read-heavy operations (list/status queries, triage, dashboards) should use the cache by default
 - Write/mutation operations (stop, start, patch) hit qB directly for immediate freshness
 - The cache also stores server profile info (`app_version`, `webapi_version`, `libtorrent_version`) detected at startup
+
+**Normalization Success Contract:**
+
+Torrent path-normalization helpers must distinguish between:
+- `path_converged`
+  - qB save/content path matches expected
+  - RT directory matches expected/aligned target
+- `verifying`
+  - path convergence is complete, but RT and/or qB are still in `checking*` or equivalent verification states
+- `verified`
+  - path convergence is complete and the torrent has left verification states into a terminal non-checking state
+- `ambiguous_needs_review`
+  - convergence or verification state cannot be proven within the configured timeout budget
+- `partial_state`
+  - one client moved and the other did not, or rollback/recovery was required
+
+Default automation requirement:
+- require qB canonical path match
+- require RT canonical path match
+- require RT to leave `checking*` before reporting strongest success
+
+Optional stricter mode may additionally require explicit qB/RT recheck completion before final success is reported.
 - If qB is temporarily unavailable or authentication is slow, the client falls back to cached data for read operations
 
 ### 8.5 Safety Features
@@ -1119,11 +1204,13 @@ The system must be:
 
 **Payload Siblings:** Multiple torrents (different infohashes) with identical payload_hash. Examples: v1 vs v2, different piece sizes, different trackers.
 
-**Payload-Group:** The set of sibling torrents that share a payload_hash. Rehomed together as a unit.
+**Payload-Group:** The set of sibling torrents that share a payload_hash. Exact-content unit for identity and many rehome operations.
+
+**Sibling Payload Group:** The broader placement unit used for stash-vs-pool decisions. May include non-duplicate payloads that mostly share inodes on the same filesystem, or would do so if co-located.
 
 **Promotion:** Moving payloads from cold storage (pool) to warm storage (stash). Only occurs when payload already exists on stash (reuse-only, no blind copy).
 
-**Seeding Domain:** Paths where torrent data resides for seeding. Primary: `/stash/media/torrents/seeding/`, Pool: `/pool/data/cross-seed/`. Excludes media library paths.
+**Seeding Domain:** Paths where torrent data resides for seeding. Canonical roots are `/stash/media/torrents/seeding/` and `/pool/media/torrents/seeding/`; legacy migration roots may still participate temporarily. Excludes media library paths and `*/media/torrents/orphans`.
 
 **`~noHL` Tag:** qBittorrent tag applied by qbit_manage indicating "no hardlinks". Torrents with this tag have no external consumers (not hardlinked to media libraries). Prime candidates for demotion.
 

@@ -1996,6 +1996,27 @@ def payload_orphan_audit_cmd(db, path_prefixes, samples, json_output):
     help="Process at most N orphan items (for staged runs).",
 )
 @click.option(
+    "--order",
+    type=click.Choice(["small-first", "large-first", "input"]),
+    default="input",
+    show_default=True,
+    help="Order orphan move candidates before applying --limit.",
+)
+@click.option(
+    "--reserve-gib",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Keep at least this many GiB free on destination before cross-dataset moves.",
+)
+@click.option(
+    "--dataset",
+    "datasets",
+    multiple=True,
+    type=click.Choice(["pool-data", "pool-media", "stash"]),
+    help="Restrict sweep to one or more datasets.",
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Print live (non-orphan) items too.",
@@ -2012,7 +2033,7 @@ def payload_orphan_audit_cmd(db, path_prefixes, samples, json_output):
     show_default=True,
     help="hashall qB shared cache file.",
 )
-def payload_orphan_sweep_cmd(db, dry_run, limit, verbose, rt_cache_file, qb_cache_file):
+def payload_orphan_sweep_cmd(db, dry_run, limit, order, reserve_gib, datasets, verbose, rt_cache_file, qb_cache_file):
     """
     Sweep seeding trees and relocate orphaned content to orphaned_data/.
 
@@ -2040,6 +2061,9 @@ def payload_orphan_sweep_cmd(db, dry_run, limit, verbose, rt_cache_file, qb_cach
         db_path=_Path(db) if db else None,
         rt_cache_file=_Path(rt_cache_file),
         qb_cache_file=_Path(qb_cache_file),
+        order=order,
+        reserve_gib=reserve_gib,
+        dataset_names=set(datasets) if datasets else None,
         verbose=verbose,
     )
 
@@ -2062,8 +2086,11 @@ def payload_orphan_sweep_cmd(db, dry_run, limit, verbose, rt_cache_file, qb_cach
     print(f"   orphaned:             {len(orphans)}")
     print(f"   moved:                {summary['moved']}")
     print(f"   skipped:              {summary['skipped']}")
+    print(f"   skipped (space):      {summary['skipped_space']}")
     print(f"   nlinks>1 warnings:    {summary['warned_nlinks']}")
     print(f"   bad files deleted:    {summary['bad_deleted']}")
+    print(f"   bytes planned:        {summary['bytes_planned']}")
+    print(f"   bytes moved:          {summary['bytes_moved']}")
 
     empty_dirs = [i for i in orphans if i.skip_reason == "empty_dir"]
     movers = [i for i in orphans if i.skip_reason != "empty_dir"]
@@ -2084,6 +2111,88 @@ def payload_orphan_sweep_cmd(db, dry_run, limit, verbose, rt_cache_file, qb_cach
                 f"   [{item.dataset_name}/{item.tracker_label}] {item.path.name}"
                 f"{nl_tag}{ref_tag}{skip_tag}{dest_tag}"
             )
+
+
+@payload.command("normalize-cross-seed-link")
+@click.option("--hash", "torrent_hash", required=True, help="Torrent hash to normalize from cross-seed-link -> cross-seed.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute qB setLocation + RT repoint. Default is dry-run.")
+@click.option("--json-output", is_flag=True, help="Emit JSON.")
+def payload_normalize_cross_seed_link_cmd(torrent_hash, rpc_url, do_apply, json_output):
+    """Normalize a single same-filesystem cross-seed-link payload across qB and RT."""
+    from hashall.path_normalize import (
+        apply_cross_seed_link_normalization,
+        plan_cross_seed_link_normalization,
+    )
+
+    torrent_key = str(torrent_hash or "").strip().lower()
+    plan = plan_cross_seed_link_normalization(torrent_key)
+
+    if do_apply and not plan.ready:
+        if json_output:
+            print(json.dumps({"plan": plan.to_dict(), "error": "plan_not_ready"}, indent=2))
+            raise SystemExit(1)
+        raise click.ClickException(f"plan_not_ready issues={','.join(plan.issues)}")
+
+    result = None
+    if do_apply:
+        try:
+            result = apply_cross_seed_link_normalization(plan, rpc_url=rpc_url)
+        except Exception as exc:
+            if json_output:
+                print(json.dumps({"plan": plan.to_dict(), "error": str(exc)}, indent=2))
+                raise SystemExit(1)
+            raise click.ClickException(str(exc))
+
+    if json_output:
+        payload = {"plan": plan.to_dict(), "apply": bool(do_apply)}
+        if result is not None:
+            payload["result"] = result.to_dict()
+        print(json.dumps(payload, indent=2))
+        return
+
+    print("🧭 payload normalize-cross-seed-link")
+    print(f"   hash: {plan.torrent_hash}")
+    print(f"   apply: {do_apply}")
+    print(f"   ready: {plan.ready}")
+    print("   lane: cross-seed-link -> cross-seed")
+    print(f"   qb_state: {plan.qb_state}")
+    print(f"   qb_resume_after: {plan.qb_should_resume}")
+    print(f"   qb_old_save_path: {plan.qb_old_save_path}")
+    print(f"   qb_new_save_path: {plan.qb_new_save_path}")
+    print(f"   qb_old_content_path: {plan.qb_old_content_path}")
+    print(f"   qb_new_content_path: {plan.qb_new_content_path}")
+    print(f"   rt_state: {plan.rt_state}")
+    print(f"   rt_restart_after: {plan.rt_should_restart}")
+    print(f"   rt_old_directory: {plan.rt_old_directory}")
+    print(f"   rt_new_directory: {plan.rt_new_directory}")
+    print(f"   rt_old_apply_directory: {plan.rt_old_apply_directory}")
+    print(f"   rt_new_apply_directory: {plan.rt_new_apply_directory}")
+    print(f"   source_exists: {plan.source_exists}")
+    print(f"   target_exists: {plan.target_exists}")
+    print(f"   same_filesystem: {plan.same_filesystem}")
+    if plan.source_device is not None or plan.target_device is not None:
+        print(f"   devices: source={plan.source_device} target={plan.target_device}")
+    print(f"   issues: {len(plan.issues)}")
+    for issue in plan.issues:
+        print(f"      - {issue}")
+
+    if result is None:
+        return
+
+    print(f"   outcome: {result.outcome}")
+    print(f"   actions: {', '.join(result.actions) if result.actions else '(none)'}")
+    if result.error:
+        print(f"   error: {result.error}")
+    if result.warnings:
+        print(f"   warnings: {', '.join(result.warnings)}")
+    else:
+        print("   warnings: none")
+    print(f"   qb_final_state: {result.qb_final_state}")
+    print(f"   qb_final_save_path: {result.qb_final_save_path}")
+    print(f"   qb_final_content_path: {result.qb_final_content_path}")
+    print(f"   rt_final_state: {result.rt_final_state}")
+    print(f"   rt_final_directory: {result.rt_final_directory}")
 
 
 @payload.command("show")

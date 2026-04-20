@@ -664,7 +664,14 @@ class QBittorrentClient:
         tag: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch normalized raw torrent payloads from qB."""
-        self._ensure_authenticated()
+        try:
+            self._ensure_authenticated()
+        except RuntimeError as e:
+            cached = self._cached_payloads(category=category, tag=tag)
+            if cached:
+                self.last_error = f"cache_fallback_auth:{e}"
+                return cached
+            raise
 
         params = {}
         if category:
@@ -1502,7 +1509,14 @@ class QBittorrentClient:
         Returns:
             QBitTorrent object or None if not found
         """
-        self._ensure_authenticated()
+        try:
+            self._ensure_authenticated()
+        except RuntimeError as e:
+            cached = self._cached_payloads(hashes=[torrent_hash])
+            if cached:
+                self.last_error = f"cache_fallback_auth:{e}"
+                return self._torrent_from_payload(cached[0])
+            raise
 
         response: Optional[requests.Response] = None
         for attempt in range(1, self.request_retries + 1):

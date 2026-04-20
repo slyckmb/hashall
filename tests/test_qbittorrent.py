@@ -351,6 +351,73 @@ def test_get_torrent_info_falls_back_to_cache_on_timeout(monkeypatch, tmp_path):
     assert client.last_error.startswith("cache_fallback:")
 
 
+def test_get_torrent_info_falls_back_to_cache_on_auth_failure(monkeypatch, tmp_path):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.cache_file = tmp_path / "torrents-info.json"
+    client.cache_file.write_text(
+        json.dumps(
+            [
+                {
+                    "hash": "abc123",
+                    "name": "Movie.mkv",
+                    "save_path": "/pool/media/site",
+                    "content_path": "/pool/media/site/Movie.mkv",
+                    "state": "pausedUP",
+                    "progress": 1.0,
+                    "size": 100,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_auth():
+        raise RuntimeError("transport_cooldown_active:login reset")
+
+    monkeypatch.setattr(client, "_ensure_authenticated", fail_auth)
+
+    info = client.get_torrent_info("abc123")
+
+    assert info is not None
+    assert info.hash == "abc123"
+    assert info.state == "stoppedUP"
+    assert client.last_error == "cache_fallback_auth:transport_cooldown_active:login reset"
+
+
+def test_get_torrents_payload_falls_back_to_cache_on_auth_failure(monkeypatch, tmp_path):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.cache_file = tmp_path / "torrents-info.json"
+    client.cache_file.write_text(
+        json.dumps(
+            [
+                {
+                    "hash": "abc123",
+                    "name": "Movie.mkv",
+                    "save_path": "/pool/media/site",
+                    "content_path": "/pool/media/site/Movie.mkv",
+                    "state": "pausedUP",
+                    "progress": 1.0,
+                    "size": 100,
+                    "category": "cross-seed",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_auth():
+        raise RuntimeError("transport_cooldown_active:login reset")
+
+    monkeypatch.setattr(client, "_ensure_authenticated", fail_auth)
+
+    payloads = client.get_torrents_payload(category="cross-seed")
+
+    assert len(payloads) == 1
+    assert payloads[0]["hash"] == "abc123"
+    assert payloads[0]["state"] == "stoppedUP"
+    assert client.last_error == "cache_fallback_auth:transport_cooldown_active:login reset"
+
+
 def test_export_torrent_file_falls_back_to_bt_backup_on_404(monkeypatch, tmp_path):
     client = QBittorrentClient(base_url="http://example", username="u", password="p")
     client.bt_backup_dir = tmp_path / "BT_backup"
