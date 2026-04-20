@@ -2,6 +2,23 @@
 
 Last updated: 2026-04-18
 
+## Big-Picture Seed Folder Cleanup TODO
+
+Keep this list as the high-level operator target while working through the detailed waves.
+
+1. Finish `cross-seed-link -> cross-seed`.
+2. Finish `orphaned_data -> orphans`.
+3. Repair the remaining broken live torrents.
+4. Drain all torrent payloads out of `/pool/data`.
+5. Enforce stash-vs-pool placement using the hardlink-anchor rule.
+6. Remove steady-state duplicates between stash and pool.
+7. De-hitchhike legacy N->1 payload trees into unique per-hash trees.
+8. Keep qB and RT aligned after every live change.
+9. Clean stale residue and empty legacy paths after each wave.
+10. Update code/docs/scripts in `hashall` and `~/dev` that still assume old paths.
+11. Finish the repair / verification contract in tooling.
+12. End with canonical stash/pool trees, zero live legacy names, zero torrent payloads on `/pool/data`, and per-hash unique payload trees.
+
 ## 2026-04-18 Torrent Tree Normalization Decisions
 
 Canonical planning doc:
@@ -471,6 +488,211 @@ Important design instruction:
   - runtime `content_path=/incomplete_torrents/...`
   - fastresume `save_path=/incomplete_torrents`
   - fastresume `qBt-savePath=/data/media/torrents/seeding/movies`
+
+## 2026-04-20 PD Repair Donor Search
+
+- Investigated the current three near-complete qB `stoppedDL` rows:
+  - `96d896ca35f42d93e4a4bdee92e8ac90adc34b54` `Transformers.Rise.of.the.Beasts...`
+  - `127c38342cfedaf4016b8079be13c5f7883b9cfe` `River Monsters S07...`
+  - `5caca88d29e64de495a47b53a466f7cadcb3ce02` `The.Diary.of.a.Teenage.Girl...`
+- Hitchhiker check:
+  - these three do **not** currently appear to be N->1 hitchhikers
+  - no shared payload-root collision was found between them
+  - no additional live qB/RT row was found pointing at the exact same payload tree for these hashes
+- `96d896...` and `127c383...`:
+  - qB cache and live qB API agree on their current state
+  - qB still reports real remaining deficits after recheck:
+    - `96d896...` `amount_left=1959802`
+    - `127c383...` `amount_left=16777216`
+  - the main media bytes are already correct
+  - the visible sidecars are broken:
+    - `96d896...` `.mkv.nfo=0`, `.txt=0`
+    - `127c383...` `.nfo=0`
+  - `/data` and `/stash` copies are the same inode families for the media payloads
+  - `_qb-repair-v2` and `rtorrent` family copies are not better donors; they carry the same broken sidecars
+  - broad search across obvious `/pool` and spare roots did not surface a better exact donor
+  - classification: **no local exact donor found**
+- `5caca8...`:
+  - qB still reports a larger remaining deficit: `amount_left=388062872`
+  - the main mkv and subtitle files are present
+  - `Sample.mkv=0` and `.nfo=0`
+  - `_qb-finish` family copies are not better donors; they have the same broken sidecars
+  - classification: **no local exact donor found**
+- Current operator conclusion for all three:
+  - not a qB-cache/dashboard problem
+  - not a hitchhiker problem
+  - not likely fixable by switching to another visible local family copy
+  - next lane is controlled redownload or deeper piece-level repair, not another blind recheck
+
+## 2026-04-20 Next Cleanup Wave
+
+- Mark these three hashes as manual-review holdouts:
+  - `96d896...`
+  - `127c383...`
+  - `5caca8...`
+- Current qB live read still shows:
+  - `96d896...` `stoppedDL` `amount_left=1959802`
+  - `127c383...` `stoppedDL` `amount_left=16777216`
+  - `5caca8...` `stoppedDL` `amount_left=388062872`
+- DocsPedia qB side is now clean:
+  - `81ede24...` is `stoppedUP 1.0`
+  - canonical qB path:
+    - `/pool/media/torrents/seeding/cross-seed/DocsPedia/How It's Made S01-S32 480p DVDRip 1080p WEBRip AAC 2.0 x264-MIXED`
+- The next smallest actionable cleanup wave is the Dexter pair:
+  - `245f2bce6afaf96b0a48ad216366c4281fdd864f`
+    - qB `stoppedDL`
+    - progress `0.9997485`
+    - `amount_left=2097152`
+    - current qB path under `_qb-repair-v2`
+  - `e36553b12dc118d8c52575a1d6711532882ae1c3`
+    - qB `stoppedDL`
+    - progress `0.9996357`
+    - `amount_left=2097152`
+    - current qB path under canonical `cross-seed/TorrentLeech`
+- Selected next wave:
+  - Dexter pair repair
+
+## 2026-04-20 Dexter Wave Outcome
+
+- Wave 1 executed on:
+  - `245f2bce6afaf96b0a48ad216366c4281fdd864f`
+  - `e36553b12dc118d8c52575a1d6711532882ae1c3`
+- qB and RT were both repointed/rechecked on canonical `/data/media/torrents/seeding/cross-seed/TorrentLeech/...` paths.
+- Post-wave live state:
+  - qB: both `stoppedDL`
+  - RT: both `stalledDL`
+  - both still have `2097152` bytes left
+- Interpretation:
+  - not a simple metadata/path-drift repair
+  - exact payload trees match healthy sibling hashes, but torrent identities differ
+  - move these two into manual-review / alternate-identity repair
+
+## 2026-04-20 RT Cleanup Wave Outcome
+
+- Wave 2 / Wave 3 result:
+  - `691f3d9453c501ed0dff9ac7c85978389a332ab2` cleared from the RT bad-row set after recheck
+  - it no longer needs RT cleanup
+- Remaining RT-only bad rows with no qB owner:
+  - `e04e524750c999ac22d994e5f5ebf8f5dd1d4c84`
+  - `3e82f6f7a3a5adaebce5dfac35d8cc6c4fc5f9ad`
+- Next interpretation:
+  - these are RT-only review items, not qB mirror fixes
+  - inspect each one for session residue vs real content trouble before mutating again
+
+## 2026-04-20 RT-Only Review Wave Outcome
+
+- Wave 4 executed on:
+  - `e04e524750c999acfc9afd5c9a604e12fbaee0d8`
+  - `3e82f6f7a3a5adae52d84a1074b290b42ccb5026`
+- Both payload trees exist on disk at canonical `/pool/media/torrents/seeding/cross-seed/FileList.io/...` paths.
+- Deeper diagnosis found that both are multi-file torrents but RT had `d.directory` set to the torrent root instead of the parent save root.
+- Direct `rt recheck` was not enough.
+- Revised fix used:
+  - `python -m hashall.cli rt session-reset --hash <full_hash> --target-directory /pool/media/torrents/seeding/cross-seed/FileList.io --apply`
+- Post-wave live state:
+  - both moved from `stoppedDL` to active `checkingDL`
+  - qB has no owner rows for either hash
+- Interpretation:
+  - this appears to be the correct RT-side fix
+  - let the RT checks settle before any further mutation
+
+## 2026-04-20 Orphan Rename Prep Wave Outcome
+
+- Wave 5 executed as an audit / dry-run prep lane for `orphaned_data -> orphans`.
+- On-disk state:
+  - `/pool/media/torrents/orphaned_data` exists and is populated
+  - `/pool/media/torrents/orphans` does not exist yet
+  - `/stash/media/torrents/orphaned_data` exists but is empty
+  - `/stash/media/torrents/seeding/orphaned_data` exists but is empty
+- Current live blocker:
+  - qB still has one live row under `/pool/media/torrents/orphaned_data/...`
+  - `f37b9983d27409b4d17d30948ce38b4e021935fb`
+  - state `stoppedUP`
+- RT cache showed no current `orphaned_data` directory rows during this audit pass.
+- First dry-run batch shape is now known:
+  - `Aither (API)`
+  - `Darkpeers (API)`
+  - `DigitalCore (API)`
+  - `DocsPedia`
+  - `FearNoPeer`
+- Code/config refs still hardcoding `orphaned_data` were reconfirmed in:
+  - `src/hashall/orphan_sweep.py`
+  - `src/hashall/cli.py`
+  - `src/hashall/content_inventory.py`
+  - `~/dev/sys/docker/qbit_manage/config*.yml`
+  - `~/dev/sys/docker/qbit_manage/bin/promote_recycle_to_seeds.sh`
+  - `~/dev/sys/docker/qbit_manage/bin/check_pool_orphans.sh`
+- Operational rule:
+  - do not run a broad orphan rename until the live qB row is moved off `orphaned_data`
+
+## 2026-04-20 Live Orphan-Path Blocker Wave Outcome
+
+- Wave 6 executed on the one live qB orphan-path row:
+  - `f37b9983d27409b4d17d30948ce38b4e021935fb`
+- qB save path was moved from:
+  - `/pool/media/torrents/orphaned_data/FileList.io/_qb-unique-repair/f37b9983d27409b4d17d30948ce38b4e021935fb`
+- to:
+  - `/pool/media/torrents/orphans/FileList.io/_qb-unique-repair/f37b9983d27409b4d17d30948ce38b4e021935fb`
+- Post-wave live state:
+  - qB remained `stoppedUP`
+  - qB now has no live `orphaned_data` rows
+  - the old legacy file path is gone
+- Operational result:
+  - the orphan rename lane is no longer blocked by live qB state
+
+## 2026-04-20 First Orphan Rename Batch Outcome
+
+- Wave 7 executed on `/pool/media/torrents/orphaned_data` using same-filesystem atomic `mv`.
+- Batch roots moved to `/pool/media/torrents/orphans`:
+  - `Aither (API)`
+  - `Darkpeers (API)`
+  - `DigitalCore (API)`
+  - `DocsPedia`
+  - `FearNoPeer`
+- Interrupted-rsync residue:
+  - `Aither (API)` had a partial destination copy from the aborted rsync attempt
+  - it was preserved as:
+    - `/pool/media/torrents/orphans/.aborted-rsync-Aither (API)-20260420-1720`
+  - then the full source tree was moved atomically into place
+- Post-wave state:
+  - the 5 batch roots are gone from `/pool/media/torrents/orphaned_data`
+  - the 5 batch roots exist under `/pool/media/torrents/orphans`
+  - qB still has no live `orphaned_data` rows
+- Operational rule:
+  - continue remaining orphan batches with same-device `mv`, not rsync
+
+## 2026-04-20 Second Orphan Rename Batch Outcome
+
+- Wave 8 executed as the next clean atomic-rename batch.
+- Moved to `/pool/media/torrents/orphans`:
+  - `It.Ends.With.Us.2024.MULTi.1080p.BluRay.x264-LYPSG`
+  - `LinkedIn - Premiere Pro Guru: Fixing Video Color and Exposure Problems`
+  - `OnlyEncodes (API)`
+  - `PrivateHD`
+- Stash side:
+  - created canonical `/stash/media/torrents/orphans`
+  - stash legacy orphan dirs remain empty
+- New blocker:
+  - `FileList.io` exists in both legacy and canonical trees
+  - treat it as a merge case, not a blind top-level rename
+- Operational rule:
+  - keep using atomic `mv` for non-conflicting top-level roots
+  - handle `FileList.io` in a planned sub-batch
+
+## 2026-04-20 FileList.io Orphan Merge Outcome
+
+- Wave 9 resolved the first merge case:
+  - `/pool/media/torrents/orphaned_data/FileList.io`
+- Method:
+  - atomic `mv` for the six non-conflicting children
+  - narrow inspection of the overlapping `_qb-unique-repair` subtree
+  - cleanup of empty legacy directories after verification
+- Result:
+  - legacy `/pool/media/torrents/orphaned_data/FileList.io` is gone
+  - canonical `/pool/media/torrents/orphans/FileList.io` remains
+  - qB still has no live `orphaned_data` rows
+- Operational rule:
+  - use this same split / inspect / remove-empty pattern for future orphan merge cases
   - catalog payload remains incomplete and still points back to `/stash/...`
 - `c8f01321...` `The.Matrix.Reloaded...`
   - runtime `save_path=/data/media/torrents/seeding/movies`
