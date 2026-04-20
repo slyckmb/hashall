@@ -1459,7 +1459,7 @@ Last updated: 2026-03-13 (historical section below)
 
 ## 2026-04-19 Normalization Loop Update
 
-- `hashall=0.8.13`
+- `hashall=0.8.14`
 - Multi-pass sim/dry-run loop completed for the current normalization helper and wrapper changes.
 - New fixes from this pass:
   - qB read-only planning falls back to cached rows on auth/login failure.
@@ -1483,7 +1483,10 @@ Last updated: 2026-03-13 (historical section below)
   - qB/RT are healthy again and wrapper preflight is back to `qb=ok rt=ok rt_freshness=fresh`
 - Semver / commit:
   - committed helper/wrapper outcome hardening as `10f54f9`
-  - bumped `hashall` to `0.8.13`
+  - bumped `hashall` to `0.8.14`
+- Remaining `cross-seed-link` lane no longer stops at `/pool/media` exhaustion:
+  - wrapper now prefers `/pool/media` first, then advances to `/data/media` / `/stash/media`
+  - repoint-only same-inode cases are now treated as safe instead of `target_content_already_exists`
 - New live normalization results after controller recovery:
   - successful live pilots:
     - `5b13542670579f80881b496032cb95db09e352af`

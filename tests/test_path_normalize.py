@@ -91,6 +91,42 @@ def test_build_cross_seed_link_plan_flags_target_and_auto_tmm_issues(tmp_path: P
     assert "target_content_already_exists" in plan.issues
 
 
+def test_build_cross_seed_link_plan_allows_same_inode_target_for_repoint(tmp_path: Path) -> None:
+    source_root = tmp_path / "data-media" / "torrents" / "seeding" / "cross-seed-link" / "hawke-uno"
+    target_root = tmp_path / "data-media" / "torrents" / "seeding" / "cross-seed" / "hawke-uno"
+    source_root.mkdir(parents=True, exist_ok=True)
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    target_file = target_root / "Movie.mkv"
+    target_file.write_text("payload", encoding="utf-8")
+    source_file = source_root / "Movie.mkv"
+    source_file.hardlink_to(target_file)
+
+    qb = QBitTorrent(
+        hash="abc123",
+        name="Movie.mkv",
+        save_path=str(source_root),
+        content_path=str(source_file),
+        category="cross-seed",
+        tags="",
+        state="stoppedUP",
+        size=10,
+        progress=1.0,
+        amount_left=0,
+        auto_tmm=False,
+    )
+    rt_row = {
+        "hash": "abc123",
+        "directory": str(source_root),
+        "state": "stalledUP",
+    }
+
+    plan = build_cross_seed_link_normalization_plan("abc123", qb_torrent=qb, rt_row=rt_row)
+
+    assert plan.ready is True
+    assert "target_content_already_exists" not in plan.issues
+
+
 class _FakeQBClient:
     def __init__(self, info: QBitTorrent):
         self.info = info

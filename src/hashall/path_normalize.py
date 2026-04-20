@@ -183,6 +183,25 @@ def _device_for_path(path_text: str | None) -> tuple[int | None, Path | None]:
         return None, existing
 
 
+def _target_repoint_already_satisfied(source_path: str | None, target_path: str | None) -> bool:
+    source_text = _normalize_path_text(source_path or "")
+    target_text = _normalize_path_text(target_path or "")
+    if not source_text or not target_text:
+        return False
+    source = Path(source_text)
+    target = Path(target_text)
+    if not source.exists() or not target.exists():
+        return False
+    try:
+        if source.is_file() and target.is_file():
+            src_stat = source.stat()
+            dst_stat = target.stat()
+            return (src_stat.st_dev, src_stat.st_ino) == (dst_stat.st_dev, dst_stat.st_ino)
+    except Exception:
+        return False
+    return False
+
+
 def _should_resume_qb(state: str) -> bool:
     return str(state or "").strip().lower() not in _STOPPED_QB_STATES
 
@@ -376,9 +395,10 @@ def build_cross_seed_link_normalization_plan(
 
     source_exists = bool(qb_old_content_path and Path(qb_old_content_path).exists())
     target_exists = bool(qb_new_content_path and Path(qb_new_content_path).exists())
+    target_is_same_payload = _target_repoint_already_satisfied(qb_old_content_path, qb_new_content_path)
     if not source_exists:
         issues.append("source_content_missing")
-    if target_exists:
+    if target_exists and not target_is_same_payload:
         issues.append("target_content_already_exists")
 
     source_device, _ = _device_for_path(qb_old_content_path)

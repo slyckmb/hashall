@@ -18,6 +18,11 @@ LIST_ONLY=0
 WATCH=0
 PICK_SAFE=0
 HASH=""
+APPLY_OUTCOME=""
+APPLY_ERROR=""
+POST_STATE_JSON=""
+LEGACY_COUNTS_JSON=""
+WATCH_VERDICT=""
 
 usage() {
   cat <<'EOF'
@@ -32,7 +37,7 @@ Safe wrapper for one-hash cross-seed-link -> cross-seed normalization.
 Defaults:
   - list candidate status only
   - no filesystem or client mutations
-  - only /pool/media candidates are considered safe
+  - prefers /pool/media candidates, then /data/media or /stash/media once pool is exhausted
   - read-heavy qB/RT status uses the shared cache helpers where possible
 
 Options:
@@ -257,8 +262,8 @@ classify_plan() {
     echo "skip:already_canonical"
     return
   fi
-  if [[ "$scope_path" != /pool/media/* ]]; then
-    echo "skip:not_pool_media"
+  if [[ "$scope_path" != /pool/media/* && "$scope_path" != /data/media/* && "$scope_path" != /stash/media/* ]]; then
+    echo "skip:out_of_scope"
     return
   fi
   if [[ "$ready" != "true" ]]; then
@@ -340,10 +345,15 @@ print_candidate_table() {
 
 selection_key() {
   local plan_json="$1"
-  local qb_state rt_state qb_old_save rank
+  local qb_state rt_state qb_old_save rank domain_rank
   qb_state="$(jq -r '.plan.qb_state' <<<"$plan_json")"
   rt_state="$(jq -r '.plan.rt_state' <<<"$plan_json")"
   qb_old_save="$(jq -r '.plan.qb_old_save_path' <<<"$plan_json")"
+  case "$qb_old_save" in
+    /pool/media/*) domain_rank="00" ;;
+    /data/media/*|/stash/media/*) domain_rank="01" ;;
+    *) domain_rank="09" ;;
+  esac
   case "${rt_state,,}" in
     stoppedup) rank="00" ;;
     stalledup) rank="01" ;;
@@ -351,7 +361,7 @@ selection_key() {
     stalleddl) rank="03" ;;
     *) rank="09" ;;
   esac
-  printf '%s|%s|%s\n' "$rank" "${qb_state,,}" "$qb_old_save"
+  printf '%s|%s|%s|%s\n' "$domain_rank" "$rank" "${qb_state,,}" "$qb_old_save"
 }
 
 pick_safe_hash() {
@@ -385,6 +395,25 @@ pick_safe_hash() {
   HASH="$best_hash"
   PICKED_PLAN_JSON="$best_plan"
   return 0
+}
+
+find_safe_hash_quiet() {
+  local audit_json="$1" best_hash="" best_key="" row hash exists plan_json status key
+  while IFS= read -r row; do
+    [[ -z "$row" ]] && continue
+    hash="$(jq -r '.torrent_hash' <<<"$row")"
+    exists="$(jq -r '.path_exists' <<<"$row")"
+    [[ "$exists" != "true" ]] && continue
+    plan_json="$(get_plan_json "$hash")"
+    status="$(classify_plan "$plan_json")"
+    [[ "$status" != "safe" ]] && continue
+    key="$(selection_key "$plan_json")"
+    if [[ -z "$best_key" || "$key" < "$best_key" ]]; then
+      best_hash="$hash"
+      best_key="$key"
+    fi
+  done < <(jq -c '.rows[]?' <<<"$audit_json")
+  [[ -n "$best_hash" ]] && printf '%s\n' "$best_hash"
 }
 
 print_hash_plan() {
@@ -577,15 +606,88 @@ watch_hash() {
       && ! is_qb_bad_terminal_state "$qb_state" \
       && ! is_rt_bad_terminal_state "$rt_state"; then
       echo "  verdict: success"
+      WATCH_VERDICT="success"
       return 0
     fi
     now="$(date +%s)"
     if (( now >= deadline )); then
       echo "  verdict: ambiguous_needs_review"
+      WATCH_VERDICT="ambiguous_needs_review"
       return 1
     fi
     sleep "$WATCH_INTERVAL"
   done
+}
+
+print_final_sitrep() {
+  local result_line summary_line qb_path qb_state rt_path rt_state legacy_qb legacy_rt next_hash action_label
+  local next_cmd
+
+  POST_STATE_JSON="${POST_STATE_JSON:-$(post_state_json "$HASH")}"
+  LEGACY_COUNTS_JSON="${LEGACY_COUNTS_JSON:-$(legacy_counts_json)}"
+
+  qb_path="$(jq -r '.qb.save_path // ""' <<<"$POST_STATE_JSON")"
+  qb_state="$(jq -r '.qb.state // ""' <<<"$POST_STATE_JSON")"
+  rt_path="$(jq -r '.rt.directory // ""' <<<"$POST_STATE_JSON")"
+  rt_state="$(jq -r '.rt.state // ""' <<<"$POST_STATE_JSON")"
+  legacy_qb="$(jq -r '.qb // ""' <<<"$LEGACY_COUNTS_JSON")"
+  legacy_rt="$(jq -r '.rt // ""' <<<"$LEGACY_COUNTS_JSON")"
+
+  if [[ "$APPLY" -eq 1 ]]; then
+    action_label="live normalization"
+  else
+    action_label="dry-run"
+  fi
+
+  if [[ "$APPLY" -eq 0 ]]; then
+    result_line="No changes were made."
+    if [[ "$status" == "safe" ]]; then
+      summary_line="This hash is safe to normalize."
+    else
+      summary_line="This hash is not currently safe to normalize."
+    fi
+  elif [[ "$wrapper_exit" -eq 0 ]]; then
+    result_line="The normalization completed cleanly."
+    summary_line="qB and rTorrent are aligned on the canonical path."
+  elif [[ "$WATCH_VERDICT" == "ambiguous_needs_review" || "$APPLY_OUTCOME" == "ambiguous_needs_review" || "$APPLY_OUTCOME" == "partial_state" ]]; then
+    result_line="This run needs review before you continue."
+    summary_line="The path change may be incomplete or still ambiguous."
+  else
+    result_line="The normalization ran, but it did not finish cleanly."
+    summary_line="Check the current qB and rTorrent state before running another."
+  fi
+
+  next_hash="$(find_safe_hash_quiet "$(get_audit_json)")"
+  if [[ -n "$next_hash" && "$wrapper_exit" -eq 0 ]]; then
+    next_cmd="scripts/pilot-normalization.sh --hash $next_hash --apply --watch"
+  elif [[ "$wrapper_exit" -eq 0 ]]; then
+    next_cmd="scripts/pilot-normalization.sh --limit 10"
+  else
+    next_cmd="scripts/pilot-normalization.sh --hash $HASH"
+  fi
+
+  echo
+  echo "Sitrep"
+  echo "  action: $action_label"
+  echo "  hash: $HASH"
+  echo "  result: $result_line"
+  echo "  summary: $summary_line"
+  if [[ -n "$APPLY_OUTCOME" ]]; then
+    echo "  helper_outcome: $APPLY_OUTCOME"
+  fi
+  if [[ -n "$WATCH_VERDICT" ]]; then
+    echo "  watch_verdict: $WATCH_VERDICT"
+  fi
+  if [[ -n "$APPLY_ERROR" ]]; then
+    echo "  helper_error: $APPLY_ERROR"
+  fi
+  echo "  qB: ${qb_state:-unknown} @ ${qb_path:-unknown}"
+  echo "  RT: ${rt_state:-unknown} @ ${rt_path:-unknown}"
+  echo "  remaining_legacy: qB=$legacy_qb rt=$legacy_rt"
+  if [[ -n "$next_hash" && "$wrapper_exit" -eq 0 ]]; then
+    echo "  next_safe_hash: $next_hash"
+  fi
+  echo "  next_command: $next_cmd"
 }
 
 mkdir -p "$LOG_DIR"
@@ -628,26 +730,32 @@ if [[ "$APPLY" -eq 1 ]]; then
   apply_json="$(cli_json payload normalize-cross-seed-link --hash "$HASH" --apply)"
   echo "$apply_json" | jq '.'
 
-  apply_outcome="$(jq -r '.result.outcome // ""' <<<"$apply_json")"
-  apply_error="$(jq -r '.result.error // ""' <<<"$apply_json")"
+  APPLY_OUTCOME="$(jq -r '.result.outcome // ""' <<<"$apply_json")"
+  APPLY_ERROR="$(jq -r '.result.error // ""' <<<"$apply_json")"
   expected_qb="$(jq -r '.result.qb_final_save_path // .plan.qb_new_save_path' <<<"$apply_json")"
   expected_rt="$(jq -r '.result.rt_final_directory // .plan.rt_new_directory' <<<"$apply_json")"
-  echo "  helper_outcome: ${apply_outcome:-unknown}"
-  if [[ -n "$apply_error" ]]; then
-    echo "  helper_error: $apply_error"
+  echo "  helper_outcome: ${APPLY_OUTCOME:-unknown}"
+  if [[ -n "$APPLY_ERROR" ]]; then
+    echo "  helper_error: $APPLY_ERROR"
   fi
-  case "$apply_outcome" in
+  case "$APPLY_OUTCOME" in
     ambiguous_needs_review|partial_state) wrapper_exit=1 ;;
   esac
 fi
 
   echo "Post-Check"
-  post_state_json "$HASH" | jq '.'
+  POST_STATE_JSON="$(post_state_json "$HASH")"
+  echo "$POST_STATE_JSON" | jq '.'
   print_residue_check "$plan_json"
-  print_legacy_counts "$(legacy_counts_json)"
+  LEGACY_COUNTS_JSON="$(legacy_counts_json)"
+  print_legacy_counts "$LEGACY_COUNTS_JSON"
 
 if [[ "$WATCH" -eq 1 ]]; then
   watch_hash "$HASH" "$expected_qb" "$expected_rt" || wrapper_exit=1
+  POST_STATE_JSON="$(post_state_json "$HASH")"
+  LEGACY_COUNTS_JSON="$(legacy_counts_json)"
 fi
+
+print_final_sitrep
 
 exit "$wrapper_exit"

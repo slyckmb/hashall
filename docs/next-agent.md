@@ -850,7 +850,7 @@ Historical snapshot:
 
 ## 2026-04-19 Normalization Loop Status
 
-- `hashall` is now `0.8.13`
+- `hashall` is now `0.8.14`
 - Code changes in progress:
   - `src/hashall/qbittorrent.py`
     - read-only `get_torrent_info()` and `get_torrents_payload()` now fall back to cached rows on auth/login failure before live reads.
@@ -903,7 +903,7 @@ Historical snapshot:
 - Current live legacy count:
   - qB `cross-seed-link`: `16`
   - RT `cross-seed-link`: `16`
-- Additional uncommitted fixes after `10f54f9` / `0.8.13`:
+- Additional uncommitted fixes after `10f54f9` / `0.8.14`:
   - `src/hashall/path_normalize.py`
     - RT runtime target derivation now uses shared `derive_rt_target_directory(...)`
     - helper no longer upgrades bad RT/qB terminal states like `error` to `verified`
@@ -911,9 +911,15 @@ Historical snapshot:
   - `scripts/pilot-normalization.sh`
     - post-check and watch now try live qB / live RT reads for the selected hash before falling back to cache snapshots
     - this fixes false `ambiguous_needs_review` watch results caused only by stale RT cache rows
+    - safe auto-pick now prefers `/pool/media` first, then continues into `/data/media` / `/stash/media`
   - `tests/test_path_normalize.py`
     - added coverage for one-file multi-file RT target derivation
     - added coverage for preferring a good aligned RT row over a later bad terminal read
+    - added coverage for same-inode repoint cases where canonical target already exists
+- New late-lane normalization finding:
+  - the final `/data/media` legacy rows were not actually blocked by bad state
+  - they were blocked because canonical `cross-seed` targets already existed as the same hardlinked file
+  - helper now treats those as safe repoint-only normalizations instead of `target_content_already_exists`
 - Verification for the current uncommitted slice:
   - `pytest -q tests/test_path_normalize.py tests/test_qbittorrent.py`
     - `34 passed`
