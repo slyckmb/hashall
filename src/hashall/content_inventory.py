@@ -73,7 +73,7 @@ def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: st
 
 def _kind_for_base(base_root: Path) -> str:
     parts = base_root.parts
-    if "orphaned_data" in parts:
+    if "orphaned_data" in parts or "orphans" in parts:
         return "orphan"
     if "RecycleBin" in parts:
         return "recovery"

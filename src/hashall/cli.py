@@ -2041,7 +2041,7 @@ def payload_orphan_sweep_cmd(db, dry_run, limit, order, reserve_gib, datasets, v
     and /stash/media/torrents/seeding for content not backed by an active RT
     or qBittorrent torrent.
 
-    Orphaned items are moved to /pool/media/torrents/orphaned_data/<tracker>/.
+    Orphaned items are moved to /pool/media/torrents/orphans/<tracker>/.
     Items with active catalog references (hitchhiker groups) are skipped.
     .bad.* and __hl_tmp__* files are deleted unconditionally.
 
@@ -2308,7 +2308,7 @@ def _default_content_base_roots() -> list[str]:
     "--root",
     "base_roots",
     multiple=True,
-    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+    help="Base non-qB root to inventory (repeatable). Defaults to orphans/orphaned_data/seeds/RecycleBin.",
 )
 @click.option("--kind", "root_kind", type=click.Choice(["archive", "orphan", "recovery", "other"]), help="Filter by root kind.")
 @click.option("--status", type=click.Choice(["complete", "incomplete"]), help="Filter by hash-completeness status.")
@@ -2358,7 +2358,7 @@ def content_inventory_cmd(db, base_roots, root_kind, status, path_contains, min_
     "--root",
     "base_roots",
     multiple=True,
-    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+    help="Base non-qB root to inventory (repeatable). Defaults to orphans/orphaned_data/seeds/RecycleBin.",
 )
 @click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
 @click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
@@ -2407,7 +2407,7 @@ def content_duplicates_cmd(db, base_roots, path_contains, min_bytes, sort_by, li
     "--root",
     "base_roots",
     multiple=True,
-    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+    help="Base non-qB root to inventory (repeatable). Defaults to orphans/orphaned_data/seeds/RecycleBin.",
 )
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
 def content_donors_cmd(db, torrent_hash, base_roots, json_output):
@@ -2446,7 +2446,7 @@ def content_donors_cmd(db, torrent_hash, base_roots, json_output):
     "--root",
     "base_roots",
     multiple=True,
-    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+    help="Base non-qB root to inventory (repeatable). Defaults to orphans/orphaned_data/seeds/RecycleBin.",
 )
 @click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
 @click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
