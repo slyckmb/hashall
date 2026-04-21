@@ -2195,6 +2195,25 @@ def payload_normalize_cross_seed_link_cmd(torrent_hash, rpc_url, do_apply, json_
     print(f"   rt_final_directory: {result.rt_final_directory}")
 
 
+@payload.command("hitchhiker-audit")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+@click.option("--limit", type=int, default=None, help="Limit number of catalog groups queried.")
+def payload_hitchhiker_audit_cmd(db, json_output, limit):
+    """
+    Audit N→1 hitchhiker payload groups (multiple hashes sharing one on-disk tree).
+
+    A hitchhiker group must be split into per-hash views (via hardlinks) before
+    path repair can be safely applied. This command enumerates all groups and
+    classifies them by safety to split: SAFE_TO_SPLIT, UNSPLIT, PARTIALLY_SPLIT, BUSY.
+    """
+    from hashall.hitchhiker import audit_hitchhiker_groups, format_hitchhiker_report
+
+    groups = audit_hitchhiker_groups(db_path=db, limit=limit)
+    report = format_hitchhiker_report(groups, json_output=json_output)
+    print(report)
+
+
 @payload.command("show")
 @click.argument("torrent_hash")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
