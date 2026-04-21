@@ -7,7 +7,7 @@ Ported from ~/dev/sys/docker/gluetun_qbit/qbittorrent_vpn/bin/qb-to-rt-migrate.p
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import yaml
 
@@ -345,5 +345,133 @@ def infer_canonical_save_path(
         category=category_norm,
         subdir=subdir,
         reliability=reliability,
+        notes=notes,
+    )
+
+
+@dataclass
+class DriftReport:
+    """Drift detection result for a single torrent hash."""
+    torrent_hash: str
+    category: str
+    qb_current_save_path: str
+    rt_current_directory: str
+    canonical_save_path: str  # inferred canonical path
+    is_drifted: bool
+    drift_reason: Optional[str] = None  # why it drifted
+    notes: list[str] = field(default_factory=list)
+
+
+def check_path_alignment(
+    current_path: str,
+    canonical_path: str,
+    tolerance_depth: int = 1,
+) -> bool:
+    """
+    Check if current path is aligned with canonical path.
+    Allows for single-level directory name variations (e.g., /tv/Show vs /tv for single-file torrents).
+    """
+    if not current_path or not canonical_path:
+        return False
+
+    current_norm = Path(current_path).as_posix().rstrip("/")
+    canonical_norm = Path(canonical_path).as_posix().rstrip("/")
+
+    if current_norm == canonical_norm:
+        return True
+
+    # Allow single subdirectory mismatch (single-file torrent case)
+    if tolerance_depth > 0:
+        current_parent = str(Path(current_norm).parent)
+        canonical_parent = str(Path(canonical_norm).parent)
+        if current_parent == canonical_parent:
+            return True
+
+    return False
+
+
+def detect_drift(
+    torrent_hash: str,
+    category: str,
+    tags: str = "",
+    current_save_path: str = "",
+    current_content_path: str = "",
+    current_rt_directory: str = "",
+    current_qb_state: str = "unknown",
+) -> DriftReport:
+    """
+    Detect save-path drift for a single torrent.
+    Returns DriftReport with canonical path and drift classification.
+    """
+    # Infer canonical path
+    inferred = infer_canonical_save_path(
+        category=category,
+        tags=tags,
+        current_save_path=current_save_path,
+        current_content_path=current_content_path,
+        current_rt_directory=current_rt_directory,
+    )
+
+    # Skip transient categories (they may be in transit due to ARR imports)
+    if inferred.reliability == "transient":
+        return DriftReport(
+            torrent_hash=torrent_hash,
+            category=category,
+            qb_current_save_path=current_save_path,
+            rt_current_directory=current_rt_directory,
+            canonical_save_path=inferred.canonical_save_path,
+            is_drifted=False,
+            drift_reason="transient_category_skipped",
+            notes=[f"Skipping transient {category} category (may be in ARR import transit)"],
+        )
+
+    # Check alignment
+    qb_aligned = check_path_alignment(current_save_path, inferred.canonical_save_path)
+    rt_aligned = check_path_alignment(current_rt_directory, inferred.canonical_save_path)
+
+    notes = []
+    drift_reasons = []
+
+    # Detect device mismatch
+    if inferred.device == "pool" and "pool" not in current_save_path.lower():
+        drift_reasons.append("wrong_device_should_be_pool")
+        notes.append("Item tagged ~noHL (no hardlinks) but save_path not on /pool")
+    elif inferred.device == "stash" and "pool" in current_save_path.lower():
+        drift_reasons.append("wrong_device_should_be_stash")
+        notes.append("Item should have hardlinks on /stash but save_path is on /pool")
+
+    # Detect category dir mismatch
+    if category in ARR_CATEGORY_FINAL_MAP:
+        final_cat = ARR_CATEGORY_FINAL_MAP[category]
+        if final_cat not in current_save_path and final_cat not in current_rt_directory:
+            if category in current_save_path or category in current_rt_directory:
+                drift_reasons.append("wrong_category_dir_pre_import")
+                notes.append(f"Still in pre-import {category}; should be {final_cat} after import")
+
+    # Detect legacy paths
+    legacy_markers = ["_qb-repair", "_qb-finish", "cross-seed-link", "/downloads/"]
+    for marker in legacy_markers:
+        if marker in current_save_path or marker in current_rt_directory:
+            drift_reasons.append("legacy_path")
+            notes.append(f"Legacy path marker found: {marker}")
+            break
+
+    # Detect general path mismatch
+    if not qb_aligned or not rt_aligned:
+        if not drift_reasons:
+            drift_reasons.append("path_mismatch")
+        notes.append(f"qB/RT mismatch: qb={qb_aligned}, rt={rt_aligned}")
+
+    is_drifted = len(drift_reasons) > 0
+    drift_reason = " + ".join(drift_reasons) if drift_reasons else None
+
+    return DriftReport(
+        torrent_hash=torrent_hash,
+        category=category,
+        qb_current_save_path=current_save_path,
+        rt_current_directory=current_rt_directory,
+        canonical_save_path=inferred.canonical_save_path,
+        is_drifted=is_drifted,
+        drift_reason=drift_reason,
         notes=notes,
     )

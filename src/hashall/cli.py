@@ -2214,6 +2214,107 @@ def payload_hitchhiker_audit_cmd(db, json_output, limit):
     print(report)
 
 
+@payload.command("save-path-audit")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+@click.option("--limit", type=int, default=None, help="Limit number of torrents audited.")
+@click.option("--drifted-only", is_flag=True, help="Show only drifted items.")
+def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
+    """
+    Audit save-path drift across all qBittorrent torrents.
+
+    Compares inferred canonical save paths (from category/tags) against actual
+    qB and RT paths. Reports items that have drifted due to device mismatch,
+    legacy paths, category changes, or qB/RT misalignment.
+
+    Skips transient ARR categories (sonarr, radarr, etc.) which may be in transit.
+    """
+    import json
+
+    from hashall.qbittorrent import QBittorrentClient
+    from hashall.rt_cache import load_rt_cache_snapshot
+    from hashall.save_path_inference import detect_drift
+
+    # Fetch all qB torrents
+    qb_client = QBittorrentClient()
+    try:
+        qb_torrents = qb_client.get_torrents() or []
+    except Exception as e:
+        click.echo(f"Error fetching qB torrents: {e}", err=True)
+        return
+
+    # Load RT cache for directory info
+    rt_state = load_rt_cache_snapshot() or {}
+
+    # Audit each torrent
+    drift_reports = []
+    count = 0
+    for qb_torrent in qb_torrents:
+        if limit and count >= limit:
+            break
+
+        rt_info = rt_state.get(qb_torrent.hash.lower(), {})
+
+        report = detect_drift(
+            torrent_hash=qb_torrent.hash,
+            category=qb_torrent.category,
+            tags=qb_torrent.tags,
+            current_save_path=qb_torrent.save_path,
+            current_content_path=qb_torrent.content_path,
+            current_rt_directory=rt_info.get("d.directory", ""),
+            current_qb_state=qb_torrent.state,
+        )
+
+        # Filter by drift status
+        if drifted_only and not report.is_drifted:
+            continue
+
+        drift_reports.append(report)
+        count += 1
+
+    # Output results
+    if json_output:
+        output = json.dumps(
+            [
+                {
+                    "hash": r.torrent_hash[:16],
+                    "category": r.category,
+                    "is_drifted": r.is_drifted,
+                    "reason": r.drift_reason,
+                    "qb_save_path": r.qb_current_save_path,
+                    "rt_directory": r.rt_current_directory,
+                    "canonical_path": r.canonical_save_path,
+                    "notes": r.notes,
+                }
+                for r in drift_reports
+            ],
+            indent=2,
+        )
+        print(output)
+    else:
+        # Text output
+        drifted_count = sum(1 for r in drift_reports if r.is_drifted)
+        clean_count = len(drift_reports) - drifted_count
+
+        print(f"Save-Path Audit: {len(drift_reports)} torrents scanned")
+        print(f"  ✅ Clean: {clean_count}")
+        print(f"  ⚠️  Drifted: {drifted_count}")
+        print()
+
+        if drifted_count > 0:
+            print("DRIFTED ITEMS:")
+            for r in drift_reports:
+                if not r.is_drifted:
+                    continue
+                print(f"  {r.torrent_hash[:16]}  {r.category}")
+                print(f"    qb_save: {r.qb_current_save_path}")
+                print(f"    rt_dir:  {r.rt_current_directory}")
+                print(f"    expected: {r.canonical_save_path}")
+                print(f"    reason: {r.drift_reason}")
+                for note in r.notes:
+                    print(f"    note: {note}")
+
+
 @payload.command("show")
 @click.argument("torrent_hash")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
