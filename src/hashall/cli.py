@@ -2214,6 +2214,36 @@ def payload_hitchhiker_audit_cmd(db, json_output, limit):
     print(report)
 
 
+@payload.command("hitchhiker-split")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    help="Dry-run (default) shows planned actions. --execute performs hardlinks + qB/RT repoint.",
+)
+@click.option("--limit", type=int, default=None, help="Limit number of groups to split.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+def payload_hitchhiker_split_cmd(db, dry_run, limit, json_output):
+    """
+    Split N→1 hitchhiker payload groups: for each secondary hash, create a
+    hardlinked copy of the shared content tree under _rehome-unique/<hash16>/
+    and repoint qB + RT to the new per-hash location.
+
+    Only processes SAFE_TO_SPLIT groups (all hashes stopped/paused, none in
+    checking/active state). Groups are processed smallest-first.
+
+    Run with --dry-run first (default) to preview what will happen.
+    Then re-run with --execute to perform the split.
+    """
+    from hashall.hitchhiker import audit_hitchhiker_groups
+    from hashall.hitchhiker_split import split_hitchhiker_groups, format_split_report
+
+    groups = audit_hitchhiker_groups(db_path=db)
+    results = split_hitchhiker_groups(groups, dry_run=dry_run, limit=limit)
+    report = format_split_report(results, dry_run=dry_run, json_output=json_output)
+    print(report)
+
+
 @payload.command("save-path-audit")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option("--json-output", is_flag=True, help="Emit JSON output.")
