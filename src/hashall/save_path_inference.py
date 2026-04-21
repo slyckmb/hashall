@@ -5,6 +5,7 @@ Ported from ~/dev/sys/docker/gluetun_qbit/qbittorrent_vpn/bin/qb-to-rt-migrate.p
 (preserve logic, adapt to hashall context).
 """
 
+import functools
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
@@ -224,6 +225,7 @@ def derive_policy_target_save_path(
     return base_save_path, None, strategy
 
 
+@functools.lru_cache(maxsize=1)
 def load_qbm_config(config_path: str = "/home/michael/dev/sys/docker/qbit_manage/config.yml") -> dict[str, str]:
     """
     Load qbit_manage config.yml and extract category → save_path mapping.
@@ -305,17 +307,17 @@ def infer_canonical_save_path(
         subdir = ""
         reliability = "ambiguous"
     elif category_norm.lower() == "cross-seed":
-        # Extract tracker slug from tags or paths
-        tracker_tags = tags_set - SYSTEM_TAGS
-        if tracker_tags:
-            tracker_slug = sorted(tracker_tags)[0]  # first remaining tag
-            subdir = f"cross-seed/{tracker_slug}"
+        # Prefer path-based provider (authoritative: qBM places files there)
+        provider = extract_cross_seed_provider_name(current_save_path, current_content_path)
+        if provider:
+            subdir = f"cross-seed/{provider}"
         else:
-            # Try to extract from current paths
-            provider = extract_cross_seed_provider_name(current_save_path, current_content_path)
-            if provider:
-                subdir = f"cross-seed/{provider}"
-                notes.append(f"cross-seed provider extracted from path: {provider}")
+            # Fall back to tags
+            tracker_tags = tags_set - SYSTEM_TAGS
+            if tracker_tags:
+                tracker_slug = sorted(tracker_tags)[0]  # first remaining tag
+                subdir = f"cross-seed/{tracker_slug}"
+                notes.append(f"cross-seed provider from tags: {tracker_slug}")
             else:
                 subdir = "cross-seed"
                 notes.append("cross-seed category, but no provider found in paths or tags")
@@ -380,12 +382,9 @@ def check_path_alignment(
     if current_norm == canonical_norm:
         return True
 
-    # Allow single subdirectory mismatch (single-file torrent case)
-    if tolerance_depth > 0:
-        current_parent = str(Path(current_norm).parent)
-        canonical_parent = str(Path(canonical_norm).parent)
-        if current_parent == canonical_parent:
-            return True
+    # current is a child of canonical (single-file torrent: save_path/filename or deeper)
+    if tolerance_depth > 0 and current_norm.startswith(canonical_norm + "/"):
+        return True
 
     return False
 
@@ -425,28 +424,20 @@ def detect_drift(
             notes=[f"Skipping transient {category} category (may be in ARR import transit)"],
         )
 
-    # Check alignment
+    # Check qB alignment
     qb_aligned = check_path_alignment(current_save_path, inferred.canonical_save_path)
-    rt_aligned = check_path_alignment(current_rt_directory, inferred.canonical_save_path)
 
     notes = []
     drift_reasons = []
 
-    # Detect device mismatch
-    if inferred.device == "pool" and "pool" not in current_save_path.lower():
+    # Detect device mismatch (use prefix check, not substring)
+    on_pool = current_save_path.startswith(APPROVED_SAVE_ROOTS[1])
+    if inferred.device == "pool" and not on_pool:
         drift_reasons.append("wrong_device_should_be_pool")
         notes.append("Item tagged ~noHL (no hardlinks) but save_path not on /pool")
-    elif inferred.device == "stash" and "pool" in current_save_path.lower():
+    elif inferred.device == "stash" and on_pool:
         drift_reasons.append("wrong_device_should_be_stash")
         notes.append("Item should have hardlinks on /stash but save_path is on /pool")
-
-    # Detect category dir mismatch
-    if category in ARR_CATEGORY_FINAL_MAP:
-        final_cat = ARR_CATEGORY_FINAL_MAP[category]
-        if final_cat not in current_save_path and final_cat not in current_rt_directory:
-            if category in current_save_path or category in current_rt_directory:
-                drift_reasons.append("wrong_category_dir_pre_import")
-                notes.append(f"Still in pre-import {category}; should be {final_cat} after import")
 
     # Detect legacy paths
     legacy_markers = ["_qb-repair", "_qb-finish", "cross-seed-link", "/downloads/"]
@@ -456,11 +447,20 @@ def detect_drift(
             notes.append(f"Legacy path marker found: {marker}")
             break
 
-    # Detect general path mismatch
-    if not qb_aligned or not rt_aligned:
+    # Detect RT path mismatch (only when RT directory is known)
+    if current_rt_directory:
+        rt_aligned = check_path_alignment(current_rt_directory, inferred.canonical_save_path)
+        if not rt_aligned:
+            drift_reasons.append("rt_path_mismatch")
+            notes.append(f"RT path wrong: {current_rt_directory!r} != {inferred.canonical_save_path!r}")
+    else:
+        notes.append("rt_directory unknown (not in RT cache snapshot)")
+
+    # Detect general qB path mismatch
+    if not qb_aligned:
         if not drift_reasons:
             drift_reasons.append("path_mismatch")
-        notes.append(f"qB/RT mismatch: qb={qb_aligned}, rt={rt_aligned}")
+        notes.append(f"qB path mismatch: {current_save_path!r} != {inferred.canonical_save_path!r}")
 
     is_drifted = len(drift_reasons) > 0
     drift_reason = " + ".join(drift_reasons) if drift_reasons else None

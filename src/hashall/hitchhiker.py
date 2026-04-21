@@ -11,8 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from .qbittorrent import QBittorrentClient
-from .rtorrent import load_rt_session_directories
+from .qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
 from .rt_cache import load_rt_cache_snapshot
 from .utils import find_db_path
 
@@ -46,7 +45,8 @@ def query_hitchhiker_groups(db_path: Optional[str] = None, limit: Optional[int] 
     conn = sqlite3.connect(str(db), timeout=30.0)
     conn.row_factory = sqlite3.Row
     try:
-        query = """
+        limit_clause = f" LIMIT {limit}" if limit else ""
+        query = f"""
             SELECT ti.payload_id, ti.torrent_hash, ti.save_path,
                    p.root_path, p.file_count, p.total_bytes
             FROM torrent_instances ti
@@ -54,11 +54,10 @@ def query_hitchhiker_groups(db_path: Optional[str] = None, limit: Optional[int] 
             WHERE ti.payload_id IN (
                 SELECT payload_id FROM torrent_instances
                 GROUP BY payload_id HAVING COUNT(*) > 1
+                ORDER BY payload_id{limit_clause}
             )
             ORDER BY ti.payload_id, ti.torrent_hash
         """
-        if limit:
-            query += f" LIMIT {limit}"
         rows = conn.execute(query).fetchall()
         return [dict(row) for row in rows]
     finally:
@@ -93,17 +92,33 @@ def audit_hitchhiker_groups(
         groups_by_payload[payload_id]["hashes"].append(row["torrent_hash"])
         groups_by_payload[payload_id]["save_paths"].add(row["save_path"])
 
-    # Fetch live qB and RT state
-    qb_client = QBittorrentClient()
-    all_hashes = [row["torrent_hash"] for row in catalog_rows]
-    qb_torrents = {}
+    # Load qB state from file cache (avoids live API hit)
+    qb_by_hash: dict = {}
     try:
-        qb_torrents = qb_client.get_torrents_by_hashes(all_hashes) or {}
+        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
+        if cached_raw is not None:
+            qb_client = QBittorrentClient()
+            for r in cached_raw:
+                t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                if t and t.hash:
+                    qb_by_hash[t.hash.lower()] = t
+        else:
+            # Fallback to live if cache absent/stale
+            qb_client = QBittorrentClient()
+            all_hashes = [row["torrent_hash"] for row in catalog_rows]
+            live = qb_client.get_torrents_by_hashes(all_hashes) or {}
+            qb_by_hash = {h.lower(): v for h, v in live.items()}
     except Exception:
-        pass  # qB might not be accessible; continue with what we have
+        pass  # qB not accessible; continue with what we have
 
-    rt_state = load_rt_cache_snapshot() or {}
-    rt_dirs = load_rt_session_directories() or {}
+    # Load RT state from cache snapshot and index by hash
+    rt_by_hash: dict = {}
+    try:
+        snapshot = load_rt_cache_snapshot() or {}
+        rows = snapshot.get("rows") or []
+        rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
+    except Exception:
+        pass
 
     # Classify each group
     groups = []
@@ -117,13 +132,13 @@ def audit_hitchhiker_groups(
 
         for hash_val in hashes:
             # Check qB state
-            qb_torrent = qb_torrents.get(hash_val.lower())
+            qb_torrent = qb_by_hash.get(hash_val.lower())
             qb_state = qb_torrent.state if qb_torrent else "unknown"
             qb_save = qb_torrent.save_path if qb_torrent else ""
 
             # Check RT state
-            rt_info = rt_state.get(hash_val, {})
-            rt_dir = rt_info.get("d.directory", "")
+            rt_info = rt_by_hash.get(hash_val.lower(), {})
+            rt_dir = rt_info.get("directory", "")
 
             # Check if already split (under _rehome-unique)
             if "_rehome-unique" in qb_save or "_rehome-unique" in rt_dir:

@@ -2231,20 +2231,35 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
     """
     import json
 
-    from hashall.qbittorrent import QBittorrentClient
+    from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
     from hashall.rt_cache import load_rt_cache_snapshot
     from hashall.save_path_inference import detect_drift
 
-    # Fetch all qB torrents
-    qb_client = QBittorrentClient()
+    # Load qB torrents from file cache (avoids live API hit)
+    qb_torrents = []
     try:
-        qb_torrents = qb_client.get_torrents() or []
+        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
+        if cached_raw is not None:
+            qb_client = QBittorrentClient()
+            qb_torrents = [
+                qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                for r in cached_raw
+            ]
+        else:
+            # Fallback to live if cache absent/stale
+            qb_torrents = QBittorrentClient().get_torrents() or []
     except Exception as e:
-        click.echo(f"Error fetching qB torrents: {e}", err=True)
+        click.echo(f"Error loading qB torrent data: {e}", err=True)
         return
 
-    # Load RT cache for directory info
-    rt_state = load_rt_cache_snapshot() or {}
+    # Load RT cache and index by hash
+    rt_by_hash: dict = {}
+    try:
+        snapshot = load_rt_cache_snapshot() or {}
+        rows = snapshot.get("rows") or []
+        rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
+    except Exception:
+        pass
 
     # Audit each torrent
     drift_reports = []
@@ -2253,7 +2268,7 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
         if limit and count >= limit:
             break
 
-        rt_info = rt_state.get(qb_torrent.hash.lower(), {})
+        rt_info = rt_by_hash.get(qb_torrent.hash.lower(), {})
 
         report = detect_drift(
             torrent_hash=qb_torrent.hash,
@@ -2261,7 +2276,7 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
             tags=qb_torrent.tags,
             current_save_path=qb_torrent.save_path,
             current_content_path=qb_torrent.content_path,
-            current_rt_directory=rt_info.get("d.directory", ""),
+            current_rt_directory=rt_info.get("directory", ""),
             current_qb_state=qb_torrent.state,
         )
 

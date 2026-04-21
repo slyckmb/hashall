@@ -1,0 +1,202 @@
+"""Tests for save_path_inference module."""
+
+import pytest
+
+from hashall.save_path_inference import (
+    APPROVED_SAVE_ROOTS,
+    check_path_alignment,
+    detect_drift,
+    infer_canonical_save_path,
+)
+
+STASH = APPROVED_SAVE_ROOTS[0]  # /data/media/torrents/seeding
+POOL = APPROVED_SAVE_ROOTS[1]  # /pool/media/torrents/seeding
+
+
+# ---- check_path_alignment ----
+
+
+@pytest.mark.parametrize(
+    "current,canonical,expected",
+    [
+        # Exact match
+        (f"{STASH}/tv", f"{STASH}/tv", True),
+        # Child path (single-file torrent: save_path/filename)
+        (f"{STASH}/tv/Show.mkv", f"{STASH}/tv", True),
+        # Nested child (multi-level, e.g. rt directory is deeper)
+        (f"{STASH}/tv/Show/ep01.mkv", f"{STASH}/tv", True),
+        # Provider subdir of cross-seed is a child
+        (f"{STASH}/cross-seed/FileList.io", f"{STASH}/cross-seed", True),
+        # Wrong sibling directory
+        (f"{STASH}/movies", f"{STASH}/tv", False),
+        # Empty current → False
+        ("", f"{STASH}/tv", False),
+        # Empty canonical → False
+        (f"{STASH}/tv", "", False),
+    ],
+)
+def test_check_path_alignment(current, canonical, expected):
+    assert check_path_alignment(current, canonical) == expected
+
+
+# ---- infer_canonical_save_path ----
+
+
+@pytest.mark.parametrize(
+    "category,tags,save_path,expected_canonical,expected_device,reliability",
+    [
+        # cross-seed: path-based provider wins over tags
+        (
+            "cross-seed",
+            "cross-seed, private, Aither (API)",
+            f"{STASH}/cross-seed/Aither (API)",
+            f"{STASH}/cross-seed/Aither (API)",
+            "stash",
+            "reliable",
+        ),
+        # cross-seed + ~noHL → pool device, path-based provider
+        (
+            "cross-seed",
+            "cross-seed, ~noHL, fearnopeer",
+            f"{POOL}/cross-seed/fearnopeer",
+            f"{POOL}/cross-seed/fearnopeer",
+            "pool",
+            "reliable",
+        ),
+        # cross-seed: path extraction wins over generic non-provider tags
+        (
+            "cross-seed",
+            "cross-seed, private",
+            f"{STASH}/cross-seed/FileList.io",
+            f"{STASH}/cross-seed/FileList.io",
+            "stash",
+            "reliable",
+        ),
+        # Normal category
+        (
+            "tv",
+            "private",
+            f"{STASH}/tv",
+            f"{STASH}/tv",
+            "stash",
+            "reliable",
+        ),
+        # ARR pre-import → transient
+        (
+            "sonarr",
+            "private",
+            f"{STASH}/sonarr",
+            f"{STASH}/sonarr",
+            "stash",
+            "transient",
+        ),
+        # Uncategorized → root, ambiguous
+        (
+            "Uncategorized",
+            "private",
+            STASH,
+            STASH,
+            "stash",
+            "ambiguous",
+        ),
+    ],
+)
+def test_infer_canonical_save_path(
+    category, tags, save_path, expected_canonical, expected_device, reliability
+):
+    result = infer_canonical_save_path(
+        category=category,
+        tags=tags,
+        current_save_path=save_path,
+    )
+    assert result.canonical_save_path == expected_canonical, (
+        f"canonical mismatch: got {result.canonical_save_path!r}"
+    )
+    assert result.device == expected_device
+    assert result.reliability == reliability
+
+
+# ---- detect_drift ----
+
+
+@pytest.mark.parametrize(
+    "scenario,category,tags,qb_path,rt_dir,expected_drifted,expected_reason_contains",
+    [
+        # qB correct, RT correct — no drift
+        (
+            "clean",
+            "tv", "private",
+            f"{STASH}/tv", f"{STASH}/tv",
+            False, None,
+        ),
+        # qB correct, RT not in cache (empty string) — not drift, note only
+        (
+            "rt_missing",
+            "tv", "private",
+            f"{STASH}/tv", "",
+            False, None,
+        ),
+        # qB correct, RT path wrong — rt_path_mismatch
+        (
+            "rt_wrong",
+            "tv", "private",
+            f"{STASH}/tv", f"{STASH}/movies",
+            True, "rt_path_mismatch",
+        ),
+        # qB legacy cross-seed-link path
+        (
+            "legacy",
+            "tv", "private",
+            f"{STASH}/cross-seed-link/FileList.io", "",
+            True, "legacy_path",
+        ),
+        # qB on pool but device=stash (no ~noHL tag)
+        (
+            "wrong_device_stash",
+            "tv", "private",
+            f"{POOL}/tv", f"{POOL}/tv",
+            True, "wrong_device_should_be_stash",
+        ),
+        # qB on stash but device=pool (~noHL tag present)
+        (
+            "wrong_device_pool",
+            "tv", "private, ~noHL",
+            f"{STASH}/tv", "",
+            True, "wrong_device_should_be_pool",
+        ),
+        # qB correct, RT is a child path (single-file torrent) — not drift
+        (
+            "rt_child_path",
+            "tv", "private",
+            f"{STASH}/tv", f"{STASH}/tv/Show.S01E01.mkv",
+            False, None,
+        ),
+        # sonarr (ARR transient) — skipped entirely, not drifted
+        (
+            "transient",
+            "sonarr", "private",
+            f"{STASH}/sonarr", f"{STASH}/sonarr",
+            False, "transient_category_skipped",
+        ),
+    ],
+)
+def test_detect_drift(
+    scenario, category, tags, qb_path, rt_dir,
+    expected_drifted, expected_reason_contains
+):
+    report = detect_drift(
+        torrent_hash="a" * 40,
+        category=category,
+        tags=tags,
+        current_save_path=qb_path,
+        current_rt_directory=rt_dir,
+    )
+    assert report.is_drifted == expected_drifted, (
+        f"[{scenario}] expected is_drifted={expected_drifted}, "
+        f"got {report.is_drifted} (reason={report.drift_reason!r}, notes={report.notes!r})"
+    )
+    if expected_reason_contains:
+        assert expected_reason_contains in (report.drift_reason or ""), (
+            f"[{scenario}] expected {expected_reason_contains!r} "
+            f"in drift_reason={report.drift_reason!r}"
+        )
