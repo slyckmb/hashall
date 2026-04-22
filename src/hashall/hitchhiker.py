@@ -150,6 +150,14 @@ def audit_hitchhiker_groups(
                 busy_hashes.append(hash_val)
                 notes.append(f"  {hash_val[:12]}: qb state={qb_state} (busy)")
                 all_stopped = False
+            elif qb_state == "unknown":
+                # Hash not in qB. Check if still active in RT.
+                # If not in qB but in RT + active → block. If in neither → safe (orphaned).
+                rt_state = rt_info.get("state", "")
+                if rt_state and rt_state not in ("stopped", "paused"):
+                    all_stopped = False
+                    notes.append(f"  {hash_val[:12]}: missing from qB but active in RT")
+                # else: not in either client, treat as safe (orphaned)
             elif qb_state not in ("stoppedDL", "stoppedUP", "pausedDL", "pausedUP"):
                 # Not in a stopped/paused state
                 all_stopped = False
