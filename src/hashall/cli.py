@@ -2360,6 +2360,50 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
                     print(f"    note: {note}")
 
 
+@payload.command("save-path-repair")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    help="Dry-run (default) shows planned moves. --execute performs the repair.",
+)
+@click.option("--limit", type=int, default=None, help="Limit number of hashes to repair.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+def payload_save_path_repair_cmd(dry_run, limit, json_output):
+    """
+    Move secondary hashes from _rehome-unique/<hash16>/ to canonical save paths.
+
+    After hitchhiker-split, secondary hashes live in temporary _rehome-unique/
+    locations. This command moves them to their canonical seeding paths based on
+    category/tags and device (stash vs pool) placement rules.
+
+    Infers canonical paths using the catalog's original save_path as a category hint.
+
+    Run with --dry-run first (default) to preview what will happen.
+    Then re-run with --execute to perform the repair.
+    """
+    from hashall.save_path_repair import audit_repair_candidates, execute_repair, format_repair_report
+
+    # Audit repair candidates
+    actions = audit_repair_candidates()
+    if not actions:
+        print("No repair candidates found (no hashes in _rehome-unique/).")
+        return
+
+    if limit:
+        actions = actions[:limit]
+
+    # Execute repairs
+    results = []
+    for i, action in enumerate(actions, 1):
+        result = execute_repair(action.hash_val, dry_run=dry_run)
+        results.append(result)
+        if (i % 10) == 0:
+            click.echo(f"  [{i}/{len(actions)}] processed...", err=True)
+
+    report = format_repair_report(results, dry_run=dry_run, json_output=json_output)
+    print(report)
+
+
 @payload.command("show")
 @click.argument("torrent_hash")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
