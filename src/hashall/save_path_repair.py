@@ -87,8 +87,12 @@ def _api_path(path_on_fs: str, fs_root: str, api_root: str) -> str:
 
 def _move_tree(src: Path, dst_parent: Path, *, dry_run: bool) -> int:
     """
-    Move src tree into dst_parent (rename operation, not copy+delete).
+    Move contents of src directory into dst_parent.
+    For a directory src, each top-level item in src is moved into dst_parent.
+    For a single file src, the file itself is moved into dst_parent.
     Returns number of files moved (or counted in dry-run).
+
+    dst_parent should be the canonical save_path directory (not its parent).
     """
     count = 0
 
@@ -102,7 +106,7 @@ def _move_tree(src: Path, dst_parent: Path, *, dry_run: bool) -> int:
         for item in sorted(src.rglob("*")):
             if not item.is_file():
                 continue
-            rel = item.relative_to(src.parent)  # keeps src.name in path
+            rel = item.relative_to(src)  # relative to src (not src.parent) — excludes src dir name
             dst_file = dst_parent / rel
             if not dry_run:
                 dst_file.parent.mkdir(parents=True, exist_ok=True)
@@ -220,16 +224,85 @@ def audit_repair_candidates(
     return actions
 
 
+DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
+DEFAULT_QB_API_URL = "http://localhost:9003"
+
+
+def _resolve_full_hash(hash_val: str, qb_by_hash: dict, conn_db) -> str:
+    """
+    Resolve a possibly-truncated hash (hash16) to its full 40-char hash.
+    Searches qB dict by prefix, then DB by LIKE prefix.
+    Returns the input unchanged if already 40 chars or not found.
+    """
+    if len(hash_val) >= 40:
+        return hash_val.lower()
+    prefix = hash_val.lower()
+    # Try qB dict by prefix match
+    for full_h in qb_by_hash:
+        if full_h.startswith(prefix):
+            return full_h
+    # Try DB by LIKE
+    if conn_db is not None:
+        try:
+            row = conn_db.execute(
+                "SELECT torrent_hash FROM torrent_instances WHERE torrent_hash LIKE ? LIMIT 1",
+                [prefix + "%"],
+            ).fetchone()
+            if row:
+                return str(row[0]).lower()
+        except Exception:
+            pass
+    return prefix  # fallback: return as-is
+
+
+def _docker_stop_qb(container: str = DEFAULT_QB_CONTAINER) -> None:
+    """Stop the qBittorrent Docker container."""
+    import subprocess
+    subprocess.run(["docker", "stop", container], check=True, capture_output=True, text=True)
+
+
+def _docker_start_qb(
+    container: str = DEFAULT_QB_CONTAINER,
+    qb_url: str = DEFAULT_QB_API_URL,
+    timeout_s: float = 90.0,
+) -> None:
+    """Start the qBittorrent Docker container and wait for API to become reachable."""
+    import subprocess, time, requests as _requests
+    subprocess.run(["docker", "start", container], check=True, capture_output=True, text=True)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            r = _requests.get(f"{qb_url}/api/v2/app/version", timeout=3)
+            if r.status_code == 200:
+                return
+        except Exception:
+            pass
+        time.sleep(2)
+    raise TimeoutError(f"qB API not ready after {timeout_s}s at {qb_url}")
+
+
 def execute_repair(
     hash_val: str,
     *,
     dry_run: bool = True,
     qb_client: Optional[QBittorrentClient] = None,
     rpc_url: str = DEFAULT_RT_RPC_URL,
+    qb_container: str = DEFAULT_QB_CONTAINER,
+    qb_url: str = DEFAULT_QB_API_URL,
 ) -> RepairResult:
     """
-    Repair one hash: move from _rehome-unique/<hash16>/ to canonical path.
-    Uses pre-computed audit action if available (faster); otherwise computes on the fly.
+    Repair one hash: move from _rehome-unique/<hash_dir>/ to canonical path.
+
+    Correct workflow (live mode):
+      1. Move files from _rehome-unique/<hash_dir>/ to canonical_path_fs/
+      2. Stop qB container
+      3. Patch fastresume with canonical API path
+      4. Start qB container
+      5. Repoint RT to canonical content directory
+      6. Recheck torrent in qB
+
+    hash_val may be truncated (16 chars from dir name) or full (40 chars).
+    Full hash is resolved via qB/DB prefix lookup.
     """
     import sqlite3
 
@@ -238,27 +311,32 @@ def execute_repair(
         category="unknown",
     )
 
-    # Find the hash in rehome_unique
+    # Find the hash in _rehome-unique
     rehome_hashes = _scan_rehome_unique_hashes()
     source_path_fs = rehome_hashes.get(hash_val.lower())
     if not source_path_fs:
         result.error = f"hash not found in _rehome-unique: {hash_val}"
         return result
 
-    # Load qB and RT state
+    # Load qB state from cache (avoids live API hit)
+    if qb_client is None:
+        qb_client = QBittorrentClient()
     qb_by_hash: dict = {}
     try:
         cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
         if cached_raw is not None:
-            if qb_client is None:
-                qb_client = QBittorrentClient()
             for r in cached_raw:
                 t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
                 if t and t.hash:
                     qb_by_hash[t.hash.lower()] = t
+        else:
+            # Cache miss: fetch live for just this hash (expensive but correct)
+            live = qb_client.get_torrents_by_hashes([hash_val]) or {}
+            qb_by_hash = {h.lower(): v for h, v in live.items()}
     except Exception:
         pass
 
+    # Load RT state from cache
     rt_by_hash: dict = {}
     try:
         snapshot = load_rt_cache_snapshot() or {}
@@ -267,82 +345,127 @@ def execute_repair(
     except Exception:
         pass
 
-    # Load catalog entry for category hint
+    # Open DB for catalog hints and hash resolution
+    conn_db = None
     catalog_info: dict = {}
     try:
         db = find_db_path()
-        conn = sqlite3.connect(str(db), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        query = """
-            SELECT ti.save_path FROM torrent_instances ti
-            WHERE ti.torrent_hash = ? LIMIT 1
-        """
-        row = conn.execute(query, [hash_val]).fetchone()
-        if row:
-            catalog_info["save_path"] = row["save_path"]
-        conn.close()
+        conn_db = sqlite3.connect(str(db), timeout=30.0)
+        conn_db.row_factory = sqlite3.Row
     except Exception:
         pass
 
-    qb_torrent = qb_by_hash.get(hash_val.lower())
-    rt_info = rt_by_hash.get(hash_val.lower(), {})
+    # Resolve hash_val to full 40-char hash (hash_val may be truncated 16-char dir name)
+    effective_hash = _resolve_full_hash(hash_val.lower(), qb_by_hash, conn_db)
+
+    # Load catalog entry for category hint
+    try:
+        if conn_db is not None:
+            row = conn_db.execute(
+                "SELECT ti.save_path FROM torrent_instances ti WHERE ti.torrent_hash = ? LIMIT 1",
+                [effective_hash],
+            ).fetchone()
+            if row:
+                catalog_info["save_path"] = row["save_path"]
+    except Exception:
+        pass
+    finally:
+        if conn_db is not None:
+            try:
+                conn_db.close()
+            except Exception:
+                pass
+
+    qb_torrent = qb_by_hash.get(effective_hash)
+    rt_info = rt_by_hash.get(effective_hash, {})
 
     qb_category = qb_torrent.category if qb_torrent else ""
     result.category = qb_category or "unknown"
 
-    # Infer canonical path
-    # Priority: use qB category/tags (current authority), fall back to catalog hints
-    # Note: qb_torrent.tags is already a comma-separated string, not a list
+    # qb_torrent.tags is a comma-separated string (not a list)
     qb_tags = qb_torrent.tags if qb_torrent and qb_torrent.tags else ""
     catalog_save_path = catalog_info.get("save_path", "")
 
     inferred = infer_canonical_save_path(
         category=qb_category,
         tags=qb_tags,
-        current_save_path=catalog_save_path,  # May contain _rehome-unique, but we use qB category instead
+        current_save_path=catalog_save_path,
         current_rt_directory=rt_info.get("directory", ""),
     )
 
-    # Skip if target path is malformed (e.g., ends with /)
+    # Reject malformed canonical paths
     if not inferred.canonical_save_path or inferred.canonical_save_path.endswith("/-"):
         result.error = f"malformed canonical path: {inferred.canonical_save_path}"
         return result
 
-    # Determine target paths
-    target_fs_base = inferred.canonical_save_path.replace("/data/media", "/stash/media") if inferred.device == "stash" else inferred.canonical_save_path
+    # Filesystem path: stash uses /stash/media/, pool uses /pool/media/ (same as API)
+    if inferred.device == "stash":
+        target_fs = inferred.canonical_save_path.replace("/data/media", "/stash/media")
+    else:
+        target_fs = inferred.canonical_save_path  # pool: API path == FS path
 
-    # Move files (dry-run or actual)
+    # RT needs the content directory: canonical_api/torrent_name for multi-file
+    torrent_name = qb_torrent.name if qb_torrent else ""
+    if torrent_name:
+        rt_target_dir = inferred.canonical_save_path.rstrip("/") + "/" + torrent_name
+    else:
+        rt_target_dir = inferred.canonical_save_path
+
     try:
         src = Path(source_path_fs)
-        dst_parent = Path(target_fs_base).parent
-        files_moved = _move_tree(src, dst_parent, dry_run=dry_run)
+        dst = Path(target_fs)  # canonical save_path dir (not its parent)
+        files_moved = _move_tree(src, dst, dry_run=dry_run)
 
-        # Repoint qB only if it exists and is not in dry-run
-        if not dry_run and qb_torrent:
-            if qb_client is None:
-                qb_client = QBittorrentClient()
-            ok = qb_client.set_location(hash_val, inferred.canonical_save_path)
-            if not ok:
-                raise RuntimeError("qb set_location returned False")
+        if not dry_run:
+            # Stop qB, patch fastresume, start qB
+            fastresume_path = qb_client._fastresume_path(effective_hash)
+            if fastresume_path.exists():
+                _docker_stop_qb(qb_container)
+                try:
+                    from .fastresume import patch_fastresume_file
+                    patch_fastresume_file(
+                        fastresume_path,
+                        inferred.canonical_save_path,
+                        ".bak-repair",
+                    )
+                finally:
+                    _docker_start_qb(qb_container, qb_url)
+                result.notes.append(f"patched fastresume → {inferred.canonical_save_path}")
+            else:
+                result.notes.append(f"fastresume not found: {fastresume_path}")
 
-        # Repoint RT only if it exists and is not in dry-run
-        if not dry_run and rt_info:
-            rt_apply_directory_repoint(
-                hash_val,
-                inferred.canonical_save_path,
-                rpc_url=rpc_url,
-                restart=True,
-            )
+            # Repoint RT (best-effort)
+            if rt_info:
+                try:
+                    rt_apply_directory_repoint(
+                        effective_hash,
+                        rt_target_dir,
+                        rpc_url=rpc_url,
+                        restart=True,
+                    )
+                    result.notes.append(f"RT repointed → {rt_target_dir}")
+                except Exception as rt_exc:
+                    result.notes.append(f"RT repoint failed: {rt_exc}")
+
+            # Recheck torrent to confirm content at new location
+            try:
+                qb_client.recheck_torrent(effective_hash)
+                result.notes.append("recheck triggered")
+            except Exception as rc_exc:
+                result.notes.append(f"recheck failed: {rc_exc}")
 
         result.success = True
-        result.notes.append(f"moved {files_moved} files to {target_fs_base}")
+        result.notes.append(
+            f"{'[dry-run] would move' if dry_run else 'moved'} {files_moved} files"
+            f" from {source_path_fs} → {target_fs}"
+        )
 
     except Exception as exc:
         result.error = str(exc)
         result.notes.append(f"FAILED: {exc}")
 
     if dry_run:
-        result.notes.append("dry-run: no files moved, no qB/RT changes made")
+        result.notes.append("dry-run: no files moved, no qB/fastresume/RT changes made")
 
     return result
 

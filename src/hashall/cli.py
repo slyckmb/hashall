@@ -2404,6 +2404,49 @@ def payload_save_path_repair_cmd(dry_run, limit, json_output):
     print(report)
 
 
+@payload.command("save-path-recover")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    help="Dry-run (default) shows recovery plan. --execute performs the recovery.",
+)
+@click.option("--limit", type=int, default=None, help="Limit number of hashes to recover.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+def payload_save_path_recover_cmd(dry_run, limit, json_output):
+    """
+    Recover hashes displaced by the broken save-path-repair run.
+
+    Finds all missingFiles hashes in qBittorrent, locates their displaced files
+    on filesystem, moves them to correct canonical paths, then (--execute only)
+    stops qB, patches fastresume files in batch, restarts qB, and rechecks all.
+
+    Run with --dry-run first to verify the recovery plan, then --execute to fix.
+    """
+    from hashall.save_path_recovery import plan_recovery, execute_recovery, format_recovery_report
+
+    click.echo("Planning recovery (fetching qB state)...", err=True)
+    actions = plan_recovery()
+    if not actions:
+        print("No missingFiles hashes found — nothing to recover.")
+        return
+
+    if limit:
+        actions = actions[:limit]
+
+    click.echo(f"Found {len(actions)} missingFiles hashes to recover.", err=True)
+
+    if dry_run:
+        report = format_recovery_report(actions, [], dry_run=True, json_output=json_output)
+        print(report)
+        return
+
+    click.echo("Executing recovery...", err=True)
+    results = execute_recovery(actions, dry_run=False)
+
+    report = format_recovery_report(actions, results, dry_run=False, json_output=json_output)
+    print(report)
+
+
 @payload.command("show")
 @click.argument("torrent_hash")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
