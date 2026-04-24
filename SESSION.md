@@ -1,99 +1,111 @@
 ---
 chat_id: hashall-20260420-175812-claude
-status: ready_for_handoff
+status: in_progress
 phase: execute
-model_tier: small
+model_tier: standard
 agent: claude
-goal: "Orphan rename completion and code alignment for big-picture TODO #2"
-current_step: "cleanup_residue_and_summary"
-files_changed: 2
-repair_cycles: 0
+goal: "Hitchhiker split + save-path-repair + recovery from broken repair runs"
+current_step: "recovery_executing"
+files_changed: 6
+repair_cycles: 1
 created_at: 2026-04-20 17:58:14
-updated_at: 2026-04-20 18:57:45
+updated_at: 2026-04-23 11:10:00
 ---
 
-## Session Summary
+## Session Summary (2026-04-23 continuation)
 
-**Date:** 2026-04-20 (18:54-18:57 executing, ~40 min)
+**Objective:** Fix damage from two broken save-path-repair runs, recover 338 missingFiles hashes
 
-**Objective:** Complete orphaned_data → orphans migration (Big-picture TODO #2) and align code helpers to canonical naming
+### Context
+
+After hitchhiker splits completed (all groups PARTIALLY_SPLIT), save-path-repair ran
+twice with bugs. Two broken runs displaced content for 338 hashes.
+
+### Bugs Found in save_path_repair.py
+
+Six critical bugs identified via code walkthrough:
+
+| Bug | File | Impact |
+|-----|------|--------|
+| `_move_tree`: `relative_to(src.parent)` → preserves hash dir in path | save_path_repair.py:105 | Files land at `dst/<hash>/content` not `dst/content` |
+| `execute_repair`: `dst_parent = canonical.parent` not `canonical` | save_path_repair.py:317 | Files one dir level too high |
+| Hash16 vs hash40 mismatch in qB/DB lookups | execute_repair:287 | qB category/tags unknown for new-style splits |
+| Missing stop_qb → patch_fastresume → start_qb | execute_repair | qB save_path not persisted across restarts |
+| Missing `recheck_torrent()` | execute_repair | Stays in missingFiles after move |
+| RT gets save_path not content dir (save_path/name) | execute_repair:334 | RT directory wrong |
+
+### Damage from two broken runs
+
+- Run 1: ~156 hashes displaced (files at `parent_of_canonical/<hash>/content`)
+- Run 2: background task, additional 182 hashes displaced  
+- Total: 338 missingFiles in qB, 338 stoppedDL in RT
+
+### Displacement patterns
+
+- Uncategorized (stash): files at `/stash/media/torrents/<hash>/content`
+- Cross-seed (stash): files at `/stash/media/torrents/seeding/cross-seed/<hash>/content`
+- Movies/TV/other: files at `/stash/media/torrents/seeding/<hash>/content`
+- Pool equivalents: same pattern under `/pool/media/torrents/`
+
+### Files Modified (commit 6faa6d5)
+
+- `src/hashall/save_path_repair.py` — fixed all 6 bugs
+- `src/hashall/save_path_recovery.py` — NEW: batch recovery module
+- `src/hashall/cli.py` — added `save-path-recover` command
+
+### Recovery plan
+
+- 338 candidates identified, 336/338 files located (2 in orphans, unrecoverable)
+- 1935 files to move, 1446 already at canonical (cross-seed dup, skipped)
+- Recovery: move files → stop qB → patch 336 fastresumes → start qB → recheck all → repoint RT
+
+### Recovery execution (RUNNING as of 2026-04-23 ~11:10)
+
+```
+python3 -m hashall payload save-path-recover --execute
+```
+
+Recovery stops qB, patches fastresumes in batch, starts qB, rechecks all 338 hashes.
+
+### Edge cases requiring manual fix after recovery
+
+- `5bf579e7c4c98dae` (How It's Made S01-S32, DocsPedia): files in orphans path or lost
+- `81ede24f8477eca6` (How It's Made S01-S32, DocsPedia): same group, in `/pool/torrents/orphans/`
+- After recovery moves `80e7ac733040aa33` (same group) to `cross-seed/DocsPedia`, point
+  both 5bf579 and 81ede24 fastresumes to same canonical path and recheck
+
+### Next after recovery completes
+
+1. Verify qB state: missingFiles should drop from 338 to ~2
+2. Update qB cache: `python3 -m hashall qb-cache refresh` (or let daemon refresh)
+3. Check RT stalledUP: all 338 RT stoppedDL should resume
+4. Fix 2 edge case hashes manually
+5. Continue with original plan: save-path-audit, drift detection
+
+### Previous session work (2026-04-20)
+
+See below for waves 10-12 history.
+
+---
+
+## Previous Session Summary (2026-04-20)
+
+**Objective:** Complete orphaned_data → orphans migration (Big-picture TODO #2)
 
 ### Completed Tasks
 
-1. **Wave 11: Code Refactoring** (18:54)
-   - Updated `src/hashall/orphan_sweep.py`: ORPHANED_DATA_DEST to `/pool/media/torrents/orphans`
-   - Updated `src/hashall/content_inventory.py`: recognize both orphaned_data and orphans in kind detection
-   - Updated `src/hashall/cli.py`: docstring, defaults, 4 help text refs to canonical orphans
-   - Updated `src/hashall/qb_repair_payload_group.py`: added canonical orphans to DEFAULT_CONTENT_BASE_ROOTS
-   - All helpers now prefer /pool/media/torrents/orphans with legacy fallback
-   - **Tests**: 20/20 passed
-   - **Commit**: d4bd9b0
+1. **Wave 11: Code Refactoring** — Updated orphan_sweep.py, content_inventory.py,
+   cli.py, qb_repair_payload_group.py to canonical orphans paths. Commit: d4bd9b0
 
-2. **Wave 10: Final Orphan Rename Batch** (18:55)
-   - Moved all 17 remaining roots from `/pool/media/torrents/orphaned_data` to `/pool/media/torrents/orphans`:
-     - Batch 1 (6 roots): abtorrents, cross, cross-seed, hawke-uno, _movie, movies
-     - Batch 2 (5 roots): privatehd, _qb-unique-repair, RecycleBin, _rehome-unique, seedpool (API)
-     - Batch 3 (6 roots): thegeeks, TorrentDay, TorrentLeech, XSpeeds, YOiNKED (API), YUSCENE (API)
-   - **RT Repoint**: Fixed f37b9983... hash pointing to old path → `/pool/media/torrents/orphans`
-   - **Cleanup**: Removed empty `/pool/media/torrents/orphaned_data` directory
-   - **Post-Wave State**:
-     - 27 total orphan roots now on canonical location
-     - qB: 0 live orphaned_data rows
-     - RT: 0 live orphaned_data rows (verified cache)
+2. **Wave 10: Final Orphan Rename Batch** — Moved all 17 roots from orphaned_data
+   to orphans. Fixed RT repoints.
 
-3. **Wave 12: Cleanup Stale Residue** (18:57)
-   - RT audit confirmed 0 cross-seed-link references in cache
-   - Removed stale `/pool/media/torrents/seeding/cross-seed-link` directory (~700KB)
-   - **Big-picture TODO #9** (clean up stale residue) partially addressed
+3. **Wave 12: Cleanup** — Removed stale cross-seed-link residue directory
 
-### Big-Picture Progress
+### Big-Picture Next Steps (still valid)
 
-✅ **Complete**: 
-- Big-picture TODO #2 "Finish orphaned_data → orphans"
-- Code alignment to canonical paths
-
-🔄 **Next Sessions Should Focus On**:
-1. **Monitor/Fix RT↔qB Drift** (qB is silent mirror, must stay synced with RT)
-   - qB should remain paused while orphan rename and path fixes are in progress
-   - Ensure all items are synced between RT (authoritative) and qB (mirror)
-   - After all repointing/repairs complete, resume qB in sync with RT state
-
-2. **Identify & Fix N→1 Hitchhiker Payloads** (item #7)
-   - Audit for multiple hashes sharing one payload tree (wrong structure)
-   - Split into unique per-hash payload trees with hardlinks (not duplicate bytes)
-   - Use `_rehome-unique/<hash>` pattern for de-hitchhiked targets
-
-3. **Restore Canonical Save Paths** (item #10 + QBit ATM design)
-   - Move payloads from repair/temporary paths back to canonical qBit-defined roots:
-     - `/seeding/<tracker-key>`
-     - `/seeding/<before-arrs-import>`
-     - `/seeding/<after-arrs-import>`
-     - `/seeding/cross-seed/<prowlarr-tracker-name>`
-   - Ensures qB Automatic Torrent Management (ATM) works as designed
-
-4. **Resume Cross-Seed-Link → Cross-Seed Normalization** (item #1, ongoing pilots)
-   - Continue one-hash pilots on remaining legacy cross-seed-link refs
-   - Integrate with above sync/hitchhiker/path work
-
-5. **Fix Broken Live Torrents** (item #3: PD holdouts, Dexter pair, /data/media stoppedDL)
-   - Classify unresolvable rows: manual-review vs controlled-redownload
-   - Consider alternate-identity repair for multi-torrent families
-
-6. **Drain /Pool/Data Torrent Payloads** (item #4)
-   - Migrate final residual seeding content to canonical /pool/media/torrents/seeding
-
-### Files Modified
-
-- `src/hashall/orphan_sweep.py` — committed as d4bd9b0
-- `src/hashall/content_inventory.py` — committed as d4bd9b0
-- `src/hashall/cli.py` — committed as d4bd9b0
-- `src/hashall/qb_repair_payload_group.py` — committed as d4bd9b0
-
-### Notes for Next Agent
-
-- Session focused on completing orphan rename workflow (Waves 10-11)
-- All code helpers now aligned to canonical `/pool/media/torrents/orphans` location
-- Stale cross-seed-link residue directory removed
-- Next session can proceed directly to normalization wrapper or broken torrent repair
-- RT cache is fresh (18:57) and confirms no legacy path references
-
+1. Monitor/Fix RT↔qB drift after recovery completes
+2. Restore canonical save paths (item #10)
+3. Cross-seed-link → cross-seed normalization (item #1)
+4. Fix broken live torrents (item #3)
+5. Drain /pool/data torrent payloads (item #4)
