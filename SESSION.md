@@ -1,15 +1,59 @@
 ---
 chat_id: hashall-20260420-175812-claude
-status: in_progress
+status: ready_for_handoff
 phase: execute
 model_tier: standard
 agent: claude
 goal: "Hitchhiker split + save-path-repair + recovery from broken repair runs"
-current_step: "recovery_executing"
-files_changed: 6
+current_step: "awaiting_refresh_completion"
+files_changed: 9
 repair_cycles: 1
 created_at: 2026-04-20 17:58:14
-updated_at: 2026-04-23 11:10:00
+updated_at: 2026-04-24 09:30:00
+---
+
+## Session Summary (2026-04-24 continuation — Bug-Fix Sweep & Refresh Issues)
+
+### Completed Work
+
+**Batch 1-5: Bug-Fix Sweep** (all bugs already fixed in commit 5d8a893)
+- ✅ 10 critical bugs verified via code inspection
+- ✅ 25 unit tests pass (test_save_path_inference.py, test_hitchhiker.py)
+- ✅ 774 integration tests pass
+- ✅ Live smoke tests: hitchhiker group counts correct, drift detection working
+- ✅ RT-missing items NOT false-flagged as drift
+
+**Makefile Improvements** (commits 3289861, d35e66c)
+- Added `make db-refresh` — incremental catalog update + dedup
+- Added `make db-refresh-verbose` — verbose output with logging to ~/.logs/hashall/
+- Supports REFRESH_OPTS for customization
+
+**Refresh Lock Bug Fix** (commit 9bae44b)
+- Fixed false-positive "stale process" detection
+- Problem: parent shell's cmdline contained "hashall refresh", was detected as stale
+- Solution: exclude parent PID (os.getppid()) from stale-process scan
+- Affected: any refresh invoked via make, shell pipe, or process wrapper
+
+### Critical Findings on Refresh Performance
+
+**Previous issue (RESOLVED):**
+- Ran `--scan-hash-mode full --drift-policy full` (was 100+ hours to rehash 35.7 TB)
+- This is a **full integrity audit**, not incremental refresh
+- Caused by my (Haiku's) incorrect flag recommendation
+
+**Correct incremental refresh:**
+```bash
+make db-refresh              # uses default: fast mode + quick drift policy
+make db-refresh-verbose      # same with progress logging
+python3 -m hashall refresh   # direct invocation
+```
+
+Default flags:
+- `--scan-hash-mode fast` — only hash files with changed metadata
+- `--drift-policy quick` — quick hash check on unchanged files
+- Dedup enabled by default
+- Typical runtime: minutes to ~1 hour (not 100+ hours)
+
 ---
 
 ## Session Summary (2026-04-23 continuation)
