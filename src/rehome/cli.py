@@ -295,6 +295,7 @@ def _looks_like_refresh_command(cmdline: list[str]) -> bool:
 def _iter_other_refresh_holders() -> list[dict[str, object]]:
     holders: list[dict[str, object]] = []
     self_pid = os.getpid()
+    parent_pid = os.getppid()  # exclude parent (e.g. make/shell that spawned us)
     proc_root = Path("/proc")
     if not proc_root.exists():
         return holders
@@ -302,7 +303,7 @@ def _iter_other_refresh_holders() -> list[dict[str, object]]:
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
-        if pid == self_pid:
+        if pid == self_pid or pid == parent_pid:
             continue
         try:
             raw_cmdline = (entry / "cmdline").read_bytes()
