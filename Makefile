@@ -21,4 +21,4 @@ db-refresh:
 	python3 -m hashall refresh $(REFRESH_OPTS)
 
 db-refresh-verbose:
-	python3 -m hashall refresh --verbose $(REFRESH_OPTS) 2>&1 | tee logs/refresh-$$(date +%Y%m%d-%H%M%S).log
+	python3 -m hashall refresh --verbose $(REFRESH_OPTS) 2>&1 | tee ~/.logs/hashall/refresh-$$(date +%Y%m%d-%H%M%S).log
