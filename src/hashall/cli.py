@@ -2041,7 +2041,7 @@ def payload_orphan_sweep_cmd(db, dry_run, limit, order, reserve_gib, datasets, v
     and /stash/media/torrents/seeding for content not backed by an active RT
     or qBittorrent torrent.
 
-    Orphaned items are moved to /pool/media/torrents/orphaned_data/<tracker>/.
+    Orphaned items are moved to /pool/media/torrents/orphans/<tracker>/.
     Items with active catalog references (hitchhiker groups) are skipped.
     .bad.* and __hl_tmp__* files are deleted unconditionally.
 
@@ -2195,6 +2195,258 @@ def payload_normalize_cross_seed_link_cmd(torrent_hash, rpc_url, do_apply, json_
     print(f"   rt_final_directory: {result.rt_final_directory}")
 
 
+@payload.command("hitchhiker-audit")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+@click.option("--limit", type=int, default=None, help="Limit number of catalog groups queried.")
+def payload_hitchhiker_audit_cmd(db, json_output, limit):
+    """
+    Audit N→1 hitchhiker payload groups (multiple hashes sharing one on-disk tree).
+
+    A hitchhiker group must be split into per-hash views (via hardlinks) before
+    path repair can be safely applied. This command enumerates all groups and
+    classifies them by safety to split: SAFE_TO_SPLIT, UNSPLIT, PARTIALLY_SPLIT, BUSY.
+    """
+    from hashall.hitchhiker import audit_hitchhiker_groups, format_hitchhiker_report
+
+    groups = audit_hitchhiker_groups(db_path=db, limit=limit)
+    report = format_hitchhiker_report(groups, json_output=json_output)
+    print(report)
+
+
+@payload.command("hitchhiker-split")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    help="Dry-run (default) shows planned actions. --execute performs hardlinks + qB/RT repoint.",
+)
+@click.option("--limit", type=int, default=None, help="Limit number of groups to split.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+def payload_hitchhiker_split_cmd(db, dry_run, limit, json_output):
+    """
+    Split N→1 hitchhiker payload groups: for each secondary hash, create a
+    hardlinked copy of the shared content tree under _rehome-unique/<hash16>/
+    and repoint qB + RT to the new per-hash location.
+
+    Only processes SAFE_TO_SPLIT groups (all hashes stopped/paused, none in
+    checking/active state). Groups are processed smallest-first.
+
+    Run with --dry-run first (default) to preview what will happen.
+    Then re-run with --execute to perform the split.
+    """
+    from hashall.hitchhiker import audit_hitchhiker_groups
+    from hashall.hitchhiker_split import split_hitchhiker_groups, format_split_report
+
+    groups = audit_hitchhiker_groups(db_path=db)
+    results = split_hitchhiker_groups(groups, dry_run=dry_run, limit=limit)
+    report = format_split_report(results, dry_run=dry_run, json_output=json_output)
+    print(report)
+
+
+@payload.command("save-path-audit")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+@click.option("--limit", type=int, default=None, help="Limit number of torrents audited.")
+@click.option("--drifted-only", is_flag=True, help="Show only drifted items.")
+def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
+    """
+    Audit save-path drift across all qBittorrent torrents.
+
+    Compares inferred canonical save paths (from category/tags) against actual
+    qB and RT paths. Reports items that have drifted due to device mismatch,
+    legacy paths, category changes, or qB/RT misalignment.
+
+    Skips transient ARR categories (sonarr, radarr, etc.) which may be in transit.
+    """
+    import json
+
+    from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
+    from hashall.rt_cache import load_rt_cache_snapshot
+    from hashall.save_path_inference import detect_drift
+
+    # Load qB torrents from file cache (avoids live API hit)
+    qb_torrents = []
+    try:
+        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
+        if cached_raw is not None:
+            qb_client = QBittorrentClient()
+            qb_torrents = [
+                qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                for r in cached_raw
+            ]
+        else:
+            # Fallback to live if cache absent/stale
+            qb_torrents = QBittorrentClient().get_torrents() or []
+    except Exception as e:
+        click.echo(f"Error loading qB torrent data: {e}", err=True)
+        return
+
+    # Load RT cache and index by hash
+    rt_by_hash: dict = {}
+    try:
+        snapshot = load_rt_cache_snapshot() or {}
+        rows = snapshot.get("rows") or []
+        rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
+    except Exception:
+        pass
+
+    # Audit each torrent
+    drift_reports = []
+    count = 0
+    for qb_torrent in qb_torrents:
+        if limit and count >= limit:
+            break
+
+        rt_info = rt_by_hash.get(qb_torrent.hash.lower(), {})
+
+        report = detect_drift(
+            torrent_hash=qb_torrent.hash,
+            category=qb_torrent.category,
+            tags=qb_torrent.tags,
+            current_save_path=qb_torrent.save_path,
+            current_content_path=qb_torrent.content_path,
+            current_rt_directory=rt_info.get("directory", ""),
+            current_qb_state=qb_torrent.state,
+        )
+
+        # Filter by drift status
+        if drifted_only and not report.is_drifted:
+            continue
+
+        drift_reports.append(report)
+        count += 1
+
+    # Output results
+    if json_output:
+        output = json.dumps(
+            [
+                {
+                    "hash": r.torrent_hash[:16],
+                    "category": r.category,
+                    "is_drifted": r.is_drifted,
+                    "reason": r.drift_reason,
+                    "qb_save_path": r.qb_current_save_path,
+                    "rt_directory": r.rt_current_directory,
+                    "canonical_path": r.canonical_save_path,
+                    "notes": r.notes,
+                }
+                for r in drift_reports
+            ],
+            indent=2,
+        )
+        print(output)
+    else:
+        # Text output
+        drifted_count = sum(1 for r in drift_reports if r.is_drifted)
+        clean_count = len(drift_reports) - drifted_count
+
+        print(f"Save-Path Audit: {len(drift_reports)} torrents scanned")
+        print(f"  ✅ Clean: {clean_count}")
+        print(f"  ⚠️  Drifted: {drifted_count}")
+        print()
+
+        if drifted_count > 0:
+            print("DRIFTED ITEMS:")
+            for r in drift_reports:
+                if not r.is_drifted:
+                    continue
+                print(f"  {r.torrent_hash[:16]}  {r.category}")
+                print(f"    qb_save: {r.qb_current_save_path}")
+                print(f"    rt_dir:  {r.rt_current_directory}")
+                print(f"    expected: {r.canonical_save_path}")
+                print(f"    reason: {r.drift_reason}")
+                for note in r.notes:
+                    print(f"    note: {note}")
+
+
+@payload.command("save-path-repair")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    help="Dry-run (default) shows planned moves. --execute performs the repair.",
+)
+@click.option("--limit", type=int, default=None, help="Limit number of hashes to repair.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+def payload_save_path_repair_cmd(dry_run, limit, json_output):
+    """
+    Move secondary hashes from _rehome-unique/<hash16>/ to canonical save paths.
+
+    After hitchhiker-split, secondary hashes live in temporary _rehome-unique/
+    locations. This command moves them to their canonical seeding paths based on
+    category/tags and device (stash vs pool) placement rules.
+
+    Infers canonical paths using the catalog's original save_path as a category hint.
+
+    Run with --dry-run first (default) to preview what will happen.
+    Then re-run with --execute to perform the repair.
+    """
+    from hashall.save_path_repair import audit_repair_candidates, execute_repair, format_repair_report
+
+    # Audit repair candidates
+    actions = audit_repair_candidates()
+    if not actions:
+        print("No repair candidates found (no hashes in _rehome-unique/).")
+        return
+
+    if limit:
+        actions = actions[:limit]
+
+    # Execute repairs
+    results = []
+    for i, action in enumerate(actions, 1):
+        result = execute_repair(action.hash_val, dry_run=dry_run)
+        results.append(result)
+        if (i % 10) == 0:
+            click.echo(f"  [{i}/{len(actions)}] processed...", err=True)
+
+    report = format_repair_report(results, dry_run=dry_run, json_output=json_output)
+    print(report)
+
+
+@payload.command("save-path-recover")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    help="Dry-run (default) shows recovery plan. --execute performs the recovery.",
+)
+@click.option("--limit", type=int, default=None, help="Limit number of hashes to recover.")
+@click.option("--json-output", is_flag=True, help="Emit JSON output.")
+def payload_save_path_recover_cmd(dry_run, limit, json_output):
+    """
+    Recover hashes displaced by the broken save-path-repair run.
+
+    Finds all missingFiles hashes in qBittorrent, locates their displaced files
+    on filesystem, moves them to correct canonical paths, then (--execute only)
+    stops qB, patches fastresume files in batch, restarts qB, and rechecks all.
+
+    Run with --dry-run first to verify the recovery plan, then --execute to fix.
+    """
+    from hashall.save_path_recovery import plan_recovery, execute_recovery, format_recovery_report
+
+    click.echo("Planning recovery (fetching qB state)...", err=True)
+    actions = plan_recovery()
+    if not actions:
+        print("No missingFiles hashes found — nothing to recover.")
+        return
+
+    if limit:
+        actions = actions[:limit]
+
+    click.echo(f"Found {len(actions)} missingFiles hashes to recover.", err=True)
+
+    if dry_run:
+        report = format_recovery_report(actions, [], dry_run=True, json_output=json_output)
+        print(report)
+        return
+
+    click.echo("Executing recovery...", err=True)
+    results = execute_recovery(actions, dry_run=False)
+
+    report = format_recovery_report(actions, results, dry_run=False, json_output=json_output)
+    print(report)
+
+
 @payload.command("show")
 @click.argument("torrent_hash")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
@@ -2308,7 +2560,7 @@ def _default_content_base_roots() -> list[str]:
     "--root",
     "base_roots",
     multiple=True,
-    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+    help="Base non-qB root to inventory (repeatable). Defaults to orphans/orphaned_data/seeds/RecycleBin.",
 )
 @click.option("--kind", "root_kind", type=click.Choice(["archive", "orphan", "recovery", "other"]), help="Filter by root kind.")
 @click.option("--status", type=click.Choice(["complete", "incomplete"]), help="Filter by hash-completeness status.")
@@ -2358,7 +2610,7 @@ def content_inventory_cmd(db, base_roots, root_kind, status, path_contains, min_
     "--root",
     "base_roots",
     multiple=True,
-    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+    help="Base non-qB root to inventory (repeatable). Defaults to orphans/orphaned_data/seeds/RecycleBin.",
 )
 @click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
 @click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")
@@ -2407,7 +2659,7 @@ def content_duplicates_cmd(db, base_roots, path_contains, min_bytes, sort_by, li
     "--root",
     "base_roots",
     multiple=True,
-    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+    help="Base non-qB root to inventory (repeatable). Defaults to orphans/orphaned_data/seeds/RecycleBin.",
 )
 @click.option("--json-output", is_flag=True, help="Emit JSON.")
 def content_donors_cmd(db, torrent_hash, base_roots, json_output):
@@ -2446,7 +2698,7 @@ def content_donors_cmd(db, torrent_hash, base_roots, json_output):
     "--root",
     "base_roots",
     multiple=True,
-    help="Base non-qB root to inventory (repeatable). Defaults to orphaned_data/seeds/RecycleBin.",
+    help="Base non-qB root to inventory (repeatable). Defaults to orphans/orphaned_data/seeds/RecycleBin.",
 )
 @click.option("--path-contains", help="Only include duplicate groups whose paths contain this substring.")
 @click.option("--min-bytes", type=int, default=0, show_default=True, help="Only include groups at or above this size.")

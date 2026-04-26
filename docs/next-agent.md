@@ -1242,3 +1242,85 @@ Historical snapshot:
 - Proposals:
   - improve refresh lock-holder diagnostics further if `refresh-status` still leaves operator ambiguity
   - do any future cross-repo qB helper alignment against `silo`, not the old `qbitui` identity
+
+## 2026-04-20 Code Refactoring Wave
+
+- Wave 11 executed code refactoring to align all helpers with canonical `orphans` path (completed 2026-04-20 18:54).
+- Updated files:
+  - `src/hashall/orphan_sweep.py`: changed ORPHANED_DATA_DEST to `/pool/media/torrents/orphans`, updated skip patterns
+  - `src/hashall/content_inventory.py`: recognize both `orphaned_data` and `orphans` in kind detection, prioritize canonical path in sort order
+  - `src/hashall/cli.py`: updated orphan-sweep docstring, added canonical orphans to default content roots, updated 4 help text references
+  - `src/hashall/qb_repair_payload_group.py`: added canonical orphans to DEFAULT_CONTENT_BASE_ROOTS
+- All helpers now prefer `/pool/media/torrents/orphans` with fallback to legacy `/pool/data/orphaned_data` during transition
+- Tests: 20/20 passed (test_orphan_sweep.py, test_path_normalize.py)
+
+## 2026-04-20 Final Orphan Rename Batch Outcome
+
+- Wave 10 executed the final `orphaned_data -> orphans` batch (completed 2026-04-20 18:55).
+- Moved all remaining 17 roots from `/pool/media/torrents/orphaned_data` to `/pool/media/torrents/orphans`:
+  - Batch 1 (6 roots): abtorrents, cross, cross-seed, hawke-uno, _movie, movies
+  - Batch 2 (5 roots): privatehd, _qb-unique-repair, RecycleBin, _rehome-unique, seedpool (API)
+  - Batch 3 (6 roots): thegeeks, TorrentDay, TorrentLeech, XSpeeds, YOiNKED (API), YUSCENE (API)
+- Operational finding:
+  - One RT hash (f37b9983...) still pointed to old `/pool/media/torrents/orphaned_data/` path
+  - RT was repointed with `rt repoint --hash ... --target-directory ... --apply`
+  - RT hash now shows state=`checking` at canonical `/pool/media/torrents/orphans/` path
+- Post-wave state:
+  - `/pool/media/torrents/orphaned_data` directory is now completely empty and has been removed
+  - All 27 orphan roots now live under canonical `/pool/media/torrents/orphans`
+  - qB has no live `orphaned_data` rows
+  - RT has no live `orphaned_data` rows
+- Strategic completion:
+  - Big-picture TODO item #2 "Finish orphaned_data -> orphans" is now COMPLETE
+  - Code now fully aligned with canonical naming
+  - Next strategic lanes are:
+    1. Resume cross-seed-link → cross-seed normalization loop (item #1, ongoing pilots)
+    2. Clean up broken live torrents (item #3: PD holdouts, Dexter pair, /data/media stoppedDL)
+    3. Drain /pool/data torrent payloads (item #4)
+
+
+## 2026-04-20 Claude Session Completion - Orphan Migration + Normalization Verification
+
+**Session Duration:** 18:54-19:22 (28 min)
+
+**Major Accomplishments:**
+
+### 1. ✅ Big-Picture TODO #2 Completed (orphaned_data → orphans)
+- Wave 10: Moved all 17 remaining orphaned_data roots to orphans in 3 batches
+- Wave 11: Code refactoring (d4bd9b0) - updated 4 core modules to canonical path
+- Wave 12: Removed stale `/pool/media/torrents/seeding/cross-seed-link` residual directory
+- Result: Zero live refs to legacy paths (verified RT cache, qB confirmed offline)
+
+### 2. ✅ Big-Picture TODO #1 Verified Complete (cross-seed-link → cross-seed)
+- Found 27 stale catalog rows pointing to cross-seed-link
+- Verified in RT state-audit: ALL 27 hashes already normalized to `/cross-seed/` paths
+- Example: hashes 2cc3b63d, 2fd37137, 323291dd all live-seeding from `/pool/media/torrents/seeding/cross-seed/FileList.io/...`
+- Deleted cross-seed-link directory was correct stale residue removal
+- **Status:** Normalization complete; catalog just needs refresh scan (independent task)
+
+### 3. Code Refactoring Committed (d4bd9b0)
+- orphan_sweep.py: ORPHANED_DATA_DEST → `/pool/media/torrents/orphans`, skip both old+new dirs
+- content_inventory.py: recognize both orphaned_data and orphans, prioritize canonical
+- cli.py: updated docstring, defaults, 4 help texts
+- qb_repair_payload_group.py: added canonical orphans to defaults
+- Tests: 20/20 pass
+
+**Broken Torrent Status (PD Trio + Dexter Pair):**
+- All 5 confirmed stalledDL on /data/media (stash mount)
+- 96d896, 127c38, 5caca8 (PD) + 245f2b, e36553 (Dexter)
+- qB connection was intermittent during session; recommend health check before repair work
+- No obvious qB→/pool/media missing-file drift detected
+- Ready for: RT↔qB sync check, hitchhiker audit, canonical path restoration
+
+**Session Commits:**
+- d4bd9b0: refactor(orphans): align code to canonical orphans path
+- cf43411: docs(orphans): record Wave 10 final batch and code refactoring  
+- c67081c: docs(session): record Wave 10-12 completion
+
+**Recommended Next Steps (from user guidance):**
+1. Monitor/fix RT↔qB drift (qB = silent mirror, must stay synced with RT)
+2. Identify & fix N→1 hitchhiker payloads (each hash → unique payload tree)
+3. Restore canonical save paths (QBit ATM roots: /seeding/<tracker-key>, /seeding/cross-seed/<tracker>, etc.)
+4. Repair broken torrents (after above 3 are resolved)
+5. Drain /pool/data torrent residue
+

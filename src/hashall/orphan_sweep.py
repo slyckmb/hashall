@@ -3,9 +3,9 @@ Orphan sweep: find and relocate/delete content in seeding trees that is not
 backed by an active RT or qBittorrent torrent.
 
 Seeding roots scanned:
-  /pool/data/media/torrents/seeding  → cross-dataset rsync --move to /pool/media/torrents/orphaned_data
-  /pool/media/torrents/seeding       → same-dataset os.rename to /pool/media/torrents/orphaned_data
-  /stash/media/torrents/seeding      → cross-dataset rsync --move to /pool/media/torrents/orphaned_data
+  /pool/data/media/torrents/seeding  → cross-dataset rsync --move to /pool/media/torrents/orphans
+  /pool/media/torrents/seeding       → same-dataset os.rename to /pool/media/torrents/orphans
+  /stash/media/torrents/seeding      → cross-dataset rsync --move to /pool/media/torrents/orphans
 
 RT and qB both report paths under /data/media/... which maps to /stash/media/... on host.
 """
@@ -29,7 +29,7 @@ _RT_QBT_DATA_MEDIA = "/data/media"
 _HOST_STASH_MEDIA = "/stash/media"
 
 # Where orphaned content lands
-ORPHANED_DATA_DEST = Path("/pool/media/torrents/orphaned_data")
+ORPHANED_DATA_DEST = Path("/pool/media/torrents/orphans")
 
 # rsync-move script path
 RSYNC_MV_SCRIPT = Path.home() / "bin" / "rsync-copy-with-progress.sh"
@@ -41,6 +41,7 @@ _BAD_PREFIXES = ("__hl_tmp__",)
 # Depth-1 dirs in seeding root that are NOT content categories; skip them
 _SKIP_DEPTH1_NAMES: frozenset[str] = frozenset({
     "orphaned_data",   # legacy destination dir, not a content category
+    "orphans",         # canonical destination dir, not a content category
 })
 
 

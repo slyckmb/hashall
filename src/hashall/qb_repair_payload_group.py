@@ -33,6 +33,7 @@ DEFAULT_LOG_DIR = Path.home() / ".logs" / "hashall" / "reports" / "qbit-triage"
 DEFAULT_OUT_DIR = Path("out") / "qb-repair-payload-group"
 DEFAULT_SUCCESS_FILE = DEFAULT_LOG_DIR / "repair-consecutive-successes.txt"
 DEFAULT_CONTENT_BASE_ROOTS = (
+    "/pool/media/torrents/orphans",
     "/pool/data/orphaned_data",
     "/pool/data/seeds",
     "/pool/data/RecycleBin",
