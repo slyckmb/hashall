@@ -56,6 +56,7 @@ tools/pre-commit-gptrail.sh
 out/
 **/._*
 .state/
+SESSION.md
 .agent/*
 .clinerules/99-session.md
 AGENTS.override.md
