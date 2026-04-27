@@ -586,21 +586,21 @@ def test_derive_rt_target_directory_for_multi_file_existing_dir(tmp_path: Path) 
     assert target == str(root_dir)
 
 
-def test_normalize_rt_target_directory_keeps_multi_file_content_root(tmp_path: Path) -> None:
+def test_normalize_rt_target_directory_uses_parent_for_multi_file_content_root(tmp_path: Path) -> None:
     target_dir = tmp_path / "tv" / "Release.One"
     target_dir.mkdir(parents=True)
     meta = RTTorrentMeta(torrent_hash="aaa111", info_name="Release.One", is_multi_file=True)
     normalized = normalize_rt_target_directory(str(target_dir), meta)
-    assert normalized == str(target_dir)
+    assert normalized == str(target_dir.parent)
 
 
-def test_normalize_rt_target_directory_uses_parent_for_multi_file_nested_file(tmp_path: Path) -> None:
+def test_normalize_rt_target_directory_uses_grandparent_for_multi_file_nested_file(tmp_path: Path) -> None:
     target_file = tmp_path / "movies" / "Release.One" / "movie.mkv"
     target_file.parent.mkdir(parents=True)
     target_file.write_text("x", encoding="utf-8")
     meta = RTTorrentMeta(torrent_hash="aaa111", info_name="Release.One", is_multi_file=True)
     normalized = normalize_rt_target_directory(str(target_file), meta)
-    assert normalized == str(target_file.parent)
+    assert normalized == str(target_file.parent.parent)
 
 
 def test_normalize_rt_target_directory_uses_parent_for_single_file_path(tmp_path: Path) -> None:
@@ -858,7 +858,7 @@ def test_rt_repair_apply_dry_run_uses_target_directory(tmp_path: Path) -> None:
     assert "apply: False" in result.output
 
 
-def test_rt_repoint_dry_run_keeps_multi_file_content_root(tmp_path: Path, monkeypatch) -> None:
+def test_rt_repoint_dry_run_shows_normalized_target_for_multi_file(tmp_path: Path, monkeypatch) -> None:
     from hashall import rtorrent as rtorrent_mod
 
     session_dir = tmp_path / "rt-session"
@@ -885,8 +885,7 @@ def test_rt_repoint_dry_run_keeps_multi_file_content_root(tmp_path: Path, monkey
     )
 
     assert result.exit_code == 0
-    assert f"target_directory: {content_root}" in result.output
-    assert "normalized_target_directory" not in result.output
+    assert f"normalized_target_directory: {content_root.parent}" in result.output
 
 
 def test_rt_state_audit_bad_only(monkeypatch) -> None:

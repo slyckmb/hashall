@@ -284,6 +284,16 @@ def rt_directories_match(actual: str | None, expected: str | None) -> bool:
     return bool(actual and expected and _canonical_path_text(actual) == _canonical_path_text(expected))
 
 
+def rt_expected_loaded_directory(target_directory: str, torrent_meta: RTTorrentMeta | None) -> str:
+    normalized = normalize_rt_target_directory(target_directory, torrent_meta)
+    if torrent_meta and torrent_meta.is_multi_file and torrent_meta.info_name:
+        try:
+            return str(canonicalize_path(Path(normalized) / torrent_meta.info_name))
+        except Exception:
+            return str(Path(normalized) / torrent_meta.info_name)
+    return normalized
+
+
 def load_rt_torrent_meta(session_dir: Path, torrent_hash: str) -> RTTorrentMeta | None:
     torrent_file = session_dir / f"{str(torrent_hash).upper()}.torrent"
     if not torrent_file.exists():
@@ -413,9 +423,11 @@ def normalize_rt_target_directory(
         if path.suffix or path.exists() and path.is_file():
             path = path.parent
     if torrent_meta and torrent_meta.is_multi_file and torrent_meta.info_name:
-        # rTorrent stores d.directory as the payload root for multi-file
-        # torrents. If the input is a nested file, collapse only to that root.
+        # load.raw_start expects the containing directory for multi-file
+        # torrents; rTorrent then materializes d.directory as parent/info.name.
         if (path.suffix or path.exists() and path.is_file()) and path.parent.name == torrent_meta.info_name:
+            path = path.parent.parent
+        if path.name == torrent_meta.info_name and path.parent != path:
             path = path.parent
     for src_prefix, dest_prefix in RT_PATH_PREFIX_ALIASES:
         try:
@@ -544,12 +556,11 @@ def rt_reset_torrent_session(
         raise FileNotFoundError(f"missing_torrent_file path={session_files.torrent_file}")
 
     backup_dir = backup_rt_session_files(session_files, backup_root=backup_root)
-    normalized_target = normalize_rt_target_directory(
-        target_directory,
-        load_rt_torrent_meta(session_path, torrent_hash),
-    )
+    torrent_meta = load_rt_torrent_meta(session_path, torrent_hash)
+    normalized_target = normalize_rt_target_directory(target_directory, torrent_meta)
     if not normalized_target:
         raise ValueError(f"missing_target_directory hash={torrent_hash}")
+    expected_loaded_directory = rt_expected_loaded_directory(target_directory, torrent_meta)
     completed: list[str] = []
     recovery_completed: list[str] = []
     session_mutated = False
@@ -614,14 +625,14 @@ def rt_reset_torrent_session(
         phase = "verify_reload"
         reload_verified = rt_wait_for_hash_directory(
             torrent_hash,
-            normalized_target,
+            expected_loaded_directory,
             rpc_url=rpc_url,
             timeout_s=verify_timeout_s,
             poll_s=poll_s,
             rpc_timeout=rpc_timeout,
         )
         if not reload_verified:
-            raise RuntimeError(f"torrent_not_reloaded hash={torrent_hash} expected_directory={normalized_target}")
+            raise RuntimeError(f"torrent_not_reloaded hash={torrent_hash} expected_directory={expected_loaded_directory}")
         if load_timed_out:
             completed.append("load.raw_start:verified_after_timeout")
 
@@ -661,6 +672,7 @@ def rt_reset_torrent_session(
         "runtime_torrent_path": runtime_torrent_path,
         "target_directory": target_directory,
         "normalized_target_directory": normalized_target,
+        "expected_loaded_directory": expected_loaded_directory,
         "completed": completed,
         "recovery_completed": recovery_completed,
     }
