@@ -2954,8 +2954,10 @@ def rt_recheck_cmd(hash_filters, rpc_url, do_apply):
 @click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session files.")
 @click.option("--backup-root", type=click.Path(file_okay=False), default="out/rt-session-reset", show_default=True, help="Backup directory for copied session files.")
 @click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--rpc-timeout", type=int, default=20, show_default=True, help="Per-call XMLRPC timeout in seconds.")
+@click.option("--verify-timeout", type=float, default=20.0, show_default=True, help="Seconds to wait for reload verification.")
 @click.option("--apply", "do_apply", is_flag=True, help="Actually execute the session reset. Default is dry-run.")
-def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_root, rpc_url, do_apply):
+def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_root, rpc_url, rpc_timeout, verify_timeout, do_apply):
     """Rebuild one or more rt torrents from .torrent plus existing data."""
     from hashall.rtorrent import rt_reset_torrent_session
 
@@ -2979,11 +2981,179 @@ def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_roo
             session_dir=session_path,
             backup_root=backup_path,
             rpc_url=rpc_url,
+            rpc_timeout=rpc_timeout,
+            verify_timeout_s=verify_timeout,
         )
+        status = result.get("status", "unknown")
+        print(f"      status: {status}")
         print(f"      backup_dir: {result['backup_dir']}")
         if result["normalized_target_directory"] != target_directory:
             print(f"      normalized_target_directory: {result['normalized_target_directory']}")
         print(f"      completed: {result['completed']}")
+        if result.get("recovery_completed"):
+            print(f"      recovery_completed: {result['recovery_completed']}")
+        if result.get("error"):
+            print(f"      error: {result['error']}")
+        if status not in {"verified", "verified_after_timeout"}:
+            raise click.ClickException(f"rt session reset blocked hash={torrent_key} status={status}")
+
+
+def _load_rt_session_reset_manifest(manifest_path: Path, session_dir: Path) -> list[dict]:
+    from hashall.rtorrent import (
+        derive_rt_target_directory,
+        load_rt_torrent_meta,
+        normalize_rt_target_directory,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        source_rows = payload.get("rows") or payload.get("items") or payload.get("repairs") or []
+    else:
+        source_rows = payload
+    if not isinstance(source_rows, list):
+        raise click.ClickException("manifest must be a JSON list or object containing rows/items/repairs")
+
+    rows: list[dict] = []
+    for raw in source_rows:
+        if not isinstance(raw, dict):
+            continue
+        torrent_hash = str(raw.get("hash") or raw.get("torrent_hash") or "").strip().lower()
+        if not torrent_hash:
+            continue
+        meta = load_rt_torrent_meta(session_dir, torrent_hash)
+        target_directory = str(raw.get("target_directory") or raw.get("normalized_target_directory") or "").strip()
+        if not target_directory:
+            target_directory = derive_rt_target_directory(
+                qb_save_path=raw.get("qb_save_path"),
+                qb_content_path=raw.get("qb_content_path"),
+                torrent_meta=meta,
+            )
+        target_directory = normalize_rt_target_directory(target_directory, meta)
+        rows.append(
+            {
+                "hash": torrent_hash,
+                "name": raw.get("name") or raw.get("torrent_name") or "",
+                "target_directory": target_directory,
+                "target_exists": bool(target_directory and Path(target_directory).exists()),
+            }
+        )
+    return rows
+
+
+def _read_rt_session_reset_journal(journal_path: Path) -> set[str]:
+    completed: set[str] = set()
+    if not journal_path.exists():
+        return completed
+    for line in journal_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("status") in {"verified", "verified_after_timeout"}:
+            torrent_hash = str(event.get("hash") or "").strip().lower()
+            if torrent_hash:
+                completed.add(torrent_hash)
+    return completed
+
+
+def _append_rt_session_reset_journal(journal_path: Path, event: dict) -> None:
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(event)
+    payload.setdefault("ts", time.time())
+    with journal_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+@rt.command("session-reset-batch")
+@click.option("--manifest", "manifest_path", type=click.Path(exists=True, dir_okay=False), required=True, help="JSON manifest with hash/target_directory rows.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session files.")
+@click.option("--backup-root", type=click.Path(file_okay=False), default="out/rt-session-reset", show_default=True, help="Backup directory for copied session files.")
+@click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default="out/rt-session-reset/session-reset-batch.jsonl", show_default=True, help="JSONL journal for resume/skip.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--rpc-timeout", type=int, default=20, show_default=True, help="Per-call XMLRPC timeout in seconds.")
+@click.option("--verify-timeout", type=float, default=20.0, show_default=True, help="Seconds to wait for reload verification.")
+@click.option("--sleep-row", type=float, default=2.0, show_default=True, help="Seconds to sleep after each applied row.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit selected rows; 0 means no limit.")
+@click.option("--include-missing-target", is_flag=True, help="Allow rows whose target path does not exist.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute resets. Default is dry-run.")
+def rt_session_reset_batch_cmd(
+    manifest_path,
+    session_dir,
+    backup_root,
+    journal_path,
+    rpc_url,
+    rpc_timeout,
+    verify_timeout,
+    sleep_row,
+    limit,
+    include_missing_target,
+    do_apply,
+):
+    """Apply session-reset rows from a manifest with journaling and pacing."""
+    from hashall.rtorrent import rt_reset_torrent_session
+
+    session_path = Path(session_dir).expanduser()
+    backup_path = Path(backup_root).expanduser()
+    journal = Path(journal_path).expanduser()
+    rows = _load_rt_session_reset_manifest(Path(manifest_path).expanduser(), session_path)
+    completed_hashes = _read_rt_session_reset_journal(journal)
+    selected = []
+    skipped_missing = 0
+    skipped_completed = 0
+    for row in rows:
+        if row["hash"] in completed_hashes:
+            skipped_completed += 1
+            continue
+        if not include_missing_target and not row["target_exists"]:
+            skipped_missing += 1
+            continue
+        selected.append(row)
+    if limit > 0:
+        selected = selected[:limit]
+
+    print("♻️  rt session reset batch")
+    print(f"   manifest: {Path(manifest_path).expanduser()}")
+    print(f"   session_dir: {session_path}")
+    print(f"   backup_root: {backup_path}")
+    print(f"   journal: {journal}")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    print(f"   manifest_rows: {len(rows)}")
+    print(f"   journal_completed: {len(completed_hashes)}")
+    print(f"   skipped_completed: {skipped_completed}")
+    print(f"   skipped_missing_target: {skipped_missing}")
+    print(f"   selected: {len(selected)}")
+    for row in selected:
+        print(f"   hash: {row['hash']} target={row['target_directory']}")
+        if not do_apply:
+            continue
+        _append_rt_session_reset_journal(
+            journal,
+            {"event": "started", "hash": row["hash"], "target_directory": row["target_directory"]},
+        )
+        result = rt_reset_torrent_session(
+            row["hash"],
+            target_directory=row["target_directory"],
+            session_dir=session_path,
+            backup_root=backup_path,
+            rpc_url=rpc_url,
+            rpc_timeout=rpc_timeout,
+            verify_timeout_s=verify_timeout,
+        )
+        _append_rt_session_reset_journal(journal, {"event": "finished", **result})
+        print(f"      status: {result.get('status')}")
+        if result.get("error"):
+            print(f"      error: {result['error']}")
+        if result.get("recovery_completed"):
+            print(f"      recovery_completed: {result['recovery_completed']}")
+        if result.get("status") not in {"verified", "verified_after_timeout"}:
+            raise click.ClickException(
+                f"rt session reset batch blocked hash={row['hash']} status={result.get('status')}"
+            )
+        if sleep_row > 0:
+            time.sleep(sleep_row)
 
 
 def _build_rt_repair_rows(report_path: str, session_dir: str, action_bucket: str | None) -> tuple[list[dict], list[dict]]:

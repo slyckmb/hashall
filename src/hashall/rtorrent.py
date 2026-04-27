@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import base64
+import html
 import shutil
 import requests
 import re
@@ -32,8 +33,8 @@ class RTTorrentMeta:
     torrent_hash: str
     info_name: str
     is_multi_file: bool
-    file_count: int
-    total_bytes: int
+    file_count: int = 0
+    total_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,24 @@ def backup_rt_session_files(
     return target_dir
 
 
+def restore_rt_session_files(session_files: RTSessionFiles, *, backup_dir: Path) -> list[str]:
+    completed: list[str] = []
+    for label, path in (
+        ("session.torrent", session_files.torrent_file),
+        ("session.rtorrent", session_files.rtorrent_file),
+        ("session.libtorrent_resume", session_files.libtorrent_resume_file),
+    ):
+        backup_path = backup_dir / path.name
+        if backup_path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup_path, path)
+            completed.append(f"{label}.restore")
+        elif path.exists():
+            path.unlink()
+            completed.append(f"{label}.unlink_unbacked")
+    return completed
+
+
 def _xml_escape(value: str) -> str:
     text = str(value)
     text = text.replace("&", "&amp;")
@@ -218,6 +237,51 @@ def rt_xmlrpc_call(method: str, *args: str, rpc_url: str = DEFAULT_RT_RPC_URL, t
         detail = match.group(1) if match else response.text
         raise RuntimeError(f"rt_xmlrpc_fault method={method} detail={detail}")
     return response.text
+
+
+def _xmlrpc_scalar_text(xml: str) -> str:
+    match = re.search(r"<string>(.*?)</string>", xml, re.DOTALL)
+    if match:
+        return html.unescape(match.group(1))
+    match = re.search(r"<value>\s*([^<]+?)\s*</value>", xml, re.DOTALL)
+    if match:
+        return html.unescape(match.group(1))
+    return ""
+
+
+def rt_xmlrpc_timeout_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, requests.Timeout)):
+        return True
+    text = str(exc).lower()
+    return "timed out" in text or "read timeout" in text or "timeout" in text
+
+
+def rt_get_torrent_directory(
+    torrent_hash: str,
+    *,
+    rpc_url: str = DEFAULT_RT_RPC_URL,
+    timeout: int = 20,
+) -> str | None:
+    try:
+        xml = rt_xmlrpc_call("d.directory", str(torrent_hash).strip().lower(), rpc_url=rpc_url, timeout=timeout)
+    except Exception:
+        return None
+    directory = _xmlrpc_scalar_text(xml).strip()
+    return directory or None
+
+
+def _canonical_path_text(value: str | Path | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(canonicalize_path(Path(text)))
+    except Exception:
+        return text
+
+
+def rt_directories_match(actual: str | None, expected: str | None) -> bool:
+    return bool(actual and expected and _canonical_path_text(actual) == _canonical_path_text(expected))
 
 
 def load_rt_torrent_meta(session_dir: Path, torrent_hash: str) -> RTTorrentMeta | None:
@@ -349,12 +413,9 @@ def normalize_rt_target_directory(
         if path.suffix or path.exists() and path.is_file():
             path = path.parent
     if torrent_meta and torrent_meta.is_multi_file and torrent_meta.info_name:
-        # Some catalog rows point at a file nested under the info-name directory
-        # for multi-file torrents. rTorrent expects the parent directory that
-        # contains the info-name root.
+        # rTorrent stores d.directory as the payload root for multi-file
+        # torrents. If the input is a nested file, collapse only to that root.
         if (path.suffix or path.exists() and path.is_file()) and path.parent.name == torrent_meta.info_name:
-            path = path.parent.parent
-        if path.name == torrent_meta.info_name and path.parent != path:
             path = path.parent
     for src_prefix, dest_prefix in RT_PATH_PREFIX_ALIASES:
         try:
@@ -377,6 +438,7 @@ def rt_apply_directory_repoint(
     *,
     rpc_url: str = DEFAULT_RT_RPC_URL,
     restart: bool = True,
+    timeout: int = 20,
 ) -> list[str]:
     calls = [
         ("d.stop", torrent_hash),
@@ -391,12 +453,12 @@ def rt_apply_directory_repoint(
     completed: list[str] = []
     try:
         for method, *args in calls:
-            rt_xmlrpc_call(method, *args, rpc_url=rpc_url)
+            rt_xmlrpc_call(method, *args, rpc_url=rpc_url, timeout=timeout)
             completed.append(method)
     except Exception:
         if restart:
             try:
-                rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url)
+                rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=timeout)
             except Exception:
                 pass
         raise
@@ -407,6 +469,7 @@ def rt_recheck_torrent(
     torrent_hash: str,
     *,
     rpc_url: str = DEFAULT_RT_RPC_URL,
+    timeout: int = 20,
 ) -> list[str]:
     calls = [
         ("d.stop", torrent_hash),
@@ -418,11 +481,11 @@ def rt_recheck_torrent(
     completed: list[str] = []
     try:
         for method, *args in calls:
-            rt_xmlrpc_call(method, *args, rpc_url=rpc_url)
+            rt_xmlrpc_call(method, *args, rpc_url=rpc_url, timeout=timeout)
             completed.append(method)
     except Exception:
         try:
-            rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url)
+            rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=timeout)
         except Exception:
             pass
         raise
@@ -446,6 +509,24 @@ def rt_wait_for_hash_present(
     return False
 
 
+def rt_wait_for_hash_directory(
+    torrent_hash: str,
+    expected_directory: str,
+    *,
+    rpc_url: str = DEFAULT_RT_RPC_URL,
+    timeout_s: float = 20.0,
+    poll_s: float = 0.5,
+    rpc_timeout: int = 20,
+) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        directory = rt_get_torrent_directory(torrent_hash, rpc_url=rpc_url, timeout=rpc_timeout)
+        if rt_directories_match(directory, expected_directory):
+            return True
+        time.sleep(poll_s)
+    return False
+
+
 def rt_reset_torrent_session(
     torrent_hash: str,
     *,
@@ -453,6 +534,9 @@ def rt_reset_torrent_session(
     session_dir: Path = DEFAULT_RT_SESSION_DIR,
     backup_root: Path,
     rpc_url: str = DEFAULT_RT_RPC_URL,
+    rpc_timeout: int = 20,
+    verify_timeout_s: float = 20.0,
+    poll_s: float = 0.5,
 ) -> dict:
     session_path = Path(session_dir).expanduser()
     session_files = resolve_rt_session_files(session_path, torrent_hash)
@@ -464,50 +548,121 @@ def rt_reset_torrent_session(
         target_directory,
         load_rt_torrent_meta(session_path, torrent_hash),
     )
+    if not normalized_target:
+        raise ValueError(f"missing_target_directory hash={torrent_hash}")
     completed: list[str] = []
+    recovery_completed: list[str] = []
+    session_mutated = False
+    reload_verified = False
+    status = "unknown"
+    phase = "stop_close_erase"
     for method in ("d.stop", "d.close", "d.erase"):
         try:
-            rt_xmlrpc_call(method, torrent_hash, rpc_url=rpc_url)
+            rt_xmlrpc_call(method, torrent_hash, rpc_url=rpc_url, timeout=rpc_timeout)
             completed.append(method)
+            if method == "d.erase":
+                session_mutated = True
         except Exception:
             # If the torrent is not currently active in-memory, continue with
             # the on-disk session reset anyway.
             completed.append(f"{method}:skip")
     try:
-        rt_xmlrpc_call("session.save", rpc_url=rpc_url)
+        rt_xmlrpc_call("session.save", rpc_url=rpc_url, timeout=rpc_timeout)
         completed.append("session.save")
     except Exception:
         completed.append("session.save:skip")
 
-    if session_files.rtorrent_file.exists():
-        session_files.rtorrent_file.unlink()
-        completed.append("session.rtorrent.unlink")
-    if session_files.libtorrent_resume_file.exists():
-        session_files.libtorrent_resume_file.unlink()
-        completed.append("session.libtorrent_resume.unlink")
-    if not session_files.torrent_file.exists():
-        backup_torrent = backup_dir / session_files.torrent_file.name
-        if not backup_torrent.exists():
-            raise FileNotFoundError(f"missing_backup_torrent path={backup_torrent}")
-        shutil.copy2(backup_torrent, session_files.torrent_file)
-        completed.append("session.torrent.restore")
-
     runtime_torrent_path = map_rt_runtime_path(session_files.torrent_file)
-    torrent_bytes = session_files.torrent_file.read_bytes()
-    inline_dir_cmd = rt_build_load_cmd("d.directory.set", normalized_target)
-    rt_xmlrpc_call("load.raw_start", "", torrent_bytes, inline_dir_cmd, rpc_url=rpc_url)
-    completed.append("load.raw_start")
-    if not rt_wait_for_hash_present(torrent_hash, rpc_url=rpc_url):
-        raise RuntimeError(f"torrent_not_reloaded hash={torrent_hash}")
+    error = ""
+    try:
+        phase = "unlink_session_sidecars"
+        if session_files.rtorrent_file.exists():
+            session_files.rtorrent_file.unlink()
+            session_mutated = True
+            completed.append("session.rtorrent.unlink")
+        if session_files.libtorrent_resume_file.exists():
+            session_files.libtorrent_resume_file.unlink()
+            session_mutated = True
+            completed.append("session.libtorrent_resume.unlink")
+        if not session_files.torrent_file.exists():
+            backup_torrent = backup_dir / session_files.torrent_file.name
+            if not backup_torrent.exists():
+                raise FileNotFoundError(f"missing_backup_torrent path={backup_torrent}")
+            shutil.copy2(backup_torrent, session_files.torrent_file)
+            completed.append("session.torrent.restore")
 
-    completed.extend(rt_recheck_torrent(torrent_hash, rpc_url=rpc_url))
+        phase = "load.raw_start"
+        torrent_bytes = session_files.torrent_file.read_bytes()
+        inline_dir_cmd = rt_build_load_cmd("d.directory.set", normalized_target)
+        load_timed_out = False
+        try:
+            rt_xmlrpc_call(
+                "load.raw_start",
+                "",
+                torrent_bytes,
+                inline_dir_cmd,
+                rpc_url=rpc_url,
+                timeout=rpc_timeout,
+            )
+            completed.append("load.raw_start")
+        except Exception as exc:
+            if not rt_xmlrpc_timeout_error(exc):
+                raise
+            load_timed_out = True
+            completed.append("load.raw_start:timeout")
+
+        phase = "verify_reload"
+        reload_verified = rt_wait_for_hash_directory(
+            torrent_hash,
+            normalized_target,
+            rpc_url=rpc_url,
+            timeout_s=verify_timeout_s,
+            poll_s=poll_s,
+            rpc_timeout=rpc_timeout,
+        )
+        if not reload_verified:
+            raise RuntimeError(f"torrent_not_reloaded hash={torrent_hash} expected_directory={normalized_target}")
+        if load_timed_out:
+            completed.append("load.raw_start:verified_after_timeout")
+
+        phase = "persist_reloaded_session"
+        rt_xmlrpc_call("d.save_full_session", torrent_hash, rpc_url=rpc_url, timeout=rpc_timeout)
+        completed.append("d.save_full_session")
+        rt_xmlrpc_call("session.save", rpc_url=rpc_url, timeout=rpc_timeout)
+        completed.append("session.save")
+
+        phase = "recheck"
+        completed.extend(rt_recheck_torrent(torrent_hash, rpc_url=rpc_url, timeout=rpc_timeout))
+        status = "verified_after_timeout" if load_timed_out else "verified"
+    except Exception as exc:
+        error = str(exc)
+        if session_mutated and not reload_verified:
+            phase = f"{phase}:restore"
+            try:
+                rt_xmlrpc_call("d.erase", torrent_hash, rpc_url=rpc_url, timeout=rpc_timeout)
+                recovery_completed.append("d.erase")
+            except Exception:
+                recovery_completed.append("d.erase:skip")
+            try:
+                rt_xmlrpc_call("session.save", rpc_url=rpc_url, timeout=rpc_timeout)
+                recovery_completed.append("session.save")
+            except Exception:
+                recovery_completed.append("session.save:skip")
+            recovery_completed.extend(restore_rt_session_files(session_files, backup_dir=backup_dir))
+            status = "blocked_restored"
+        else:
+            status = "blocked_after_reload" if reload_verified else "blocked"
     return {
         "hash": str(torrent_hash).strip().lower(),
+        "status": status,
+        "phase": phase,
+        "error": error,
         "backup_dir": str(backup_dir),
         "runtime_torrent_path": runtime_torrent_path,
         "target_directory": target_directory,
         "normalized_target_directory": normalized_target,
         "completed": completed,
+        "recovery_completed": recovery_completed,
     }
 
 
