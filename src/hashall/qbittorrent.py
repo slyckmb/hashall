@@ -961,6 +961,84 @@ class QBittorrentClient:
                 return None
         return None
 
+    def add_torrent_file(
+        self,
+        torrent_file: Path,
+        *,
+        save_path: str,
+        category: str = "",
+        tags: Optional[Iterable[str]] = None,
+        stopped: bool = True,
+        skip_checking: bool = False,
+    ) -> bool:
+        """
+        Add a local .torrent file to qBittorrent.
+
+        The caller owns all safety decisions. This helper only performs the Web API
+        mutation and keeps the torrent stopped by default for mirror imports.
+        """
+        torrent_path = Path(torrent_file)
+        if not torrent_path.exists():
+            self.last_error = f"torrent_file_missing:{torrent_path}"
+            return False
+        self._ensure_authenticated()
+
+        clean_tags = sorted({str(tag or "").strip() for tag in (tags or []) if str(tag or "").strip()})
+        data = {
+            "savepath": str(save_path),
+            "category": str(category or ""),
+            "tags": ",".join(clean_tags),
+            "autoTMM": "false",
+            "paused": "true" if stopped else "false",
+            "stopped": "true" if stopped else "false",
+            "skip_checking": "true" if skip_checking else "false",
+        }
+        response: Optional[requests.Response] = None
+        for attempt in range(1, self.request_retries + 1):
+            try:
+                with torrent_path.open("rb") as handle:
+                    response = self.session.post(
+                        f"{self.base_url}/api/v2/torrents/add",
+                        data=data,
+                        files={"torrents": (torrent_path.name, handle, "application/x-bittorrent")},
+                        timeout=self.request_timeout,
+                    )
+                response.raise_for_status()
+                body = self._response_body_snippet(response)
+                if body and body.lower().startswith("fails"):
+                    self.last_error = body
+                    return False
+                self.last_error = None
+                return True
+            except requests.Timeout as e:
+                self.last_error = str(e)
+                if attempt < self.request_retries:
+                    time.sleep(self._retry_delay_seconds(attempt))
+                    continue
+                print(f"⚠️ Failed to add torrent file {torrent_path}: {e}")
+                return False
+            except requests.HTTPError as e:
+                status = self._status_from_error(e, response)
+                body = self._response_body_snippet(
+                    e.response if e.response is not None else response
+                )
+                self.last_error = f"HTTP {status}" if status is not None else str(e)
+                if body:
+                    self.last_error += f":{body}"
+                if status in self.retryable_http_statuses and attempt < self.request_retries:
+                    time.sleep(self._retry_delay_seconds(attempt))
+                    continue
+                print(f"⚠️ Failed to add torrent file {torrent_path}: {self.last_error}")
+                return False
+            except requests.RequestException as e:
+                self.last_error = str(e)
+                if attempt < self.request_retries:
+                    time.sleep(self._retry_delay_seconds(attempt))
+                    continue
+                print(f"⚠️ Failed to add torrent file {torrent_path}: {e}")
+                return False
+        return False
+
     def get_torrents_by_hashes(self, torrent_hashes: List[str]) -> Dict[str, QBitTorrent]:
         """
         Fetch torrent info for a specific set of hashes in one API request.

@@ -459,6 +459,50 @@ def test_export_torrent_file_uses_bt_backup_when_auth_fails(monkeypatch, tmp_pat
     assert blob == b"torrent-bytes"
 
 
+def test_add_torrent_file_posts_stopped_mirror_import(monkeypatch, tmp_path):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    torrent_file = tmp_path / "abc123.torrent"
+    torrent_file.write_bytes(b"torrent-bytes")
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+
+    captured = {}
+
+    class FakeResponse:
+        text = "Ok."
+
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, data=None, files=None, timeout=None):
+        captured["url"] = url
+        captured["data"] = dict(data)
+        name, handle, content_type = files["torrents"]
+        captured["file_name"] = name
+        captured["file_bytes"] = handle.read()
+        captured["content_type"] = content_type
+        return FakeResponse()
+
+    monkeypatch.setattr(client.session, "post", fake_post)
+
+    ok = client.add_torrent_file(
+        torrent_file,
+        save_path="/data/media/torrents/seeding/site",
+        category="tv",
+        tags=["hashall-client-drift", "mirror"],
+    )
+
+    assert ok is True
+    assert captured["url"].endswith("/api/v2/torrents/add")
+    assert captured["data"]["savepath"] == "/data/media/torrents/seeding/site"
+    assert captured["data"]["category"] == "tv"
+    assert captured["data"]["tags"] == "hashall-client-drift,mirror"
+    assert captured["data"]["paused"] == "true"
+    assert captured["data"]["stopped"] == "true"
+    assert captured["data"]["autoTMM"] == "false"
+    assert captured["file_name"] == "abc123.torrent"
+    assert captured["file_bytes"] == b"torrent-bytes"
+
+
 def test_get_torrents_from_cache_defaults_to_hashall_cache_path(monkeypatch, tmp_path):
     cache_file = tmp_path / "torrents-info.json"
     cache_file.write_text("[]", encoding="utf-8")
