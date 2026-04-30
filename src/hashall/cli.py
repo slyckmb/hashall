@@ -2773,6 +2773,7 @@ def _monitor_rt_qb_rechecks(
     *,
     timeout_s: float,
     interval_s: float,
+    stop_after_check: bool = True,
 ) -> dict[str, dict]:
     pending = {str(item or "").strip().lower() for item in torrent_hashes if str(item or "").strip()}
     results: dict[str, dict] = {}
@@ -2787,6 +2788,7 @@ def _monitor_rt_qb_rechecks(
             ("total", len(pending), "yellow"),
             ("poll_interval", f"{interval:.0f}s", None),
             ("timeout", f"{timeout:.0f}s", None),
+            ("stop_after_check", "yes" if stop_after_check else "no", None),
         ],
     )
     while pending and time.time() < deadline:
@@ -2794,12 +2796,19 @@ def _monitor_rt_qb_rechecks(
             info = qbit.get_torrent_info(torrent_hash)
             status, detail = _rt_qb_monitor_classify(info)
             if status == "success":
+                stopped_ok: bool | None = None
+                if stop_after_check:
+                    stopped_ok = qbit.pause_torrent(torrent_hash)
+                    if stopped_ok:
+                        detail = f"{detail} → stopped"
+                    else:
+                        detail = f"{detail} → stop_failed"
                 print(f"{_rt_qb_style('✓', fg='green', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
-                results[torrent_hash] = {"status": "success", "detail": detail}
+                results[torrent_hash] = {"status": "success", "detail": detail, "stopped": stopped_ok}
                 pending.remove(torrent_hash)
             elif status == "failure":
                 print(f"{_rt_qb_style('✗', fg='red', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
-                results[torrent_hash] = {"status": "failure", "detail": detail}
+                results[torrent_hash] = {"status": "failure", "detail": detail, "stopped": None}
                 pending.remove(torrent_hash)
             else:
                 print(f"{_rt_qb_style('…', fg='yellow', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
@@ -2808,22 +2817,23 @@ def _monitor_rt_qb_rechecks(
     for torrent_hash in sorted(pending):
         detail = "monitor_timeout"
         print(f"{_rt_qb_style('!', fg='red', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
-        results[torrent_hash] = {"status": "timeout", "detail": detail}
+        results[torrent_hash] = {"status": "timeout", "detail": detail, "stopped": None}
+    stopped_count = sum(1 for item in results.values() if item.get("stopped") is True)
     counts = {
         "success": sum(1 for item in results.values() if item["status"] == "success"),
         "failed": sum(1 for item in results.values() if item["status"] == "failure"),
         "timeout": sum(1 for item in results.values() if item["status"] == "timeout"),
         "total": len(results),
     }
-    _print_rt_qb_summary(
-        "RT→qB mirror summary",
-        [
-            ("success", counts["success"], "green" if counts["success"] else None),
-            ("failed", counts["failed"], "red" if counts["failed"] else "green"),
-            ("timeout", counts["timeout"], "red" if counts["timeout"] else "green"),
-            ("total", counts["total"], None),
-        ],
-    )
+    summary_rows = [
+        ("success", counts["success"], "green" if counts["success"] else None),
+        ("failed", counts["failed"], "red" if counts["failed"] else "green"),
+        ("timeout", counts["timeout"], "red" if counts["timeout"] else "green"),
+        ("total", counts["total"], None),
+    ]
+    if stop_after_check:
+        summary_rows.append(("stopped", stopped_count, "green" if stopped_count == counts["success"] else "yellow"))
+    _print_rt_qb_summary("RT→qB mirror summary", summary_rows)
     return results
 
 
