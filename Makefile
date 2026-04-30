@@ -6,7 +6,7 @@ TRK_WARN_SCRIPT := $(HOME)/dev/sys/docker/gluetun_qbit/rtorrent_vpn/bin/rt-track
 
 .PHONY: help test db-refresh db-refresh-verbose \
         rt-qb-mirror-drift rt-qb-mirror-apply rt-qb-mirror-pause-seeding rt-qb-mirror-queue-apply \
-        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup
+        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs
 
 help:
 	@echo "Use the CLI directly:"
@@ -26,8 +26,9 @@ help:
 	@echo ""
 	@echo "  make trk-warn                — list RT tracker-warning items (deleted/auth_err/other)"
 	@echo "  make trk-warn-prowlarr       — same, with Prowlarr replacement search"
-	@echo "  make trk-warn-dry            — dry-run cleanup: plan removes for deleted+other"
-	@echo "  make trk-warn-cleanup        — execute cleanup: remove deleted+other, sync to qB"
+	@echo "  make trk-warn-dry            — dry-run: plan removes + season-pack upgrades for deleted+other"
+	@echo "  make trk-warn-cleanup        — execute cleanup: remove deleted+other (no upgrades), sync to qB"
+	@echo "  make trk-warn-upgrade-packs  — season pack upgrades: erase individual eps, add pack, sync to qB"
 	@echo ""
 	@echo "  Vars: LIMIT=N BUCKET=deleted,auth_err,other HASH=<hash> SLEEP_ROW=N"
 
@@ -84,7 +85,10 @@ trk-warn-prowlarr:
 	@python3 $(TRK_WARN_SCRIPT) --prowlarr --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
 
 trk-warn-dry:
-	@python3 $(TRK_WARN_SCRIPT) --dryrun --bucket $${BUCKET:-deleted,other} --qb-sync $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --dryrun --prowlarr --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-cleanup:
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --bucket $${BUCKET:-deleted,other} --qb-sync $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+
+trk-warn-upgrade-packs:
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --upgrade-season-packs --prowlarr --bucket $${BUCKET:-deleted} --qb-sync $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
