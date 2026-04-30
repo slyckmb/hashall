@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -6,6 +7,7 @@ from click.testing import CliRunner
 from hashall.bencode import bencode_dump
 from hashall.cli import cli
 from hashall.cli import _read_client_drift_journal
+from hashall.cli import _rt_qb_monitor_classify
 from hashall.client_drift import (
     ClientDriftPolicy,
     build_client_drift_report,
@@ -28,6 +30,38 @@ def _write_rt_session(session_dir: Path, torrent_hash: str, directory: Path, nam
         session_dir / f"{torrent_hash.upper()}.torrent.rtorrent",
         {b"directory": str(directory).encode("utf-8")},
     )
+
+
+def _assert_output_field(output: str, label: str, value: object) -> None:
+    assert re.search(rf"{re.escape(label)}:\s+{re.escape(str(value))}\b", output)
+
+
+class _FakeTorrentInfo:
+    def __init__(self, state: str, progress: float, amount_left: int) -> None:
+        self.state = state
+        self.progress = progress
+        self.amount_left = amount_left
+
+
+def test_rt_qb_monitor_classifies_stopped_complete_success() -> None:
+    status, detail = _rt_qb_monitor_classify(_FakeTorrentInfo("stoppedUP", 1.0, 0))
+
+    assert status == "success"
+    assert detail == "stoppedUP 100%"
+
+
+def test_rt_qb_monitor_classifies_downloading_failure() -> None:
+    status, detail = _rt_qb_monitor_classify(_FakeTorrentInfo("downloading", 0.5, 100))
+
+    assert status == "failure"
+    assert "transitioned_to_downloading" in detail
+
+
+def test_rt_qb_monitor_keeps_checking_pending() -> None:
+    status, detail = _rt_qb_monitor_classify(_FakeTorrentInfo("checkingDL", 0.5, 100))
+
+    assert status == "pending"
+    assert "checkingDL" in detail
 
 
 def test_client_drift_conservative_does_not_auto_mirror_rt_only(tmp_path: Path) -> None:
@@ -378,7 +412,7 @@ def test_rt_qb_mirror_sync_dry_run_selects_mirror_rows_without_qb(tmp_path: Path
     )
 
     assert result.exit_code == 0
-    assert "selected: 1" in result.output
+    _assert_output_field(result.output, "selected", 1)
     assert torrent_hash in result.output
 
 
@@ -447,6 +481,7 @@ def test_rt_qb_mirror_sync_apply_rechecks_by_default(tmp_path: Path, monkeypatch
             "--journal",
             str(tmp_path / "journal.jsonl"),
             "--apply",
+            "--no-monitor",
         ],
     )
 
@@ -511,7 +546,7 @@ def test_rt_qb_mirror_process_queue_keeps_blocked_rows_queued(tmp_path: Path) ->
     )
 
     assert result.exit_code == 0
-    assert "selected: 0" in result.output
+    _assert_output_field(result.output, "selected", 0)
     assert "queued_not_ready_for_mirror" in result.output
     assert queue_file.exists()
 
@@ -572,7 +607,7 @@ def test_rt_qb_mirror_process_queue_matches_hash_prefix_to_selected_row(tmp_path
     )
 
     assert result.exit_code == 0
-    assert "selected: 1" in result.output
+    _assert_output_field(result.output, "selected", 1)
     assert "dry-run would_remove_queue" in result.output
     assert "queued_not_ready_for_mirror" not in result.output
     assert queue_file.exists()

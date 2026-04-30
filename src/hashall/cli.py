@@ -2624,6 +2624,7 @@ def _verify_qb_import_complete(qbit, torrent_hash: str, *, timeout_s: float, int
     interval = max(0.5, float(interval_s))
     last = None
     while True:
+        remaining_s = max(0.0, deadline - time.time())
         info = qbit.get_torrent_info(torrent_hash)
         if info is not None:
             last = {
@@ -2633,12 +2634,197 @@ def _verify_qb_import_complete(qbit, torrent_hash: str, *, timeout_s: float, int
                 "save_path": info.save_path,
                 "content_path": info.content_path,
             }
+            _rt_qb_progress(
+                f"verify poll state={info.state} progress={float(info.progress):.3f} "
+                f"left={int(info.amount_left)} timeout_left={remaining_s:.0f}s"
+            )
             if info.progress >= 0.999 and int(info.amount_left) == 0:
                 return {"ok": True, **last}
+        else:
+            _rt_qb_progress(f"verify poll state=missing timeout_left={remaining_s:.0f}s")
         if time.time() >= deadline:
             break
         time.sleep(interval)
     return {"ok": False, **(last or {"state": "missing", "progress": 0.0, "amount_left": -1})}
+
+
+def _rt_qb_progress(message: str) -> None:
+    print(f"      {_rt_qb_style('…', fg='yellow', bold=True)} {message}", flush=True)
+
+
+def _rt_qb_color_enabled() -> bool:
+    override = str(os.environ.get("HASHALL_COLOR") or "").strip().lower()
+    if override in {"1", "true", "yes", "always"}:
+        return True
+    if override in {"0", "false", "no", "never"}:
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if str(os.environ.get("CLICOLOR_FORCE") or "").strip().lower() in {"1", "true", "yes", "always"}:
+        return True
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
+def _rt_qb_style(text: object, *, fg: str | None = None, bold: bool = False) -> str:
+    value = str(text)
+    if not _rt_qb_color_enabled():
+        return value
+    return click.style(value, fg=fg, bold=bold)
+
+
+def _rt_qb_bool(value: bool) -> str:
+    return _rt_qb_style("True", fg="green", bold=True) if value else _rt_qb_style("False", fg="yellow", bold=True)
+
+
+def _print_rt_qb_summary(title: str, rows: list[tuple[str, object, str | None]]) -> None:
+    print(_rt_qb_style(f"╭─ {title}", fg="cyan", bold=True))
+    for label, value, color in rows:
+        label_text = f"{label + ':':<24}"
+        print(f"│ {_rt_qb_style(label_text, fg='bright_black')} {_rt_qb_style(value, fg=color, bold=color in {'green', 'yellow', 'red'})}")
+    print(_rt_qb_style("╰─", fg="cyan", bold=True))
+
+
+def _rt_qb_added_text(raw_added_on: object) -> str:
+    try:
+        added_on = int(raw_added_on or 0)
+    except (TypeError, ValueError):
+        added_on = 0
+    if added_on <= 0:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(added_on))
+
+
+def _print_rt_qb_candidate(row: dict, *, index: int | None = None) -> None:
+    rt_row = row.get("rt") or {}
+    hash_prefix = str(row.get("hash") or "")[:16]
+    name = str(row.get("name") or "")
+    save_path = str(rt_row.get("target_qb_save_path") or rt_row.get("save_path") or "")
+    category = str(rt_row.get("category") or "")
+    added = str(rt_row.get("added_display") or "").strip() or _rt_qb_added_text(rt_row.get("added_on"))
+    prefix = f"{index:>3}. " if index is not None else "   "
+    category_text = f"{category or '-':<14}"
+    print(
+        f"{_rt_qb_style(prefix, fg='bright_black')}"
+        f"{_rt_qb_style(hash_prefix, fg='cyan', bold=True)} "
+        f"{_rt_qb_style(category_text, fg='magenta')} "
+        f"{_rt_qb_style(name, fg='bright_white', bold=True)}"
+    )
+    print(
+        f"     {_rt_qb_style('added:', fg='bright_black')} {_rt_qb_style(added, fg='yellow')}"
+    )
+    print(
+        f"     {_rt_qb_style('path:', fg='bright_black')} {_rt_qb_style(save_path, fg='bright_blue')}"
+    )
+
+
+def _print_rt_qb_event_status(event: dict) -> None:
+    status = str(event.get("status") or "")
+    status_color = "green" if status in {"ok", "already_present"} else "red"
+    print(f"      status: {_rt_qb_style(status, fg=status_color, bold=True)}")
+    if "recheck_started" in event:
+        print(f"      recheck_started: {_rt_qb_bool(bool(event['recheck_started']))}")
+    if "verify" in event:
+        verify = event["verify"]
+        if isinstance(verify, dict) and verify.get("ok") is True:
+            print(
+                "      verify: "
+                f"{_rt_qb_style('ok', fg='green', bold=True)} "
+                f"state={verify.get('state')} progress={float(verify.get('progress') or 0):.3f} "
+                f"left={verify.get('amount_left')}"
+            )
+        else:
+            print(f"      verify: {_rt_qb_style(verify, fg='yellow')}")
+
+
+_RT_QB_COMPLETE_STATES = {"pausedUP", "stoppedUP", "queuedUP", "stalledUP", "uploading", "forcedUP"}
+_RT_QB_DOWNLOADING_STATES = {
+    "allocating",
+    "checkingDL",
+    "checkingResumeData",
+    "downloading",
+    "forcedDL",
+    "metaDL",
+    "moving",
+    "queuedDL",
+    "stalledDL",
+    "stoppedDL",
+    "pausedDL",
+}
+
+
+def _rt_qb_monitor_classify(info) -> tuple[str, str]:
+    if info is None:
+        return "pending", "missing_from_qb"
+    state = str(info.state or "")
+    progress = float(info.progress or 0.0)
+    amount_left = int(info.amount_left)
+    if progress >= 0.999 and amount_left == 0 and state in _RT_QB_COMPLETE_STATES:
+        return "success", f"{state} 100%"
+    if state in _RT_QB_DOWNLOADING_STATES and not state.startswith("checking"):
+        return "failure", f"transitioned_to_downloading state={state} progress={progress:.3f} left={amount_left}"
+    return "pending", f"{state or 'unknown'} progress={progress:.3f} left={amount_left}"
+
+
+def _monitor_rt_qb_rechecks(
+    qbit,
+    torrent_hashes: list[str],
+    *,
+    timeout_s: float,
+    interval_s: float,
+) -> dict[str, dict]:
+    pending = {str(item or "").strip().lower() for item in torrent_hashes if str(item or "").strip()}
+    results: dict[str, dict] = {}
+    if not pending:
+        return results
+    timeout = max(1.0, float(timeout_s))
+    interval = max(1.0, float(interval_s))
+    deadline = time.time() + timeout
+    _print_rt_qb_summary(
+        "Monitoring qB rechecks",
+        [
+            ("total", len(pending), "yellow"),
+            ("poll_interval", f"{interval:.0f}s", None),
+            ("timeout", f"{timeout:.0f}s", None),
+        ],
+    )
+    while pending and time.time() < deadline:
+        for torrent_hash in list(pending):
+            info = qbit.get_torrent_info(torrent_hash)
+            status, detail = _rt_qb_monitor_classify(info)
+            if status == "success":
+                print(f"{_rt_qb_style('✓', fg='green', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
+                results[torrent_hash] = {"status": "success", "detail": detail}
+                pending.remove(torrent_hash)
+            elif status == "failure":
+                print(f"{_rt_qb_style('✗', fg='red', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
+                results[torrent_hash] = {"status": "failure", "detail": detail}
+                pending.remove(torrent_hash)
+            else:
+                print(f"{_rt_qb_style('…', fg='yellow', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
+        if pending:
+            time.sleep(min(interval, max(0.0, deadline - time.time())))
+    for torrent_hash in sorted(pending):
+        detail = "monitor_timeout"
+        print(f"{_rt_qb_style('!', fg='red', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
+        results[torrent_hash] = {"status": "timeout", "detail": detail}
+    counts = {
+        "success": sum(1 for item in results.values() if item["status"] == "success"),
+        "failed": sum(1 for item in results.values() if item["status"] == "failure"),
+        "timeout": sum(1 for item in results.values() if item["status"] == "timeout"),
+        "total": len(results),
+    }
+    _print_rt_qb_summary(
+        "RT→qB mirror summary",
+        [
+            ("success", counts["success"], "green" if counts["success"] else None),
+            ("failed", counts["failed"], "red" if counts["failed"] else "green"),
+            ("timeout", counts["timeout"], "red" if counts["timeout"] else "green"),
+            ("total", counts["total"], None),
+        ],
+    )
+    return results
 
 
 def _select_client_drift_mirror_rows(
@@ -2681,23 +2867,22 @@ def _apply_client_drift_mirror_rows(
 
         qbit = get_qbittorrent_client()
 
-    for row in rows:
+    for index, row in enumerate(rows, start=1):
         rt_row = row.get("rt") or {}
-        print(
-            f"   {row['hash'][:16]} {row.get('name') or ''} "
-            f"savepath={rt_row.get('target_qb_save_path') or rt_row.get('save_path') or ''} "
-            f"category={rt_row.get('category') or ''}"
-        )
+        _print_rt_qb_candidate(row, index=index)
         if not do_apply:
             continue
         assert qbit is not None
         torrent_hash = str(row.get("hash") or "").strip().lower()
+        _rt_qb_progress("checking qB for existing torrent")
         existing = qbit.get_torrent_info(torrent_hash)
         if existing is not None:
             verify = {}
             if recheck_after_add:
+                _rt_qb_progress("already present; starting qB recheck")
                 qbit.recheck_torrent(torrent_hash)
             if verify_timeout > 0:
+                _rt_qb_progress(f"verifying qB completion for up to {verify_timeout:.0f}s")
                 verify = _verify_qb_import_complete(
                     qbit,
                     torrent_hash,
@@ -2712,11 +2897,10 @@ def _apply_client_drift_mirror_rows(
             }
             _append_client_drift_journal(journal, event)
             events.append(event)
-            print("      status: already_present")
-            if verify:
-                print(f"      verify: {verify}")
+            _print_rt_qb_event_status(event)
             continue
         tags = ["hashall-client-drift", *extra_tags]
+        _rt_qb_progress("adding torrent to qB as stopped")
         ok = qbit.add_torrent_file(
             Path(str(rt_row.get("torrent_file") or "")),
             save_path=str(rt_row.get("target_qb_save_path") or rt_row.get("save_path") or ""),
@@ -2735,11 +2919,13 @@ def _apply_client_drift_mirror_rows(
             "error": "" if ok else str(qbit.last_error or "unknown"),
         }
         if ok and recheck_after_add:
+            _rt_qb_progress("starting qB recheck")
             recheck_ok = qbit.recheck_torrent(torrent_hash)
             event["recheck_started"] = bool(recheck_ok)
             if not recheck_ok:
                 event["error"] = str(qbit.last_error or "qbit_recheck_failed")
         if ok and not event["error"] and verify_timeout > 0:
+            _rt_qb_progress(f"verifying qB completion for up to {verify_timeout:.0f}s")
             verify = _verify_qb_import_complete(
                 qbit,
                 torrent_hash,
@@ -2751,13 +2937,9 @@ def _apply_client_drift_mirror_rows(
                 event["error"] = f"verify_incomplete:{verify}"
         _append_client_drift_journal(journal, event)
         events.append(event)
-        print(f"      status: {event['status']}")
-        if "recheck_started" in event:
-            print(f"      recheck_started: {event['recheck_started']}")
-        if "verify" in event:
-            print(f"      verify: {event['verify']}")
+        _print_rt_qb_event_status(event)
         if event["error"]:
-            print(f"      error: {event['error']}")
+            print(f"      error: {_rt_qb_style(event['error'], fg='red', bold=True)}")
             raise click.ClickException(f"client drift apply failed hash={torrent_hash}: {event['error']}")
         if sleep_row > 0:
             time.sleep(sleep_row)
@@ -3058,6 +3240,10 @@ def rt_qb_mirror_enqueue_cmd(torrent_hash, queue_dir, config_path, source):
 )
 @click.option("--verify-timeout", type=float, default=0.0, show_default=True)
 @click.option("--verify-interval", type=float, default=5.0, show_default=True)
+@click.option("--wait-for-check", is_flag=True, help="Wait for qB recheck to reach 100%; uses --verify-timeout or 180s by default.")
+@click.option("--monitor/--no-monitor", default=True, show_default=True, help="After queueing all rechecks, monitor them to success/failure.")
+@click.option("--monitor-timeout", type=float, default=900.0, show_default=True, help="Seconds to monitor batch rechecks.")
+@click.option("--monitor-interval", type=float, default=10.0, show_default=True, help="Seconds between batch monitor polls.")
 @click.option("--apply", "do_apply", is_flag=True, help="Actually mutate qB. Default is dry-run.")
 def rt_qb_mirror_sync_cmd(
     qb_cache_file,
@@ -3075,6 +3261,10 @@ def rt_qb_mirror_sync_cmd(
     recheck_after_add,
     verify_timeout,
     verify_interval,
+    wait_for_check,
+    monitor,
+    monitor_timeout,
+    monitor_interval,
     do_apply,
 ):
     """Mirror safe RT-only rows into qB as stopped torrents."""
@@ -3096,25 +3286,50 @@ def rt_qb_mirror_sync_cmd(
         limit=limit,
         journal_path=journal,
     )
-    print("🔁 rt-qb mirror sync")
-    print(f"   apply: {do_apply}")
-    print(f"   policy_mode: {report['summary']['policy_mode']}")
-    print(f"   rt_only: {report['summary']['rt_only']}")
-    print(f"   candidates: {candidate_count}")
-    print(f"   journal_completed: {completed_count}")
-    print(f"   selected: {len(selected)}")
-    print(f"   journal: {journal}")
-    _apply_client_drift_mirror_rows(
+    _print_rt_qb_summary(
+        f"RT→qB mirror sync ({'APPLY' if do_apply else 'DRY RUN'})",
+        [
+            ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("policy_mode", report["summary"]["policy_mode"], "cyan"),
+            ("rt_only", report["summary"]["rt_only"], "yellow" if report["summary"]["rt_only"] else "green"),
+            ("candidates", candidate_count, "yellow" if candidate_count else "green"),
+            ("journal_completed", completed_count, None),
+            ("selected", len(selected), "yellow" if selected else "green"),
+            ("journal", journal, None),
+        ],
+    )
+    effective_verify_timeout = verify_timeout
+    if wait_for_check and effective_verify_timeout <= 0:
+        effective_verify_timeout = 180.0
+    qbit = None
+    if do_apply and monitor:
+        from hashall.qbittorrent import get_qbittorrent_client
+
+        qbit = get_qbittorrent_client()
+    events = _apply_client_drift_mirror_rows(
         selected,
         do_apply=do_apply,
         journal=journal,
         extra_tags=extra_tags,
         skip_checking=skip_checking,
         recheck_after_add=recheck_after_add,
-        verify_timeout=verify_timeout,
+        verify_timeout=effective_verify_timeout,
         verify_interval=verify_interval,
         sleep_row=sleep_row,
+        qbit=qbit,
     )
+    if do_apply and monitor and qbit is not None:
+        monitor_hashes = [
+            str(event.get("hash") or "").lower()
+            for event in events
+            if event.get("status") in {"ok", "already_present"} and not event.get("error")
+        ]
+        _monitor_rt_qb_rechecks(
+            qbit,
+            monitor_hashes,
+            timeout_s=monitor_timeout,
+            interval_s=monitor_interval,
+        )
 
 
 @rt_qb_mirror.command("process-queue")
@@ -3138,6 +3353,10 @@ def rt_qb_mirror_sync_cmd(
 )
 @click.option("--verify-timeout", type=float, default=0.0, show_default=True)
 @click.option("--verify-interval", type=float, default=5.0, show_default=True)
+@click.option("--wait-for-check", is_flag=True, help="Wait for qB recheck to reach 100%; uses --verify-timeout or 180s by default.")
+@click.option("--monitor/--no-monitor", default=True, show_default=True, help="After queueing all rechecks, monitor them to success/failure.")
+@click.option("--monitor-timeout", type=float, default=900.0, show_default=True, help="Seconds to monitor batch rechecks.")
+@click.option("--monitor-interval", type=float, default=10.0, show_default=True, help="Seconds between batch monitor polls.")
 @click.option("--apply", "do_apply", is_flag=True)
 def rt_qb_mirror_process_queue_cmd(
     queue_dir,
@@ -3156,6 +3375,10 @@ def rt_qb_mirror_process_queue_cmd(
     recheck_after_add,
     verify_timeout,
     verify_interval,
+    wait_for_check,
+    monitor,
+    monitor_timeout,
+    monitor_interval,
     do_apply,
 ):
     """Process delayed RT completion queue entries."""
@@ -3183,14 +3406,26 @@ def rt_qb_mirror_process_queue_cmd(
         limit=0,
         journal_path=journal,
     )
-    print("🔁 rt-qb mirror process-queue")
-    print(f"   apply: {do_apply}")
-    print(f"   queue_dir: {qdir}")
-    print(f"   ready: {len(ready)}")
-    print(f"   waiting: {len(waiting)}")
-    print(f"   candidates: {candidate_count}")
-    print(f"   journal_completed: {completed_count}")
-    print(f"   selected: {len(selected)}")
+    _print_rt_qb_summary(
+        f"RT→qB mirror queue ({'APPLY' if do_apply else 'DRY RUN'})",
+        [
+            ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("queue_dir", qdir, None),
+            ("ready", len(ready), "yellow" if ready else "green"),
+            ("waiting", len(waiting), None),
+            ("candidates", candidate_count, "yellow" if candidate_count else "green"),
+            ("journal_completed", completed_count, None),
+            ("selected", len(selected), "yellow" if selected else "green"),
+        ],
+    )
+    effective_verify_timeout = verify_timeout
+    if wait_for_check and effective_verify_timeout <= 0:
+        effective_verify_timeout = 180.0
+    qbit = None
+    if do_apply and monitor:
+        from hashall.qbittorrent import get_qbittorrent_client
+
+        qbit = get_qbittorrent_client()
     events = _apply_client_drift_mirror_rows(
         selected,
         do_apply=do_apply,
@@ -3198,10 +3433,23 @@ def rt_qb_mirror_process_queue_cmd(
         extra_tags=extra_tags,
         skip_checking=skip_checking,
         recheck_after_add=recheck_after_add,
-        verify_timeout=verify_timeout,
+        verify_timeout=effective_verify_timeout,
         verify_interval=verify_interval,
         sleep_row=sleep_row,
+        qbit=qbit,
     )
+    if do_apply and monitor and qbit is not None:
+        monitor_hashes = [
+            str(event.get("hash") or "").lower()
+            for event in events
+            if event.get("status") in {"ok", "already_present"} and not event.get("error")
+        ]
+        _monitor_rt_qb_rechecks(
+            qbit,
+            monitor_hashes,
+            timeout_s=monitor_timeout,
+            interval_s=monitor_interval,
+        )
     finished = {
         str(event.get("hash") or "").lower()
         for event in events

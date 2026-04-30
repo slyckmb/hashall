@@ -53,6 +53,7 @@ class ClientTorrentRow:
     size: int = 0
     tracker: str = ""
     added_on: int = 0
+    added_display: str = ""
     path_exists: bool = False
     torrent_file: str = ""
     torrent_file_exists: bool = False
@@ -77,6 +78,7 @@ class ClientTorrentRow:
             "size": self.size,
             "tracker": self.tracker,
             "added_on": self.added_on,
+            "added_display": self.added_display,
             "path_exists": self.path_exists,
             "torrent_file": self.torrent_file,
             "torrent_file_exists": self.torrent_file_exists,
@@ -292,6 +294,7 @@ def load_rt_cache_rows(
             size=_to_int(raw.get("size") or raw.get("total_size") or (meta.total_bytes if meta else 0)),
             tracker=str(raw.get("tracker") or "").strip(),
             added_on=_to_int(raw.get("added_on")),
+            added_display=str(raw.get("added") or raw.get("added_short") or "").strip(),
             path_exists=_path_exists(content_path),
             torrent_file=str(session_files.torrent_file),
             torrent_file_exists=session_files.torrent_file.exists(),
