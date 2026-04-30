@@ -75,7 +75,7 @@ rt-qb-mirror-pause-seeding:
 	EOF
 
 rt-qb-mirror-queue-apply:
-	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror process-queue --apply --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-queue.jsonl}
+	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror process-queue --queue-dir /dump/docker/gluetun_qbit/rtorrent_vpn/rt-qb-mirror-queue --apply --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-queue.jsonl}
 
 trk-warn:
 	@python3 $(TRK_WARN_SCRIPT) --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
