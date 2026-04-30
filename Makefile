@@ -48,32 +48,7 @@ rt-qb-mirror-apply:
 	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --apply --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-apply.jsonl}
 
 rt-qb-mirror-pause-seeding:
-	@python3 - <<'EOF'
-	import json, sys
-	from pathlib import Path
-	sys.path.insert(0, '.')
-	from src.hashall.qbittorrent import get_qbittorrent_client
-	qb = get_qbittorrent_client()
-	cache = json.loads(Path.home().joinpath('.cache/hashall-qb/torrents-info.json').read_text())
-	seeding_states = {'stalledUP', 'uploading', 'forcedUP', 'queuedUP'}
-	targets = [t for t in cache if t.get('state') in seeding_states
-	           and ('hashall-client-drift' in (t.get('tags') or '')
-	                or 'hashall-rt-qb-mirror' in (t.get('tags') or ''))]
-	if not targets:
-	    print('No seeding mirror items found.')
-	    sys.exit(0)
-	print(f'Pausing {len(targets)} seeding mirror item(s)...')
-	ok = err = 0
-	for t in targets:
-	    h = t['hash']
-	    if qb.pause_torrent(h):
-	        print(f'  paused  {h[:16]}: {t["name"][:55]}')
-	        ok += 1
-	    else:
-	        print(f'  FAILED  {h[:16]}: {t["name"][:55]}')
-	        err += 1
-	print(f'Done: {ok} paused, {err} failed.')
-	EOF
+	@python3 scripts/pause_mirror_seeders.py
 
 rt-qb-mirror-queue-apply:
 	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror process-queue --queue-dir /dump/docker/gluetun_qbit/rtorrent_vpn/rt-qb-mirror-queue --apply --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-queue.jsonl}
