@@ -2774,6 +2774,7 @@ def _monitor_rt_qb_rechecks(
     timeout_s: float,
     interval_s: float,
     stop_after_check: bool = True,
+    stalled_dl_grace: int = 3,
 ) -> dict[str, dict]:
     pending = {str(item or "").strip().lower() for item in torrent_hashes if str(item or "").strip()}
     results: dict[str, dict] = {}
@@ -2791,10 +2792,25 @@ def _monitor_rt_qb_rechecks(
             ("stop_after_check", "yes" if stop_after_check else "no", None),
         ],
     )
+    # Grace counter: stoppedDL is the normal initial state before qB processes the recheck
+    # command. Track consecutive stoppedDL observations per hash; only fail after the grace
+    # window expires so we don't misclassify a queued recheck as a download failure.
+    stalled_dl_seen: dict[str, int] = {}
     while pending and time.time() < deadline:
         for torrent_hash in list(pending):
             info = qbit.get_torrent_info(torrent_hash)
-            status, detail = _rt_qb_monitor_classify(info)
+            raw_state = str(info.state or "") if info is not None else ""
+            if raw_state == "stoppedDL":
+                count = stalled_dl_seen.get(torrent_hash, 0) + 1
+                stalled_dl_seen[torrent_hash] = count
+                if count <= stalled_dl_grace:
+                    status = "pending"
+                    detail = f"stoppedDL (grace {count}/{stalled_dl_grace}, waiting for recheck)"
+                else:
+                    status, detail = _rt_qb_monitor_classify(info)
+            else:
+                stalled_dl_seen.pop(torrent_hash, None)
+                status, detail = _rt_qb_monitor_classify(info)
             if status == "success":
                 stopped_ok: bool | None = None
                 if stop_after_check:
