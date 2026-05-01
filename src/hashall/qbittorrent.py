@@ -18,7 +18,7 @@ from pathlib import Path
 from hashall.bencode import as_text, bencode_decode
 
 
-DEFAULT_QB_CACHE_DIR = Path.home() / ".cache" / "hashall-qb"
+DEFAULT_QB_CACHE_DIR = Path.home() / ".cache" / "silo-qb"
 DEFAULT_QB_CACHE_FILE = DEFAULT_QB_CACHE_DIR / "torrents-info.json"
 DEFAULT_QB_CACHE_META_FILE = DEFAULT_QB_CACHE_DIR / "torrents-info.meta.json"
 DEFAULT_QB_BT_BACKUP_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
