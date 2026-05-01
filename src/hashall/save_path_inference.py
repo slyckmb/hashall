@@ -24,8 +24,8 @@ ARR_CATEGORY_FINAL_MAP = {
     "sonarr": "tv",
     "radarr": "movies",
     "lidarr": "music",
-    "readarr": "books",
-    "speakarr": "books",
+    "readarr": "ebooks",
+    "speakarr": "audiobooks",
 }
 
 # Category aliases (e.g., MaM → myanonamouse)
