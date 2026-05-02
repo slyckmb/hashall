@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
+import requests
 from click.testing import CliRunner
 from hashall.bencode import bencode_dump
 from hashall.rtorrent import (
@@ -12,6 +13,7 @@ from hashall.rtorrent import (
     map_rt_runtime_path,
     normalize_rt_target_directory,
     rt_build_load_cmd,
+    rt_reset_torrent_session,
     rt_xmlrpc_call,
 )
 
@@ -675,6 +677,133 @@ def test_rt_xmlrpc_call_base64_encodes_bytes(monkeypatch) -> None:
     assert "<base64>YWJj</base64>" in captured["data"]
 
 
+def _write_rt_session_reset_fixture(session_dir: Path, torrent_hash: str = "AAA111") -> None:
+    bencode_dump(
+        session_dir / f"{torrent_hash}.torrent",
+        {
+            b"info": {
+                b"name": b"Release.One",
+                b"files": [{b"length": 1, b"path": [b"movie.mkv"]}],
+            }
+        },
+    )
+    bencode_dump(session_dir / f"{torrent_hash}.torrent.rtorrent", {b"directory": b"/old/root"})
+    (session_dir / f"{torrent_hash}.torrent.libtorrent_resume").write_bytes(b"old-resume")
+
+
+def test_rt_session_reset_verifies_after_load_timeout(tmp_path: Path, monkeypatch) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    backup_root = tmp_path / "backups"
+    target = tmp_path / "media" / "Release.One"
+    target.mkdir(parents=True)
+    _write_rt_session_reset_fixture(session_dir)
+
+    calls: list[str] = []
+    loaded = {"ok": False}
+
+    def fake_call(method, *args, **kwargs):
+        calls.append(method)
+        if method == "load.raw_start":
+            loaded["ok"] = True
+            raise requests.Timeout("read timeout")
+        if method == "d.directory" and loaded["ok"]:
+            return f"<methodResponse><params><param><value><string>{target}</string></value></param></params></methodResponse>"
+        return "<methodResponse><params><param><value><i8>0</i8></value></param></params></methodResponse>"
+
+    import hashall.rtorrent as rtorrent_mod
+
+    monkeypatch.setattr(rtorrent_mod, "rt_xmlrpc_call", fake_call)
+    result = rt_reset_torrent_session(
+        "aaa111",
+        target_directory=str(target),
+        session_dir=session_dir,
+        backup_root=backup_root,
+        rpc_timeout=1,
+        verify_timeout_s=0.1,
+        poll_s=0.01,
+    )
+
+    assert result["status"] == "verified_after_timeout"
+    assert "load.raw_start:verified_after_timeout" in result["completed"]
+    assert result["recovery_completed"] == []
+    assert calls.count("d.directory") >= 1
+
+
+def test_rt_session_reset_restores_after_unverified_load_timeout(tmp_path: Path, monkeypatch) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    backup_root = tmp_path / "backups"
+    target = tmp_path / "media" / "Release.One"
+    target.mkdir(parents=True)
+    _write_rt_session_reset_fixture(session_dir)
+    rtorrent_file = session_dir / "AAA111.torrent.rtorrent"
+    original_rtorrent = rtorrent_file.read_bytes()
+
+    def fake_call(method, *args, **kwargs):
+        if method == "load.raw_start":
+            raise requests.Timeout("read timeout")
+        if method == "d.directory":
+            return "<methodResponse><params><param><value><string>/wrong/root</string></value></param></params></methodResponse>"
+        return "<methodResponse><params><param><value><i8>0</i8></value></param></params></methodResponse>"
+
+    import hashall.rtorrent as rtorrent_mod
+
+    monkeypatch.setattr(rtorrent_mod, "rt_xmlrpc_call", fake_call)
+    result = rt_reset_torrent_session(
+        "aaa111",
+        target_directory=str(target),
+        session_dir=session_dir,
+        backup_root=backup_root,
+        rpc_timeout=1,
+        verify_timeout_s=0.02,
+        poll_s=0.01,
+    )
+
+    assert result["status"] == "blocked_restored"
+    assert "load.raw_start:timeout" in result["completed"]
+    assert "torrent_not_reloaded" in result["error"]
+    assert rtorrent_file.read_bytes() == original_rtorrent
+
+
+def test_rt_session_reset_restores_sidecars_when_load_fails(tmp_path: Path, monkeypatch) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    backup_root = tmp_path / "backups"
+    target = tmp_path / "media" / "Release.One"
+    target.mkdir(parents=True)
+    _write_rt_session_reset_fixture(session_dir)
+    rtorrent_file = session_dir / "AAA111.torrent.rtorrent"
+    resume_file = session_dir / "AAA111.torrent.libtorrent_resume"
+    original_rtorrent = rtorrent_file.read_bytes()
+    original_resume = resume_file.read_bytes()
+
+    def fake_call(method, *args, **kwargs):
+        if method == "load.raw_start":
+            raise RuntimeError("load failed")
+        return "<methodResponse><params><param><value><i8>0</i8></value></param></params></methodResponse>"
+
+    import hashall.rtorrent as rtorrent_mod
+
+    monkeypatch.setattr(rtorrent_mod, "rt_xmlrpc_call", fake_call)
+    result = rt_reset_torrent_session(
+        "aaa111",
+        target_directory=str(target),
+        session_dir=session_dir,
+        backup_root=backup_root,
+        rpc_timeout=1,
+        verify_timeout_s=0.1,
+        poll_s=0.01,
+    )
+
+    assert result["status"] == "blocked_restored"
+    assert result["error"] == "load failed"
+    assert rtorrent_file.read_bytes() == original_rtorrent
+    assert resume_file.read_bytes() == original_resume
+    assert "session.rtorrent.restore" in result["recovery_completed"]
+    assert "session.libtorrent_resume.restore" in result["recovery_completed"]
+
+
 def test_rt_repair_apply_dry_run_uses_target_directory(tmp_path: Path) -> None:
     session_dir = tmp_path / "rt-session"
     session_dir.mkdir()
@@ -912,3 +1041,68 @@ def test_rt_session_reset_dry_run_lists_hashes() -> None:
     assert "hash: aaa111" in result.output
     assert "hash: bbb222" in result.output
     assert "apply: False" in result.output
+
+
+def test_rt_session_reset_batch_dry_run_reads_manifest(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    target = tmp_path / "media" / "Release.One"
+    target.mkdir(parents=True)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"rows": [{"hash": "AAA111", "target_directory": str(target)}]}),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "session-reset-batch",
+            "--manifest",
+            str(manifest),
+            "--session-dir",
+            str(session_dir),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "manifest_rows: 1" in result.output
+    assert "selected: 1" in result.output
+    assert "hash: aaa111" in result.output
+    assert "apply: False" in result.output
+
+
+def test_rt_session_reset_batch_skips_journal_completed(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    target = tmp_path / "media" / "Release.One"
+    target.mkdir(parents=True)
+    manifest = tmp_path / "manifest.json"
+    journal = tmp_path / "journal.jsonl"
+    manifest.write_text(
+        json.dumps({"rows": [{"hash": "aaa111", "target_directory": str(target)}]}),
+        encoding="utf-8",
+    )
+    journal.write_text(json.dumps({"hash": "aaa111", "status": "verified"}) + "\n", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "rt",
+            "session-reset-batch",
+            "--manifest",
+            str(manifest),
+            "--session-dir",
+            str(session_dir),
+            "--journal",
+            str(journal),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "journal_completed: 1" in result.output
+    assert "skipped_completed: 1" in result.output
+    assert "selected: 0" in result.output

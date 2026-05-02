@@ -1,0 +1,613 @@
+import json
+import re
+from pathlib import Path
+
+from click.testing import CliRunner
+
+from hashall.bencode import bencode_dump
+from hashall.cli import cli
+from hashall.cli import _read_client_drift_journal
+from hashall.cli import _rt_qb_monitor_classify
+from hashall.client_drift import (
+    ClientDriftPolicy,
+    build_client_drift_report,
+    default_policy,
+)
+
+
+def _write_rt_session(session_dir: Path, torrent_hash: str, directory: Path, name: str = "Release.One") -> None:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    bencode_dump(
+        session_dir / f"{torrent_hash.upper()}.torrent",
+        {
+            b"info": {
+                b"name": name.encode("utf-8"),
+                b"files": [{b"length": 123, b"path": [b"file.bin"]}],
+            }
+        },
+    )
+    bencode_dump(
+        session_dir / f"{torrent_hash.upper()}.torrent.rtorrent",
+        {b"directory": str(directory).encode("utf-8")},
+    )
+
+
+def _assert_output_field(output: str, label: str, value: object) -> None:
+    assert re.search(rf"{re.escape(label)}:\s+{re.escape(str(value))}\b", output)
+
+
+class _FakeTorrentInfo:
+    def __init__(self, state: str, progress: float, amount_left: int) -> None:
+        self.state = state
+        self.progress = progress
+        self.amount_left = amount_left
+
+
+def test_rt_qb_monitor_classifies_stopped_complete_success() -> None:
+    status, detail = _rt_qb_monitor_classify(_FakeTorrentInfo("stoppedUP", 1.0, 0))
+
+    assert status == "success"
+    assert detail == "stoppedUP 100%"
+
+
+def test_rt_qb_monitor_classifies_downloading_failure() -> None:
+    status, detail = _rt_qb_monitor_classify(_FakeTorrentInfo("downloading", 0.5, 100))
+
+    assert status == "failure"
+    assert "transitioned_to_downloading" in detail
+
+
+def test_rt_qb_monitor_keeps_checking_pending() -> None:
+    status, detail = _rt_qb_monitor_classify(_FakeTorrentInfo("checkingDL", 0.5, 100))
+
+    assert status == "pending"
+    assert "checkingDL" in detail
+
+
+def test_client_drift_conservative_does_not_auto_mirror_rt_only(tmp_path: Path) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "category": "tv",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=default_policy("conservative"),
+    )
+
+    assert report["summary"]["rt_only"] == 1
+    assert report["rows"][0]["action"] == "manual_review"
+    assert "no_policy_says_rt_only_should_be_mirrored_or_removed" in report["rows"][0]["blockers"]
+
+
+def test_client_drift_policy_mirrors_healthy_rt_only_under_mirror_root(tmp_path: Path) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "category": "tv",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            mirror_roots=(str(tmp_path / "seeding"),),
+            mode="rt-authoritative-mirror",
+        ),
+    )
+
+    row = report["rows"][0]
+    assert row["action"] == "mirror_rt_to_qb"
+    assert row["confidence"] == "high"
+    assert row["rt"]["target_qb_save_path"] == str(seed_root)
+
+
+def test_client_drift_remove_requires_explicit_policy(tmp_path: Path) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "category": "stale",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(remove_from_rt_categories=("stale",)),
+    )
+
+    assert report["rows"][0]["action"] == "remove_from_rt"
+    assert "explicit_remove_from_rt_policy" in report["rows"][0]["reasons"]
+
+
+def test_client_drift_cli_audit_json_output(tmp_path: Path) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "category": "tv",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "client-drift",
+            "audit",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--json-output",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output[result.output.find("{"):])
+    assert payload["summary"]["rt_only"] == 1
+    assert payload["rows"][0]["action"] == "manual_review"
+
+
+def test_client_drift_policy_template_is_conservative_by_default(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["hashall", "client-drift", "policy-template"])
+    result = CliRunner().invoke(cli, ["client-drift", "policy-template"])
+
+    assert result.exit_code == 0
+    assert result.output.lstrip().startswith("{")
+    payload = json.loads(result.output)
+    assert payload["mode"] == "conservative"
+    assert payload["mirror_roots"] == []
+    assert payload["_example_mirror_roots"]
+
+
+def test_client_drift_apply_dry_run_does_not_construct_qb_client(tmp_path: Path, monkeypatch) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "category": "tv",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps({"mode": "rt-authoritative-mirror", "mirror_roots": [str(tmp_path / "seeding")]}),
+        encoding="utf-8",
+    )
+
+    def fail_client():
+        raise AssertionError("dry-run must not construct qB client")
+
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", fail_client)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "client-drift",
+            "apply",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "selected: 1" in result.output
+
+
+def test_client_drift_apply_rejects_remove_actions() -> None:
+    result = CliRunner().invoke(
+        cli,
+        ["client-drift", "apply", "--action", "remove_from_rt"],
+    )
+
+    assert result.exit_code != 0
+    assert "remove actions are audit-only" in result.output
+
+
+def test_client_drift_journal_does_not_skip_failed_verify(tmp_path: Path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text(
+        "\n".join(
+            [
+                json.dumps({"hash": "aaa111", "status": "ok", "verify": {"ok": True}}),
+                json.dumps({"hash": "bbb222", "status": "ok", "error": "verify_incomplete"}),
+                json.dumps({"hash": "ccc333", "status": "ok", "verify": {"ok": False}}),
+                json.dumps({"hash": "ddd444", "status": "already_present"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert _read_client_drift_journal(journal) == {"aaa111", "ddd444"}
+
+
+def test_rt_qb_mirror_enqueue_respects_disable_env(tmp_path: Path, monkeypatch) -> None:
+    queue_dir = tmp_path / "queue"
+    monkeypatch.setenv("HASHALL_QB_MIRROR_ENABLED", "0")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "rt-qb-mirror",
+            "enqueue",
+            "AAA111",
+            "--queue-dir",
+            str(queue_dir),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "disabled" in result.output
+    assert not queue_dir.exists()
+
+
+def test_rt_qb_mirror_enqueue_writes_queue_file(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "rt-qb-mirror",
+            "enqueue",
+            "AAA111",
+            "--queue-dir",
+            str(queue_dir),
+            "--source",
+            "test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    queue_file = queue_dir / "aaa111.json"
+    assert queue_file.exists()
+    payload = json.loads(queue_file.read_text(encoding="utf-8"))
+    assert payload["hash"] == "aaa111"
+    assert payload["source"] == "test"
+
+
+def test_rt_qb_mirror_sync_dry_run_selects_mirror_rows_without_qb(tmp_path: Path, monkeypatch) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "category": "tv",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps({"mode": "rt-authoritative-mirror", "mirror_roots": [str(tmp_path / "seeding")]}),
+        encoding="utf-8",
+    )
+
+    def fail_client():
+        raise AssertionError("dry-run must not construct qB client")
+
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", fail_client)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "rt-qb-mirror",
+            "sync",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--hash",
+            torrent_hash[:6],
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    _assert_output_field(result.output, "selected", 1)
+    assert torrent_hash in result.output
+
+
+def test_rt_qb_mirror_sync_apply_rechecks_by_default(tmp_path: Path, monkeypatch) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "category": "tv",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps({"mode": "rt-authoritative-mirror", "mirror_roots": [str(tmp_path / "seeding")]}),
+        encoding="utf-8",
+    )
+
+    class FakeQbit:
+        last_error = None
+
+        def __init__(self) -> None:
+            self.rechecked: list[str] = []
+
+        def get_torrent_info(self, torrent_hash: str):
+            return None
+
+        def add_torrent_file(self, *args, **kwargs) -> bool:
+            return True
+
+        def recheck_torrent(self, torrent_hash: str) -> bool:
+            self.rechecked.append(torrent_hash)
+            return True
+
+    fake = FakeQbit()
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", lambda: fake)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "rt-qb-mirror",
+            "sync",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--hash",
+            torrent_hash,
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+            "--apply",
+            "--no-monitor",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert fake.rechecked == [torrent_hash]
+    assert "recheck_started: True" in result.output
+
+
+def test_rt_qb_mirror_process_queue_keeps_blocked_rows_queued(tmp_path: Path) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    queue_dir = tmp_path / "queue"
+    queue_dir.mkdir()
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "downloading",
+                "category": "tv",
+                "complete": 0,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps({"mode": "rt-authoritative-mirror", "mirror_roots": [str(tmp_path / "seeding")]}),
+        encoding="utf-8",
+    )
+    queue_file = queue_dir / f"{torrent_hash}.json"
+    queue_file.write_text(json.dumps({"hash": torrent_hash, "first_seen": 1}), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "rt-qb-mirror",
+            "process-queue",
+            "--queue-dir",
+            str(queue_dir),
+            "--min-age",
+            "0",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    _assert_output_field(result.output, "selected", 0)
+    assert "queued_not_ready_for_mirror" in result.output
+    assert queue_file.exists()
+
+
+def test_rt_qb_mirror_process_queue_matches_hash_prefix_to_selected_row(tmp_path: Path) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    queue_dir = tmp_path / "queue"
+    queue_dir.mkdir()
+    torrent_hash = "aaa111bbb222"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "category": "tv",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps({"mode": "rt-authoritative-mirror", "mirror_roots": [str(tmp_path / "seeding")]}),
+        encoding="utf-8",
+    )
+    queue_file = queue_dir / "aaa111.json"
+    queue_file.write_text(json.dumps({"hash": "aaa111", "first_seen": 1}), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "rt-qb-mirror",
+            "process-queue",
+            "--queue-dir",
+            str(queue_dir),
+            "--min-age",
+            "0",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    _assert_output_field(result.output, "selected", 1)
+    assert "dry-run would_remove_queue" in result.output
+    assert "queued_not_ready_for_mirror" not in result.output
+    assert queue_file.exists()

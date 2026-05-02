@@ -573,9 +573,13 @@ def _emit_run_header() -> None:
     global _RUN_HEADER_EMITTED
     if _RUN_HEADER_EMITTED:
         return
+    argv = [str(arg) for arg in sys.argv[1:]]
+    if "--json-output" in argv or argv[:2] == ["client-drift", "policy-template"]:
+        _RUN_HEADER_EMITTED = True
+        return
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     script = Path(sys.argv[0]).name or "hashall"
-    argv_text = " ".join(str(arg) for arg in sys.argv[1:])
+    argv_text = " ".join(argv)
     run_boundary = "═" * 68
     print(run_boundary)
     print(f"🧾 {script} v{__version__} @ {timestamp}")
@@ -2546,6 +2550,930 @@ def rt():
     pass
 
 
+@cli.group("client-drift")
+def client_drift():
+    """Audit and remediate qB/rt membership drift."""
+    pass
+
+
+def _filtered_client_drift_rows(report: dict, *, side: str, action: str, limit: int) -> list[dict]:
+    rows = list(report.get("rows") or [])
+    side_filter = str(side or "").strip()
+    action_filter = str(action or "").strip()
+    if side_filter:
+        rows = [row for row in rows if str(row.get("side") or "") == side_filter]
+    if action_filter:
+        rows = [row for row in rows if str(row.get("action") or "") == action_filter]
+    if limit > 0:
+        rows = rows[:limit]
+    return rows
+
+
+def _load_client_drift_report(
+    *,
+    qb_cache_file: str,
+    rt_cache_file: str,
+    rt_session_dir: str,
+    policy_path: str | None,
+    policy_mode: str,
+) -> dict:
+    from hashall.client_drift import build_client_drift_report, load_policy
+
+    policy = load_policy(
+        Path(policy_path).expanduser() if policy_path else None,
+        mode=policy_mode,
+    )
+    return build_client_drift_report(
+        qb_cache_file=Path(qb_cache_file).expanduser(),
+        rt_cache_file=Path(rt_cache_file).expanduser(),
+        rt_session_dir=Path(rt_session_dir).expanduser(),
+        policy=policy,
+    )
+
+
+def _read_client_drift_journal(journal_path: Path) -> set[str]:
+    completed: set[str] = set()
+    if not journal_path.exists():
+        return completed
+    for line in journal_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        verify = event.get("verify")
+        verify_failed = isinstance(verify, dict) and verify.get("ok") is False
+        if event.get("status") in {"ok", "already_present"} and not event.get("error") and not verify_failed:
+            torrent_hash = str(event.get("hash") or "").strip().lower()
+            if torrent_hash:
+                completed.add(torrent_hash)
+    return completed
+
+
+def _append_client_drift_journal(journal_path: Path, event: dict) -> None:
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(event)
+    payload.setdefault("ts", time.time())
+    with journal_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _verify_qb_import_complete(qbit, torrent_hash: str, *, timeout_s: float, interval_s: float) -> dict:
+    deadline = time.time() + max(0.0, float(timeout_s))
+    interval = max(0.5, float(interval_s))
+    last = None
+    while True:
+        remaining_s = max(0.0, deadline - time.time())
+        info = qbit.get_torrent_info(torrent_hash)
+        if info is not None:
+            last = {
+                "state": info.state,
+                "progress": float(info.progress),
+                "amount_left": int(info.amount_left),
+                "save_path": info.save_path,
+                "content_path": info.content_path,
+            }
+            _rt_qb_progress(
+                f"verify poll state={info.state} progress={float(info.progress):.3f} "
+                f"left={int(info.amount_left)} timeout_left={remaining_s:.0f}s"
+            )
+            if info.progress >= 0.999 and int(info.amount_left) == 0:
+                return {"ok": True, **last}
+        else:
+            _rt_qb_progress(f"verify poll state=missing timeout_left={remaining_s:.0f}s")
+        if time.time() >= deadline:
+            break
+        time.sleep(interval)
+    return {"ok": False, **(last or {"state": "missing", "progress": 0.0, "amount_left": -1})}
+
+
+def _rt_qb_progress(message: str) -> None:
+    print(f"      {_rt_qb_style('…', fg='yellow', bold=True)} {message}", flush=True)
+
+
+def _rt_qb_color_enabled() -> bool:
+    override = str(os.environ.get("HASHALL_COLOR") or "").strip().lower()
+    if override in {"1", "true", "yes", "always"}:
+        return True
+    if override in {"0", "false", "no", "never"}:
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if str(os.environ.get("CLICOLOR_FORCE") or "").strip().lower() in {"1", "true", "yes", "always"}:
+        return True
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
+def _rt_qb_style(text: object, *, fg: str | None = None, bold: bool = False) -> str:
+    value = str(text)
+    if not _rt_qb_color_enabled():
+        return value
+    return click.style(value, fg=fg, bold=bold)
+
+
+def _rt_qb_bool(value: bool) -> str:
+    return _rt_qb_style("True", fg="green", bold=True) if value else _rt_qb_style("False", fg="yellow", bold=True)
+
+
+def _print_rt_qb_summary(title: str, rows: list[tuple[str, object, str | None]]) -> None:
+    print(_rt_qb_style(f"╭─ {title}", fg="cyan", bold=True))
+    for label, value, color in rows:
+        label_text = f"{label + ':':<24}"
+        print(f"│ {_rt_qb_style(label_text, fg='bright_black')} {_rt_qb_style(value, fg=color, bold=color in {'green', 'yellow', 'red'})}")
+    print(_rt_qb_style("╰─", fg="cyan", bold=True))
+
+
+def _rt_qb_added_text(raw_added_on: object) -> str:
+    try:
+        added_on = int(raw_added_on or 0)
+    except (TypeError, ValueError):
+        added_on = 0
+    if added_on <= 0:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(added_on))
+
+
+def _print_rt_qb_candidate(row: dict, *, index: int | None = None) -> None:
+    rt_row = row.get("rt") or {}
+    hash_prefix = str(row.get("hash") or "")[:16]
+    name = str(row.get("name") or "")
+    save_path = str(rt_row.get("target_qb_save_path") or rt_row.get("save_path") or "")
+    category = str(rt_row.get("category") or "")
+    added = str(rt_row.get("added_display") or "").strip() or _rt_qb_added_text(rt_row.get("added_on"))
+    prefix = f"{index:>3}. " if index is not None else "   "
+    category_text = f"{category or '-':<14}"
+    print(
+        f"{_rt_qb_style(prefix, fg='bright_black')}"
+        f"{_rt_qb_style(hash_prefix, fg='cyan', bold=True)} "
+        f"{_rt_qb_style(category_text, fg='magenta')} "
+        f"{_rt_qb_style(name, fg='bright_white', bold=True)}"
+    )
+    print(
+        f"     {_rt_qb_style('added:', fg='bright_black')} {_rt_qb_style(added, fg='yellow')}"
+    )
+    print(
+        f"     {_rt_qb_style('path:', fg='bright_black')} {_rt_qb_style(save_path, fg='bright_blue')}"
+    )
+
+
+def _print_rt_qb_event_status(event: dict) -> None:
+    status = str(event.get("status") or "")
+    status_color = "green" if status in {"ok", "already_present"} else "red"
+    print(f"      status: {_rt_qb_style(status, fg=status_color, bold=True)}")
+    if "recheck_started" in event:
+        print(f"      recheck_started: {_rt_qb_bool(bool(event['recheck_started']))}")
+    if "verify" in event:
+        verify = event["verify"]
+        if isinstance(verify, dict) and verify.get("ok") is True:
+            print(
+                "      verify: "
+                f"{_rt_qb_style('ok', fg='green', bold=True)} "
+                f"state={verify.get('state')} progress={float(verify.get('progress') or 0):.3f} "
+                f"left={verify.get('amount_left')}"
+            )
+        else:
+            print(f"      verify: {_rt_qb_style(verify, fg='yellow')}")
+
+
+_RT_QB_COMPLETE_STATES = {"pausedUP", "stoppedUP", "queuedUP", "stalledUP", "uploading", "forcedUP"}
+_RT_QB_DOWNLOADING_STATES = {
+    "allocating",
+    "checkingDL",
+    "checkingResumeData",
+    "downloading",
+    "forcedDL",
+    "metaDL",
+    "moving",
+    "queuedDL",
+    "stalledDL",
+    "stoppedDL",
+    "pausedDL",
+}
+
+
+def _rt_qb_monitor_classify(info) -> tuple[str, str]:
+    if info is None:
+        return "pending", "missing_from_qb"
+    state = str(info.state or "")
+    progress = float(info.progress or 0.0)
+    amount_left = int(info.amount_left)
+    if progress >= 0.999 and amount_left == 0 and state in _RT_QB_COMPLETE_STATES:
+        return "success", f"{state} 100%"
+    if state in _RT_QB_DOWNLOADING_STATES and not state.startswith("checking"):
+        return "failure", f"transitioned_to_downloading state={state} progress={progress:.3f} left={amount_left}"
+    return "pending", f"{state or 'unknown'} progress={progress:.3f} left={amount_left}"
+
+
+def _monitor_rt_qb_rechecks(
+    qbit,
+    torrent_hashes: list[str],
+    *,
+    timeout_s: float,
+    interval_s: float,
+) -> dict[str, dict]:
+    pending = {str(item or "").strip().lower() for item in torrent_hashes if str(item or "").strip()}
+    results: dict[str, dict] = {}
+    if not pending:
+        return results
+    timeout = max(1.0, float(timeout_s))
+    interval = max(1.0, float(interval_s))
+    deadline = time.time() + timeout
+    _print_rt_qb_summary(
+        "Monitoring qB rechecks",
+        [
+            ("total", len(pending), "yellow"),
+            ("poll_interval", f"{interval:.0f}s", None),
+            ("timeout", f"{timeout:.0f}s", None),
+        ],
+    )
+    while pending and time.time() < deadline:
+        for torrent_hash in list(pending):
+            info = qbit.get_torrent_info(torrent_hash)
+            status, detail = _rt_qb_monitor_classify(info)
+            if status == "success":
+                print(f"{_rt_qb_style('✓', fg='green', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
+                results[torrent_hash] = {"status": "success", "detail": detail}
+                pending.remove(torrent_hash)
+            elif status == "failure":
+                print(f"{_rt_qb_style('✗', fg='red', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
+                results[torrent_hash] = {"status": "failure", "detail": detail}
+                pending.remove(torrent_hash)
+            else:
+                print(f"{_rt_qb_style('…', fg='yellow', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
+        if pending:
+            time.sleep(min(interval, max(0.0, deadline - time.time())))
+    for torrent_hash in sorted(pending):
+        detail = "monitor_timeout"
+        print(f"{_rt_qb_style('!', fg='red', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
+        results[torrent_hash] = {"status": "timeout", "detail": detail}
+    counts = {
+        "success": sum(1 for item in results.values() if item["status"] == "success"),
+        "failed": sum(1 for item in results.values() if item["status"] == "failure"),
+        "timeout": sum(1 for item in results.values() if item["status"] == "timeout"),
+        "total": len(results),
+    }
+    _print_rt_qb_summary(
+        "RT→qB mirror summary",
+        [
+            ("success", counts["success"], "green" if counts["success"] else None),
+            ("failed", counts["failed"], "red" if counts["failed"] else "green"),
+            ("timeout", counts["timeout"], "red" if counts["timeout"] else "green"),
+            ("total", counts["total"], None),
+        ],
+    )
+    return results
+
+
+def _select_client_drift_mirror_rows(
+    report: dict,
+    *,
+    hash_filters: tuple[str, ...] | list[str] = (),
+    limit: int = 0,
+    journal_path: Path | None = None,
+) -> tuple[list[dict], int, int]:
+    rows = _filtered_client_drift_rows(report, side="rt_only", action="mirror_rt_to_qb", limit=0)
+    hash_prefixes = [str(item or "").strip().lower() for item in hash_filters if str(item or "").strip()]
+    if hash_prefixes:
+        rows = [
+            row for row in rows
+            if any(str(row.get("hash") or "").lower().startswith(prefix) for prefix in hash_prefixes)
+        ]
+    completed = _read_client_drift_journal(journal_path) if journal_path else set()
+    selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
+    if limit > 0:
+        selected = selected[:limit]
+    return selected, len(rows), len(completed)
+
+
+def _apply_client_drift_mirror_rows(
+    rows: list[dict],
+    *,
+    do_apply: bool,
+    journal: Path,
+    extra_tags: tuple[str, ...] | list[str] = (),
+    skip_checking: bool = False,
+    recheck_after_add: bool = False,
+    verify_timeout: float = 0.0,
+    verify_interval: float = 5.0,
+    sleep_row: float = 0.0,
+    qbit=None,
+) -> list[dict]:
+    events: list[dict] = []
+    if do_apply and qbit is None:
+        from hashall.qbittorrent import get_qbittorrent_client
+
+        qbit = get_qbittorrent_client()
+
+    for index, row in enumerate(rows, start=1):
+        rt_row = row.get("rt") or {}
+        _print_rt_qb_candidate(row, index=index)
+        if not do_apply:
+            continue
+        assert qbit is not None
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        _rt_qb_progress("checking qB for existing torrent")
+        existing = qbit.get_torrent_info(torrent_hash)
+        if existing is not None:
+            verify = {}
+            if recheck_after_add:
+                _rt_qb_progress("already present; starting qB recheck")
+                qbit.recheck_torrent(torrent_hash)
+            if verify_timeout > 0:
+                _rt_qb_progress(f"verifying qB completion for up to {verify_timeout:.0f}s")
+                verify = _verify_qb_import_complete(
+                    qbit,
+                    torrent_hash,
+                    timeout_s=verify_timeout,
+                    interval_s=verify_interval,
+                )
+            event = {
+                "event": "finished",
+                "hash": torrent_hash,
+                "status": "already_present",
+                "verify": verify,
+            }
+            _append_client_drift_journal(journal, event)
+            events.append(event)
+            _print_rt_qb_event_status(event)
+            continue
+        tags = ["hashall-client-drift", *extra_tags]
+        _rt_qb_progress("adding torrent to qB as stopped")
+        ok = qbit.add_torrent_file(
+            Path(str(rt_row.get("torrent_file") or "")),
+            save_path=str(rt_row.get("target_qb_save_path") or rt_row.get("save_path") or ""),
+            category=str(rt_row.get("category") or ""),
+            tags=tags,
+            stopped=True,
+            skip_checking=skip_checking,
+        )
+        event = {
+            "event": "finished",
+            "hash": torrent_hash,
+            "status": "ok" if ok else "error",
+            "action": "mirror_rt_to_qb",
+            "save_path": str(rt_row.get("target_qb_save_path") or rt_row.get("save_path") or ""),
+            "category": str(rt_row.get("category") or ""),
+            "error": "" if ok else str(qbit.last_error or "unknown"),
+        }
+        if ok and recheck_after_add:
+            _rt_qb_progress("starting qB recheck")
+            recheck_ok = qbit.recheck_torrent(torrent_hash)
+            event["recheck_started"] = bool(recheck_ok)
+            if not recheck_ok:
+                event["error"] = str(qbit.last_error or "qbit_recheck_failed")
+        if ok and not event["error"] and verify_timeout > 0:
+            _rt_qb_progress(f"verifying qB completion for up to {verify_timeout:.0f}s")
+            verify = _verify_qb_import_complete(
+                qbit,
+                torrent_hash,
+                timeout_s=verify_timeout,
+                interval_s=verify_interval,
+            )
+            event["verify"] = verify
+            if not verify.get("ok"):
+                event["error"] = f"verify_incomplete:{verify}"
+        _append_client_drift_journal(journal, event)
+        events.append(event)
+        _print_rt_qb_event_status(event)
+        if event["error"]:
+            print(f"      error: {_rt_qb_style(event['error'], fg='red', bold=True)}")
+            raise click.ClickException(f"client drift apply failed hash={torrent_hash}: {event['error']}")
+        if sleep_row > 0:
+            time.sleep(sleep_row)
+    return events
+
+
+@client_drift.command("policy-template")
+def client_drift_policy_template_cmd():
+    """Print a conservative client-drift policy template."""
+    payload = {
+        "mode": "conservative",
+        "mirror_roots": [],
+        "_example_mirror_roots": [
+            "/data/media/torrents/seeding",
+            "/pool/media/torrents/seeding",
+            "/stash/media/torrents/seeding",
+        ],
+        "mirror_rt_to_qb_categories": [],
+        "mirror_qb_to_rt_categories": [],
+        "ignore_rt_only_categories": [],
+        "ignore_qb_only_categories": [],
+        "ignore_rt_only_path_prefixes": [],
+        "ignore_qb_only_path_prefixes": [],
+        "remove_from_rt_categories": [],
+        "remove_from_qb_categories": [],
+        "remove_from_rt_path_prefixes": [],
+        "remove_from_qb_path_prefixes": [],
+        "recent_seconds": 0,
+    }
+    print(json.dumps(payload, indent=2))
+
+
+@client_drift.command("audit")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
+@click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
+@click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
+@click.option("--side", type=click.Choice(["rt_only", "qb_only"]), default=None, help="Only show one drift side.")
+@click.option("--action", default="", help="Only show rows with this classified action.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit shown rows; 0 means no limit.")
+@click.option("--output", type=click.Path(dir_okay=False), help="Write the full JSON report to this path.")
+@click.option("--json-output", is_flag=True, help="Emit JSON report to stdout.")
+def client_drift_audit_cmd(
+    qb_cache_file,
+    rt_cache_file,
+    rt_session_dir,
+    policy_path,
+    policy_mode,
+    side,
+    action,
+    limit,
+    output,
+    json_output,
+):
+    """Classify qB/RT membership drift without mutating either client."""
+    report = _load_client_drift_report(
+        qb_cache_file=qb_cache_file,
+        rt_cache_file=rt_cache_file,
+        rt_session_dir=rt_session_dir,
+        policy_path=policy_path,
+        policy_mode=policy_mode,
+    )
+    rows = _filtered_client_drift_rows(report, side=side, action=action, limit=limit)
+    payload = {"summary": dict(report["summary"], rows_shown=len(rows)), "rows": rows}
+    if output:
+        out_path = Path(output).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if json_output:
+        print(json.dumps(payload, indent=2))
+        return
+
+    summary = payload["summary"]
+    print("🧭 client drift audit")
+    print(f"   policy_mode: {summary['policy_mode']}")
+    print(f"   qb_total: {summary['qb_total']}")
+    print(f"   rt_total: {summary['rt_total']}")
+    print(f"   common: {summary['common']}")
+    print(f"   qb_only: {summary['qb_only']}")
+    print(f"   rt_only: {summary['rt_only']}")
+    print(f"   action_counts: {summary['action_counts']}")
+    if output:
+        print(f"   output: {Path(output).expanduser()}")
+    for row in rows:
+        client_row = row.get("rt") if row.get("side") == "rt_only" else row.get("qb")
+        client_row = client_row or {}
+        blockers = ",".join(row.get("blockers") or [])
+        reason = ",".join(row.get("reasons") or [])
+        print(
+            f"   {row['side']:7s} {row['action']:28s} {row['confidence']:6s} "
+            f"{row['hash'][:16]} {row.get('name') or ''}"
+        )
+        print(f"      state={client_row.get('state') or ''} category={client_row.get('category') or ''} path={client_row.get('content_path') or client_row.get('save_path') or ''}")
+        if blockers:
+            print(f"      blockers={blockers}")
+        if reason:
+            print(f"      reasons={reason}")
+
+
+@client_drift.command("apply")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
+@click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
+@click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
+@click.option("--action", default="mirror_rt_to_qb", show_default=True, help="Action class to apply. Currently only mirror_rt_to_qb is executable.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict apply to specific torrent hash(es). Prefixes are accepted.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit selected rows; 0 means no limit.")
+@click.option("--sleep-row", type=float, default=5.0, show_default=True, help="Seconds to sleep after each applied row.")
+@click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default="out/client-drift/apply.jsonl", show_default=True, help="JSONL journal for resume/skip.")
+@click.option("--tag", "extra_tags", multiple=True, help="Additional qB tag(s) for imported torrents.")
+@click.option("--skip-checking", is_flag=True, help="Ask qB to skip checking on add. Default leaves checking behavior to qB.")
+@click.option("--recheck-after-add", is_flag=True, help="Trigger qB recheck after import.")
+@click.option("--verify-timeout", type=float, default=0.0, show_default=True, help="Seconds to wait for qB import to reach complete after recheck; 0 disables wait.")
+@click.option("--verify-interval", type=float, default=5.0, show_default=True, help="Seconds between qB import verification polls.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually mutate qB. Default is dry-run.")
+def client_drift_apply_cmd(
+    qb_cache_file,
+    rt_cache_file,
+    rt_session_dir,
+    policy_path,
+    policy_mode,
+    action,
+    hash_filters,
+    limit,
+    sleep_row,
+    journal_path,
+    extra_tags,
+    skip_checking,
+    recheck_after_add,
+    verify_timeout,
+    verify_interval,
+    do_apply,
+):
+    """Apply safe client-drift actions with journaling. Does not delete data."""
+    if action != "mirror_rt_to_qb":
+        raise click.ClickException("only mirror_rt_to_qb is executable; remove actions are audit-only")
+
+    report = _load_client_drift_report(
+        qb_cache_file=qb_cache_file,
+        rt_cache_file=rt_cache_file,
+        rt_session_dir=rt_session_dir,
+        policy_path=policy_path,
+        policy_mode=policy_mode,
+    )
+    journal = Path(journal_path).expanduser()
+    selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+        report,
+        hash_filters=hash_filters,
+        limit=limit,
+        journal_path=journal,
+    )
+
+    print("🛠️  client drift apply")
+    print(f"   action: {action}")
+    print(f"   policy_mode: {report['summary']['policy_mode']}")
+    print(f"   apply: {do_apply}")
+    print(f"   hash_filters: {len([h for h in hash_filters if str(h or '').strip()])}")
+    print(f"   recheck_after_add: {recheck_after_add}")
+    print(f"   verify_timeout: {verify_timeout}")
+    print(f"   candidates: {candidate_count}")
+    print(f"   journal_completed: {completed_count}")
+    print(f"   selected: {len(selected)}")
+    print(f"   journal: {journal}")
+    _apply_client_drift_mirror_rows(
+        selected,
+        do_apply=do_apply,
+        journal=journal,
+        extra_tags=extra_tags,
+        skip_checking=skip_checking,
+        recheck_after_add=recheck_after_add,
+        verify_timeout=verify_timeout,
+        verify_interval=verify_interval,
+        sleep_row=sleep_row,
+    )
+
+
+DEFAULT_RT_QB_MIRROR_QUEUE_DIR = Path.home() / ".cache" / "hashall-rt-qb-mirror" / "queue"
+DEFAULT_RT_QB_MIRROR_JOURNAL = Path("out") / "rt-qb-mirror" / "apply.jsonl"
+
+
+def _mirror_hash_key(value: str) -> str:
+    return re.sub(r"[^a-fA-F0-9]", "", str(value or "")).lower()
+
+
+def _read_json_file(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _rt_qb_mirror_disabled_reason(config_path: str | None) -> str:
+    env_value = str(os.environ.get("HASHALL_QB_MIRROR_ENABLED", "")).strip().lower()
+    if env_value in {"0", "false", "no", "off", "disabled"}:
+        return "env:HASHALL_QB_MIRROR_ENABLED=0"
+    if config_path:
+        payload = _read_json_file(Path(config_path).expanduser())
+        if isinstance(payload, dict) and payload.get("enabled") is False:
+            return f"config:{Path(config_path).expanduser()}"
+    return ""
+
+
+def _queue_path(queue_dir: Path, torrent_hash: str) -> Path:
+    key = _mirror_hash_key(torrent_hash)
+    if not key:
+        raise click.ClickException("missing or invalid torrent hash")
+    return queue_dir.expanduser() / f"{key}.json"
+
+
+def _load_queue_entries(queue_dir: Path, *, min_age_s: float, now: float) -> tuple[list[dict], list[dict]]:
+    ready: list[dict] = []
+    waiting: list[dict] = []
+    for path in sorted(queue_dir.expanduser().glob("*.json")):
+        payload = _read_json_file(path)
+        if not isinstance(payload, dict):
+            payload = {}
+        torrent_hash = _mirror_hash_key(str(payload.get("hash") or path.stem))
+        if not torrent_hash:
+            continue
+        try:
+            first_seen = float(payload.get("first_seen") or path.stat().st_mtime)
+        except Exception:
+            first_seen = path.stat().st_mtime
+        entry = {
+            "hash": torrent_hash,
+            "path": str(path),
+            "first_seen": first_seen,
+            "age_s": max(0.0, now - first_seen),
+            "source": str(payload.get("source") or "queue"),
+        }
+        if entry["age_s"] >= min_age_s:
+            ready.append(entry)
+        else:
+            waiting.append(entry)
+    return ready, waiting
+
+
+@cli.group("rt-qb-mirror")
+def rt_qb_mirror():
+    """Mirror complete RT additions into qB as stopped torrents."""
+    pass
+
+
+@rt_qb_mirror.command("enqueue")
+@click.argument("torrent_hash")
+@click.option("--queue-dir", type=click.Path(file_okay=False), default=str(DEFAULT_RT_QB_MIRROR_QUEUE_DIR), show_default=True)
+@click.option("--config", "config_path", type=click.Path(dir_okay=False), help="Optional JSON config; {\"enabled\": false} disables the mirror.")
+@click.option("--source", default="rt-finished-hook", show_default=True)
+def rt_qb_mirror_enqueue_cmd(torrent_hash, queue_dir, config_path, source):
+    """Queue a completed RT hash for delayed qB mirror import."""
+    disabled = _rt_qb_mirror_disabled_reason(config_path)
+    if disabled:
+        print(f"rt-qb-mirror enqueue disabled reason={disabled}")
+        return
+    key = _mirror_hash_key(torrent_hash)
+    if not key:
+        raise click.ClickException("missing or invalid torrent hash")
+    qdir = Path(queue_dir).expanduser()
+    qdir.mkdir(parents=True, exist_ok=True)
+    path = _queue_path(qdir, key)
+    if path.exists():
+        payload = _read_json_file(path)
+        if not isinstance(payload, dict):
+            payload = {"hash": key, "first_seen": time.time()}
+        payload["last_seen"] = time.time()
+        payload["source"] = str(source or payload.get("source") or "rt-finished-hook")
+    else:
+        payload = {
+            "hash": key,
+            "first_seen": time.time(),
+            "last_seen": time.time(),
+            "source": str(source or "rt-finished-hook"),
+        }
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"rt-qb-mirror queued hash={key[:16]} path={path}")
+
+
+@rt_qb_mirror.command("sync")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True)
+@click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
+@click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="rt-authoritative-mirror", show_default=True)
+@click.option("--config", "config_path", type=click.Path(dir_okay=False), help="Optional JSON config; {\"enabled\": false} disables the mirror.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict sync to hash prefixes.")
+@click.option("--limit", type=int, default=0, show_default=True)
+@click.option("--sleep-row", type=float, default=5.0, show_default=True)
+@click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default=str(DEFAULT_RT_QB_MIRROR_JOURNAL), show_default=True)
+@click.option("--tag", "extra_tags", multiple=True, default=("hashall-rt-qb-mirror",), help="Additional qB tag(s) for imported torrents.")
+@click.option("--skip-checking", is_flag=True, help="Ask qB to skip checking on add.")
+@click.option(
+    "--recheck-after-add/--no-recheck-after-add",
+    default=True,
+    show_default=True,
+    help="Trigger qB recheck after import so qB can verify the stopped mirror at its existing files.",
+)
+@click.option("--verify-timeout", type=float, default=0.0, show_default=True)
+@click.option("--verify-interval", type=float, default=5.0, show_default=True)
+@click.option("--wait-for-check", is_flag=True, help="Wait for qB recheck to reach 100%; uses --verify-timeout or 180s by default.")
+@click.option("--monitor/--no-monitor", default=True, show_default=True, help="After queueing all rechecks, monitor them to success/failure.")
+@click.option("--monitor-timeout", type=float, default=900.0, show_default=True, help="Seconds to monitor batch rechecks.")
+@click.option("--monitor-interval", type=float, default=10.0, show_default=True, help="Seconds between batch monitor polls.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually mutate qB. Default is dry-run.")
+def rt_qb_mirror_sync_cmd(
+    qb_cache_file,
+    rt_cache_file,
+    rt_session_dir,
+    policy_path,
+    policy_mode,
+    config_path,
+    hash_filters,
+    limit,
+    sleep_row,
+    journal_path,
+    extra_tags,
+    skip_checking,
+    recheck_after_add,
+    verify_timeout,
+    verify_interval,
+    wait_for_check,
+    monitor,
+    monitor_timeout,
+    monitor_interval,
+    do_apply,
+):
+    """Mirror safe RT-only rows into qB as stopped torrents."""
+    disabled = _rt_qb_mirror_disabled_reason(config_path)
+    if disabled:
+        print(f"rt-qb-mirror sync disabled reason={disabled}")
+        return
+    report = _load_client_drift_report(
+        qb_cache_file=qb_cache_file,
+        rt_cache_file=rt_cache_file,
+        rt_session_dir=rt_session_dir,
+        policy_path=policy_path,
+        policy_mode=policy_mode,
+    )
+    journal = Path(journal_path).expanduser()
+    selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+        report,
+        hash_filters=hash_filters,
+        limit=limit,
+        journal_path=journal,
+    )
+    _print_rt_qb_summary(
+        f"RT→qB mirror sync ({'APPLY' if do_apply else 'DRY RUN'})",
+        [
+            ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("policy_mode", report["summary"]["policy_mode"], "cyan"),
+            ("rt_only", report["summary"]["rt_only"], "yellow" if report["summary"]["rt_only"] else "green"),
+            ("candidates", candidate_count, "yellow" if candidate_count else "green"),
+            ("journal_completed", completed_count, None),
+            ("selected", len(selected), "yellow" if selected else "green"),
+            ("journal", journal, None),
+        ],
+    )
+    effective_verify_timeout = verify_timeout
+    if wait_for_check and effective_verify_timeout <= 0:
+        effective_verify_timeout = 180.0
+    qbit = None
+    if do_apply and monitor:
+        from hashall.qbittorrent import get_qbittorrent_client
+
+        qbit = get_qbittorrent_client()
+    events = _apply_client_drift_mirror_rows(
+        selected,
+        do_apply=do_apply,
+        journal=journal,
+        extra_tags=extra_tags,
+        skip_checking=skip_checking,
+        recheck_after_add=recheck_after_add,
+        verify_timeout=effective_verify_timeout,
+        verify_interval=verify_interval,
+        sleep_row=sleep_row,
+        qbit=qbit,
+    )
+    if do_apply and monitor and qbit is not None:
+        monitor_hashes = [
+            str(event.get("hash") or "").lower()
+            for event in events
+            if event.get("status") in {"ok", "already_present"} and not event.get("error")
+        ]
+        _monitor_rt_qb_rechecks(
+            qbit,
+            monitor_hashes,
+            timeout_s=monitor_timeout,
+            interval_s=monitor_interval,
+        )
+
+
+@rt_qb_mirror.command("process-queue")
+@click.option("--queue-dir", type=click.Path(file_okay=False), default=str(DEFAULT_RT_QB_MIRROR_QUEUE_DIR), show_default=True)
+@click.option("--min-age", type=float, default=120.0, show_default=True, help="Seconds a queued hash must age before sync.")
+@click.option("--limit", type=int, default=20, show_default=True)
+@click.option("--config", "config_path", type=click.Path(dir_okay=False), help="Optional JSON config; {\"enabled\": false} disables the mirror.")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True)
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True)
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True)
+@click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="rt-authoritative-mirror", show_default=True)
+@click.option("--sleep-row", type=float, default=5.0, show_default=True)
+@click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default=str(DEFAULT_RT_QB_MIRROR_JOURNAL), show_default=True)
+@click.option("--tag", "extra_tags", multiple=True, default=("hashall-rt-qb-mirror",))
+@click.option("--skip-checking", is_flag=True)
+@click.option(
+    "--recheck-after-add/--no-recheck-after-add",
+    default=True,
+    show_default=True,
+)
+@click.option("--verify-timeout", type=float, default=0.0, show_default=True)
+@click.option("--verify-interval", type=float, default=5.0, show_default=True)
+@click.option("--wait-for-check", is_flag=True, help="Wait for qB recheck to reach 100%; uses --verify-timeout or 180s by default.")
+@click.option("--monitor/--no-monitor", default=True, show_default=True, help="After queueing all rechecks, monitor them to success/failure.")
+@click.option("--monitor-timeout", type=float, default=900.0, show_default=True, help="Seconds to monitor batch rechecks.")
+@click.option("--monitor-interval", type=float, default=10.0, show_default=True, help="Seconds between batch monitor polls.")
+@click.option("--apply", "do_apply", is_flag=True)
+def rt_qb_mirror_process_queue_cmd(
+    queue_dir,
+    min_age,
+    limit,
+    config_path,
+    qb_cache_file,
+    rt_cache_file,
+    rt_session_dir,
+    policy_path,
+    policy_mode,
+    sleep_row,
+    journal_path,
+    extra_tags,
+    skip_checking,
+    recheck_after_add,
+    verify_timeout,
+    verify_interval,
+    wait_for_check,
+    monitor,
+    monitor_timeout,
+    monitor_interval,
+    do_apply,
+):
+    """Process delayed RT completion queue entries."""
+    disabled = _rt_qb_mirror_disabled_reason(config_path)
+    if disabled:
+        print(f"rt-qb-mirror process-queue disabled reason={disabled}")
+        return
+    qdir = Path(queue_dir).expanduser()
+    qdir.mkdir(parents=True, exist_ok=True)
+    ready, waiting = _load_queue_entries(qdir, min_age_s=min_age, now=time.time())
+    if limit > 0:
+        ready = ready[:limit]
+    hash_filters = tuple(entry["hash"] for entry in ready)
+    report = _load_client_drift_report(
+        qb_cache_file=qb_cache_file,
+        rt_cache_file=rt_cache_file,
+        rt_session_dir=rt_session_dir,
+        policy_path=policy_path,
+        policy_mode=policy_mode,
+    )
+    journal = Path(journal_path).expanduser()
+    selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+        report,
+        hash_filters=hash_filters,
+        limit=0,
+        journal_path=journal,
+    )
+    _print_rt_qb_summary(
+        f"RT→qB mirror queue ({'APPLY' if do_apply else 'DRY RUN'})",
+        [
+            ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("queue_dir", qdir, None),
+            ("ready", len(ready), "yellow" if ready else "green"),
+            ("waiting", len(waiting), None),
+            ("candidates", candidate_count, "yellow" if candidate_count else "green"),
+            ("journal_completed", completed_count, None),
+            ("selected", len(selected), "yellow" if selected else "green"),
+        ],
+    )
+    effective_verify_timeout = verify_timeout
+    if wait_for_check and effective_verify_timeout <= 0:
+        effective_verify_timeout = 180.0
+    qbit = None
+    if do_apply and monitor:
+        from hashall.qbittorrent import get_qbittorrent_client
+
+        qbit = get_qbittorrent_client()
+    events = _apply_client_drift_mirror_rows(
+        selected,
+        do_apply=do_apply,
+        journal=journal,
+        extra_tags=extra_tags,
+        skip_checking=skip_checking,
+        recheck_after_add=recheck_after_add,
+        verify_timeout=effective_verify_timeout,
+        verify_interval=verify_interval,
+        sleep_row=sleep_row,
+        qbit=qbit,
+    )
+    if do_apply and monitor and qbit is not None:
+        monitor_hashes = [
+            str(event.get("hash") or "").lower()
+            for event in events
+            if event.get("status") in {"ok", "already_present"} and not event.get("error")
+        ]
+        _monitor_rt_qb_rechecks(
+            qbit,
+            monitor_hashes,
+            timeout_s=monitor_timeout,
+            interval_s=monitor_interval,
+        )
+    finished = {
+        str(event.get("hash") or "").lower()
+        for event in events
+        if event.get("status") in {"ok", "already_present"} and not event.get("error")
+    }
+    selected_hashes = {str(row.get("hash") or "").lower() for row in selected}
+    def matched_selected(key: str) -> bool:
+        return any(full == key or full.startswith(key) for full in selected_hashes)
+
+    def matched_finished(key: str) -> bool:
+        return any(full == key or full.startswith(key) for full in finished)
+
+    for entry in ready:
+        key = str(entry["hash"]).lower()
+        if do_apply:
+            if matched_finished(key):
+                Path(entry["path"]).unlink(missing_ok=True)
+        elif matched_selected(key):
+            print(f"   dry-run would_remove_queue hash={key[:16]} path={entry['path']}")
+    blocked = [entry for entry in ready if not matched_selected(str(entry["hash"]).lower())]
+    for entry in blocked[:20]:
+        print(f"   queued_not_ready_for_mirror hash={entry['hash'][:16]} age_s={entry['age_s']:.0f}")
+
+
 def _default_content_base_roots() -> list[str]:
     return [
         "/pool/data/orphaned_data",
@@ -2954,8 +3882,10 @@ def rt_recheck_cmd(hash_filters, rpc_url, do_apply):
 @click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session files.")
 @click.option("--backup-root", type=click.Path(file_okay=False), default="out/rt-session-reset", show_default=True, help="Backup directory for copied session files.")
 @click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--rpc-timeout", type=int, default=20, show_default=True, help="Per-call XMLRPC timeout in seconds.")
+@click.option("--verify-timeout", type=float, default=20.0, show_default=True, help="Seconds to wait for reload verification.")
 @click.option("--apply", "do_apply", is_flag=True, help="Actually execute the session reset. Default is dry-run.")
-def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_root, rpc_url, do_apply):
+def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_root, rpc_url, rpc_timeout, verify_timeout, do_apply):
     """Rebuild one or more rt torrents from .torrent plus existing data."""
     from hashall.rtorrent import rt_reset_torrent_session
 
@@ -2979,11 +3909,179 @@ def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_roo
             session_dir=session_path,
             backup_root=backup_path,
             rpc_url=rpc_url,
+            rpc_timeout=rpc_timeout,
+            verify_timeout_s=verify_timeout,
         )
+        status = result.get("status", "unknown")
+        print(f"      status: {status}")
         print(f"      backup_dir: {result['backup_dir']}")
         if result["normalized_target_directory"] != target_directory:
             print(f"      normalized_target_directory: {result['normalized_target_directory']}")
         print(f"      completed: {result['completed']}")
+        if result.get("recovery_completed"):
+            print(f"      recovery_completed: {result['recovery_completed']}")
+        if result.get("error"):
+            print(f"      error: {result['error']}")
+        if status not in {"verified", "verified_after_timeout"}:
+            raise click.ClickException(f"rt session reset blocked hash={torrent_key} status={status}")
+
+
+def _load_rt_session_reset_manifest(manifest_path: Path, session_dir: Path) -> list[dict]:
+    from hashall.rtorrent import (
+        derive_rt_target_directory,
+        load_rt_torrent_meta,
+        normalize_rt_target_directory,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        source_rows = payload.get("rows") or payload.get("items") or payload.get("repairs") or []
+    else:
+        source_rows = payload
+    if not isinstance(source_rows, list):
+        raise click.ClickException("manifest must be a JSON list or object containing rows/items/repairs")
+
+    rows: list[dict] = []
+    for raw in source_rows:
+        if not isinstance(raw, dict):
+            continue
+        torrent_hash = str(raw.get("hash") or raw.get("torrent_hash") or "").strip().lower()
+        if not torrent_hash:
+            continue
+        meta = load_rt_torrent_meta(session_dir, torrent_hash)
+        target_directory = str(raw.get("target_directory") or raw.get("normalized_target_directory") or "").strip()
+        if not target_directory:
+            target_directory = derive_rt_target_directory(
+                qb_save_path=raw.get("qb_save_path"),
+                qb_content_path=raw.get("qb_content_path"),
+                torrent_meta=meta,
+            )
+        target_directory = normalize_rt_target_directory(target_directory, meta)
+        rows.append(
+            {
+                "hash": torrent_hash,
+                "name": raw.get("name") or raw.get("torrent_name") or "",
+                "target_directory": target_directory,
+                "target_exists": bool(target_directory and Path(target_directory).exists()),
+            }
+        )
+    return rows
+
+
+def _read_rt_session_reset_journal(journal_path: Path) -> set[str]:
+    completed: set[str] = set()
+    if not journal_path.exists():
+        return completed
+    for line in journal_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("status") in {"verified", "verified_after_timeout"}:
+            torrent_hash = str(event.get("hash") or "").strip().lower()
+            if torrent_hash:
+                completed.add(torrent_hash)
+    return completed
+
+
+def _append_rt_session_reset_journal(journal_path: Path, event: dict) -> None:
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(event)
+    payload.setdefault("ts", time.time())
+    with journal_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+@rt.command("session-reset-batch")
+@click.option("--manifest", "manifest_path", type=click.Path(exists=True, dir_okay=False), required=True, help="JSON manifest with hash/target_directory rows.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session files.")
+@click.option("--backup-root", type=click.Path(file_okay=False), default="out/rt-session-reset", show_default=True, help="Backup directory for copied session files.")
+@click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default="out/rt-session-reset/session-reset-batch.jsonl", show_default=True, help="JSONL journal for resume/skip.")
+@click.option("--rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--rpc-timeout", type=int, default=20, show_default=True, help="Per-call XMLRPC timeout in seconds.")
+@click.option("--verify-timeout", type=float, default=20.0, show_default=True, help="Seconds to wait for reload verification.")
+@click.option("--sleep-row", type=float, default=2.0, show_default=True, help="Seconds to sleep after each applied row.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Limit selected rows; 0 means no limit.")
+@click.option("--include-missing-target", is_flag=True, help="Allow rows whose target path does not exist.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually execute resets. Default is dry-run.")
+def rt_session_reset_batch_cmd(
+    manifest_path,
+    session_dir,
+    backup_root,
+    journal_path,
+    rpc_url,
+    rpc_timeout,
+    verify_timeout,
+    sleep_row,
+    limit,
+    include_missing_target,
+    do_apply,
+):
+    """Apply session-reset rows from a manifest with journaling and pacing."""
+    from hashall.rtorrent import rt_reset_torrent_session
+
+    session_path = Path(session_dir).expanduser()
+    backup_path = Path(backup_root).expanduser()
+    journal = Path(journal_path).expanduser()
+    rows = _load_rt_session_reset_manifest(Path(manifest_path).expanduser(), session_path)
+    completed_hashes = _read_rt_session_reset_journal(journal)
+    selected = []
+    skipped_missing = 0
+    skipped_completed = 0
+    for row in rows:
+        if row["hash"] in completed_hashes:
+            skipped_completed += 1
+            continue
+        if not include_missing_target and not row["target_exists"]:
+            skipped_missing += 1
+            continue
+        selected.append(row)
+    if limit > 0:
+        selected = selected[:limit]
+
+    print("♻️  rt session reset batch")
+    print(f"   manifest: {Path(manifest_path).expanduser()}")
+    print(f"   session_dir: {session_path}")
+    print(f"   backup_root: {backup_path}")
+    print(f"   journal: {journal}")
+    print(f"   rpc_url: {rpc_url}")
+    print(f"   apply: {do_apply}")
+    print(f"   manifest_rows: {len(rows)}")
+    print(f"   journal_completed: {len(completed_hashes)}")
+    print(f"   skipped_completed: {skipped_completed}")
+    print(f"   skipped_missing_target: {skipped_missing}")
+    print(f"   selected: {len(selected)}")
+    for row in selected:
+        print(f"   hash: {row['hash']} target={row['target_directory']}")
+        if not do_apply:
+            continue
+        _append_rt_session_reset_journal(
+            journal,
+            {"event": "started", "hash": row["hash"], "target_directory": row["target_directory"]},
+        )
+        result = rt_reset_torrent_session(
+            row["hash"],
+            target_directory=row["target_directory"],
+            session_dir=session_path,
+            backup_root=backup_path,
+            rpc_url=rpc_url,
+            rpc_timeout=rpc_timeout,
+            verify_timeout_s=verify_timeout,
+        )
+        _append_rt_session_reset_journal(journal, {"event": "finished", **result})
+        print(f"      status: {result.get('status')}")
+        if result.get("error"):
+            print(f"      error: {result['error']}")
+        if result.get("recovery_completed"):
+            print(f"      recovery_completed: {result['recovery_completed']}")
+        if result.get("status") not in {"verified", "verified_after_timeout"}:
+            raise click.ClickException(
+                f"rt session reset batch blocked hash={row['hash']} status={result.get('status')}"
+            )
+        if sleep_row > 0:
+            time.sleep(sleep_row)
 
 
 def _build_rt_repair_rows(report_path: str, session_dir: str, action_bucket: str | None) -> tuple[list[dict], list[dict]]:
