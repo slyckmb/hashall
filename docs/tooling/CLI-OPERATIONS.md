@@ -212,7 +212,7 @@ Guidance:
 - The local cache uses the shared Python qB client in `src/hashall/qbittorrent.py`, so qB app/API version detection and state alias normalization happen in one place.
 - The shared Python qB client now falls back to cached server-profile and per-hash torrent data when qB is temporarily slow or authentication is timing out.
 - The shared Python qB client now falls back to `.torrent` files in qB `BT_backup` when an older qB build does not implement `/api/v2/torrents/export`.
-- The local cache lives under `~/.cache/hashall-qb/`.
+- The local cache lives under `~/.cache/silo-qb/` (silo owns the cache daemon; hashall reads the JSON files it writes).
 - `bin/qb-checking-watch.sh` now defaults to cached reads; use `--no-cache` only for direct-mode debugging.
 - `bin/qb-start-seeding-gradual.sh` now defaults to cached `torrents/info` reads; use `--no-cache` only when debugging cache behavior.
 - Read-heavy list/status tooling should prefer cached reads; write/mutation endpoints can remain direct when immediate freshness matters.

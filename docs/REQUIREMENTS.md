@@ -1017,7 +1017,7 @@ qBittorrent API state strings differ across versions. The shared client normaliz
 All code that inspects torrent state must go through the shared client or its normalization layer. Hard-coding version-specific state strings is prohibited.
 
 **qB Cache Layer:**
-A local cache (`src/hashall/qb_cache.py`, `~/.cache/hashall-qb/`) reduces load on the qB API for read-heavy operations (status checks, torrent list queries, triage scripts). The cache is populated by `bin/qb-cache-agent.py` / `bin/qb-cache-daemon.py`.
+A local cache (`~/.cache/silo-qb/`) reduces load on the qB API for read-heavy operations (status checks, torrent list queries, triage scripts). The cache daemon is owned by silo; hashall reads the JSON files it writes via `src/hashall/qbittorrent.py`.
 
 **Requirements:**
 - Read-heavy operations (list/status queries, triage, dashboards) should use the cache by default

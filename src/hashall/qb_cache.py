@@ -232,7 +232,7 @@ def _ensure_daemon(
 
 
 def build_agent_parser() -> argparse.ArgumentParser:
-    base_dir = Path.home() / ".cache" / "hashall-qb"
+    base_dir = Path.home() / ".cache" / "silo-qb"
     parser = argparse.ArgumentParser(
         description="Return qB torrents/info JSON from shared cache, with lease renewal."
     )
@@ -397,7 +397,7 @@ def _cleanup_expired_leases(lease_dir: Path, now: float) -> List[dict]:
 
 
 def build_daemon_parser() -> argparse.ArgumentParser:
-    base_dir = Path.home() / ".cache" / "hashall-qb"
+    base_dir = Path.home() / ".cache" / "silo-qb"
     parser = argparse.ArgumentParser(
         description="Run qB torrents/info shared cache daemon with lease-based lifecycle."
     )

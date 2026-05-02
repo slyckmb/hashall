@@ -12,7 +12,7 @@ Prompt-critical context (2026-03-12):
     - `bin/qb-cache-agent.py`
     - `bin/qb-cache-daemon.py`
   - local cache root:
-    - `~/.cache/hashall-qb/`
+    - `~/.cache/silo-qb/` (silo owns the daemon; hashall reads this path)
   - qB compatibility/profile detection now lives in:
     - `src/hashall/qbittorrent.py`
   - normalized pause-state aliases:
