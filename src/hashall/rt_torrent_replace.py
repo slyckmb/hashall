@@ -241,14 +241,20 @@ def fetch_prowlarr_replacement(
     search_name = re.sub(r"\([^)]*\)", " ", search_name)  # drop parentheticals
     search_name = re.sub(r"[.\-_]", " ", search_name)
     search_name = re.sub(r"\s+", " ", search_name).strip()
-    # Truncate at quality markers (keep SxxExx if present)
-    _QUALITY_RE = re.compile(
-        r"\b(2160p|1080p|720p|480p|WEB(?:\s?DL|\s?RIP)?|BluRay|BDRip|HDRip|HDTV|AMZN|HULU|NF|DSNP|H\.?264|H\.?265|x264|x265|DDP|AAC|HEVC)\b",
-        re.IGNORECASE,
-    )
-    m = _QUALITY_RE.search(search_name)
-    if m:
-        search_name = search_name[:m.start()].strip()
+    # For TV episodes, keep only "Series Name SxxExx" — drop guest names / date suffix.
+    _EPISODE_RE = re.compile(r"\bS\d{1,2}E\d{1,2}\b", re.IGNORECASE)
+    me = _EPISODE_RE.search(search_name)
+    if me:
+        search_name = search_name[:me.end()].strip()
+    else:
+        # For films/books, truncate at quality markers.
+        _QUALITY_RE = re.compile(
+            r"\b(2160p|1080p|720p|480p|WEB(?:\s?DL|\s?RIP)?|BluRay|BDRip|HDRip|HDTV|AMZN|HULU|NF|DSNP|H\.?264|H\.?265|x264|x265|DDP|AAC|HEVC)\b",
+            re.IGNORECASE,
+        )
+        mq = _QUALITY_RE.search(search_name)
+        if mq:
+            search_name = search_name[:mq.start()].strip()
 
     params: dict[str, Any] = {"query": search_name, "type": "search", "limit": "10"}
     if indexer_id is not None:
