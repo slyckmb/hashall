@@ -232,7 +232,15 @@ def fetch_prowlarr_replacement(
             break
 
     # Search
-    params: dict[str, Any] = {"query": name, "type": "search", "limit": "10"}
+    # Normalize for Prowlarr: strip extension, punctuation, and parenthetical
+    # qualifiers like "(2nd ed)" that reduce match rate.
+    import os
+    search_name = os.path.splitext(name)[0]
+    search_name = re.sub(r"\([^)]*\)", " ", search_name)  # drop parentheticals
+    search_name = re.sub(r"[.\-_]", " ", search_name)
+    search_name = re.sub(r"\s+", " ", search_name).strip()
+
+    params: dict[str, Any] = {"query": search_name, "type": "search", "limit": "10"}
     if indexer_id is not None:
         params["indexerIds"] = indexer_id
     try:
@@ -243,7 +251,7 @@ def fetch_prowlarr_replacement(
         return None, f"prowlarr_search_error: {exc}"
 
     if not hits:
-        return None, "no_hits"
+        return None, f"no_hits (query={search_name!r})"
 
     def _score(h: dict) -> tuple:
         same = int((h.get("indexer") or "").lower() == indexer_name.lower())
