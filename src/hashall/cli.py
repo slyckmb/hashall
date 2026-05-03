@@ -3312,18 +3312,38 @@ def rt_qb_mirror_sync_cmd(
         limit=limit,
         journal_path=journal,
     )
+    qb_only_count = report["summary"]["qb_only"]
     _print_rt_qb_summary(
         f"RT→qB mirror sync ({'APPLY' if do_apply else 'DRY RUN'})",
         [
             ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
             ("policy_mode", report["summary"]["policy_mode"], "cyan"),
             ("rt_only", report["summary"]["rt_only"], "yellow" if report["summary"]["rt_only"] else "green"),
+            ("qb_only", qb_only_count, "yellow" if qb_only_count else None),
             ("candidates", candidate_count, "yellow" if candidate_count else "green"),
             ("journal_completed", completed_count, None),
             ("selected", len(selected), "yellow" if selected else "green"),
             ("journal", journal, None),
         ],
     )
+    if qb_only_count:
+        qb_only_rows = _filtered_client_drift_rows(report, side="qb_only", action=None, limit=0)
+        for row in qb_only_rows:
+            qb_row = row.get("qb") or {}
+            hash_prefix = str(row.get("hash") or "")[:16]
+            name = str(row.get("name") or "")
+            category = str(qb_row.get("category") or "")
+            save_path = str(qb_row.get("save_path") or "")
+            state = str(qb_row.get("state") or "")
+            cat_text = f"{category or '-':<14}"
+            print(
+                f"  {_rt_qb_style('qb-only', fg='yellow')} "
+                f"{_rt_qb_style(hash_prefix, fg='cyan', bold=True)} "
+                f"{_rt_qb_style(cat_text, fg='magenta')} "
+                f"{_rt_qb_style(name, fg='bright_white', bold=True)}"
+            )
+            print(f"     {_rt_qb_style('state:', fg='bright_black')} {state}   "
+                  f"{_rt_qb_style('path:', fg='bright_black')} {_rt_qb_style(save_path, fg='bright_blue')}")
     effective_verify_timeout = verify_timeout
     if wait_for_check and effective_verify_timeout <= 0:
         effective_verify_timeout = 180.0
