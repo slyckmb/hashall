@@ -4037,15 +4037,16 @@ def rt_torrent_replace_cmd(
         print(f"\n   replacement: {torrent_file}")
     else:
         tracker_host = ""
-        # Prefer label/category as indexer hint — tracker list may be corrupted.
-        # Fall back to first private tracker URL if label is unhelpful.
+        # Use first private tracker host as indexer hint — more specific than label.
+        # Fall back to label only when the tracker list is fully public (corruption case).
         from hashall.rt_torrent_replace import _PUBLIC_TRACKER_FRAGMENTS as _pub_frags
         from urllib.parse import urlparse
-        tracker_host = current_label or ""
-        if not tracker_host:
-            private_trackers = [u for u in current_trackers if not any(f in u.lower() for f in _pub_frags)]
-            if private_trackers:
-                tracker_host = urlparse(private_trackers[0]).hostname or ""
+        private_trackers = [u for u in current_trackers if not any(f in u.lower() for f in _pub_frags)]
+        if private_trackers:
+            tracker_host = urlparse(private_trackers[0]).hostname or ""
+        else:
+            # All trackers are public (corrupted list) — label is the only reliable hint.
+            tracker_host = current_label or ""
         print(f"\n   searching Prowlarr for: {current_name!r} on {tracker_host or '(any)'}...")
         replacement_bytes, source = fetch_prowlarr_replacement(
             current_name,

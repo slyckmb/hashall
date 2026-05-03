@@ -218,8 +218,9 @@ def fetch_prowlarr_replacement(
     except Exception as exc:
         return None, f"prowlarr_indexer_error: {exc}"
 
+    _GENERIC_HOST_PARTS = frozenset({"tracker", "www", "api", "announce"})
     host_lower = tracker_host.lower()
-    host_parts = [p for p in host_lower.split(".") if len(p) > 3]
+    host_parts = [p for p in host_lower.split(".") if len(p) > 3 and p not in _GENERIC_HOST_PARTS]
 
     indexer_id: int | None = None
     indexer_name: str = ""
@@ -232,13 +233,22 @@ def fetch_prowlarr_replacement(
             break
 
     # Search
-    # Normalize for Prowlarr: strip extension, punctuation, and parenthetical
-    # qualifiers like "(2nd ed)" that reduce match rate.
+    # Normalize for Prowlarr: strip extension and reduce to core title.
+    # Truncate at first quality/spec token (1080p, 720p, WEB, BluRay, etc.)
+    # or release group (-GROUP) so the query matches the series/film title only.
     import os
     search_name = os.path.splitext(name)[0]
     search_name = re.sub(r"\([^)]*\)", " ", search_name)  # drop parentheticals
     search_name = re.sub(r"[.\-_]", " ", search_name)
     search_name = re.sub(r"\s+", " ", search_name).strip()
+    # Truncate at quality markers (keep SxxExx if present)
+    _QUALITY_RE = re.compile(
+        r"\b(2160p|1080p|720p|480p|WEB(?:\s?DL|\s?RIP)?|BluRay|BDRip|HDRip|HDTV|AMZN|HULU|NF|DSNP|H\.?264|H\.?265|x264|x265|DDP|AAC|HEVC)\b",
+        re.IGNORECASE,
+    )
+    m = _QUALITY_RE.search(search_name)
+    if m:
+        search_name = search_name[:m.start()].strip()
 
     params: dict[str, Any] = {"query": search_name, "type": "search", "limit": "10"}
     if indexer_id is not None:
