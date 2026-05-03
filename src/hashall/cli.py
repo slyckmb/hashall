@@ -3952,6 +3952,164 @@ def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_roo
             raise click.ClickException(f"rt session reset blocked hash={torrent_key} status={status}")
 
 
+@rt.command("torrent-replace")
+@click.option("--hash", "torrent_hash", required=True, help="Hash (or short prefix) of the RT torrent to replace.")
+@click.option("--torrent-file", "torrent_file", type=click.Path(exists=True), default=None, help="Path to replacement .torrent file.")
+@click.option("--prowlarr", "use_prowlarr", is_flag=True, help="Search Prowlarr for replacement torrent automatically.")
+@click.option("--target-dir", "target_dir", default=None, help="Override save directory (default: current RT directory).")
+@click.option("--backup-root", "backup_root", default="out/rt-torrent-replace", show_default=True, help="Directory for session file backups.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=None, help="RT session directory.")
+@click.option("--rpc-url", default=None, help="rTorrent XMLRPC endpoint.")
+@click.option("--prowlarr-url", default="http://localhost:9696", show_default=True, help="Prowlarr API URL.")
+@click.option("--prowlarr-api-key-file", "prowlarr_key_file", default="", help="Prowlarr API key file.")
+@click.option("--apply", "do_apply", is_flag=True, help="Execute replacement. Default is dry-run (validation only).")
+def rt_torrent_replace_cmd(
+    torrent_hash, torrent_file, use_prowlarr, target_dir, backup_root,
+    session_dir, rpc_url, prowlarr_url, prowlarr_key_file, do_apply,
+):
+    """Replace a compromised or corrupted RT torrent, reusing existing on-disk data.
+
+    Supports two input modes (mutually exclusive):
+
+      --torrent-file <path>   Use a locally downloaded .torrent file.
+      --prowlarr              Search Prowlarr for a replacement automatically.
+
+    Without --apply, runs in dry-run mode: validates the replacement and reports
+    what would happen without touching RT or the session directory.
+    """
+    from hashall.rt_torrent_replace import (
+        validate_replacement,
+        fetch_prowlarr_replacement,
+        rt_get_torrent_info_live,
+        replace_torrent,
+    )
+    from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, DEFAULT_RT_RPC_URL
+
+    if not torrent_file and not use_prowlarr:
+        raise click.UsageError("Provide --torrent-file or --prowlarr.")
+    if torrent_file and use_prowlarr:
+        raise click.UsageError("--torrent-file and --prowlarr are mutually exclusive.")
+
+    resolved_session = Path(session_dir).expanduser() if session_dir else DEFAULT_RT_SESSION_DIR
+    resolved_rpc = rpc_url or DEFAULT_RT_RPC_URL
+
+    print("🔄 rt torrent-replace")
+    print(f"   hash:        {torrent_hash}")
+    print(f"   source:      {'prowlarr' if use_prowlarr else torrent_file}")
+    print(f"   apply:       {do_apply}")
+
+    # Resolve full hash and current RT state
+    info = rt_get_torrent_info_live(torrent_hash, rpc_url=resolved_rpc)
+    if info is None:
+        # Try resolving short hash via session files
+        from hashall.rtorrent import load_rt_session_directories
+        session_rows = load_rt_session_directories(resolved_session)
+        matches = [h for h in session_rows if h.lower().startswith(torrent_hash.lower())]
+        if len(matches) == 1:
+            torrent_hash = matches[0]
+            info = rt_get_torrent_info_live(torrent_hash, rpc_url=resolved_rpc)
+        elif len(matches) > 1:
+            raise click.ClickException(f"Ambiguous short hash; matches: {matches}")
+
+    if info is None:
+        raise click.ClickException(
+            f"Hash not found in live RT: {torrent_hash}. "
+            "Is the torrent loaded? (paused torrents are still visible)"
+        )
+
+    full_hash = torrent_hash.strip().lower()
+    current_name = info["name"]
+    current_directory = target_dir or info["directory"]
+    current_label = info["label"]
+    current_size = info["size"]
+    current_trackers = info["trackers"]
+
+    print(f"   name:        {current_name}")
+    print(f"   directory:   {current_directory}")
+    print(f"   label:       {current_label}")
+    print(f"   size:        {current_size:,} bytes")
+    print(f"   trackers:    {len(current_trackers)} (current)")
+
+    # Acquire replacement bytes
+    replacement_bytes: bytes
+    if torrent_file:
+        replacement_bytes = Path(torrent_file).read_bytes()
+        print(f"\n   replacement: {torrent_file}")
+    else:
+        tracker_host = ""
+        if current_trackers:
+            from urllib.parse import urlparse
+            tracker_host = urlparse(current_trackers[0]).hostname or ""
+        print(f"\n   searching Prowlarr for: {current_name!r} on {tracker_host or '(any)'}...")
+        replacement_bytes, source = fetch_prowlarr_replacement(
+            current_name,
+            tracker_host,
+            prowlarr_url=prowlarr_url,
+            api_key_file=prowlarr_key_file,
+        )
+        if replacement_bytes is None:
+            raise click.ClickException(f"Prowlarr search returned no result: {source}")
+        print(f"   replacement: {source}")
+
+    # Validate
+    validation = validate_replacement(full_hash, current_name, current_size, replacement_bytes)
+    rep_meta = validation.replacement_meta
+
+    print(f"\n📋 Validation")
+    print(f"   ok:           {validation.ok}")
+    print(f"   reason:       {validation.reason}")
+    if rep_meta:
+        print(f"   repl_name:    {rep_meta.name}")
+        print(f"   repl_hash:    {rep_meta.infohash}")
+        print(f"   repl_size:    {rep_meta.total_bytes:,} bytes")
+        print(f"   repl_private: {rep_meta.is_private}")
+        print(f"   repl_trackers:{rep_meta.tracker_count}")
+        if rep_meta.has_public_trackers:
+            print("   ⚠️  replacement still contains public trackers")
+        if not rep_meta.is_private:
+            print("   ⚠️  replacement is not marked private=1")
+
+    if not validation.ok:
+        raise click.ClickException(f"Validation failed: {validation.reason}")
+
+    same_hash = validation.same_hash
+    print(f"   operation:    {'same_hash (overwrite + reset)' if same_hash else 'new_hash (load + erase old)'}")
+
+    if not do_apply:
+        print("\n✅ Dry-run complete. Pass --apply to execute.")
+        return
+
+    print(f"\n⚙️  Executing replacement (apply=True)")
+    result = replace_torrent(
+        full_hash,
+        replacement_bytes,
+        directory=current_directory,
+        label=current_label,
+        session_dir=resolved_session,
+        backup_root=Path(backup_root),
+        rpc_url=resolved_rpc,
+        same_hash=same_hash,
+    )
+
+    status = result["status"]
+    print(f"   status:      {status}")
+    print(f"   old_hash:    {result['old_hash'][:16]}...")
+    if result.get("new_hash") and result["new_hash"] != result["old_hash"]:
+        print(f"   new_hash:    {result['new_hash'][:16]}...")
+    if result.get("backup_dir"):
+        print(f"   backup_dir:  {result['backup_dir']}")
+    print(f"   completed:   {result['completed']}")
+    if result.get("error"):
+        print(f"   error:       {result['error']}")
+
+    if status not in {"verified", "verified_after_timeout"}:
+        raise click.ClickException(f"Replacement did not complete: status={status}")
+
+    print("\n✅ Replacement complete.")
+    if result.get("new_hash") and result["new_hash"] != result["old_hash"]:
+        print(f"   Run `hashall payload sync` to update the catalog with the new hash.")
+
+
 def _load_rt_session_reset_manifest(manifest_path: Path, session_dir: Path) -> list[dict]:
     from hashall.rtorrent import (
         derive_rt_target_directory,
