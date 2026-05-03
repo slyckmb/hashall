@@ -63,7 +63,7 @@ trk-warn-dry:
 	@python3 $(TRK_WARN_SCRIPT) --dryrun --prowlarr --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-cleanup:
-	@python3 $(TRK_WARN_SCRIPT) --cleanup --bucket $${BUCKET:-deleted,other} --qb-sync $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-upgrade-packs:
-	@python3 $(TRK_WARN_SCRIPT) --cleanup --upgrade-season-packs --prowlarr --bucket $${BUCKET:-deleted} --qb-sync $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
