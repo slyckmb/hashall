@@ -4073,6 +4073,18 @@ def rt_torrent_replace_cmd(
         raise click.ClickException(f"Validation failed: {validation.reason}")
 
     same_hash = validation.same_hash
+
+    # If replacement has no trackers, inject private ones from current RT state.
+    inject_trackers: list[str] = []
+    if rep_meta and rep_meta.tracker_count == 0 and current_trackers:
+        from hashall.rt_torrent_replace import _PUBLIC_TRACKER_FRAGMENTS as _pub_frags
+        inject_trackers = [
+            u for u in current_trackers
+            if not any(f in u.lower() for f in _pub_frags)
+        ]
+        if inject_trackers:
+            print(f"   inject_trackers: {len(inject_trackers)} private tracker(s) from current state")
+
     print(f"   operation:    {'same_hash (overwrite + reset)' if same_hash else 'new_hash (load + erase old)'}")
 
     if not do_apply:
@@ -4085,6 +4097,7 @@ def rt_torrent_replace_cmd(
         replacement_bytes,
         directory=current_directory,
         label=current_label,
+        inject_trackers=inject_trackers or None,
         session_dir=resolved_session,
         backup_root=Path(backup_root),
         rpc_url=resolved_rpc,

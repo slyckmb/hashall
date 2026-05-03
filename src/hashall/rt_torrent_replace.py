@@ -329,12 +329,25 @@ def rt_get_torrent_info_live(
 # Core replacement execution
 # ---------------------------------------------------------------------------
 
+def _inject_announce_list(torrent_bytes: bytes, trackers: list[str]) -> bytes:
+    """
+    Return torrent_bytes with the given trackers injected as announce / announce-list.
+    The info dict is not touched, so the infohash is unchanged.
+    Each tracker gets its own tier so all are tried independently.
+    """
+    data = bencode_decode(torrent_bytes)
+    data[b"announce"] = trackers[0].encode()
+    data[b"announce-list"] = [[u.encode()] for u in trackers]
+    return bencode_encode(data)
+
+
 def replace_torrent(
     torrent_hash: str,
     replacement_bytes: bytes,
     *,
     directory: str,
     label: str,
+    inject_trackers: list[str] | None = None,
     session_dir: Path = DEFAULT_RT_SESSION_DIR,
     backup_root: Path = Path("out/rt-torrent-replace"),
     rpc_url: str = DEFAULT_RT_RPC_URL,
@@ -345,10 +358,20 @@ def replace_torrent(
     """
     Install replacement_bytes into RT for an existing torrent, reusing its on-disk data.
 
+    inject_trackers: if the replacement has no announce-list and this list is non-empty,
+                     inject the given tracker URLs into the bytes before loading so they
+                     persist in the session .torrent after d.save_full_session.
+
     same_hash=True  — overwrite session .torrent + call rt_reset_torrent_session().
     same_hash=False — load.raw_start new hash, recheck, erase old hash.
     """
     torrent_hash = torrent_hash.strip().lower()
+
+    # Inject private trackers into the replacement bytes if it has none.
+    meta = parse_torrent_metadata(replacement_bytes)
+    if inject_trackers and meta.tracker_count == 0:
+        replacement_bytes = _inject_announce_list(replacement_bytes, inject_trackers)
+
     result: dict[str, Any] = {
         "old_hash": torrent_hash,
         "new_hash": None,
