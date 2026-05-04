@@ -2847,8 +2847,6 @@ def _monitor_rt_qb_rechecks(
         ("timeout", counts["timeout"], "red" if counts["timeout"] else "green"),
         ("total", counts["total"], None),
     ]
-    if orphaned_removed_count > 0:
-        summary_rows.insert(0, ("orphaned_removed", orphaned_removed_count, "green"))
     if stop_after_check:
         summary_rows.append(("stopped", stopped_count, "green" if stopped_count == counts["success"] else "yellow"))
     _print_rt_qb_summary("RT→qB mirror summary", summary_rows)
@@ -3346,9 +3344,9 @@ def rt_qb_mirror_sync_cmd(
             ("journal", journal, None),
         ],
     )
+    orphaned_hashes_to_remove = []
     if qb_only_count:
         qb_only_rows = _filtered_client_drift_rows(report, side="qb_only", action=None, limit=0)
-        orphaned_hashes_to_remove = []
         for row in qb_only_rows:
             action = row.get("action")
             is_orphan = action == "remove_from_qb"
@@ -3392,6 +3390,9 @@ def rt_qb_mirror_sync_cmd(
                 orphaned_removed_count += 1
             else:
                 print(f"      {_rt_qb_style('!', fg='red', bold=True)} failed to remove {torrent_hash[:16]}: {ok.text}")
+
+    if orphaned_removed_count:
+        print(f"  {_rt_qb_style('orphaned_removed', fg='green')} {orphaned_removed_count}")
 
     effective_verify_timeout = verify_timeout
     if wait_for_check and effective_verify_timeout <= 0:
