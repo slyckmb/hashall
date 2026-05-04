@@ -880,7 +880,7 @@ This is the plain-language top-level cleanup list for the seeding trees. Treat i
 - `hashall` is now `0.8.4`.
 - qB cache compatibility is now partially internalized:
   - use `bin/qb-cache-agent.py --status` to inspect the local cache
-  - local cache path is `~/.cache/hashall-qb/`
+  - local cache path is `~/.cache/silo-qb/` (silo owns daemon; hashall reads)
   - qB profile detection and state alias normalization now live in `src/hashall/qbittorrent.py`
   - read-heavy hashall qB scripts should prefer the local cache by default
 - Remaining follow-up:

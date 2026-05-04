@@ -2773,6 +2773,8 @@ def _monitor_rt_qb_rechecks(
     *,
     timeout_s: float,
     interval_s: float,
+    stop_after_check: bool = True,
+    stalled_dl_grace: int = 3,
 ) -> dict[str, dict]:
     pending = {str(item or "").strip().lower() for item in torrent_hashes if str(item or "").strip()}
     results: dict[str, dict] = {}
@@ -2787,19 +2789,42 @@ def _monitor_rt_qb_rechecks(
             ("total", len(pending), "yellow"),
             ("poll_interval", f"{interval:.0f}s", None),
             ("timeout", f"{timeout:.0f}s", None),
+            ("stop_after_check", "yes" if stop_after_check else "no", None),
         ],
     )
+    # Grace counter: stoppedDL is the normal initial state before qB processes the recheck
+    # command. Track consecutive stoppedDL observations per hash; only fail after the grace
+    # window expires so we don't misclassify a queued recheck as a download failure.
+    stalled_dl_seen: dict[str, int] = {}
     while pending and time.time() < deadline:
         for torrent_hash in list(pending):
             info = qbit.get_torrent_info(torrent_hash)
-            status, detail = _rt_qb_monitor_classify(info)
+            raw_state = str(info.state or "") if info is not None else ""
+            if raw_state == "stoppedDL":
+                count = stalled_dl_seen.get(torrent_hash, 0) + 1
+                stalled_dl_seen[torrent_hash] = count
+                if count <= stalled_dl_grace:
+                    status = "pending"
+                    detail = f"stoppedDL (grace {count}/{stalled_dl_grace}, waiting for recheck)"
+                else:
+                    status, detail = _rt_qb_monitor_classify(info)
+            else:
+                stalled_dl_seen.pop(torrent_hash, None)
+                status, detail = _rt_qb_monitor_classify(info)
             if status == "success":
+                stopped_ok: bool | None = None
+                if stop_after_check:
+                    stopped_ok = qbit.pause_torrent(torrent_hash)
+                    if stopped_ok:
+                        detail = f"{detail} → stopped"
+                    else:
+                        detail = f"{detail} → stop_failed"
                 print(f"{_rt_qb_style('✓', fg='green', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
-                results[torrent_hash] = {"status": "success", "detail": detail}
+                results[torrent_hash] = {"status": "success", "detail": detail, "stopped": stopped_ok}
                 pending.remove(torrent_hash)
             elif status == "failure":
                 print(f"{_rt_qb_style('✗', fg='red', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
-                results[torrent_hash] = {"status": "failure", "detail": detail}
+                results[torrent_hash] = {"status": "failure", "detail": detail, "stopped": None}
                 pending.remove(torrent_hash)
             else:
                 print(f"{_rt_qb_style('…', fg='yellow', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
@@ -2808,22 +2833,23 @@ def _monitor_rt_qb_rechecks(
     for torrent_hash in sorted(pending):
         detail = "monitor_timeout"
         print(f"{_rt_qb_style('!', fg='red', bold=True)} {torrent_hash[:16]} {detail}", flush=True)
-        results[torrent_hash] = {"status": "timeout", "detail": detail}
+        results[torrent_hash] = {"status": "timeout", "detail": detail, "stopped": None}
+    stopped_count = sum(1 for item in results.values() if item.get("stopped") is True)
     counts = {
         "success": sum(1 for item in results.values() if item["status"] == "success"),
         "failed": sum(1 for item in results.values() if item["status"] == "failure"),
         "timeout": sum(1 for item in results.values() if item["status"] == "timeout"),
         "total": len(results),
     }
-    _print_rt_qb_summary(
-        "RT→qB mirror summary",
-        [
-            ("success", counts["success"], "green" if counts["success"] else None),
-            ("failed", counts["failed"], "red" if counts["failed"] else "green"),
-            ("timeout", counts["timeout"], "red" if counts["timeout"] else "green"),
-            ("total", counts["total"], None),
-        ],
-    )
+    summary_rows = [
+        ("success", counts["success"], "green" if counts["success"] else None),
+        ("failed", counts["failed"], "red" if counts["failed"] else "green"),
+        ("timeout", counts["timeout"], "red" if counts["timeout"] else "green"),
+        ("total", counts["total"], None),
+    ]
+    if stop_after_check:
+        summary_rows.append(("stopped", stopped_count, "green" if stopped_count == counts["success"] else "yellow"))
+    _print_rt_qb_summary("RT→qB mirror summary", summary_rows)
     return results
 
 
@@ -3286,18 +3312,38 @@ def rt_qb_mirror_sync_cmd(
         limit=limit,
         journal_path=journal,
     )
+    qb_only_count = report["summary"]["qb_only"]
     _print_rt_qb_summary(
         f"RT→qB mirror sync ({'APPLY' if do_apply else 'DRY RUN'})",
         [
             ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
             ("policy_mode", report["summary"]["policy_mode"], "cyan"),
             ("rt_only", report["summary"]["rt_only"], "yellow" if report["summary"]["rt_only"] else "green"),
+            ("qb_only", qb_only_count, "yellow" if qb_only_count else None),
             ("candidates", candidate_count, "yellow" if candidate_count else "green"),
             ("journal_completed", completed_count, None),
             ("selected", len(selected), "yellow" if selected else "green"),
             ("journal", journal, None),
         ],
     )
+    if qb_only_count:
+        qb_only_rows = _filtered_client_drift_rows(report, side="qb_only", action=None, limit=0)
+        for row in qb_only_rows:
+            qb_row = row.get("qb") or {}
+            hash_prefix = str(row.get("hash") or "")[:16]
+            name = str(row.get("name") or "")
+            category = str(qb_row.get("category") or "")
+            save_path = str(qb_row.get("save_path") or "")
+            state = str(qb_row.get("state") or "")
+            cat_text = f"{category or '-':<14}"
+            print(
+                f"  {_rt_qb_style('qb-only', fg='yellow')} "
+                f"{_rt_qb_style(hash_prefix, fg='cyan', bold=True)} "
+                f"{_rt_qb_style(cat_text, fg='magenta')} "
+                f"{_rt_qb_style(name, fg='bright_white', bold=True)}"
+            )
+            print(f"     {_rt_qb_style('state:', fg='bright_black')} {state}   "
+                  f"{_rt_qb_style('path:', fg='bright_black')} {_rt_qb_style(save_path, fg='bright_blue')}")
     effective_verify_timeout = verify_timeout
     if wait_for_check and effective_verify_timeout <= 0:
         effective_verify_timeout = 180.0
@@ -3924,6 +3970,184 @@ def rt_session_reset_cmd(hash_filters, target_directory, session_dir, backup_roo
             print(f"      error: {result['error']}")
         if status not in {"verified", "verified_after_timeout"}:
             raise click.ClickException(f"rt session reset blocked hash={torrent_key} status={status}")
+
+
+@rt.command("torrent-replace")
+@click.option("--hash", "torrent_hash", required=True, help="Hash (or short prefix) of the RT torrent to replace.")
+@click.option("--torrent-file", "torrent_file", type=click.Path(exists=True), default=None, help="Path to replacement .torrent file.")
+@click.option("--prowlarr", "use_prowlarr", is_flag=True, help="Search Prowlarr for replacement torrent automatically.")
+@click.option("--target-dir", "target_dir", default=None, help="Override save directory (default: current RT directory).")
+@click.option("--backup-root", "backup_root", default="out/rt-torrent-replace", show_default=True, help="Directory for session file backups.")
+@click.option("--session-dir", type=click.Path(exists=True, file_okay=False), default=None, help="RT session directory.")
+@click.option("--rpc-url", default=None, help="rTorrent XMLRPC endpoint.")
+@click.option("--prowlarr-url", default="http://localhost:9696", show_default=True, help="Prowlarr API URL.")
+@click.option("--prowlarr-api-key-file", "prowlarr_key_file", default="", help="Prowlarr API key file.")
+@click.option("--apply", "do_apply", is_flag=True, help="Execute replacement. Default is dry-run (validation only).")
+def rt_torrent_replace_cmd(
+    torrent_hash, torrent_file, use_prowlarr, target_dir, backup_root,
+    session_dir, rpc_url, prowlarr_url, prowlarr_key_file, do_apply,
+):
+    """Replace a compromised or corrupted RT torrent, reusing existing on-disk data.
+
+    Supports two input modes (mutually exclusive):
+
+      --torrent-file <path>   Use a locally downloaded .torrent file.
+      --prowlarr              Search Prowlarr for a replacement automatically.
+
+    Without --apply, runs in dry-run mode: validates the replacement and reports
+    what would happen without touching RT or the session directory.
+    """
+    from hashall.rt_torrent_replace import (
+        validate_replacement,
+        fetch_prowlarr_replacement,
+        rt_get_torrent_info_live,
+        replace_torrent,
+    )
+    from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, DEFAULT_RT_RPC_URL
+
+    if not torrent_file and not use_prowlarr:
+        raise click.UsageError("Provide --torrent-file or --prowlarr.")
+    if torrent_file and use_prowlarr:
+        raise click.UsageError("--torrent-file and --prowlarr are mutually exclusive.")
+
+    resolved_session = Path(session_dir).expanduser() if session_dir else DEFAULT_RT_SESSION_DIR
+    resolved_rpc = rpc_url or DEFAULT_RT_RPC_URL
+
+    print("🔄 rt torrent-replace")
+    print(f"   hash:        {torrent_hash}")
+    print(f"   source:      {'prowlarr' if use_prowlarr else torrent_file}")
+    print(f"   apply:       {do_apply}")
+
+    # Resolve full hash and current RT state
+    info = rt_get_torrent_info_live(torrent_hash, rpc_url=resolved_rpc)
+    if info is None:
+        # Try resolving short hash via session files
+        from hashall.rtorrent import load_rt_session_directories
+        session_rows = load_rt_session_directories(resolved_session)
+        matches = [h for h in session_rows if h.lower().startswith(torrent_hash.lower())]
+        if len(matches) == 1:
+            torrent_hash = matches[0]
+            info = rt_get_torrent_info_live(torrent_hash, rpc_url=resolved_rpc)
+        elif len(matches) > 1:
+            raise click.ClickException(f"Ambiguous short hash; matches: {matches}")
+
+    if info is None:
+        raise click.ClickException(
+            f"Hash not found in live RT: {torrent_hash}. "
+            "Is the torrent loaded? (paused torrents are still visible)"
+        )
+
+    full_hash = torrent_hash.strip().lower()
+    current_name = info["name"]
+    current_directory = target_dir or info["directory"]
+    current_label = info["label"]
+    current_size = info["size"]
+    current_trackers = info["trackers"]
+
+    print(f"   name:        {current_name}")
+    print(f"   directory:   {current_directory}")
+    print(f"   label:       {current_label}")
+    print(f"   size:        {current_size:,} bytes")
+    print(f"   trackers:    {len(current_trackers)} (current)")
+
+    # Acquire replacement bytes
+    replacement_bytes: bytes
+    if torrent_file:
+        replacement_bytes = Path(torrent_file).read_bytes()
+        print(f"\n   replacement: {torrent_file}")
+    else:
+        tracker_host = ""
+        # Use first private tracker host as indexer hint — more specific than label.
+        # Fall back to label only when the tracker list is fully public (corruption case).
+        from hashall.rt_torrent_replace import _PUBLIC_TRACKER_FRAGMENTS as _pub_frags
+        from urllib.parse import urlparse
+        private_trackers = [u for u in current_trackers if not any(f in u.lower() for f in _pub_frags)]
+        if private_trackers:
+            tracker_host = urlparse(private_trackers[0]).hostname or ""
+        else:
+            # All trackers are public (corrupted list) — label is the only reliable hint.
+            tracker_host = current_label or ""
+        print(f"\n   searching Prowlarr for: {current_name!r} on {tracker_host or '(any)'}...")
+        replacement_bytes, source = fetch_prowlarr_replacement(
+            current_name,
+            tracker_host,
+            prowlarr_url=prowlarr_url,
+            api_key_file=prowlarr_key_file,
+        )
+        if replacement_bytes is None:
+            raise click.ClickException(f"Prowlarr search returned no result: {source}")
+        print(f"   replacement: {source}")
+
+    # Validate
+    validation = validate_replacement(full_hash, current_name, current_size, replacement_bytes)
+    rep_meta = validation.replacement_meta
+
+    print(f"\n📋 Validation")
+    print(f"   ok:           {validation.ok}")
+    print(f"   reason:       {validation.reason}")
+    if rep_meta:
+        print(f"   repl_name:    {rep_meta.name}")
+        print(f"   repl_hash:    {rep_meta.infohash}")
+        print(f"   repl_size:    {rep_meta.total_bytes:,} bytes")
+        print(f"   repl_private: {rep_meta.is_private}")
+        print(f"   repl_trackers:{rep_meta.tracker_count}")
+        if rep_meta.has_public_trackers:
+            print("   ⚠️  replacement still contains public trackers")
+        if not rep_meta.is_private:
+            print("   ⚠️  replacement is not marked private=1")
+
+    if not validation.ok:
+        raise click.ClickException(f"Validation failed: {validation.reason}")
+
+    same_hash = validation.same_hash
+
+    # If replacement has no trackers, inject private ones from current RT state.
+    inject_trackers: list[str] = []
+    if rep_meta and rep_meta.tracker_count == 0 and current_trackers:
+        from hashall.rt_torrent_replace import _PUBLIC_TRACKER_FRAGMENTS as _pub_frags
+        inject_trackers = [
+            u for u in current_trackers
+            if not any(f in u.lower() for f in _pub_frags)
+        ]
+        if inject_trackers:
+            print(f"   inject_trackers: {len(inject_trackers)} private tracker(s) from current state")
+
+    print(f"   operation:    {'same_hash (overwrite + reset)' if same_hash else 'new_hash (load + erase old)'}")
+
+    if not do_apply:
+        print("\n✅ Dry-run complete. Pass --apply to execute.")
+        return
+
+    print(f"\n⚙️  Executing replacement (apply=True)")
+    result = replace_torrent(
+        full_hash,
+        replacement_bytes,
+        directory=current_directory,
+        label=current_label,
+        inject_trackers=inject_trackers or None,
+        session_dir=resolved_session,
+        backup_root=Path(backup_root),
+        rpc_url=resolved_rpc,
+        same_hash=same_hash,
+    )
+
+    status = result["status"]
+    print(f"   status:      {status}")
+    print(f"   old_hash:    {result['old_hash'][:16]}...")
+    if result.get("new_hash") and result["new_hash"] != result["old_hash"]:
+        print(f"   new_hash:    {result['new_hash'][:16]}...")
+    if result.get("backup_dir"):
+        print(f"   backup_dir:  {result['backup_dir']}")
+    print(f"   completed:   {result['completed']}")
+    if result.get("error"):
+        print(f"   error:       {result['error']}")
+
+    if status not in {"verified", "verified_after_timeout"}:
+        raise click.ClickException(f"Replacement did not complete: status={status}")
+
+    print("\n✅ Replacement complete.")
+    if result.get("new_hash") and result["new_hash"] != result["old_hash"]:
+        print(f"   Run `hashall payload sync` to update the catalog with the new hash.")
 
 
 def _load_rt_session_reset_manifest(manifest_path: Path, session_dir: Path) -> list[dict]:

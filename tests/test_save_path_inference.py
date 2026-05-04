@@ -25,8 +25,8 @@ POOL = APPROVED_SAVE_ROOTS[1]  # /pool/media/torrents/seeding
         (f"{STASH}/tv/Show.mkv", f"{STASH}/tv", True),
         # Nested child (multi-level, e.g. rt directory is deeper)
         (f"{STASH}/tv/Show/ep01.mkv", f"{STASH}/tv", True),
-        # Provider subdir of cross-seed is a child
-        (f"{STASH}/cross-seed/FileList.io", f"{STASH}/cross-seed", True),
+        # New-canonical cross-seed item is a child of its tracker dir
+        (f"{STASH}/FileList.io/some.show", f"{STASH}/FileList.io", True),
         # Wrong sibling directory
         (f"{STASH}/movies", f"{STASH}/tv", False),
         # Empty current → False
@@ -45,30 +45,30 @@ def test_check_path_alignment(current, canonical, expected):
 @pytest.mark.parametrize(
     "category,tags,save_path,expected_canonical,expected_device,reliability",
     [
-        # cross-seed: path-based provider wins over tags
+        # cross-seed: new canonical — tracker dir directly under seeding root
         (
             "cross-seed",
             "cross-seed, private, Aither (API)",
-            f"{STASH}/cross-seed/Aither (API)",
-            f"{STASH}/cross-seed/Aither (API)",
+            f"{STASH}/Aither (API)",
+            f"{STASH}/Aither (API)",
             "stash",
             "reliable",
         ),
-        # cross-seed + ~noHL → pool device, path-based provider
+        # cross-seed + ~noHL → pool device, new canonical
         (
             "cross-seed",
             "cross-seed, ~noHL, fearnopeer",
-            f"{POOL}/cross-seed/fearnopeer",
-            f"{POOL}/cross-seed/fearnopeer",
+            f"{POOL}/fearnopeer",
+            f"{POOL}/fearnopeer",
             "pool",
             "reliable",
         ),
-        # cross-seed: path extraction wins over generic non-provider tags
+        # cross-seed: legacy path (/seeding/cross-seed/<tracker>) → canonical is /seeding/<tracker>
         (
             "cross-seed",
             "cross-seed, private",
             f"{STASH}/cross-seed/FileList.io",
-            f"{STASH}/cross-seed/FileList.io",
+            f"{STASH}/FileList.io",
             "stash",
             "reliable",
         ),

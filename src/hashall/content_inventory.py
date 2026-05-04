@@ -127,7 +127,7 @@ def _prefer_file_roots(root_kind: str, rel_root: str) -> bool:
     parent = Path(rel_root).parent.name
     name = Path(rel_root).name
     if root_kind == "orphan":
-        if name in {"books", "movies", "shows"}:
+        if name in {"books", "ebooks", "audiobooks", "movies", "shows"}:
             return True
         if parent == "books" and len(name) == 1:
             return True

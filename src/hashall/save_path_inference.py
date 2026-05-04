@@ -24,8 +24,8 @@ ARR_CATEGORY_FINAL_MAP = {
     "sonarr": "tv",
     "radarr": "movies",
     "lidarr": "music",
-    "readarr": "books",
-    "speakarr": "books",
+    "readarr": "ebooks",
+    "speakarr": "audiobooks",
 }
 
 # Category aliases (e.g., MaM → myanonamouse)
@@ -145,18 +145,28 @@ def choose_category_leaf_name(category: str, *paths: str) -> str:
 
 
 def extract_cross_seed_provider_name(*paths: str) -> str | None:
-    """Extract tracker slug from cross-seed path."""
+    """Extract tracker name from cross-seed path.
+
+    Canonical: /seeding/<tracker>/...  → returns <tracker>
+    Legacy:    /seeding/cross-seed/<tracker>/...  → returns <tracker>
+    """
     for candidate in paths:
         normalized = normalize_cross_seed_refactor_path(candidate, "cross-seed")
         if not normalized:
             continue
         for root in APPROVED_SAVE_ROOTS:
-            prefix = f"{root}/cross-seed/"
-            if not normalized.startswith(prefix):
+            if not (normalized == root or normalized.startswith(root + "/")):
                 continue
-            rel = Path(normalized[len(prefix):])
-            if rel.parts:
-                return rel.parts[0]
+            rel = normalized[len(root):].lstrip("/")
+            parts = Path(rel).parts if rel else ()
+            if not parts:
+                continue
+            # Canonical: first component is the tracker name
+            if parts[0] != "cross-seed":
+                return parts[0]
+            # Legacy: /seeding/cross-seed/<tracker>/...
+            if len(parts) > 1:
+                return parts[1]
     return None
 
 
@@ -182,10 +192,9 @@ def derive_policy_base_save_path(
                 content_path,
                 rt_host_directory,
             )
-            base = f"{primary_root}/cross-seed"
             if provider:
-                return f"{base}/{provider}", None, "cross_seed_provider"
-            return base, None, "cross_seed_root"
+                return f"{primary_root}/{provider}", None, "cross_seed_provider"
+            return f"{primary_root}/cross-seed", None, "cross_seed_root"
         leaf = choose_category_leaf_name(category_norm, save_path, content_path, rt_host_directory)
         return f"{primary_root}/{leaf}", None, "category_root"
 
@@ -307,16 +316,17 @@ def infer_canonical_save_path(
         subdir = ""
         reliability = "ambiguous"
     elif category_norm.lower() == "cross-seed":
-        # Prefer path-based provider (authoritative: qBM places files there)
+        # Canonical: /seeding/<tracker-name>/ (no cross-seed/ prefix)
+        # extract_cross_seed_provider_name handles both canonical and legacy paths
         provider = extract_cross_seed_provider_name(current_save_path, current_content_path)
         if provider:
-            subdir = f"cross-seed/{provider}"
+            subdir = provider
         else:
             # Fall back to tags
             tracker_tags = tags_set - SYSTEM_TAGS
             if tracker_tags:
-                tracker_slug = sorted(tracker_tags)[0]  # first remaining tag
-                subdir = f"cross-seed/{tracker_slug}"
+                tracker_slug = sorted(tracker_tags)[0]
+                subdir = tracker_slug
                 notes.append(f"cross-seed provider from tags: {tracker_slug}")
             else:
                 subdir = "cross-seed"
