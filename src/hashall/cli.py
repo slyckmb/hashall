@@ -2847,6 +2847,8 @@ def _monitor_rt_qb_rechecks(
         ("timeout", counts["timeout"], "red" if counts["timeout"] else "green"),
         ("total", counts["total"], None),
     ]
+    if orphaned_removed_count > 0:
+        summary_rows.insert(0, ("orphaned_removed", orphaned_removed_count, "green"))
     if stop_after_check:
         summary_rows.append(("stopped", stopped_count, "green" if stopped_count == counts["success"] else "yellow"))
     _print_rt_qb_summary("RT→qB mirror summary", summary_rows)
@@ -2935,6 +2937,24 @@ def _apply_client_drift_mirror_rows(
             stopped=True,
             skip_checking=skip_checking,
         )
+        if ok:
+            # Task 3b: Tag both sides
+            from hashall.client_drift import RT_MIRROR_TAG, QB_MIRROR_TAG
+            # Tag qB side (redundant if add_torrent_file tags are correct, but following handoff spec)
+            qbit.add_tags(torrent_hash, [RT_MIRROR_TAG])
+
+            # Tag RT side via XMLRPC
+            import xmlrpc.client
+            try:
+                rt = xmlrpc.client.ServerProxy("http://127.0.0.1:18000/")
+                cur = rt.d.custom2(torrent_hash) or ""
+                existing = {t.strip() for t in cur.split(",") if t.strip()}
+                if QB_MIRROR_TAG not in existing:
+                    existing.add(QB_MIRROR_TAG)
+                    rt.d.custom2.set(torrent_hash, ",".join(sorted(existing)))
+            except Exception as e:
+                _rt_qb_progress(f"warning: failed to tag RT side: {e}")
+
         event = {
             "event": "finished",
             "hash": torrent_hash,
@@ -3328,7 +3348,10 @@ def rt_qb_mirror_sync_cmd(
     )
     if qb_only_count:
         qb_only_rows = _filtered_client_drift_rows(report, side="qb_only", action=None, limit=0)
+        orphaned_hashes_to_remove = []
         for row in qb_only_rows:
+            action = row.get("action")
+            is_orphan = action == "remove_from_qb"
             qb_row = row.get("qb") or {}
             hash_prefix = str(row.get("hash") or "")[:16]
             name = str(row.get("name") or "")
@@ -3336,14 +3359,40 @@ def rt_qb_mirror_sync_cmd(
             save_path = str(qb_row.get("save_path") or "")
             state = str(qb_row.get("state") or "")
             cat_text = f"{category or '-':<14}"
+            
+            label = "orphaned mirror" if is_orphan else "qb-only"
+            label_fg = "red" if is_orphan else "yellow"
+            
             print(
-                f"  {_rt_qb_style('qb-only', fg='yellow')} "
+                f"  {_rt_qb_style(label, fg=label_fg)} "
                 f"{_rt_qb_style(hash_prefix, fg='cyan', bold=True)} "
                 f"{_rt_qb_style(cat_text, fg='magenta')} "
                 f"{_rt_qb_style(name, fg='bright_white', bold=True)}"
             )
             print(f"     {_rt_qb_style('state:', fg='bright_black')} {state}   "
                   f"{_rt_qb_style('path:', fg='bright_black')} {_rt_qb_style(save_path, fg='bright_blue')}")
+            
+            if is_orphan and do_apply:
+                orphaned_hashes_to_remove.append(str(row.get("hash") or ""))
+
+    orphaned_removed_count = 0
+    if do_apply and orphaned_hashes_to_remove:
+        if qbit is None:
+            from hashall.qbittorrent import get_qbittorrent_client
+            qbit = get_qbittorrent_client()
+        
+        _rt_qb_progress(f"removing {len(orphaned_hashes_to_remove)} orphaned mirrors from qB")
+        for torrent_hash in orphaned_hashes_to_remove:
+            ok = qbit.session.post(
+                f"{qbit.base_url}/api/v2/torrents/delete",
+                data={"hashes": torrent_hash, "deleteFiles": "false"},
+                timeout=qbit.request_timeout,
+            )
+            if ok.status_code == 200:
+                orphaned_removed_count += 1
+            else:
+                print(f"      {_rt_qb_style('!', fg='red', bold=True)} failed to remove {torrent_hash[:16]}: {ok.text}")
+
     effective_verify_timeout = verify_timeout
     if wait_for_check and effective_verify_timeout <= 0:
         effective_verify_timeout = 180.0

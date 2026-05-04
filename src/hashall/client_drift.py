@@ -22,6 +22,10 @@ DEFAULT_MIRROR_ROOTS = (
 )
 
 
+RT_MIRROR_TAG = "~rt-mirrored"   # qB tag: item was added via RT→qB mirror
+QB_MIRROR_TAG = "~qb-mirrored"   # RT d.custom2 tag: item has a qB mirror
+
+
 @dataclass(frozen=True)
 class ClientDriftPolicy:
     mirror_roots: tuple[str, ...] = ()
@@ -158,6 +162,12 @@ def _under_any_prefix(path: str, prefixes: Iterable[str]) -> bool:
 def _category_in(category: str, categories: Iterable[str]) -> bool:
     wanted = {str(item or "").strip().lower() for item in categories if str(item or "").strip()}
     return bool(wanted and str(category or "").strip().lower() in wanted)
+
+
+def _has_tag(tags_str: str, tag: str) -> bool:
+    """Exact-match tag check; tags_str is comma-separated."""
+    needle = tag.strip().lower()
+    return any(t.strip().lower() == needle for t in str(tags_str or "").split(",") if t.strip())
 
 
 def _infer_category_from_path(path: str, mirror_roots: Iterable[str]) -> str:
@@ -338,6 +348,10 @@ def _classify_rt_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
     if mirrorable_by_category:
         reasons.append("category_mirror_rt_to_qb_policy")
     if (mirrorable_by_root or mirrorable_by_category) and not blockers:
+        custom2_val = row.raw.get("custom2", "")
+        if _has_tag(custom2_val, QB_MIRROR_TAG):
+            reasons.append("qb_lost_mirrored_item")
+            return "re_mirror_rt_to_qb", "high", reasons, blockers
         return "mirror_rt_to_qb", "high", reasons, blockers
     if blockers:
         return "manual_review", "low", reasons, blockers
@@ -348,6 +362,9 @@ def _classify_rt_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
 def _classify_qb_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: float) -> tuple[str, str, list[str], list[str]]:
     reasons: list[str] = ["present_in_qb_missing_in_rt"]
     blockers: list[str] = []
+    if _has_tag(row.tags, RT_MIRROR_TAG):
+        reasons.append("orphaned_rt_mirror")
+        return "remove_from_qb", "high", reasons, blockers
     if _category_in(row.category, policy.ignore_qb_only_categories) or _under_any_prefix(row.save_path, policy.ignore_qb_only_path_prefixes):
         reasons.append("explicit_qb_only_ignore_policy")
         return "ignore_intentional_qb_only", "high", reasons, blockers
