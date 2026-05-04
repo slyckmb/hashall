@@ -3312,11 +3312,7 @@ def rt_qb_mirror_sync_cmd(
         limit=limit,
         journal_path=journal,
     )
-    qb_only_rows = [
-        row for row in _filtered_client_drift_rows(report, side="qb_only", action=None, limit=0)
-        if row.get("action") != "ignore_intentional_qb_only"
-    ]
-    qb_only_count = len(qb_only_rows)
+    qb_only_count = report["summary"]["qb_only"]
     _print_rt_qb_summary(
         f"RT→qB mirror sync ({'APPLY' if do_apply else 'DRY RUN'})",
         [
@@ -3331,6 +3327,7 @@ def rt_qb_mirror_sync_cmd(
         ],
     )
     if qb_only_count:
+        qb_only_rows = _filtered_client_drift_rows(report, side="qb_only", action=None, limit=0)
         for row in qb_only_rows:
             qb_row = row.get("qb") or {}
             hash_prefix = str(row.get("hash") or "")[:16]
