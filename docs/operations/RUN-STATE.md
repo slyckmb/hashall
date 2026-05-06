@@ -525,6 +525,46 @@ Rules going forward:
 
 2B did not remove the alias because this branch still has humans and docs consuming historic JSON examples. Removing it should wait until all report consumers are updated.
 
+## 2026-05-06 Phase 3 Residue Sibling-Link Map
+
+Phase 3 ran a read-only sibling-link map for the old `2d9004...` stash/data tree left by the Phase B RT repoint:
+
+- audited old tree:
+  - `/data/media/torrents/seeding/cross-seed/2d9004e9af6618c192d965c8950189955326b3e2/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- old tree exists with `22` files and `22` distinct inodes
+- same-inode matches found:
+  - `406` torrent-seeding path hits
+  - `0` ARR-library hits
+  - root split: `203` under `/data/media/torrents/seeding`, `203` under `/stash/media/torrents/seeding`
+- distinct sibling directories found: `20`
+  - the data and stash views appear as paired aliases for the same underlying inode set
+  - `18` directories have the full `22` files
+  - `2` historical `.bad.20260227-145228.59baef61a4bb` directories have only `5` linked files
+- live qB cache still has `5` West Wing S07 torrent rows:
+  - `2d9004e9af6618c192d965c8950189955326b3e2` now on pool
+  - `f18b8cd0ac223d4a68d546de35ac3350c9d69ba9` on stash/data
+  - `8bf2aec2609247feefcfbec26e38ecabefeb1358` on stash/data
+  - `59baef61a4bb0b26ae4ce780ade53be4849f1f43` on stash/data
+  - `b6131c833d24013b4fd3841a8df90792167bc4d1` on stash/data
+- live RT cache also has the same `5` West Wing S07 hashes in healthy `stalledUP` state.
+
+Interpretation:
+
+- The old `2d9004...` data tree is not a simple unowned deletion candidate.
+- It is part of a larger hardlinked torrent sibling group with multiple live qB/RT siblings still on stash/data.
+- There are still historical `cross-seed-link` `.bad...` partial directories linked into the group; they are cleanup candidates only after client ownership and alias-path handling are explicit.
+- No deletion was performed.
+
+Recommended follow-up 3B:
+
+- build a per-hash sibling-group ownership table for these `5` West Wing hashes:
+  - qB save/content path
+  - RT directory/content path
+  - policy placement
+  - whether each sibling should remain on stash/data or move to pool
+  - whether the `.bad...` partial paths are unowned residue
+- only after that table is reviewed should cleanup remove any linked directory entries.
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.
