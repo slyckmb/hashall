@@ -228,6 +228,69 @@ Edge case to keep out of the repoint lane:
   - decide whether to create/rebuild ARR hardlinks
   - only then revisit stash-vs-pool placement
 
+## 2026-05-06 Phase 2G Dry-Run Repoint Plan
+
+2G produced a read-only dry-run plan from the 2F filesystem-proven placement classes.
+
+Artifact:
+
+- `/tmp/hashall-20260505-112759-codex-2g-dryrun-repoint-plan.json`
+
+Summary:
+
+- rows planned: `13`
+- mutates live state: `false`
+- requires human review: `true`
+- action buckets:
+  - `dry_run_repoint_qb_to_rt_stash`: `1`
+  - `dry_run_repoint_rt_to_qb_pool`: `2`
+  - `dry_run_same_placement_canonical_choice_needed`: `7`
+  - `blocked_rehome_to_pool_before_repoint`: `3`
+
+Straightforward repoint-only candidates:
+
+- `4f454ed3bdf830f0` Alien Resurrection
+  - desired placement: stash
+  - qB currently points at pool
+  - RT already points at stash/data
+  - dry-run action: repoint qB to RT stash save root
+- `2d9004e9af6618c1` West Wing S07
+  - desired placement: pool
+  - qB already points at pool
+  - RT points at stash/data
+  - dry-run action: repoint RT to qB pool content path
+- `97343f6005da2ed8` Cinderella
+  - desired placement: pool
+  - qB already points at pool
+  - RT points at stash/data
+  - dry-run action: repoint RT to qB pool content path
+
+Same-placement canonical-choice blockers:
+
+- `1a06655541134463` Top Gun
+- `20555f704e0ae477` Bottle Shock
+- `2a4e075ecf0962ba` V for Vendetta
+- `4052607092357bfe` Twisters
+- `5c86280a99d10071` Spider-Man Into the Spider-Verse
+- `c7845e03fe21e7fa` Twin Peaks S01
+- `e2a7eab3a5be76f7` Here 2024
+
+These are policy-proven stash rows, but both qB and RT already point somewhere under stash/data. Do not repoint until choosing the canonical tree shape/root for each row.
+
+Rehome-before-repoint blockers:
+
+- `29e2b889867a8fbb` Vigen Guroian (`~noHL`)
+- `2fb25fdf2ef20ae5` Novitiate (`~noHL`)
+- `a5a2b78798009b38` Wilding (`~noHL`)
+
+These are policy-proven pool candidates, but neither client currently points at pool. They need a pool rehome/materialization plan before qB/RT repoint.
+
+2G interpretation:
+
+- Do not apply all 13 as a single drift-repoint batch.
+- The first live pilot candidate should be one of the three straightforward repoint-only rows, after human inspection of the exact target paths.
+- Phase 2H, if needed, should turn the three straightforward dry-run candidates into explicit one-hash pilot commands with pre/post checks and rollback notes.
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.
