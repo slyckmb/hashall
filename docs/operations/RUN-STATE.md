@@ -1,6 +1,45 @@
 # Operational Run State
 
-Last updated: 2026-04-18
+Last updated: 2026-05-06
+
+## 2026-05-06 Phase 0 Baseline
+
+Read-only baseline from the `cr/hashall-20260505-112759-codex` worktree:
+
+- `~/.hashall/refresh.lock` was stale metadata only (`pid=3969561`, process not running) and was removed; `hashall rehome refresh-status` now reports `idle`.
+- qB cache source of truth is the silo-owned cache:
+  - `~/.cache/silo-qb/torrents-info.json`
+  - `~/.cache/silo-qb/torrents-info.meta.json`
+  - latest observed cache: `5200` items, qB `v5.1.4`, `consecutive_failures=0`
+- RT cache source of truth is the silo-owned cache:
+  - `~/.cache/silo-rt/torrents.json`
+  - `~/.cache/silo-rt/torrents.meta.json`
+  - latest observed cache: `5202` items, `consecutive_failures=0`
+- Live cache counts now show the path-normalization live rows are clear:
+  - qB `cross-seed-link`: `0`
+  - RT `cross-seed-link`: `0`
+  - qB `orphaned_data`: `0`
+  - RT `orphaned_data`: `0`
+  - qB paths under `/pool/data`: `0`
+  - RT paths under `/pool/data`: `0`
+- `scripts/pilot-normalization.sh --list` found no current safe normalization candidates.
+- Capacity is no longer the immediate migration blocker:
+  - `/pool/data`: about `3.6T` available
+  - `/pool/media`: about `3.6T` available
+- The five current qB `stoppedDL` rows are treated as waiting-for-seed-peers, not as the active repair lane:
+  - `245f2bce6afaf96b0a48ad216366c4281fdd864f`
+  - `e36553b12dc118d8c52575a1d6711532882ae1c3`
+  - `127c38342cfedaf4016b8079be13c5f7883b9cfe`
+  - `5caca88d29e64de495a47b53a466f7cadcb3ce02`
+  - `96d896ca35f42d93e4a4bdee92e8ac90adc34b54`
+- Non-blocking cache-daemon hygiene item:
+  - `~/.cache/silo-qb/daemon.pid` points at a live silo daemon.
+  - `torrents-info.meta.json` still reported an older non-running `daemon_pid`.
+  - The cache itself is fresh, so do not restart the shared daemon while active leases exist; handle this in the silo/cache hygiene lane.
+
+Interpretation:
+- Treat older notes that cite live `cross-seed-link`, live `orphaned_data`, `/pool/data` qB/RT rows, or zero-capacity blockers as historical unless a new live read contradicts this baseline.
+- Next best work lane is code/doc/cache cleanup, not another live path-normalization pilot.
 
 ## Big-Picture Seed Folder Cleanup TODO
 

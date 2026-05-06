@@ -1,5 +1,16 @@
 # hashall: qB Cache Path Rename Follow-up
 
+Status as of 2026-05-06:
+
+- Silo-owned `~/.cache/silo-qb` is the live fresh cache path.
+- The old `~/.cache/hashall-qb` cache is stale fallback state only.
+- Hashall now consumes the silo cache path by default while preserving explicit
+  `--qb-cache-file` overrides and legacy fallback reads.
+- Observed hygiene issue: `~/.cache/silo-qb/daemon.pid` can point at the live
+  daemon while `torrents-info.meta.json` still carries an older non-running
+  `daemon_pid`. The cache payload can still be fresh; fix this in the
+  silo/cache hygiene lane rather than restarting an actively leased daemon.
+
 Silo now owns the qB cache path and writes to:
 
 ```text
@@ -22,11 +33,15 @@ Impacted hashall references found under `/home/michael/dev/work/hashall`:
 - `bin/lib/qb-cache.sh`
 - docs under `docs/operations`, `docs/tooling`, `docs/handoff*`, `docs/NEXT-AGENT-PROMPT.md`, `docs/REQUIREMENTS.md`
 
-Recommended remedy:
+Implemented in hashall:
 
-1. Decide whether hashall should continue owning a separate cache or consume silo's cache path.
-2. If consuming silo, change defaults from `~/.cache/hashall-qb` to `~/.cache/silo-qb`.
-3. Keep `--qb-cache-file` overrides intact.
-4. If backwards compatibility is needed, read `~/.cache/hashall-qb` only when `~/.cache/silo-qb` is absent.
-5. Update docs that describe hashall as the canonical qB cache owner.
-6. Verify `bin/qb-cache-agent.py --status`, CLI commands with `--qb-cache-file`, and tests around `DEFAULT_QB_CACHE_FILE`.
+1. `src/hashall/qbittorrent.py` defaults to `~/.cache/silo-qb`.
+2. `get_torrents_from_cache()` falls back to `~/.cache/hashall-qb` only for default reads when the silo cache is absent or stale.
+3. Explicit cache paths remain exact and do not fall back.
+4. `scripts/pause_mirror_seeders.py` now uses the shared cache helper instead of a hardcoded old path.
+5. Tests cover default reads, legacy fallback, and explicit-path behavior.
+
+Remaining follow-up:
+
+1. Decide when hashall's local qB cache daemon entry points should be removed or demoted now that silo owns daemon lifecycle.
+2. Fix the silo daemon metadata hygiene issue where `torrents-info.meta.json` can retain an older non-running `daemon_pid`.

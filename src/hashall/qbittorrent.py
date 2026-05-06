@@ -21,6 +21,9 @@ from hashall.bencode import as_text, bencode_decode
 DEFAULT_QB_CACHE_DIR = Path.home() / ".cache" / "silo-qb"
 DEFAULT_QB_CACHE_FILE = DEFAULT_QB_CACHE_DIR / "torrents-info.json"
 DEFAULT_QB_CACHE_META_FILE = DEFAULT_QB_CACHE_DIR / "torrents-info.meta.json"
+LEGACY_QB_CACHE_DIR = Path.home() / ".cache" / "hashall-qb"
+LEGACY_QB_CACHE_FILE = LEGACY_QB_CACHE_DIR / "torrents-info.json"
+LEGACY_QB_CACHE_META_FILE = LEGACY_QB_CACHE_DIR / "torrents-info.meta.json"
 DEFAULT_QB_BT_BACKUP_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 
 
@@ -106,7 +109,7 @@ def get_torrents_from_cache(
     or older than *max_age_s* seconds.  Never raises; returns None on any error.
     """
     if cache_path is None:
-        cache_path = DEFAULT_QB_CACHE_FILE
+        cache_path = _resolve_default_qb_cache_file(max_age_s=max_age_s)
     try:
         age = time.time() - os.stat(cache_path).st_mtime
         if age > max_age_s:
@@ -120,6 +123,29 @@ def get_torrents_from_cache(
         return None
 
 
+def _cache_is_fresh(path: Path, *, max_age_s: float) -> bool:
+    try:
+        return (time.time() - os.stat(path).st_mtime) <= max_age_s
+    except OSError:
+        return False
+
+
+def _resolve_default_qb_cache_file(*, max_age_s: float = 30.0) -> Path:
+    if _cache_is_fresh(DEFAULT_QB_CACHE_FILE, max_age_s=max_age_s):
+        return DEFAULT_QB_CACHE_FILE
+    if _cache_is_fresh(LEGACY_QB_CACHE_FILE, max_age_s=max_age_s):
+        return LEGACY_QB_CACHE_FILE
+    return DEFAULT_QB_CACHE_FILE
+
+
+def _resolve_default_qb_cache_meta_file() -> Path:
+    if DEFAULT_QB_CACHE_META_FILE.exists():
+        return DEFAULT_QB_CACHE_META_FILE
+    if LEGACY_QB_CACHE_META_FILE.exists():
+        return LEGACY_QB_CACHE_META_FILE
+    return DEFAULT_QB_CACHE_META_FILE
+
+
 def _load_json_file(path: Path) -> Optional[Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -128,7 +154,7 @@ def _load_json_file(path: Path) -> Optional[Any]:
 
 
 def get_qb_cache_meta(meta_path: "Path | None" = None) -> "dict | None":
-    path = meta_path or DEFAULT_QB_CACHE_META_FILE
+    path = meta_path or _resolve_default_qb_cache_meta_file()
     payload = _load_json_file(path)
     return payload if isinstance(payload, dict) else None
 

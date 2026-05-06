@@ -6,7 +6,7 @@ Paste or adapt this instruction set when another CLI agent in another repo needs
 
 Do not build or maintain another ad hoc qB Web API client in your repo.
 
-Use the qB helper and cache tooling that already exists in `hashall` so:
+Use the qB helper APIs in `hashall` and the shared qB cache owned by `silo` so:
 
 - qB version and Web API differences are normalized in one place
 - read-heavy status/list polling goes through the shared cache
@@ -38,12 +38,19 @@ What it gives you:
 - cached-profile and cached-torrent fallback when qB is slow/unresponsive
 - `.torrent` export fallback to qB `BT_backup` when old qB builds lack the export endpoint
 
-Shared cache:
+Shared cache entry points:
 
 - `/home/michael/dev/work/hashall/bin/qb-cache-agent.py`
 - `/home/michael/dev/work/hashall/bin/qb-cache-daemon.py`
 - cache root:
-  - `~/.cache/hashall-qb/`
+  - `~/.cache/silo-qb/`
+
+Ownership note:
+
+- `silo` owns and operates the live qB cache daemon.
+- `hashall` reads `~/.cache/silo-qb/torrents-info.json` by default.
+- `hashall` preserves `~/.cache/hashall-qb/torrents-info.json` only as a legacy fallback when the silo cache is absent or stale.
+- Explicit cache-file overrides should continue to use exactly the requested path.
 
 Shell helper for cached list reads:
 
@@ -103,6 +110,6 @@ Do not patch around it locally in a second helper.
 
 ## Current Limitation
 
-`silo` external dashboard alignment is still separate follow-up work.
-
-If you are working in `silo` (formerly `qbitui`), the right direction is to align it to the `hashall` helper/cache contract, not to fork the contract again.
+`silo` owns daemon lifecycle details. Hashall-owned consumers should treat the
+cache files as the contract and avoid restarting the shared daemon while active
+leases exist.
