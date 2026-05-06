@@ -98,6 +98,45 @@ Interpretation:
 - Phase 2C is safe for selected dry-run triage and target reporting.
 - Phase 2D should replace or supplement filesystem anchor scans with catalog-backed hardlink-anchor evidence before any live repoint pilot.
 
+## 2026-05-06 Phase 2D Catalog-Backed Anchor Evidence
+
+`client-drift audit` now accepts an optional read-only catalog:
+
+```bash
+python3 -m hashall.cli client-drift audit \
+  --qb-cache-file ~/.cache/silo-qb/torrents-info.json \
+  --rt-cache-file ~/.cache/silo-rt/torrents.json \
+  --side path_drift \
+  --hash 2d9004 \
+  --catalog ~/.hashall/catalog.db \
+  --anchor-scan-max-files 0 \
+  --limit 5 \
+  --json-output
+```
+
+Catalog behavior:
+
+- reads SQLite in `mode=ro`
+- checks both legacy `files` and device tables shaped as `files_<id>`
+- skips incompatible file tables that do not expose both `path` and `inode`
+- treats matching payload inode(s) with ARR-library sibling paths as `has_arr_anchor=true`
+- treats catalog payload rows without ARR-library siblings as `has_arr_anchor=false`
+- falls back to the selected filesystem scan path only when catalog evidence is unavailable
+
+Read-only selected live result for `2d9004`:
+
+- selected rows: `1`
+- action: `manual_review`
+- blockers:
+  - `catalog_payload_paths_missing`
+  - `arr_anchor_scan_disabled`
+  - `hardlink_anchor_evidence_required_for_placement`
+
+Interpretation:
+
+- Phase 2D is working, but this selected live hash is not yet catalog-proven because its qB/RT payload paths were not found in the current catalog.
+- Phase 2E is needed before live repoint pilots: refresh or path-alias the catalog evidence for the 13 path-drift rows, then rerun selected catalog-backed audits until each row is either policy-proven or explicitly blocked.
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.

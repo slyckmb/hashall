@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import json
 import stat
+import sqlite3
 import time
 from typing import Any, Iterable
 
@@ -48,6 +49,7 @@ DEFAULT_ARR_LIBRARY_ROOTS = (
 )
 
 DEFAULT_ANCHOR_SCAN_MAX_FILES = 0
+DEFAULT_CATALOG_PATH = Path("~/.hashall/catalog.db")
 
 
 RT_MIRROR_TAG = "~rt-mirrored"   # qB tag: item was added via RT→qB mirror
@@ -434,6 +436,7 @@ def _classify_qb_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
 @dataclass
 class _AnchorScanResult:
     has_arr_anchor: bool | None
+    source: str = ""
     anchor_paths: list[str] = field(default_factory=list)
     payload_files_checked: int = 0
     library_files_checked: int = 0
@@ -444,6 +447,7 @@ class _AnchorScanResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "has_arr_anchor": self.has_arr_anchor,
+            "source": self.source,
             "anchor_paths": self.anchor_paths[:20],
             "payload_files_checked": self.payload_files_checked,
             "library_files_checked": self.library_files_checked,
@@ -454,36 +458,49 @@ class _AnchorScanResult:
 
 
 class _PlacementAnchorScanner:
-    def __init__(self, policy: ClientDriftPolicy) -> None:
+    def __init__(self, policy: ClientDriftPolicy, *, catalog_path: Path | None = None) -> None:
         self.policy = policy
+        self.catalog_path = catalog_path
         self._library_index: dict[tuple[int, int], list[str]] | None = None
         self._library_files_checked = 0
         self._library_scan_truncated = False
         self._library_blockers: list[str] = []
 
     def scan_paths(self, paths: Iterable[str]) -> _AnchorScanResult:
+        path_tuple = tuple(str(path or "").strip() for path in paths if str(path or "").strip())
+        catalog_result = self._scan_catalog(path_tuple)
+        if catalog_result.has_arr_anchor is not None:
+            return catalog_result
+        catalog_blockers = [
+            blocker
+            for blocker in catalog_result.blockers
+            if blocker != "catalog_anchor_lookup_not_configured"
+        ]
+
         library_index = self._load_library_index()
-        blockers = list(self._library_blockers)
+        blockers = [*catalog_blockers, *self._library_blockers]
         max_files = max(0, int(self.policy.anchor_scan_max_files))
         if max_files <= 0:
             return _AnchorScanResult(
                 has_arr_anchor=None,
+                source="filesystem",
                 library_files_checked=self._library_files_checked,
                 library_scan_truncated=self._library_scan_truncated,
-                blockers=["arr_anchor_scan_disabled"],
+                blockers=[*blockers, "arr_anchor_scan_disabled"],
             )
         if not self.policy.arr_library_roots:
             return _AnchorScanResult(
                 has_arr_anchor=None,
+                source="filesystem",
                 library_files_checked=self._library_files_checked,
                 library_scan_truncated=self._library_scan_truncated,
-                blockers=["arr_library_roots_not_configured"],
+                blockers=[*blockers, "arr_library_roots_not_configured"],
             )
 
         anchor_paths: list[str] = []
         payload_files_checked = 0
         payload_scan_truncated = False
-        for payload_file in self._iter_files(paths):
+        for payload_file in self._iter_files(path_tuple):
             payload_files_checked += 1
             if payload_files_checked > max_files:
                 payload_scan_truncated = True
@@ -501,6 +518,7 @@ class _PlacementAnchorScanner:
         if anchor_paths:
             return _AnchorScanResult(
                 has_arr_anchor=True,
+                source="filesystem",
                 anchor_paths=anchor_paths,
                 payload_files_checked=payload_files_checked,
                 library_files_checked=self._library_files_checked,
@@ -512,6 +530,7 @@ class _PlacementAnchorScanner:
             blockers.append("arr_anchor_scan_incomplete")
             return _AnchorScanResult(
                 has_arr_anchor=None,
+                source="filesystem",
                 payload_files_checked=payload_files_checked,
                 library_files_checked=self._library_files_checked,
                 payload_scan_truncated=payload_scan_truncated,
@@ -520,10 +539,128 @@ class _PlacementAnchorScanner:
             )
         return _AnchorScanResult(
             has_arr_anchor=False,
+            source="filesystem",
             payload_files_checked=payload_files_checked,
             library_files_checked=self._library_files_checked,
             blockers=blockers,
         )
+
+    def _scan_catalog(self, paths: Iterable[str]) -> _AnchorScanResult:
+        if self.catalog_path is None:
+            return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["catalog_anchor_lookup_not_configured"])
+        catalog_path = self.catalog_path.expanduser()
+        if not catalog_path.exists():
+            return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["catalog_not_found"])
+        if not self.policy.arr_library_roots:
+            return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["arr_library_roots_not_configured"])
+
+        try:
+            conn = sqlite3.connect(f"file:{catalog_path.resolve()}?mode=ro", uri=True)
+            try:
+                tables = self._catalog_files_tables(conn)
+                if not tables:
+                    return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["catalog_files_tables_missing"])
+                anchor_paths: list[str] = []
+                payload_files_checked = 0
+                for table in tables:
+                    if not self._catalog_table_has_column(conn, table, "path") or not self._catalog_table_has_column(conn, table, "inode"):
+                        continue
+                    has_status = self._catalog_table_has_column(conn, table, "status")
+                    payload_rows = self._catalog_payload_rows(conn, table, paths, has_status=has_status)
+                    payload_files_checked += len(payload_rows)
+                    if not payload_rows:
+                        continue
+                    inode_values = sorted({int(inode) for _path, inode in payload_rows if inode is not None})
+                    for inode_chunk in self._chunks(inode_values, 500):
+                        placeholders = ",".join("?" for _ in inode_chunk)
+                        status_clause = "status = 'active' AND " if has_status else ""
+                        rows = conn.execute(
+                            f"SELECT path, inode FROM {table} WHERE {status_clause}inode IN ({placeholders})",
+                            inode_chunk,
+                        ).fetchall()
+                        for link_path, _inode in rows:
+                            link_text = str(link_path or "")
+                            if self._under_library_root(link_text) and link_text not in anchor_paths:
+                                anchor_paths.append(link_text)
+                if anchor_paths:
+                    return _AnchorScanResult(
+                        has_arr_anchor=True,
+                        source="catalog",
+                        anchor_paths=sorted(anchor_paths),
+                        payload_files_checked=payload_files_checked,
+                    )
+                if payload_files_checked > 0:
+                    return _AnchorScanResult(
+                        has_arr_anchor=False,
+                        source="catalog",
+                        payload_files_checked=payload_files_checked,
+                    )
+                return _AnchorScanResult(
+                    has_arr_anchor=None,
+                    source="catalog",
+                    blockers=["catalog_payload_paths_missing"],
+                )
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="catalog",
+                blockers=[f"catalog_error:{exc}"],
+            )
+
+    @staticmethod
+    def _catalog_files_tables(conn: sqlite3.Connection) -> list[str]:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND (name = 'files' OR name LIKE 'files_%') ORDER BY name"
+        ).fetchall()
+        out = []
+        for (name,) in rows:
+            text = str(name or "")
+            if text == "files" or (text.startswith("files_") and text[6:].isdigit()):
+                out.append(text)
+        return out
+
+    @staticmethod
+    def _catalog_table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+        return any(str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+    @staticmethod
+    def _catalog_payload_rows(
+        conn: sqlite3.Connection,
+        table: str,
+        paths: Iterable[str],
+        *,
+        has_status: bool,
+    ) -> list[tuple[str, int]]:
+        out: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+        status_clause = "status = 'active' AND " if has_status else ""
+        for raw_path in paths:
+            path = str(raw_path or "").rstrip("/")
+            if not path:
+                continue
+            rows = conn.execute(
+                f"SELECT path, inode FROM {table} WHERE {status_clause}(path = ? OR path LIKE ?)",
+                (path, f"{path}/%"),
+            ).fetchall()
+            for file_path, inode in rows:
+                try:
+                    key = (str(file_path), int(inode))
+                except Exception:
+                    continue
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+        return out
+
+    def _under_library_root(self, path: str) -> bool:
+        return _under_any_prefix(path, self.policy.arr_library_roots)
+
+    @staticmethod
+    def _chunks(values: list[int], size: int) -> Iterable[list[int]]:
+        for index in range(0, len(values), size):
+            yield values[index:index + size]
 
     def _load_library_index(self) -> dict[tuple[int, int], list[str]]:
         if self._library_index is not None:
@@ -665,6 +802,7 @@ def build_client_drift_report(
     rt_session_dir: Path = DEFAULT_RT_SESSION_DIR,
     policy: ClientDriftPolicy | None = None,
     hash_filters: Iterable[str] = (),
+    catalog_path: Path | None = None,
 ) -> dict[str, Any]:
     active_policy = policy or default_policy()
     qb_rows = load_qb_cache_rows(qb_cache_file)
@@ -679,7 +817,7 @@ def build_client_drift_report(
 
     now = time.time()
     drift_rows: list[dict[str, Any]] = []
-    anchor_scanner = _PlacementAnchorScanner(active_policy)
+    anchor_scanner = _PlacementAnchorScanner(active_policy, catalog_path=catalog_path)
 
     for torrent_hash in sorted(common):
         if not _selected_hash(torrent_hash):
@@ -765,6 +903,7 @@ def build_client_drift_report(
         "arr_library_roots": list(active_policy.arr_library_roots),
         "anchor_scan_max_files": active_policy.anchor_scan_max_files,
         "hash_filters": list(hash_prefixes),
+        "catalog_path": str(catalog_path.expanduser()) if catalog_path is not None else "",
         "qb_total": len(qb_rows),
         "rt_total": len(rt_rows),
         "common": len(common),

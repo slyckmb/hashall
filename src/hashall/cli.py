@@ -2578,6 +2578,7 @@ def _load_client_drift_report(
     policy_mode: str,
     anchor_scan_max_files: int | None = None,
     hash_filters: tuple[str, ...] | list[str] = (),
+    catalog_path: str | None = None,
 ) -> dict:
     from hashall.client_drift import build_client_drift_report, load_policy
     from dataclasses import replace
@@ -2594,6 +2595,7 @@ def _load_client_drift_report(
         rt_session_dir=Path(rt_session_dir).expanduser(),
         policy=policy,
         hash_filters=hash_filters,
+        catalog_path=Path(catalog_path).expanduser() if catalog_path else None,
     )
 
 
@@ -3055,6 +3057,7 @@ def client_drift_policy_template_cmd():
 @click.option("--action", default="", help="Only show rows with this classified action.")
 @click.option("--hash", "hash_filters", multiple=True, help="Restrict audit to specific torrent hash(es). Prefixes are accepted.")
 @click.option("--anchor-scan-max-files", type=int, default=None, help="Override policy anchor scan limit for selected dry-run/pilot audits. Default uses policy.")
+@click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), help="Optional read-only catalog DB for hardlink-anchor evidence.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit shown rows; 0 means no limit.")
 @click.option("--output", type=click.Path(dir_okay=False), help="Write the full JSON report to this path.")
 @click.option("--json-output", is_flag=True, help="Emit JSON report to stdout.")
@@ -3068,6 +3071,7 @@ def client_drift_audit_cmd(
     action,
     hash_filters,
     anchor_scan_max_files,
+    catalog_path,
     limit,
     output,
     json_output,
@@ -3081,6 +3085,7 @@ def client_drift_audit_cmd(
         policy_mode=policy_mode,
         anchor_scan_max_files=anchor_scan_max_files,
         hash_filters=hash_filters,
+        catalog_path=catalog_path,
     )
     rows = _filtered_client_drift_rows(report, side=side, action=action, limit=limit)
     payload = {"summary": dict(report["summary"], rows_shown=len(rows)), "rows": rows}
@@ -3096,6 +3101,8 @@ def client_drift_audit_cmd(
     print("🧭 client drift audit")
     print(f"   policy_mode: {summary['policy_mode']}")
     print(f"   hash_filters: {len(summary.get('hash_filters') or [])}")
+    if summary.get("catalog_path"):
+        print(f"   catalog: {summary['catalog_path']}")
     print(f"   anchor_scan_max_files: {summary.get('anchor_scan_max_files', 0)}")
     print(f"   qb_total: {summary['qb_total']}")
     print(f"   rt_total: {summary['rt_total']}")
