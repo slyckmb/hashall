@@ -41,6 +41,25 @@ Interpretation:
 - Treat older notes that cite live `cross-seed-link`, live `orphaned_data`, `/pool/data` qB/RT rows, or zero-capacity blockers as historical unless a new live read contradicts this baseline.
 - Next best work lane is code/doc/cache cleanup, not another live path-normalization pilot.
 
+## 2026-05-06 Phase 2B Save-Path Drift Policy
+
+`client-drift audit` now watches same-hash qB/RT save-path drift as a first-class drift side:
+
+- read-only live audit against silo caches:
+  - qB rows: `5202`
+  - RT rows: `5202`
+  - common hashes: `5202`
+  - qB-only: `0`
+  - RT-only: `0`
+  - same-hash path drift: `13`
+- default audit behavior is fail-closed:
+  - anchor scanning is disabled by default (`anchor_scan_max_files=0`)
+  - drift rows are reported as `manual_review` until a selected dry-run/pilot policy enables bounded ARR hardlink-anchor evidence
+- placement rule carried into tooling:
+  - ARR library hardlink anchor present -> stash/data is the correct placement
+  - no ARR library hardlink anchor found -> pool is the correct placement
+  - incomplete or disabled anchor evidence -> manual review, no automatic side selection
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.
@@ -50,9 +69,12 @@ Keep this list as the high-level operator target while working through the detai
 3. Repair the remaining broken live torrents.
 4. Drain all torrent payloads out of `/pool/data`.
 5. Enforce stash-vs-pool placement using the hardlink-anchor rule.
+   - pool is correct when no sibling media file is hardlinked into ARR media libraries
+   - stash/data is correct when any sibling media file is hardlinked into ARR media libraries
 6. Remove steady-state duplicates between stash and pool.
 7. De-hitchhike legacy N->1 payload trees into unique per-hash trees.
 8. Keep qB and RT aligned after every live change.
+   - same-hash qB/RT save-path drift is an active watch/fix class, not just membership drift
 9. Clean stale residue and empty legacy paths after each wave.
 10. Update code/docs/scripts in `hashall` and `~/dev` that still assume old paths.
 11. Finish the repair / verification contract in tooling.
@@ -78,6 +100,8 @@ Settled operator decisions:
 - if any file in a payload has a hardlink into `/stash/media` libraries, keep the whole sibling payload group on stash
 - otherwise, rehome the whole sibling payload group to pool
 - `/pool/data` is not a final torrent-payload home and should drain to zero torrent payloads
+- same-hash qB/RT save-path drift must be audited after cleanup waves; select the corrected side from the stash-vs-pool hardlink-anchor policy, not from client preference alone
+- default drift audits should find save-path drift quickly and fail closed on placement; enable bounded hardlink-anchor scans only for selected dry-run/pilot rows or replace them with catalog-backed lookups
 
 Execution policy:
 - no blind bulk loops

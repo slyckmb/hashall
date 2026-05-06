@@ -139,6 +139,185 @@ def test_client_drift_policy_mirrors_healthy_rt_only_under_mirror_root(tmp_path:
     assert row["rt"]["target_qb_save_path"] == str(seed_root)
 
 
+def test_client_drift_common_hash_aligned_paths_are_not_drift(tmp_path: Path) -> None:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    (content_root / "file.bin").write_text("payload", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(seed_root),
+                "content_path": str(content_root),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool"),),
+            stash_roots=(str(tmp_path / "stash"),),
+            arr_library_roots=(str(tmp_path / "library"),),
+        ),
+    )
+
+    assert report["summary"]["path_drift"] == 0
+    assert report["rows"] == []
+
+
+def test_client_drift_path_drift_prefers_pool_without_arr_hardlink_anchor(tmp_path: Path) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One"
+    rt_content = stash_seed / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    qb_content.mkdir(parents=True)
+    rt_content.mkdir(parents=True)
+    library_root.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    (rt_content / "file.bin").write_text("payload", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool" / "torrents" / "seeding"),),
+            stash_roots=(str(tmp_path / "stash" / "torrents" / "seeding"),),
+            arr_library_roots=(str(library_root),),
+            anchor_scan_max_files=1000,
+        ),
+    )
+
+    row = report["rows"][0]
+    assert report["summary"]["path_drift"] == 1
+    assert row["side"] == "path_drift"
+    assert row["action"] == "repoint_rt_to_qb_path"
+    assert row["placement"]["desired"] == "pool"
+    assert row["placement"]["anchor_scan"]["has_arr_anchor"] is False
+    assert "no_arr_library_hardlink_anchor_found" in row["reasons"]
+
+
+def test_client_drift_path_drift_prefers_stash_with_arr_hardlink_anchor(tmp_path: Path) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One"
+    rt_content = stash_seed / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    qb_content.mkdir(parents=True)
+    rt_content.mkdir(parents=True)
+    library_root.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    rt_file = rt_content / "file.bin"
+    rt_file.write_text("payload", encoding="utf-8")
+    (library_root / "Release.One.bin").hardlink_to(rt_file)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool" / "torrents" / "seeding"),),
+            stash_roots=(str(tmp_path / "stash" / "torrents" / "seeding"),),
+            arr_library_roots=(str(library_root),),
+            anchor_scan_max_files=1000,
+        ),
+    )
+
+    row = report["rows"][0]
+    assert report["summary"]["path_drift"] == 1
+    assert row["action"] == "repoint_qb_to_rt_path"
+    assert row["placement"]["desired"] == "stash"
+    assert row["placement"]["anchor_scan"]["has_arr_anchor"] is True
+    assert row["placement"]["anchor_scan"]["anchor_paths"] == [str(library_root / "Release.One.bin")]
+    assert "arr_library_hardlink_anchor_present" in row["reasons"]
+
+
 def test_client_drift_remove_requires_explicit_policy(tmp_path: Path) -> None:
     seed_root = tmp_path / "seeding" / "site"
     content_root = seed_root / "Release.One"
@@ -455,6 +634,9 @@ def test_rt_qb_mirror_sync_apply_rechecks_by_default(tmp_path: Path, monkeypatch
             return None
 
         def add_torrent_file(self, *args, **kwargs) -> bool:
+            return True
+
+        def add_tags(self, torrent_hash: str, tags: list[str]) -> bool:
             return True
 
         def recheck_torrent(self, torrent_hash: str) -> bool:

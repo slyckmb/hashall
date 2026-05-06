@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import json
+import stat
 import time
 from typing import Any, Iterable
 
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE
-from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, resolve_rt_session_files
+from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, resolve_rt_session_files, rt_path_aligned
 
 
 HEALTHY_QB_STATES = {"uploading", "stalledUP", "stoppedUP", "pausedUP"}
@@ -20,6 +22,32 @@ DEFAULT_MIRROR_ROOTS = (
     "/pool/media/torrents/seeding",
     "/stash/media/torrents/seeding",
 )
+
+DEFAULT_POOL_PLACEMENT_ROOTS = (
+    "/pool/media/torrents/seeding",
+)
+
+DEFAULT_STASH_PLACEMENT_ROOTS = (
+    "/data/media/torrents/seeding",
+    "/stash/media/torrents/seeding",
+)
+
+DEFAULT_ARR_LIBRARY_ROOTS = (
+    "/data/media/books",
+    "/data/media/downloads",
+    "/data/media/movies",
+    "/data/media/music",
+    "/data/media/shows",
+    "/data/media/tv",
+    "/stash/media/books",
+    "/stash/media/downloads",
+    "/stash/media/movies",
+    "/stash/media/music",
+    "/stash/media/shows",
+    "/stash/media/tv",
+)
+
+DEFAULT_ANCHOR_SCAN_MAX_FILES = 0
 
 
 RT_MIRROR_TAG = "~rt-mirrored"   # qB tag: item was added via RT→qB mirror
@@ -39,6 +67,10 @@ class ClientDriftPolicy:
     remove_from_qb_categories: tuple[str, ...] = ()
     remove_from_rt_path_prefixes: tuple[str, ...] = ()
     remove_from_qb_path_prefixes: tuple[str, ...] = ()
+    pool_roots: tuple[str, ...] = DEFAULT_POOL_PLACEMENT_ROOTS
+    stash_roots: tuple[str, ...] = DEFAULT_STASH_PLACEMENT_ROOTS
+    arr_library_roots: tuple[str, ...] = DEFAULT_ARR_LIBRARY_ROOTS
+    anchor_scan_max_files: int = DEFAULT_ANCHOR_SCAN_MAX_FILES
     recent_seconds: int = 0
     mode: str = "conservative"
 
@@ -214,6 +246,10 @@ def load_policy(path: Path | None = None, *, mode: str = "conservative") -> Clie
         "remove_from_qb_categories": _as_tuple(payload.get("remove_from_qb_categories", base.remove_from_qb_categories)),
         "remove_from_rt_path_prefixes": _as_tuple(payload.get("remove_from_rt_path_prefixes", base.remove_from_rt_path_prefixes)),
         "remove_from_qb_path_prefixes": _as_tuple(payload.get("remove_from_qb_path_prefixes", base.remove_from_qb_path_prefixes)),
+        "pool_roots": _as_tuple(payload.get("pool_roots", base.pool_roots)),
+        "stash_roots": _as_tuple(payload.get("stash_roots", base.stash_roots)),
+        "arr_library_roots": _as_tuple(payload.get("arr_library_roots", base.arr_library_roots)),
+        "anchor_scan_max_files": _to_int(payload.get("anchor_scan_max_files", base.anchor_scan_max_files)),
         "recent_seconds": _to_int(payload.get("recent_seconds", base.recent_seconds)),
         "mode": str(payload.get("mode") or base.mode),
     }
@@ -395,6 +431,226 @@ def _classify_qb_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
     return "manual_review", "medium", reasons, blockers
 
 
+@dataclass
+class _AnchorScanResult:
+    has_arr_anchor: bool | None
+    anchor_paths: list[str] = field(default_factory=list)
+    payload_files_checked: int = 0
+    library_files_checked: int = 0
+    payload_scan_truncated: bool = False
+    library_scan_truncated: bool = False
+    blockers: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "has_arr_anchor": self.has_arr_anchor,
+            "anchor_paths": self.anchor_paths[:20],
+            "payload_files_checked": self.payload_files_checked,
+            "library_files_checked": self.library_files_checked,
+            "payload_scan_truncated": self.payload_scan_truncated,
+            "library_scan_truncated": self.library_scan_truncated,
+            "blockers": self.blockers,
+        }
+
+
+class _PlacementAnchorScanner:
+    def __init__(self, policy: ClientDriftPolicy) -> None:
+        self.policy = policy
+        self._library_index: dict[tuple[int, int], list[str]] | None = None
+        self._library_files_checked = 0
+        self._library_scan_truncated = False
+        self._library_blockers: list[str] = []
+
+    def scan_paths(self, paths: Iterable[str]) -> _AnchorScanResult:
+        library_index = self._load_library_index()
+        blockers = list(self._library_blockers)
+        max_files = max(0, int(self.policy.anchor_scan_max_files))
+        if max_files <= 0:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                library_files_checked=self._library_files_checked,
+                library_scan_truncated=self._library_scan_truncated,
+                blockers=["arr_anchor_scan_disabled"],
+            )
+        if not self.policy.arr_library_roots:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                library_files_checked=self._library_files_checked,
+                library_scan_truncated=self._library_scan_truncated,
+                blockers=["arr_library_roots_not_configured"],
+            )
+
+        anchor_paths: list[str] = []
+        payload_files_checked = 0
+        payload_scan_truncated = False
+        for payload_file in self._iter_files(paths):
+            payload_files_checked += 1
+            if payload_files_checked > max_files:
+                payload_scan_truncated = True
+                break
+            try:
+                st = payload_file.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink <= 1:
+                continue
+            for library_path in library_index.get((int(st.st_dev), int(st.st_ino)), []):
+                if str(payload_file) != library_path and library_path not in anchor_paths:
+                    anchor_paths.append(library_path)
+
+        if anchor_paths:
+            return _AnchorScanResult(
+                has_arr_anchor=True,
+                anchor_paths=anchor_paths,
+                payload_files_checked=payload_files_checked,
+                library_files_checked=self._library_files_checked,
+                payload_scan_truncated=payload_scan_truncated,
+                library_scan_truncated=self._library_scan_truncated,
+                blockers=blockers,
+            )
+        if payload_scan_truncated or self._library_scan_truncated:
+            blockers.append("arr_anchor_scan_incomplete")
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                payload_files_checked=payload_files_checked,
+                library_files_checked=self._library_files_checked,
+                payload_scan_truncated=payload_scan_truncated,
+                library_scan_truncated=self._library_scan_truncated,
+                blockers=blockers,
+            )
+        return _AnchorScanResult(
+            has_arr_anchor=False,
+            payload_files_checked=payload_files_checked,
+            library_files_checked=self._library_files_checked,
+            blockers=blockers,
+        )
+
+    def _load_library_index(self) -> dict[tuple[int, int], list[str]]:
+        if self._library_index is not None:
+            return self._library_index
+        self._library_index = {}
+        max_files = max(0, int(self.policy.anchor_scan_max_files))
+        if max_files <= 0:
+            return self._library_index
+        existing_roots = [Path(root) for root in self.policy.arr_library_roots if root and Path(root).exists()]
+        if not existing_roots:
+            self._library_blockers.append("arr_library_roots_missing")
+            return self._library_index
+        for library_file in self._iter_files(str(root) for root in existing_roots):
+            self._library_files_checked += 1
+            if self._library_files_checked > max_files:
+                self._library_scan_truncated = True
+                break
+            try:
+                st = library_file.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                self._library_index.setdefault((int(st.st_dev), int(st.st_ino)), []).append(str(library_file))
+        return self._library_index
+
+    @staticmethod
+    def _iter_files(paths: Iterable[str]) -> Iterable[Path]:
+        seen: set[str] = set()
+        for raw_path in paths:
+            path_text = str(raw_path or "").strip()
+            if not path_text or path_text in seen:
+                continue
+            seen.add(path_text)
+            path = Path(path_text)
+            if path.is_file():
+                yield path
+                continue
+            if not path.is_dir():
+                continue
+            for root, dirs, files in os.walk(path, followlinks=False):
+                dirs.sort()
+                for name in sorted(files):
+                    yield Path(root) / name
+
+
+def _placement_kind(path: str, policy: ClientDriftPolicy) -> str:
+    if _under_any_prefix(path, policy.pool_roots):
+        return "pool"
+    if _under_any_prefix(path, policy.stash_roots):
+        return "stash"
+    return "other"
+
+
+def _classify_common_path_drift(
+    qb_row: ClientTorrentRow,
+    rt_row: ClientTorrentRow,
+    policy: ClientDriftPolicy,
+    anchor_scanner: _PlacementAnchorScanner,
+) -> tuple[str, str, list[str], list[str], dict[str, Any]]:
+    reasons = ["present_in_both_clients", "same_hash_path_drift", "rt_qb_path_not_aligned"]
+    blockers: list[str] = []
+    if qb_row.state not in HEALTHY_QB_STATES:
+        blockers.append(f"qb_state_not_healthy:{qb_row.state or 'unknown'}")
+    if qb_row.progress < 0.999:
+        blockers.append(f"qb_progress_not_complete:{qb_row.progress:.3f}")
+    if rt_row.state not in HEALTHY_RT_STATES:
+        blockers.append(f"rt_state_not_healthy:{rt_row.state or 'unknown'}")
+    if not qb_row.path_exists:
+        blockers.append("qb_content_path_missing")
+    if not rt_row.path_exists:
+        blockers.append("rt_content_path_missing")
+
+    anchor = anchor_scanner.scan_paths(
+        path for path in (qb_row.content_path, rt_row.content_path) if path
+    )
+    blockers.extend(anchor.blockers)
+    desired_placement = ""
+    if anchor.has_arr_anchor is True:
+        desired_placement = "stash"
+        reasons.append("arr_library_hardlink_anchor_present")
+    elif anchor.has_arr_anchor is False:
+        desired_placement = "pool"
+        reasons.append("no_arr_library_hardlink_anchor_found")
+    else:
+        blockers.append("hardlink_anchor_evidence_required_for_placement")
+
+    qb_kind = _placement_kind(qb_row.save_path or qb_row.content_path, policy)
+    rt_kind = _placement_kind(rt_row.target_qb_save_path or rt_row.save_path or rt_row.content_path, policy)
+    placement = {
+        "desired": desired_placement,
+        "qb_kind": qb_kind,
+        "rt_kind": rt_kind,
+        "qb_save_path": qb_row.save_path,
+        "qb_content_path": qb_row.content_path,
+        "rt_save_path": rt_row.save_path,
+        "rt_target_qb_save_path": rt_row.target_qb_save_path,
+        "rt_content_path": rt_row.content_path,
+        "anchor_scan": anchor.to_dict(),
+    }
+
+    action = "manual_review"
+    if desired_placement:
+        qb_matches = qb_kind == desired_placement
+        rt_matches = rt_kind == desired_placement
+        if qb_matches and not rt_matches:
+            action = "repoint_rt_to_qb_path"
+            reasons.append(f"qb_on_required_{desired_placement}_placement")
+            if not qb_row.path_exists:
+                blockers.append("selected_qb_target_missing")
+        elif rt_matches and not qb_matches:
+            action = "repoint_qb_to_rt_path"
+            reasons.append(f"rt_on_required_{desired_placement}_placement")
+            if not rt_row.path_exists:
+                blockers.append("selected_rt_target_missing")
+        elif qb_matches and rt_matches:
+            blockers.append("both_clients_on_required_placement_but_paths_differ")
+        else:
+            blockers.append(f"no_client_on_required_{desired_placement}_placement")
+
+    if blockers:
+        return "manual_review", "low", reasons, blockers, placement
+    if action != "manual_review":
+        return action, "high", reasons, blockers, placement
+    blockers.append("unable_to_select_repoint_source")
+    return "manual_review", "medium", reasons, blockers, placement
+
+
 def build_client_drift_report(
     *,
     qb_cache_file: Path = DEFAULT_QB_CACHE_FILE,
@@ -410,6 +666,38 @@ def build_client_drift_report(
     common = qb_hashes & rt_hashes
     now = time.time()
     drift_rows: list[dict[str, Any]] = []
+    anchor_scanner = _PlacementAnchorScanner(active_policy)
+
+    for torrent_hash in sorted(common):
+        qb_row = qb_rows[torrent_hash]
+        rt_row = rt_rows[torrent_hash]
+        aligned = rt_path_aligned(
+            rt_row.save_path,
+            qb_save_path=qb_row.save_path,
+            qb_content_path=qb_row.content_path,
+        )
+        if aligned:
+            continue
+        action, confidence, reasons, blockers, placement = _classify_common_path_drift(
+            qb_row,
+            rt_row,
+            active_policy,
+            anchor_scanner,
+        )
+        drift_rows.append(
+            {
+                "hash": torrent_hash,
+                "side": "path_drift",
+                "action": action,
+                "confidence": confidence,
+                "reasons": reasons,
+                "blockers": blockers,
+                "name": qb_row.name or rt_row.name,
+                "placement": placement,
+                "rt": rt_row.to_dict(),
+                "qb": qb_row.to_dict(),
+            }
+        )
 
     for torrent_hash in sorted(rt_hashes - qb_hashes):
         row = rt_rows[torrent_hash]
@@ -453,11 +741,16 @@ def build_client_drift_report(
         "rt_session_dir": str(rt_session_dir.expanduser()),
         "policy_mode": active_policy.mode,
         "mirror_roots": list(active_policy.mirror_roots),
+        "pool_roots": list(active_policy.pool_roots),
+        "stash_roots": list(active_policy.stash_roots),
+        "arr_library_roots": list(active_policy.arr_library_roots),
+        "anchor_scan_max_files": active_policy.anchor_scan_max_files,
         "qb_total": len(qb_rows),
         "rt_total": len(rt_rows),
         "common": len(common),
         "qb_only": len(qb_hashes - rt_hashes),
         "rt_only": len(rt_hashes - qb_hashes),
+        "path_drift": side_counts.get("path_drift", 0),
         "drift_total": len(drift_rows),
         "side_counts": dict(side_counts),
         "action_counts": dict(action_counts),

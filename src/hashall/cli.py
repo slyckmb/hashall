@@ -3001,6 +3001,29 @@ def client_drift_policy_template_cmd():
             "/pool/media/torrents/seeding",
             "/stash/media/torrents/seeding",
         ],
+        "pool_roots": [
+            "/pool/media/torrents/seeding",
+        ],
+        "stash_roots": [
+            "/data/media/torrents/seeding",
+            "/stash/media/torrents/seeding",
+        ],
+        "arr_library_roots": [
+            "/data/media/books",
+            "/data/media/downloads",
+            "/data/media/movies",
+            "/data/media/music",
+            "/data/media/shows",
+            "/data/media/tv",
+            "/stash/media/books",
+            "/stash/media/downloads",
+            "/stash/media/movies",
+            "/stash/media/music",
+            "/stash/media/shows",
+            "/stash/media/tv",
+        ],
+        "anchor_scan_max_files": 0,
+        "_example_anchor_scan_max_files_for_selected_pilots": 200000,
         "mirror_rt_to_qb_categories": [],
         "mirror_qb_to_rt_categories": [],
         "ignore_rt_only_categories": [],
@@ -3022,7 +3045,7 @@ def client_drift_policy_template_cmd():
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
 @click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
 @click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
-@click.option("--side", type=click.Choice(["rt_only", "qb_only"]), default=None, help="Only show one drift side.")
+@click.option("--side", type=click.Choice(["rt_only", "qb_only", "path_drift"]), default=None, help="Only show one drift side.")
 @click.option("--action", default="", help="Only show rows with this classified action.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit shown rows; 0 means no limit.")
 @click.option("--output", type=click.Path(dir_okay=False), help="Write the full JSON report to this path.")
@@ -3065,11 +3088,13 @@ def client_drift_audit_cmd(
     print(f"   common: {summary['common']}")
     print(f"   qb_only: {summary['qb_only']}")
     print(f"   rt_only: {summary['rt_only']}")
+    print(f"   path_drift: {summary.get('path_drift', 0)}")
     print(f"   action_counts: {summary['action_counts']}")
     if output:
         print(f"   output: {Path(output).expanduser()}")
     for row in rows:
-        client_row = row.get("rt") if row.get("side") == "rt_only" else row.get("qb")
+        side_value = row.get("side")
+        client_row = row.get("rt") if side_value == "rt_only" else row.get("qb")
         client_row = client_row or {}
         blockers = ",".join(row.get("blockers") or [])
         reason = ",".join(row.get("reasons") or [])
@@ -3077,7 +3102,16 @@ def client_drift_audit_cmd(
             f"   {row['side']:7s} {row['action']:28s} {row['confidence']:6s} "
             f"{row['hash'][:16]} {row.get('name') or ''}"
         )
-        print(f"      state={client_row.get('state') or ''} category={client_row.get('category') or ''} path={client_row.get('content_path') or client_row.get('save_path') or ''}")
+        if side_value == "path_drift":
+            placement = row.get("placement") or {}
+            print(
+                "      "
+                f"desired={placement.get('desired') or '-'} "
+                f"qb={placement.get('qb_kind') or '-'}:{placement.get('qb_save_path') or ''} "
+                f"rt={placement.get('rt_kind') or '-'}:{placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}"
+            )
+        else:
+            print(f"      state={client_row.get('state') or ''} category={client_row.get('category') or ''} path={client_row.get('content_path') or client_row.get('save_path') or ''}")
         if blockers:
             print(f"      blockers={blockers}")
         if reason:
