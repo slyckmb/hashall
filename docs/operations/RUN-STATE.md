@@ -353,6 +353,46 @@ Decision point:
 - human approval is required before running the `--apply` command.
 - 2I is only needed if we want this exact pilot packaged into a reusable guarded script/manifest instead of running the existing `rt repoint` command manually.
 
+## 2026-05-06 Phase B One-Hash Live RT Repoint Pilot
+
+Phase B applied the Phase 2H pilot for:
+
+- hash: `2d9004e9af6618c192d965c8950189955326b3e2`
+- name: `The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- policy result: pool-proven by selected filesystem no-ARR-anchor evidence
+- action: repointed RT from the stale stash/data path to the qB pool save root
+
+Applied command:
+
+```bash
+python3 -m hashall.cli rt repoint \
+  --hash 2d9004e9af6618c192d965c8950189955326b3e2 \
+  --target-directory /pool/media/torrents/seeding/cross-seed/aither \
+  --apply
+```
+
+Apply result:
+
+- completed RT actions: `d.stop`, `d.close`, `d.directory.set`, `d.save_full_session`, `session.save`, `d.open`, `d.start`
+- live RT postcheck directory: `/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- live RT postcheck complete: `1`
+- qB postcheck remains complete at:
+  - save path: `/pool/media/torrents/seeding/cross-seed/aither`
+  - content path: `/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+  - state: `stoppedUP`
+  - progress: `1.0`
+- selected drift audit now reports `path_drift=0` and `drift_total=0` for `--hash 2d9004e9`
+
+Residual notes:
+
+- the old stash/data content directory still exists and should be handled by a later read-only residue/ownership audit, not deleted from this pilot.
+- 2I was skipped by request; no reusable pilot wrapper was added.
+
+Next recommended lanes:
+
+- Phase C: read-only residue audit for the old stash/data path and related cleanup candidates.
+- Phase D: continue path-drift repair with another one-hash pilot only after Phase C confirms no unexpected ownership/residue issue from this pilot.
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.
