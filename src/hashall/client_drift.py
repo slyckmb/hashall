@@ -10,6 +10,8 @@ import sqlite3
 import time
 from typing import Any, Iterable
 
+from hashall.fs_utils import get_mount_point
+from hashall.pathing import canonicalize_path, remap_to_mount_alias
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE
 from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, normalize_rt_target_directory, resolve_rt_session_files, rt_path_aligned
@@ -183,6 +185,84 @@ def _path_exists(path: str) -> bool:
     return bool(path and Path(path).exists())
 
 
+def _policy_mount_points(policy: ClientDriftPolicy) -> tuple[Path, ...]:
+    roots = (
+        *policy.mirror_roots,
+        *policy.pool_roots,
+        *policy.stash_roots,
+        *policy.arr_library_roots,
+    )
+    out: list[Path] = []
+    seen: set[str] = set()
+    for raw_root in roots:
+        root = str(raw_root or "").strip()
+        if not root:
+            continue
+        try:
+            mount = get_mount_point(root) or ""
+        except Exception:
+            mount = ""
+        if not mount:
+            continue
+        mount_text = str(Path(mount))
+        if mount_text not in seen:
+            seen.add(mount_text)
+            out.append(Path(mount_text))
+    return tuple(out)
+
+
+def _path_variants(path: str, policy: ClientDriftPolicy) -> tuple[str, ...]:
+    text = _norm_path(path).rstrip("/")
+    if not text:
+        return ()
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str | Path | None) -> None:
+        value = str(candidate or "").rstrip("/")
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+
+    add(text)
+    try:
+        add(canonicalize_path(Path(text)))
+    except Exception:
+        pass
+
+    for mount_point in _policy_mount_points(policy):
+        for candidate in tuple(out):
+            try:
+                remapped = remap_to_mount_alias(Path(candidate), mount_point)
+            except Exception:
+                remapped = None
+            if remapped is None:
+                continue
+            add(remapped)
+            try:
+                add(canonicalize_path(remapped))
+            except Exception:
+                pass
+
+    return tuple(out)
+
+
+def _path_variants_many(paths: Iterable[str], policy: ClientDriftPolicy) -> tuple[str, ...]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        for variant in _path_variants(path, policy):
+            if variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    return tuple(out)
+
+
+def _under_any_policy_prefix(path: str, prefixes: Iterable[str], policy: ClientDriftPolicy) -> bool:
+    return any(_under_any_prefix(variant, prefixes) for variant in _path_variants(path, policy))
+
+
 def _under_any_prefix(path: str, prefixes: Iterable[str]) -> bool:
     candidate = str(path or "").rstrip("/")
     if not candidate:
@@ -217,6 +297,39 @@ def _infer_category_from_path(path: str, mirror_roots: Iterable[str]) -> str:
             continue
         return rel.parts[0] if rel.parts else ""
     return ""
+
+
+def _rt_path_aligned_with_policy(
+    rt_directory: str | None,
+    *,
+    qb_save_path: str | None,
+    qb_content_path: str | None,
+    policy: ClientDriftPolicy,
+) -> bool:
+    if rt_path_aligned(rt_directory, qb_save_path=qb_save_path, qb_content_path=qb_content_path):
+        return True
+
+    rt_variants = set(_path_variants(str(rt_directory or ""), policy))
+    if not rt_variants:
+        return False
+
+    candidates: list[str] = []
+    for raw in (qb_save_path, qb_content_path):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        candidates.append(text)
+        try:
+            parent = str(Path(text).parent)
+        except Exception:
+            parent = ""
+        if parent:
+            candidates.append(parent)
+
+    for candidate in candidates:
+        if rt_variants.intersection(_path_variants(candidate, policy)):
+            return True
+    return False
 
 
 def default_policy(mode: str = "conservative") -> ClientDriftPolicy:
@@ -364,10 +477,10 @@ def _is_recent(row: ClientTorrentRow, policy: ClientDriftPolicy, now: float) -> 
 def _classify_rt_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: float) -> tuple[str, str, list[str], list[str]]:
     reasons: list[str] = ["present_in_rt_missing_in_qb"]
     blockers: list[str] = []
-    if _category_in(row.category, policy.ignore_rt_only_categories) or _under_any_prefix(row.save_path, policy.ignore_rt_only_path_prefixes):
+    if _category_in(row.category, policy.ignore_rt_only_categories) or _under_any_policy_prefix(row.save_path, policy.ignore_rt_only_path_prefixes, policy):
         reasons.append("explicit_rt_only_ignore_policy")
         return "ignore_intentional_rt_only", "high", reasons, blockers
-    if _category_in(row.category, policy.remove_from_rt_categories) or _under_any_prefix(row.save_path, policy.remove_from_rt_path_prefixes):
+    if _category_in(row.category, policy.remove_from_rt_categories) or _under_any_policy_prefix(row.save_path, policy.remove_from_rt_path_prefixes, policy):
         reasons.append("explicit_remove_from_rt_policy")
         return "remove_from_rt", "high", reasons, blockers
     if _is_recent(row, policy, now):
@@ -380,7 +493,7 @@ def _classify_rt_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
         blockers.append("rt_torrent_file_missing")
     if not row.meta_loaded:
         blockers.append("rt_torrent_meta_missing")
-    mirrorable_by_root = _under_any_prefix(row.target_qb_save_path or row.save_path, policy.mirror_roots)
+    mirrorable_by_root = _under_any_policy_prefix(row.target_qb_save_path or row.save_path, policy.mirror_roots, policy)
     mirrorable_by_category = _category_in(row.category, policy.mirror_rt_to_qb_categories)
     if mirrorable_by_root:
         reasons.append("under_mirror_root")
@@ -404,10 +517,10 @@ def _classify_qb_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
     if _has_tag(row.tags, RT_MIRROR_TAG):
         reasons.append("orphaned_rt_mirror")
         return "remove_from_qb", "high", reasons, blockers
-    if _category_in(row.category, policy.ignore_qb_only_categories) or _under_any_prefix(row.save_path, policy.ignore_qb_only_path_prefixes):
+    if _category_in(row.category, policy.ignore_qb_only_categories) or _under_any_policy_prefix(row.save_path, policy.ignore_qb_only_path_prefixes, policy):
         reasons.append("explicit_qb_only_ignore_policy")
         return "ignore_intentional_qb_only", "high", reasons, blockers
-    if _category_in(row.category, policy.remove_from_qb_categories) or _under_any_prefix(row.save_path, policy.remove_from_qb_path_prefixes):
+    if _category_in(row.category, policy.remove_from_qb_categories) or _under_any_policy_prefix(row.save_path, policy.remove_from_qb_path_prefixes, policy):
         reasons.append("explicit_remove_from_qb_policy")
         return "remove_from_qb", "high", reasons, blockers
     if _is_recent(row, policy, now):
@@ -418,7 +531,7 @@ def _classify_qb_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
         blockers.append(f"qb_progress_not_complete:{row.progress:.3f}")
     if not row.path_exists:
         blockers.append("qb_content_path_missing")
-    mirrorable_by_root = _under_any_prefix(row.save_path or row.content_path, policy.mirror_roots)
+    mirrorable_by_root = _under_any_policy_prefix(row.save_path or row.content_path, policy.mirror_roots, policy)
     mirrorable_by_category = _category_in(row.category, policy.mirror_qb_to_rt_categories)
     if mirrorable_by_root:
         reasons.append("under_mirror_root")
@@ -468,7 +581,8 @@ class _PlacementAnchorScanner:
         self._library_blockers: list[str] = []
 
     def scan_paths(self, paths: Iterable[str]) -> _AnchorScanResult:
-        path_tuple = tuple(str(path or "").strip() for path in paths if str(path or "").strip())
+        raw_paths = tuple(str(path or "").strip() for path in paths if str(path or "").strip())
+        path_tuple = _path_variants_many(raw_paths, self.policy)
         catalog_result = self._scan_catalog(path_tuple)
         if catalog_result.has_arr_anchor is not None:
             return catalog_result
@@ -736,7 +850,7 @@ class _PlacementAnchorScanner:
         return out
 
     def _under_library_root(self, path: str) -> bool:
-        return _under_any_prefix(path, self.policy.arr_library_roots)
+        return _under_any_policy_prefix(path, self.policy.arr_library_roots, self.policy)
 
     @staticmethod
     def _chunks(values: list[int], size: int) -> Iterable[list[int]]:
@@ -770,6 +884,7 @@ class _PlacementAnchorScanner:
     @staticmethod
     def _iter_files(paths: Iterable[str]) -> Iterable[Path]:
         seen: set[str] = set()
+        seen_inodes: set[tuple[int, int]] = set()
         for raw_path in paths:
             path_text = str(raw_path or "").strip()
             if not path_text or path_text in seen:
@@ -777,6 +892,15 @@ class _PlacementAnchorScanner:
             seen.add(path_text)
             path = Path(path_text)
             if path.is_file():
+                try:
+                    st = path.stat(follow_symlinks=False)
+                    inode_key = (int(st.st_dev), int(st.st_ino))
+                except OSError:
+                    inode_key = None
+                if inode_key is not None:
+                    if inode_key in seen_inodes:
+                        continue
+                    seen_inodes.add(inode_key)
                 yield path
                 continue
             if not path.is_dir():
@@ -784,13 +908,23 @@ class _PlacementAnchorScanner:
             for root, dirs, files in os.walk(path, followlinks=False):
                 dirs.sort()
                 for name in sorted(files):
-                    yield Path(root) / name
+                    file_path = Path(root) / name
+                    try:
+                        st = file_path.stat(follow_symlinks=False)
+                        inode_key = (int(st.st_dev), int(st.st_ino))
+                    except OSError:
+                        inode_key = None
+                    if inode_key is not None:
+                        if inode_key in seen_inodes:
+                            continue
+                        seen_inodes.add(inode_key)
+                    yield file_path
 
 
 def _placement_kind(path: str, policy: ClientDriftPolicy) -> str:
-    if _under_any_prefix(path, policy.pool_roots):
+    if _under_any_policy_prefix(path, policy.pool_roots, policy):
         return "pool"
-    if _under_any_prefix(path, policy.stash_roots):
+    if _under_any_policy_prefix(path, policy.stash_roots, policy):
         return "stash"
     return "other"
 
@@ -923,10 +1057,11 @@ def build_client_drift_report(
             continue
         qb_row = qb_rows[torrent_hash]
         rt_row = rt_rows[torrent_hash]
-        aligned = rt_path_aligned(
+        aligned = _rt_path_aligned_with_policy(
             rt_row.save_path,
             qb_save_path=qb_row.save_path,
             qb_content_path=qb_row.content_path,
+            policy=active_policy,
         )
         if aligned:
             continue

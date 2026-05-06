@@ -54,6 +54,32 @@ def _assert_output_field(output: str, label: str, value: object) -> None:
     assert re.search(rf"{re.escape(label)}:\s+{re.escape(str(value))}\b", output)
 
 
+def _install_media_mount_alias(monkeypatch) -> None:
+    def fake_get_mount_point(path: str) -> str | None:
+        text = str(path)
+        if text == "/data/media" or text.startswith("/data/media/"):
+            return "/data/media"
+        if text == "/stash/media" or text.startswith("/stash/media/"):
+            return "/stash/media"
+        if text == "/pool/media" or text.startswith("/pool/media/"):
+            return "/pool/media"
+        return None
+
+    def fake_remap_to_mount_alias(path: Path, preferred_mount: Path) -> Path | None:
+        text = str(path).rstrip("/")
+        preferred = str(preferred_mount).rstrip("/")
+        if preferred == "/stash/media" and (text == "/data/media" or text.startswith("/data/media/")):
+            suffix = text[len("/data/media"):].lstrip("/")
+            return Path("/stash/media") / suffix if suffix else Path("/stash/media")
+        if preferred == "/data/media" and (text == "/stash/media" or text.startswith("/stash/media/")):
+            suffix = text[len("/stash/media"):].lstrip("/")
+            return Path("/data/media") / suffix if suffix else Path("/data/media")
+        return None
+
+    monkeypatch.setattr("hashall.client_drift.get_mount_point", fake_get_mount_point)
+    monkeypatch.setattr("hashall.client_drift.remap_to_mount_alias", fake_remap_to_mount_alias)
+
+
 class _FakeTorrentInfo:
     def __init__(self, state: str, progress: float, amount_left: int) -> None:
         self.state = state
@@ -201,6 +227,57 @@ def test_client_drift_common_hash_aligned_paths_are_not_drift(tmp_path: Path) ->
             pool_roots=(str(tmp_path / "pool"),),
             stash_roots=(str(tmp_path / "stash"),),
             arr_library_roots=(str(tmp_path / "library"),),
+        ),
+    )
+
+    assert report["summary"]["path_drift"] == 0
+    assert report["rows"] == []
+
+
+def test_client_drift_mount_alias_paths_are_not_path_drift(monkeypatch, tmp_path: Path) -> None:
+    _install_media_mount_alias(monkeypatch)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    qb_save = Path("/data/media/torrents/seeding/site")
+    qb_content = qb_save / "Release.One"
+    rt_content = Path("/stash/media/torrents/seeding/site/Release.One")
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(qb_save),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=("/pool/media/torrents/seeding",),
+            stash_roots=("/stash/media/torrents/seeding",),
+            arr_library_roots=("/stash/media/movies",),
         ),
     )
 
@@ -564,6 +641,84 @@ def test_client_drift_uses_catalog_hardlink_anchor_evidence(tmp_path: Path) -> N
     assert row["placement"]["anchor_scan"]["source"] == "catalog"
     assert row["placement"]["anchor_scan"]["has_arr_anchor"] is True
     assert row["placement"]["proposed_qb_save_path"] == str(stash_seed)
+
+
+def test_client_drift_catalog_lookup_uses_mount_alias_variants(monkeypatch, tmp_path: Path) -> None:
+    _install_media_mount_alias(monkeypatch)
+    qb_content = Path("/pool/media/torrents/seeding/site/Release.One")
+    rt_content = Path("/data/media/torrents/seeding/site/Release.One")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.executescript("""
+        CREATE TABLE files (
+            path TEXT PRIMARY KEY,
+            device_id INTEGER NOT NULL,
+            inode INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            mtime REAL NOT NULL,
+            status TEXT DEFAULT 'active'
+        );
+    """)
+    conn.execute(
+        "INSERT INTO files (path, device_id, inode, size, mtime, status) VALUES (?, ?, ?, ?, ?, 'active')",
+        ("/stash/media/torrents/seeding/site/Release.One/file.bin", 4242, 1001, 7, 0.0),
+    )
+    conn.execute(
+        "INSERT INTO files (path, device_id, inode, size, mtime, status) VALUES (?, ?, ?, ?, ?, 'active')",
+        ("/stash/media/movies/Release.One.bin", 4242, 1001, 7, 0.0),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(qb_content.parent),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=("/pool/media/torrents/seeding",),
+            stash_roots=("/stash/media/torrents/seeding",),
+            arr_library_roots=("/stash/media/movies",),
+            anchor_scan_max_files=0,
+        ),
+        hash_filters=(torrent_hash,),
+        catalog_path=catalog,
+    )
+
+    row = report["rows"][0]
+    assert row["placement"]["rt_kind"] == "stash"
+    assert row["placement"]["anchor_scan"]["source"] == "catalog"
+    assert row["placement"]["anchor_scan"]["has_arr_anchor"] is True
+    assert "catalog_payload_paths_missing" not in row["blockers"]
 
 
 def test_client_drift_catalog_no_anchor_evidence_still_requires_filesystem_confirmation(tmp_path: Path) -> None:
