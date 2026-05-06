@@ -621,6 +621,9 @@ def _classify_common_path_drift(
         "rt_save_path": rt_row.save_path,
         "rt_target_qb_save_path": rt_row.target_qb_save_path,
         "rt_content_path": rt_row.content_path,
+        "proposed_qb_save_path": "",
+        "proposed_rt_directory": "",
+        "proposed_source_client": "",
         "anchor_scan": anchor.to_dict(),
     }
 
@@ -631,11 +634,15 @@ def _classify_common_path_drift(
         if qb_matches and not rt_matches:
             action = "repoint_rt_to_qb_path"
             reasons.append(f"qb_on_required_{desired_placement}_placement")
+            placement["proposed_source_client"] = "qb"
+            placement["proposed_rt_directory"] = qb_row.content_path
             if not qb_row.path_exists:
                 blockers.append("selected_qb_target_missing")
         elif rt_matches and not qb_matches:
             action = "repoint_qb_to_rt_path"
             reasons.append(f"rt_on_required_{desired_placement}_placement")
+            placement["proposed_source_client"] = "rt"
+            placement["proposed_qb_save_path"] = rt_row.target_qb_save_path or rt_row.save_path
             if not rt_row.path_exists:
                 blockers.append("selected_rt_target_missing")
         elif qb_matches and rt_matches:
@@ -657,6 +664,7 @@ def build_client_drift_report(
     rt_cache_file: Path = DEFAULT_RT_SHARED_CACHE_FILE,
     rt_session_dir: Path = DEFAULT_RT_SESSION_DIR,
     policy: ClientDriftPolicy | None = None,
+    hash_filters: Iterable[str] = (),
 ) -> dict[str, Any]:
     active_policy = policy or default_policy()
     qb_rows = load_qb_cache_rows(qb_cache_file)
@@ -664,11 +672,18 @@ def build_client_drift_report(
     qb_hashes = set(qb_rows)
     rt_hashes = set(rt_rows)
     common = qb_hashes & rt_hashes
+    hash_prefixes = tuple(_norm_hash(item) for item in hash_filters if _norm_hash(item))
+
+    def _selected_hash(torrent_hash: str) -> bool:
+        return not hash_prefixes or any(torrent_hash.startswith(prefix) for prefix in hash_prefixes)
+
     now = time.time()
     drift_rows: list[dict[str, Any]] = []
     anchor_scanner = _PlacementAnchorScanner(active_policy)
 
     for torrent_hash in sorted(common):
+        if not _selected_hash(torrent_hash):
+            continue
         qb_row = qb_rows[torrent_hash]
         rt_row = rt_rows[torrent_hash]
         aligned = rt_path_aligned(
@@ -700,6 +715,8 @@ def build_client_drift_report(
         )
 
     for torrent_hash in sorted(rt_hashes - qb_hashes):
+        if not _selected_hash(torrent_hash):
+            continue
         row = rt_rows[torrent_hash]
         action, confidence, reasons, blockers = _classify_rt_only(row, active_policy, now)
         drift_rows.append(
@@ -717,6 +734,8 @@ def build_client_drift_report(
         )
 
     for torrent_hash in sorted(qb_hashes - rt_hashes):
+        if not _selected_hash(torrent_hash):
+            continue
         row = qb_rows[torrent_hash]
         action, confidence, reasons, blockers = _classify_qb_only(row, active_policy, now)
         drift_rows.append(
@@ -745,6 +764,7 @@ def build_client_drift_report(
         "stash_roots": list(active_policy.stash_roots),
         "arr_library_roots": list(active_policy.arr_library_roots),
         "anchor_scan_max_files": active_policy.anchor_scan_max_files,
+        "hash_filters": list(hash_prefixes),
         "qb_total": len(qb_rows),
         "rt_total": len(rt_rows),
         "common": len(common),

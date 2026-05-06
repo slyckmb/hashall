@@ -2576,18 +2576,24 @@ def _load_client_drift_report(
     rt_session_dir: str,
     policy_path: str | None,
     policy_mode: str,
+    anchor_scan_max_files: int | None = None,
+    hash_filters: tuple[str, ...] | list[str] = (),
 ) -> dict:
     from hashall.client_drift import build_client_drift_report, load_policy
+    from dataclasses import replace
 
     policy = load_policy(
         Path(policy_path).expanduser() if policy_path else None,
         mode=policy_mode,
     )
+    if anchor_scan_max_files is not None:
+        policy = replace(policy, anchor_scan_max_files=max(0, int(anchor_scan_max_files)))
     return build_client_drift_report(
         qb_cache_file=Path(qb_cache_file).expanduser(),
         rt_cache_file=Path(rt_cache_file).expanduser(),
         rt_session_dir=Path(rt_session_dir).expanduser(),
         policy=policy,
+        hash_filters=hash_filters,
     )
 
 
@@ -3047,6 +3053,8 @@ def client_drift_policy_template_cmd():
 @click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
 @click.option("--side", type=click.Choice(["rt_only", "qb_only", "path_drift"]), default=None, help="Only show one drift side.")
 @click.option("--action", default="", help="Only show rows with this classified action.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict audit to specific torrent hash(es). Prefixes are accepted.")
+@click.option("--anchor-scan-max-files", type=int, default=None, help="Override policy anchor scan limit for selected dry-run/pilot audits. Default uses policy.")
 @click.option("--limit", type=int, default=0, show_default=True, help="Limit shown rows; 0 means no limit.")
 @click.option("--output", type=click.Path(dir_okay=False), help="Write the full JSON report to this path.")
 @click.option("--json-output", is_flag=True, help="Emit JSON report to stdout.")
@@ -3058,6 +3066,8 @@ def client_drift_audit_cmd(
     policy_mode,
     side,
     action,
+    hash_filters,
+    anchor_scan_max_files,
     limit,
     output,
     json_output,
@@ -3069,6 +3079,8 @@ def client_drift_audit_cmd(
         rt_session_dir=rt_session_dir,
         policy_path=policy_path,
         policy_mode=policy_mode,
+        anchor_scan_max_files=anchor_scan_max_files,
+        hash_filters=hash_filters,
     )
     rows = _filtered_client_drift_rows(report, side=side, action=action, limit=limit)
     payload = {"summary": dict(report["summary"], rows_shown=len(rows)), "rows": rows}
@@ -3083,6 +3095,8 @@ def client_drift_audit_cmd(
     summary = payload["summary"]
     print("🧭 client drift audit")
     print(f"   policy_mode: {summary['policy_mode']}")
+    print(f"   hash_filters: {len(summary.get('hash_filters') or [])}")
+    print(f"   anchor_scan_max_files: {summary.get('anchor_scan_max_files', 0)}")
     print(f"   qb_total: {summary['qb_total']}")
     print(f"   rt_total: {summary['rt_total']}")
     print(f"   common: {summary['common']}")
@@ -3110,6 +3124,13 @@ def client_drift_audit_cmd(
                 f"qb={placement.get('qb_kind') or '-'}:{placement.get('qb_save_path') or ''} "
                 f"rt={placement.get('rt_kind') or '-'}:{placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}"
             )
+            if placement.get("proposed_source_client"):
+                print(
+                    "      "
+                    f"proposed_source={placement.get('proposed_source_client')} "
+                    f"qb_save={placement.get('proposed_qb_save_path') or '-'} "
+                    f"rt_directory={placement.get('proposed_rt_directory') or '-'}"
+                )
         else:
             print(f"      state={client_row.get('state') or ''} category={client_row.get('category') or ''} path={client_row.get('content_path') or client_row.get('save_path') or ''}")
         if blockers:

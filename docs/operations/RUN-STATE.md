@@ -60,6 +60,44 @@ Interpretation:
   - no ARR library hardlink anchor found -> pool is the correct placement
   - incomplete or disabled anchor evidence -> manual review, no automatic side selection
 
+## 2026-05-06 Phase 2C Selected Drift Pilot Interface
+
+`client-drift audit` now supports selected path-drift pilots:
+
+- `--hash <prefix>` restricts report construction before path-drift anchor checks run.
+- `--anchor-scan-max-files <N>` enables bounded ARR hardlink-anchor scanning for selected dry-run/pilot rows only.
+- path-drift rows now include proposed target fields when policy evidence is complete:
+  - `proposed_source_client`
+  - `proposed_qb_save_path`
+  - `proposed_rt_directory`
+
+Read-only selected live pilot:
+
+```bash
+python3 -m hashall.cli client-drift audit \
+  --qb-cache-file ~/.cache/silo-qb/torrents-info.json \
+  --rt-cache-file ~/.cache/silo-rt/torrents.json \
+  --side path_drift \
+  --hash 2d9004 \
+  --anchor-scan-max-files 1000 \
+  --limit 5 \
+  --json-output
+```
+
+Result:
+
+- selected rows: `1`
+- hash: `2d9004e9af6618c192d965c8950189955326b3e2`
+- qB side: pool
+- RT side: stash/data
+- anchor scan: incomplete (`library_scan_truncated=true`, `library_files_checked=1001`)
+- action: `manual_review`
+
+Interpretation:
+
+- Phase 2C is safe for selected dry-run triage and target reporting.
+- Phase 2D should replace or supplement filesystem anchor scans with catalog-backed hardlink-anchor evidence before any live repoint pilot.
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.

@@ -249,6 +249,8 @@ def test_client_drift_path_drift_prefers_pool_without_arr_hardlink_anchor(tmp_pa
     assert row["side"] == "path_drift"
     assert row["action"] == "repoint_rt_to_qb_path"
     assert row["placement"]["desired"] == "pool"
+    assert row["placement"]["proposed_source_client"] == "qb"
+    assert row["placement"]["proposed_rt_directory"] == str(qb_content)
     assert row["placement"]["anchor_scan"]["has_arr_anchor"] is False
     assert "no_arr_library_hardlink_anchor_found" in row["reasons"]
 
@@ -313,9 +315,89 @@ def test_client_drift_path_drift_prefers_stash_with_arr_hardlink_anchor(tmp_path
     assert report["summary"]["path_drift"] == 1
     assert row["action"] == "repoint_qb_to_rt_path"
     assert row["placement"]["desired"] == "stash"
+    assert row["placement"]["proposed_source_client"] == "rt"
+    assert row["placement"]["proposed_qb_save_path"] == str(stash_seed)
     assert row["placement"]["anchor_scan"]["has_arr_anchor"] is True
     assert row["placement"]["anchor_scan"]["anchor_paths"] == [str(library_root / "Release.One.bin")]
     assert "arr_library_hardlink_anchor_present" in row["reasons"]
+
+
+def test_client_drift_hash_filter_limits_anchor_scan_to_selected_hash(tmp_path: Path) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    library_root = tmp_path / "library" / "movies"
+    library_root.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    selected_hash = "aaa111"
+    other_hash = "bbb222"
+    selected_qb = pool_seed / "Selected.Release"
+    selected_rt = stash_seed / "Selected.Release"
+    other_qb = pool_seed / "Other.Release"
+    other_rt = stash_seed / "Other.Release"
+    for path in (selected_qb, selected_rt, other_qb, other_rt):
+        path.mkdir(parents=True)
+        (path / "file.bin").write_text("payload", encoding="utf-8")
+    _write_rt_session(session_dir, selected_hash, selected_rt, name="Selected.Release")
+    _write_rt_session(session_dir, other_hash, other_rt, name="Other.Release")
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": selected_hash,
+                "name": "Selected.Release",
+                "save_path": str(pool_seed),
+                "content_path": str(selected_qb),
+                "state": "stoppedUP",
+                "progress": 1,
+            },
+            {
+                "hash": other_hash,
+                "name": "Other.Release",
+                "save_path": str(pool_seed),
+                "content_path": str(other_qb),
+                "state": "stoppedUP",
+                "progress": 1,
+            },
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": selected_hash,
+                "name": "Selected.Release",
+                "directory": str(selected_rt),
+                "state": "stalledUP",
+                "complete": 1,
+            },
+            {
+                "hash": other_hash,
+                "name": "Other.Release",
+                "directory": str(other_rt),
+                "state": "stalledUP",
+                "complete": 1,
+            },
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool" / "torrents" / "seeding"),),
+            stash_roots=(str(tmp_path / "stash" / "torrents" / "seeding"),),
+            arr_library_roots=(str(library_root),),
+            anchor_scan_max_files=1000,
+        ),
+        hash_filters=("aaa",),
+    )
+
+    assert report["summary"]["hash_filters"] == ["aaa"]
+    assert report["summary"]["path_drift"] == 1
+    assert [row["hash"] for row in report["rows"]] == [selected_hash]
 
 
 def test_client_drift_remove_requires_explicit_policy(tmp_path: Path) -> None:
