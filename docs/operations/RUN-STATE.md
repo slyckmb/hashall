@@ -59,6 +59,7 @@ Interpretation:
   - ARR library hardlink anchor present -> stash/data is the correct placement
   - no ARR library hardlink anchor found -> pool is the correct placement
   - incomplete or disabled anchor evidence -> manual review, no automatic side selection
+  - qB `~noHL` from qbit_manage is advisory no-hardlink evidence, not proof; always confirm catalog/filesystem hardlink state before destructive moves, repoints, or cleanup
 
 ## 2026-05-06 Phase 2C Selected Drift Pilot Interface
 
@@ -136,6 +137,29 @@ Interpretation:
 
 - Phase 2D is working, but this selected live hash is not yet catalog-proven because its qB/RT payload paths were not found in the current catalog.
 - Phase 2E is needed before live repoint pilots: refresh or path-alias the catalog evidence for the 13 path-drift rows, then rerun selected catalog-backed audits until each row is either policy-proven or explicitly blocked.
+
+## 2026-05-06 Phase 2E Plan Update: `~noHL` Evidence
+
+Additional evidence to carry into 2E/B/C:
+
+- qbit_manage may tag qB items with `~noHL` when it did not find ARR hardlinks.
+- Treat `~noHL` as advisory evidence toward pool placement only.
+- Never use `~noHL` alone for destructive actions:
+  - no deletion
+  - no live qB/RT repoint
+  - no stash/pool cleanup
+- Required confirmation before any destructive decision remains:
+  - catalog inode evidence proving ARR hardlink anchors or their absence, or
+  - selected bounded filesystem verification of the real paths, plus human review
+
+Updated 2E execution target:
+
+- produce a read-only evidence table for the 13 path-drift rows with:
+  - qB/RT placement kind
+  - qB `~noHL` presence
+  - catalog anchor source/status/blockers
+  - selected filesystem fallback status only when explicitly bounded
+  - final classification: `policy_proven_stash`, `policy_proven_pool`, or `blocked_needs_evidence`
 
 ## Big-Picture Seed Folder Cleanup TODO
 

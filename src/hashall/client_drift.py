@@ -54,6 +54,7 @@ DEFAULT_CATALOG_PATH = Path("~/.hashall/catalog.db")
 
 RT_MIRROR_TAG = "~rt-mirrored"   # qB tag: item was added via RT→qB mirror
 QB_MIRROR_TAG = "~qb-mirrored"   # RT d.custom2 tag: item has a qB mirror
+NO_HARDLINK_TAG = "~noHL"        # qB tag: qbit_manage did not find ARR hardlinks
 
 
 @dataclass(frozen=True)
@@ -737,6 +738,9 @@ def _classify_common_path_drift(
         path for path in (qb_row.content_path, rt_row.content_path) if path
     )
     blockers.extend(anchor.blockers)
+    qb_has_nohl_tag = _has_tag(qb_row.tags, NO_HARDLINK_TAG)
+    if qb_has_nohl_tag:
+        reasons.append("qb_nohl_tag_present_advisory")
     desired_placement = ""
     if anchor.has_arr_anchor is True:
         desired_placement = "stash"
@@ -758,6 +762,7 @@ def _classify_common_path_drift(
         "rt_save_path": rt_row.save_path,
         "rt_target_qb_save_path": rt_row.target_qb_save_path,
         "rt_content_path": rt_row.content_path,
+        "qb_has_nohl_tag": qb_has_nohl_tag,
         "proposed_qb_save_path": "",
         "proposed_rt_directory": "",
         "proposed_source_client": "",

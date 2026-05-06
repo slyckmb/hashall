@@ -18,6 +18,7 @@ Unified roadmap + active backlog for development and operations.
    - hardlink-anchored into `/stash/media` libraries stays on stash
    - otherwise rehome the whole sibling group to pool
    - qB/RT save-path drift must use this same policy to select the correct side
+   - qB `~noHL` is advisory only; confirm actual catalog/filesystem hardlink state before any destructive action
 5. Audit `~/dev` for path-sensitive code/docs before any rename batches.
 6. Keep qB out of the byte-move path.
 7. Use one shared attach/repoint constructor for both `REUSE` and `MOVE`.
@@ -42,6 +43,7 @@ Immediate planning rules:
 - keep local dataset orphan moves atomic first; rehome stash orphans outward later
 - stop for manual review on conflicting verified copies, mixed hardlink-anchor evidence, incomplete sibling groups, or any unexpected state
 - treat same-hash qB/RT save-path drift as a cleanup blocker until both clients agree on the policy-correct path
+- do not treat qbit_manage `~noHL` as proof by itself; use it only as one evidence field beside catalog/filesystem confirmation
 - every mutating phase must use:
   - sim code walk
   - dry-run

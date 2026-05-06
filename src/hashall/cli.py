@@ -3128,6 +3128,7 @@ def client_drift_audit_cmd(
             print(
                 "      "
                 f"desired={placement.get('desired') or '-'} "
+                f"noHL={'yes' if placement.get('qb_has_nohl_tag') else 'no'} "
                 f"qb={placement.get('qb_kind') or '-'}:{placement.get('qb_save_path') or ''} "
                 f"rt={placement.get('rt_kind') or '-'}:{placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}"
             )
