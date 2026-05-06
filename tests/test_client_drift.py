@@ -33,6 +33,23 @@ def _write_rt_session(session_dir: Path, torrent_hash: str, directory: Path, nam
     )
 
 
+def _write_single_file_rt_session(session_dir: Path, torrent_hash: str, directory: Path, name: str = "Release.One.mkv") -> None:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    bencode_dump(
+        session_dir / f"{torrent_hash.upper()}.torrent",
+        {
+            b"info": {
+                b"name": name.encode("utf-8"),
+                b"length": 123,
+            }
+        },
+    )
+    bencode_dump(
+        session_dir / f"{torrent_hash.upper()}.torrent.rtorrent",
+        {b"directory": str(directory).encode("utf-8")},
+    )
+
+
 def _assert_output_field(output: str, label: str, value: object) -> None:
     assert re.search(rf"{re.escape(label)}:\s+{re.escape(str(value))}\b", output)
 
@@ -251,7 +268,10 @@ def test_client_drift_path_drift_prefers_pool_without_arr_hardlink_anchor(tmp_pa
     assert row["action"] == "repoint_rt_to_qb_path"
     assert row["placement"]["desired"] == "pool"
     assert row["placement"]["proposed_source_client"] == "qb"
+    # Compatibility alias only; new mutation tooling must use proposed_rt_repoint_target.
     assert row["placement"]["proposed_rt_directory"] == str(qb_content)
+    assert row["placement"]["proposed_rt_content_path"] == str(qb_content)
+    assert row["placement"]["proposed_rt_repoint_target"] == str(pool_seed)
     assert row["placement"]["anchor_scan"]["has_arr_anchor"] is False
     assert "no_arr_library_hardlink_anchor_found" in row["reasons"]
 
@@ -321,6 +341,66 @@ def test_client_drift_path_drift_prefers_stash_with_arr_hardlink_anchor(tmp_path
     assert row["placement"]["anchor_scan"]["has_arr_anchor"] is True
     assert row["placement"]["anchor_scan"]["anchor_paths"] == [str(library_root / "Release.One.bin")]
     assert "arr_library_hardlink_anchor_present" in row["reasons"]
+
+
+def test_client_drift_repoint_target_uses_parent_for_single_file_torrent(tmp_path: Path) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One.mkv"
+    rt_content = stash_seed / "Release.One.mkv"
+    library_root = tmp_path / "library" / "movies"
+    pool_seed.mkdir(parents=True)
+    stash_seed.mkdir(parents=True)
+    library_root.mkdir(parents=True)
+    qb_content.write_text("payload", encoding="utf-8")
+    rt_content.write_text("payload", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_single_file_rt_session(session_dir, torrent_hash, stash_seed, name="Release.One.mkv")
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One.mkv",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One.mkv",
+                "directory": str(stash_seed),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool" / "torrents" / "seeding"),),
+            stash_roots=(str(tmp_path / "stash" / "torrents" / "seeding"),),
+            arr_library_roots=(str(library_root),),
+            anchor_scan_max_files=1000,
+        ),
+    )
+
+    row = report["rows"][0]
+    assert row["action"] == "repoint_rt_to_qb_path"
+    assert row["placement"]["proposed_rt_content_path"] == str(qb_content)
+    assert row["placement"]["proposed_rt_repoint_target"] == str(pool_seed)
 
 
 def test_client_drift_hash_filter_limits_anchor_scan_to_selected_hash(tmp_path: Path) -> None:
@@ -567,7 +647,10 @@ def test_client_drift_catalog_no_anchor_evidence_still_requires_filesystem_confi
     assert row["placement"]["anchor_scan"]["source"] == "catalog"
     assert row["placement"]["anchor_scan"]["has_arr_anchor"] is None
     assert "catalog_negative_anchor_requires_filesystem_confirmation" in row["blockers"]
+    # Compatibility alias remains blank when no safe repoint target was selected.
     assert row["placement"]["proposed_rt_directory"] == ""
+    assert row["placement"]["proposed_rt_content_path"] == ""
+    assert row["placement"]["proposed_rt_repoint_target"] == ""
 
 
 def test_client_drift_catalog_inode_match_requires_same_device_identity(tmp_path: Path) -> None:

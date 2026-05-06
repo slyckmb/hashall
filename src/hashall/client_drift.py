@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE
-from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, resolve_rt_session_files, rt_path_aligned
+from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, normalize_rt_target_directory, resolve_rt_session_files, rt_path_aligned
 
 
 HEALTHY_QB_STATES = {"uploading", "stalledUP", "stoppedUP", "pausedUP"}
@@ -795,6 +795,16 @@ def _placement_kind(path: str, policy: ClientDriftPolicy) -> str:
     return "other"
 
 
+def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
+    if not content_path:
+        return ""
+    if rt_row.is_multi_file and rt_row.name and Path(content_path).name == rt_row.name:
+        return str(Path(content_path).parent)
+    if rt_row.is_multi_file is False:
+        return str(Path(content_path).parent)
+    return normalize_rt_target_directory(content_path, None)
+
+
 def _classify_common_path_drift(
     qb_row: ClientTorrentRow,
     rt_row: ClientTorrentRow,
@@ -845,6 +855,8 @@ def _classify_common_path_drift(
         "qb_has_nohl_tag": qb_has_nohl_tag,
         "proposed_qb_save_path": "",
         "proposed_rt_directory": "",
+        "proposed_rt_content_path": "",
+        "proposed_rt_repoint_target": "",
         "proposed_source_client": "",
         "anchor_scan": anchor.to_dict(),
     }
@@ -858,6 +870,8 @@ def _classify_common_path_drift(
             reasons.append(f"qb_on_required_{desired_placement}_placement")
             placement["proposed_source_client"] = "qb"
             placement["proposed_rt_directory"] = qb_row.content_path
+            placement["proposed_rt_content_path"] = qb_row.content_path
+            placement["proposed_rt_repoint_target"] = _rt_repoint_target_for_content_path(qb_row.content_path, rt_row)
             if not qb_row.path_exists:
                 blockers.append("selected_qb_target_missing")
         elif rt_matches and not qb_matches:

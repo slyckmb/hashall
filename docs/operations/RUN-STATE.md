@@ -70,7 +70,9 @@ Interpretation:
 - path-drift rows now include proposed target fields when policy evidence is complete:
   - `proposed_source_client`
   - `proposed_qb_save_path`
-  - `proposed_rt_directory`
+  - `proposed_rt_content_path`
+  - `proposed_rt_repoint_target`
+  - `proposed_rt_directory` compatibility alias only; do not use for new mutation tooling
 
 Read-only selected live pilot:
 
@@ -480,6 +482,48 @@ Interpretation:
 
 - The branch is safer for the stated cleanup goal: catalog positive evidence can still help when identity is sound, but catalog absence cannot drive placement by itself.
 - The next live pilot must use actual bounded filesystem confirmation or a future catalog freshness/coverage proof before selecting the side to keep.
+
+## 2026-05-06 Phase 2 Pilot Contract Hardening
+
+Phase 2 hardened path-drift report fields so dry-run/pilot consumers do not confuse RT content paths with the safe `d.directory.set` target.
+
+Code changes:
+
+- path-drift placement rows now include:
+  - `proposed_rt_content_path`
+  - `proposed_rt_repoint_target`
+- `proposed_rt_directory` remains for compatibility, but new code and operator docs should prefer `proposed_rt_repoint_target` for `rt repoint --target-directory`
+- single-file RT rows now emit the parent directory as `proposed_rt_repoint_target`
+- multi-file RT rows now emit the containing save root as `proposed_rt_repoint_target`
+- CLI human output now labels the safer value as `rt_repoint=...`
+
+Verification:
+
+- `pytest -q tests/test_client_drift.py tests/test_qbittorrent.py` -> `50 passed`
+- `python3 -m py_compile src/hashall/client_drift.py src/hashall/cli.py src/hashall/qbittorrent.py scripts/pause_mirror_seeders.py` -> passed
+- `python3 scripts/check_doc_links.py` -> `BROKEN_LINKS=0`
+- selected read-only `97343f...` path-drift audit with bounded filesystem scan reports:
+  - action: `repoint_rt_to_qb_path`
+  - blockers: `[]`
+  - `proposed_rt_content_path=/pool/media/torrents/seeding/cross-seed/DigitalCore (API)/Cinderella.2021.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR.mkv`
+  - `proposed_rt_repoint_target=/pool/media/torrents/seeding/cross-seed/DigitalCore (API)`
+
+Interpretation:
+
+- Phase 2 fixes the most important pilot-contract ambiguity for the next single-file live candidate.
+- Phase 2B should update the remaining docs/tests to describe `proposed_rt_directory` as a compatibility alias only; new live pilot docs and automation must use `proposed_rt_repoint_target`.
+
+## 2026-05-06 Phase 2B Compatibility Cleanup
+
+Phase 2B retained `proposed_rt_directory` for older JSON consumers but demoted it from the operator contract.
+
+Rules going forward:
+
+- use `proposed_rt_repoint_target` as the only report field safe to pass to `rt repoint --target-directory`
+- use `proposed_rt_content_path` for inspection and post-apply content existence checks
+- treat `proposed_rt_directory` as a compatibility alias for older report readers, not as a mutation target
+
+2B did not remove the alias because this branch still has humans and docs consuming historic JSON examples. Removing it should wait until all report consumers are updated.
 
 ## Big-Picture Seed Folder Cleanup TODO
 

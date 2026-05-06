@@ -3137,7 +3137,7 @@ def client_drift_audit_cmd(
                     "      "
                     f"proposed_source={placement.get('proposed_source_client')} "
                     f"qb_save={placement.get('proposed_qb_save_path') or '-'} "
-                    f"rt_directory={placement.get('proposed_rt_directory') or '-'}"
+                    f"rt_repoint={placement.get('proposed_rt_repoint_target') or placement.get('proposed_rt_directory') or '-'}"
                 )
         else:
             print(f"      state={client_row.get('state') or ''} category={client_row.get('category') or ''} path={client_row.get('content_path') or client_row.get('save_path') or ''}")
