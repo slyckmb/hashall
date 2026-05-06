@@ -161,6 +161,28 @@ Updated 2E execution target:
   - selected filesystem fallback status only when explicitly bounded
   - final classification: `policy_proven_stash`, `policy_proven_pool`, or `blocked_needs_evidence`
 
+2E read-only execution result:
+
+- command shape:
+  - `client-drift audit --side path_drift --catalog ~/.hashall/catalog.db --anchor-scan-max-files 0 --json-output`
+- qB rows: `5202`
+- RT rows: `5202`
+- same-hash path drift rows: `13`
+- policy-proven stash: `0`
+- policy-proven pool: `0`
+- blocked needs evidence: `13`
+- qB `~noHL` advisory rows: `4`
+- common blocker set:
+  - `catalog_payload_paths_missing`
+  - `arr_anchor_scan_disabled`
+  - `hardlink_anchor_evidence_required_for_placement`
+
+2E interpretation:
+
+- `~noHL` is now visible in the evidence report, but it did not unlock any row by itself.
+- Current catalog coverage is insufficient for these 13 drift payload paths.
+- Next follow-up should be 2F: produce a read-only catalog coverage/remap plan for the 13 qB/RT payload paths, then refresh/rescan only the missing roots or teach catalog lookup the safe `/data`/`/stash` alias mapping needed to find existing rows.
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.
