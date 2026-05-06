@@ -449,6 +449,38 @@ Recommended E:
   - torrent-root same-inode siblings
   - deletion eligibility status, always defaulting to blocked until explicitly reviewed
 
+## 2026-05-06 Phase 1 Evidence Safety Hardening
+
+Deep branch review found two evidence semantics that needed hardening before more live path-drift pilots:
+
+- catalog hardlink-anchor detection matched on `inode` without requiring filesystem identity in aggregate tables
+- catalog "no ARR anchor found" was treated as proof of pool placement, even though absence from catalog is not the same as absence on disk
+
+Phase 1 code changes:
+
+- catalog positive ARR-anchor evidence now requires:
+  - a same-table per-filesystem catalog table such as `files_fs_*` / `files_<id>`, or
+  - an aggregate `files` table with `fs_uuid` or `device_id`
+- aggregate catalog tables without filesystem identity now block with `catalog_table_lacks_filesystem_identity:<table>`
+- matching in aggregate tables now uses the filesystem identity plus inode, not inode alone
+- catalog negative evidence now blocks with `catalog_negative_anchor_requires_filesystem_confirmation`
+- catalog-only negative evidence no longer selects pool or emits a repoint action
+
+Verification:
+
+- `pytest -q tests/test_client_drift.py tests/test_qbittorrent.py` -> `49 passed`
+- `python3 -m py_compile src/hashall/client_drift.py src/hashall/cli.py src/hashall/qbittorrent.py scripts/pause_mirror_seeders.py` -> passed
+- read-only live `client-drift audit --side path_drift --catalog ~/.hashall/catalog.db --anchor-scan-max-files 0 --json-output` now reports:
+  - qB rows: `5202`
+  - RT rows: `5202`
+  - path drift: `12`
+  - action counts: `manual_review=12`
+
+Interpretation:
+
+- The branch is safer for the stated cleanup goal: catalog positive evidence can still help when identity is sound, but catalog absence cannot drive placement by itself.
+- The next live pilot must use actual bounded filesystem confirmation or a future catalog freshness/coverage proof before selecting the side to keep.
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.

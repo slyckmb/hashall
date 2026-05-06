@@ -416,6 +416,7 @@ def test_client_drift_uses_catalog_hardlink_anchor_evidence(tmp_path: Path) -> N
     conn.executescript("""
         CREATE TABLE files (
             path TEXT PRIMARY KEY,
+            device_id INTEGER NOT NULL,
             inode INTEGER NOT NULL,
             size INTEGER NOT NULL,
             mtime REAL NOT NULL,
@@ -423,12 +424,12 @@ def test_client_drift_uses_catalog_hardlink_anchor_evidence(tmp_path: Path) -> N
         );
     """)
     conn.execute(
-        "INSERT INTO files (path, inode, size, mtime, status) VALUES (?, ?, ?, ?, 'active')",
-        (str(rt_content / "file.bin"), 1001, 7, 0.0),
+        "INSERT INTO files (path, device_id, inode, size, mtime, status) VALUES (?, ?, ?, ?, ?, 'active')",
+        (str(rt_content / "file.bin"), 4242, 1001, 7, 0.0),
     )
     conn.execute(
-        "INSERT INTO files (path, inode, size, mtime, status) VALUES (?, ?, ?, ?, 'active')",
-        (str(library_root / "Release.One.bin"), 1001, 7, 0.0),
+        "INSERT INTO files (path, device_id, inode, size, mtime, status) VALUES (?, ?, ?, ?, ?, 'active')",
+        (str(library_root / "Release.One.bin"), 4242, 1001, 7, 0.0),
     )
     conn.commit()
     conn.close()
@@ -485,7 +486,7 @@ def test_client_drift_uses_catalog_hardlink_anchor_evidence(tmp_path: Path) -> N
     assert row["placement"]["proposed_qb_save_path"] == str(stash_seed)
 
 
-def test_client_drift_uses_catalog_no_anchor_evidence(tmp_path: Path) -> None:
+def test_client_drift_catalog_no_anchor_evidence_still_requires_filesystem_confirmation(tmp_path: Path) -> None:
     pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
     stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
     qb_content = pool_seed / "Release.One"
@@ -562,10 +563,177 @@ def test_client_drift_uses_catalog_no_anchor_evidence(tmp_path: Path) -> None:
     )
 
     row = report["rows"][0]
-    assert row["action"] == "repoint_rt_to_qb_path"
+    assert row["action"] == "manual_review"
     assert row["placement"]["anchor_scan"]["source"] == "catalog"
-    assert row["placement"]["anchor_scan"]["has_arr_anchor"] is False
-    assert row["placement"]["proposed_rt_directory"] == str(qb_content)
+    assert row["placement"]["anchor_scan"]["has_arr_anchor"] is None
+    assert "catalog_negative_anchor_requires_filesystem_confirmation" in row["blockers"]
+    assert row["placement"]["proposed_rt_directory"] == ""
+
+
+def test_client_drift_catalog_inode_match_requires_same_device_identity(tmp_path: Path) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One"
+    rt_content = stash_seed / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    (rt_content / "file.bin").write_text("payload", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.executescript("""
+        CREATE TABLE files (
+            path TEXT PRIMARY KEY,
+            device_id INTEGER NOT NULL,
+            inode INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            mtime REAL NOT NULL,
+            status TEXT DEFAULT 'active'
+        );
+    """)
+    conn.execute(
+        "INSERT INTO files (path, device_id, inode, size, mtime, status) VALUES (?, ?, ?, ?, ?, 'active')",
+        (str(rt_content / "file.bin"), 1, 3001, 7, 0.0),
+    )
+    conn.execute(
+        "INSERT INTO files (path, device_id, inode, size, mtime, status) VALUES (?, ?, ?, ?, ?, 'active')",
+        (str(library_root / "same-inode-different-device.bin"), 2, 3001, 7, 0.0),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool" / "torrents" / "seeding"),),
+            stash_roots=(str(tmp_path / "stash" / "torrents" / "seeding"),),
+            arr_library_roots=(str(library_root),),
+            anchor_scan_max_files=0,
+        ),
+        hash_filters=(torrent_hash,),
+        catalog_path=catalog,
+    )
+
+    row = report["rows"][0]
+    assert row["action"] == "manual_review"
+    assert row["placement"]["anchor_scan"]["has_arr_anchor"] is None
+    assert "catalog_negative_anchor_requires_filesystem_confirmation" in row["blockers"]
+    assert row["placement"]["anchor_scan"]["anchor_paths"] == []
+
+
+def test_client_drift_catalog_rows_without_device_identity_are_not_anchor_proof(tmp_path: Path) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One"
+    rt_content = stash_seed / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    (rt_content / "file.bin").write_text("payload", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.executescript("""
+        CREATE TABLE files (
+            path TEXT PRIMARY KEY,
+            inode INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            mtime REAL NOT NULL,
+            status TEXT DEFAULT 'active'
+        );
+    """)
+    conn.execute(
+        "INSERT INTO files (path, inode, size, mtime, status) VALUES (?, ?, ?, ?, 'active')",
+        (str(rt_content / "file.bin"), 4001, 7, 0.0),
+    )
+    conn.execute(
+        "INSERT INTO files (path, inode, size, mtime, status) VALUES (?, ?, ?, ?, 'active')",
+        (str(library_root / "same-inode-unknown-device.bin"), 4001, 7, 0.0),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool" / "torrents" / "seeding"),),
+            stash_roots=(str(tmp_path / "stash" / "torrents" / "seeding"),),
+            arr_library_roots=(str(library_root),),
+            anchor_scan_max_files=0,
+        ),
+        hash_filters=(torrent_hash,),
+        catalog_path=catalog,
+    )
+
+    row = report["rows"][0]
+    assert row["action"] == "manual_review"
+    assert row["placement"]["anchor_scan"]["has_arr_anchor"] is None
+    assert "catalog_table_lacks_filesystem_identity:files" in row["blockers"]
 
 
 def test_client_drift_nohl_tag_is_advisory_not_proof(tmp_path: Path) -> None:

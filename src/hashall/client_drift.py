@@ -477,10 +477,20 @@ class _PlacementAnchorScanner:
             for blocker in catalog_result.blockers
             if blocker != "catalog_anchor_lookup_not_configured"
         ]
+        max_files = max(0, int(self.policy.anchor_scan_max_files))
+        if (
+            max_files <= 0
+            and "catalog_negative_anchor_requires_filesystem_confirmation" in catalog_blockers
+        ):
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="catalog",
+                payload_files_checked=catalog_result.payload_files_checked,
+                blockers=[*catalog_blockers, "arr_anchor_scan_disabled"],
+            )
 
         library_index = self._load_library_index()
         blockers = [*catalog_blockers, *self._library_blockers]
-        max_files = max(0, int(self.policy.anchor_scan_max_files))
         if max_files <= 0:
             return _AnchorScanResult(
                 has_arr_anchor=None,
@@ -563,38 +573,68 @@ class _PlacementAnchorScanner:
                     return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["catalog_files_tables_missing"])
                 anchor_paths: list[str] = []
                 payload_files_checked = 0
+                blockers: list[str] = []
                 for table in tables:
                     if not self._catalog_table_has_column(conn, table, "path") or not self._catalog_table_has_column(conn, table, "inode"):
                         continue
+                    identity_column = self._catalog_identity_column(conn, table)
+                    table_scoped_identity = self._catalog_table_scopes_inode_identity(table)
+                    if identity_column is None and not table_scoped_identity:
+                        blockers.append(f"catalog_table_lacks_filesystem_identity:{table}")
+                        continue
                     has_status = self._catalog_table_has_column(conn, table, "status")
-                    payload_rows = self._catalog_payload_rows(conn, table, paths, has_status=has_status)
+                    payload_rows = self._catalog_payload_rows(
+                        conn,
+                        table,
+                        paths,
+                        has_status=has_status,
+                        identity_column=identity_column,
+                        table_scoped_identity=table_scoped_identity,
+                    )
                     payload_files_checked += len(payload_rows)
                     if not payload_rows:
                         continue
-                    inode_values = sorted({int(inode) for _path, inode in payload_rows if inode is not None})
-                    for inode_chunk in self._chunks(inode_values, 500):
-                        placeholders = ",".join("?" for _ in inode_chunk)
-                        status_clause = "status = 'active' AND " if has_status else ""
-                        rows = conn.execute(
-                            f"SELECT path, inode FROM {table} WHERE {status_clause}inode IN ({placeholders})",
-                            inode_chunk,
-                        ).fetchall()
-                        for link_path, _inode in rows:
-                            link_text = str(link_path or "")
-                            if self._under_library_root(link_text) and link_text not in anchor_paths:
-                                anchor_paths.append(link_text)
+                    identity_groups: dict[str, list[int]] = {}
+                    for _path, inode, identity in payload_rows:
+                        identity_groups.setdefault(identity, []).append(int(inode))
+                    for identity, inode_values_raw in sorted(identity_groups.items()):
+                        inode_values = sorted(set(inode_values_raw))
+                        for inode_chunk in self._chunks(inode_values, 500):
+                            placeholders = ",".join("?" for _ in inode_chunk)
+                            status_clause = "status = 'active' AND " if has_status else ""
+                            params: list[Any] = []
+                            identity_clause = ""
+                            if identity_column is not None:
+                                identity_clause = f"{identity_column} = ? AND "
+                                params.append(identity)
+                            rows = conn.execute(
+                                f"SELECT path, inode FROM {table} WHERE {status_clause}{identity_clause}inode IN ({placeholders})",
+                                [*params, *inode_chunk],
+                            ).fetchall()
+                            for link_path, _inode in rows:
+                                link_text = str(link_path or "")
+                                if self._under_library_root(link_text) and link_text not in anchor_paths:
+                                    anchor_paths.append(link_text)
                 if anchor_paths:
                     return _AnchorScanResult(
                         has_arr_anchor=True,
                         source="catalog",
                         anchor_paths=sorted(anchor_paths),
                         payload_files_checked=payload_files_checked,
+                        blockers=blockers,
                     )
                 if payload_files_checked > 0:
                     return _AnchorScanResult(
-                        has_arr_anchor=False,
+                        has_arr_anchor=None,
                         source="catalog",
                         payload_files_checked=payload_files_checked,
+                        blockers=[*blockers, "catalog_negative_anchor_requires_filesystem_confirmation"],
+                    )
+                if blockers:
+                    return _AnchorScanResult(
+                        has_arr_anchor=None,
+                        source="catalog",
+                        blockers=blockers,
                     )
                 return _AnchorScanResult(
                     has_arr_anchor=None,
@@ -609,6 +649,33 @@ class _PlacementAnchorScanner:
                 source="catalog",
                 blockers=[f"catalog_error:{exc}"],
             )
+
+    @staticmethod
+    def _catalog_table_scopes_inode_identity(table: str) -> bool:
+        return str(table or "").startswith("files_")
+
+    @staticmethod
+    def _catalog_identity_column(conn: sqlite3.Connection, table: str) -> str | None:
+        for column in ("fs_uuid", "device_id"):
+            if _PlacementAnchorScanner._catalog_table_has_column(conn, table, column):
+                return column
+        return None
+
+    @staticmethod
+    def _catalog_identity_value(
+        *,
+        table: str,
+        identity_column: str | None,
+        table_scoped_identity: bool,
+        row_identity: Any,
+    ) -> str:
+        if identity_column is not None:
+            if row_identity is None:
+                return ""
+            return str(row_identity).strip()
+        if table_scoped_identity:
+            return f"table:{table}"
+        return ""
 
     @staticmethod
     def _catalog_files_tables(conn: sqlite3.Connection) -> list[str]:
@@ -633,21 +700,34 @@ class _PlacementAnchorScanner:
         paths: Iterable[str],
         *,
         has_status: bool,
-    ) -> list[tuple[str, int]]:
-        out: list[tuple[str, int]] = []
-        seen: set[tuple[str, int]] = set()
+        identity_column: str | None,
+        table_scoped_identity: bool,
+    ) -> list[tuple[str, int, str]]:
+        out: list[tuple[str, int, str]] = []
+        seen: set[tuple[str, int, str]] = set()
         status_clause = "status = 'active' AND " if has_status else ""
+        identity_select = f", {identity_column}" if identity_column is not None else ""
         for raw_path in paths:
             path = str(raw_path or "").rstrip("/")
             if not path:
                 continue
             rows = conn.execute(
-                f"SELECT path, inode FROM {table} WHERE {status_clause}(path = ? OR path LIKE ?)",
+                f"SELECT path, inode{identity_select} FROM {table} WHERE {status_clause}(path = ? OR path LIKE ?)",
                 (path, f"{path}/%"),
             ).fetchall()
-            for file_path, inode in rows:
+            for row in rows:
+                file_path, inode, *identity_values = row
+                row_identity = identity_values[0] if identity_values else None
+                identity = _PlacementAnchorScanner._catalog_identity_value(
+                    table=table,
+                    identity_column=identity_column,
+                    table_scoped_identity=table_scoped_identity,
+                    row_identity=row_identity,
+                )
+                if not identity:
+                    continue
                 try:
-                    key = (str(file_path), int(inode))
+                    key = (str(file_path), int(inode), identity)
                 except Exception:
                     continue
                 if key not in seen:
