@@ -2,6 +2,34 @@
 
 Last updated: 2026-05-06
 
+## 2026-05-06 Critical Context Compliance Gate
+
+Live mutation is frozen until this branch corrects the `/data/media` /
+`/stash/media` alias evidence drift and the operator approves a resumed lane.
+
+Wedged P0 task:
+
+1. Identify repo-critical context and setup docs that every agent must read.
+2. Put the mandatory read order and compliance ACK in `AGENTS.md`.
+3. Make `docs/README.md` point agents at the same context gate.
+4. Treat the Phase 3 residue interpretation below as superseded until it is
+   rewritten with alias-aware counts.
+5. Before any further qB/RT pilot, patch and test the affected tooling so
+   `/data/media` and `/stash/media` are canonicalized/deduped before ownership,
+   copy-count, anchor, or cleanup decisions.
+
+Required compliance ACK for future agents:
+
+```text
+HASHALL_CONTEXT_ACK docs=SESSION,RUN-STATE,README,SYSTEM,PLAN,AGENT-PLAYBOOK status=OK
+```
+
+Non-negotiable invariant:
+
+- `/data/media` and `/stash/media` are equivalent mount aliases for the same
+  `stash/media` filesystem. They are not separate evidence streams and must not
+  be counted as independent copies.
+
 ## 2026-05-06 Phase 0 Baseline
 
 Read-only baseline from the `cr/hashall-20260505-112759-codex` worktree:

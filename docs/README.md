@@ -2,6 +2,23 @@
 
 Purpose: minimal, canonical documentation set for CLI agents.
 
+## Agent Start Gate
+
+Every agent must read `AGENTS.md` first and emit the required
+`HASHALL_CONTEXT_ACK` before analysis, edits, or live operations.
+
+Critical setup facts:
+
+- `/data/media` and `/stash/media` are equivalent mount aliases for the same
+  `stash/media` filesystem. Do not count them as separate copies.
+- Path-sensitive work must use canonical path/device identity, not raw string
+  path comparisons.
+- `docs/operations/RUN-STATE.md` is the current live-state source of truth; old
+  sections and archived docs are historical unless the current run state says
+  otherwise.
+- Live qB/RT mutation requires dry-run, tiny pilot, post-check, and human
+  inspection gates.
+
 ## Canonical (required)
 
 1. `docs/REQUIREMENTS.md` - Product and safety requirements.
@@ -12,7 +29,7 @@ Purpose: minimal, canonical documentation set for CLI agents.
 6. `docs/project/AGENT-PLAYBOOK.md` - Agent read order, rules, test strategy.
 7. `docs/project/PLAN.md` - Active roadmap and backlog.
 8. `docs/project/KNOWN-TEST-FAILURES.md` - Pre-existing test failures: root causes and fix plans.
-8. `README.md` - Project overview and onboarding.
+9. `README.md` - Project overview and onboarding.
 
 ## Active Continuity Docs
 
