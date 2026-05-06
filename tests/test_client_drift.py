@@ -498,7 +498,7 @@ def test_client_drift_uses_catalog_no_anchor_evidence(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog.db"
     conn = sqlite3.connect(catalog)
     conn.executescript("""
-        CREATE TABLE files_49 (
+        CREATE TABLE files_fs_zfs_123 (
             path TEXT PRIMARY KEY,
             inode INTEGER NOT NULL,
             size INTEGER NOT NULL,
@@ -507,11 +507,11 @@ def test_client_drift_uses_catalog_no_anchor_evidence(tmp_path: Path) -> None:
         );
     """)
     conn.execute(
-        "INSERT INTO files_49 (path, inode, size, mtime, status) VALUES (?, ?, ?, ?, 'active')",
+        "INSERT INTO files_fs_zfs_123 (path, inode, size, mtime, status) VALUES (?, ?, ?, ?, 'active')",
         (str(qb_content / "file.bin"), 2001, 7, 0.0),
     )
     conn.execute(
-        "INSERT INTO files_49 (path, inode, size, mtime, status) VALUES (?, ?, ?, ?, 'active')",
+        "INSERT INTO files_fs_zfs_123 (path, inode, size, mtime, status) VALUES (?, ?, ?, ?, 'active')",
         (str(rt_content / "file.bin"), 2002, 7, 0.0),
     )
     conn.commit()

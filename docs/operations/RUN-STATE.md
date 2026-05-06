@@ -183,6 +183,51 @@ Updated 2E execution target:
 - Current catalog coverage is insufficient for these 13 drift payload paths.
 - Next follow-up should be 2F: produce a read-only catalog coverage/remap plan for the 13 qB/RT payload paths, then refresh/rescan only the missing roots or teach catalog lookup the safe `/data`/`/stash` alias mapping needed to find existing rows.
 
+## 2026-05-06 Phase 2F Coverage + Filesystem Anchor Check
+
+2F read-only coverage result:
+
+- compatible catalog tables considered: `18`
+- direct/alias catalog payload hits for the 13 drift rows: `0`
+- all 13 candidate qB/RT paths exist on disk
+- selected filesystem inode comparison scanned ARR library roots read-only:
+  - ARR files scanned: `146604`
+  - ARR-anchored rows: `8`
+  - no ARR-anchor found: `5`
+  - qB `~noHL` advisory rows: `4`
+
+Policy classification from actual filesystem state:
+
+- `policy_proven_stash`:
+  - `1a06655541134463` Top Gun
+  - `20555f704e0ae477` Bottle Shock
+  - `2a4e075ecf0962ba` V for Vendetta
+  - `4052607092357bfe` Twisters
+  - `4f454ed3bdf830f0` Alien Resurrection
+  - `5c86280a99d10071` Spider-Man Into the Spider-Verse
+  - `c7845e03fe21e7fa` Twin Peaks S01
+  - `e2a7eab3a5be76f7` Here 2024
+- `policy_proven_pool_by_fs_no_arr_anchor`:
+  - `29e2b889867a8fbb` Vigen Guroian (`~noHL`)
+  - `2d9004e9af6618c1` West Wing S07
+  - `2fb25fdf2ef20ae5` Novitiate (`~noHL`)
+  - `97343f6005da2ed8` Cinderella
+  - `a5a2b78798009b38` Wilding (`~noHL`)
+
+Code follow-up completed during 2F:
+
+- catalog anchor lookup now considers `files_fs_*` tables as well as legacy `files` and numeric `files_<id>` tables.
+
+Edge case to keep out of the repoint lane:
+
+- Some items may not be hardlinked into ARR libraries but arguably should be.
+- Detect that by comparing torrent payload identity/name/path against ARR library metadata or import history, not by drift repair alone.
+- Handling should be a separate `missing_arr_anchor_candidate` audit lane:
+  - read-only match candidate to ARR item
+  - verify bytes/path compatibility
+  - decide whether to create/rebuild ARR hardlinks
+  - only then revisit stash-vs-pool placement
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.

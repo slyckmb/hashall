@@ -613,12 +613,12 @@ class _PlacementAnchorScanner:
     @staticmethod
     def _catalog_files_tables(conn: sqlite3.Connection) -> list[str]:
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND (name = 'files' OR name LIKE 'files_%') ORDER BY name"
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         out = []
         for (name,) in rows:
             text = str(name or "")
-            if text == "files" or (text.startswith("files_") and text[6:].isdigit()):
+            if text == "files" or text.startswith("files_"):
                 out.append(text)
         return out
 
