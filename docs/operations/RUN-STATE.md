@@ -393,6 +393,62 @@ Next recommended lanes:
 - Phase C: read-only residue audit for the old stash/data path and related cleanup candidates.
 - Phase D: continue path-drift repair with another one-hash pilot only after Phase C confirms no unexpected ownership/residue issue from this pilot.
 
+## 2026-05-06 Phase C Read-Only Residue Audit
+
+Phase C audited the old stash/data tree left behind by the Phase B pilot:
+
+- old tree: `/data/media/torrents/seeding/cross-seed/2d9004e9af6618c192d965c8950189955326b3e2/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- current pool tree: `/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+
+Read-only findings:
+
+- old tree exists and contains `22` files / `75,287,462,464` bytes
+- current pool tree exists and contains `22` files / `75,287,462,464` bytes
+- old and pool trees are on different devices and do not share inodes
+- old file link counts range from `9` to `10`
+- pool file link counts range from `5` to `6`
+- focused ARR-library same-inode check found `0` matches for the old tree
+- catalog `payload orphan-audit` scoped to the old `2d9004...` prefix reports:
+  - `true_orphans=0`
+  - `alias_artifacts=0`
+  - `scoped_unmanaged_payloads=0`
+- catalog lookup found:
+  - `0` payload rows under the old tree
+  - `0` scanned file rows under the old tree in compatible `files*` tables
+  - torrent instance `2d9004e9af6618c192d965c8950189955326b3e2` points to payload `16738` at the pool save path
+- selected client-drift audit still reports `path_drift=0` for `--hash 2d9004e9`
+
+Interpretation:
+
+- the old stash/data tree is not qB-owned, not RT-owned, not catalog-payload-owned, and not ARR-hardlink-anchored by the focused check.
+- it is a duplicate-looking cross-device residue candidate, not a deletion-approved path.
+- because the old files have high non-ARR link counts, cleanup needs one more targeted ownership pass that maps the sibling hardlinks before any destructive action.
+
+Phase C stopped before deletion, as intended.
+
+Recommended C-2:
+
+- map same-inode siblings for the old tree inside torrent seeding roots only, excluding ARR roots already checked
+- identify whether those links are other cross-seed aliases, historical hash directories, or unmanaged residues
+- produce an exact reviewed cleanup set if every old-tree inode has non-client, non-ARR sibling coverage
+- do not delete directly from the report
+
+Recommended D:
+
+- after C-2 or human acceptance of the residue risk, continue path-drift repair with the next simple one-hash pilot.
+- recommended candidate: `97343f6005da2ed8` if fresh prechecks still show it as pool-proven, complete, and repoint-only.
+
+Recommended E:
+
+- build a reusable read-only residue/ownership audit around this evidence pattern so future path-drift pilots automatically emit:
+  - qB owner
+  - RT owner
+  - catalog payload owner
+  - catalog file rows
+  - ARR same-inode anchors
+  - torrent-root same-inode siblings
+  - deletion eligibility status, always defaulting to blocked until explicitly reviewed
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.
