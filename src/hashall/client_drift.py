@@ -604,14 +604,14 @@ class _PlacementAnchorScanner:
             )
 
         library_index = self._load_library_index()
-        blockers = [*catalog_blockers, *self._library_blockers]
+        fs_blockers = [*self._library_blockers]
         if max_files <= 0:
             return _AnchorScanResult(
                 has_arr_anchor=None,
                 source="filesystem",
                 library_files_checked=self._library_files_checked,
                 library_scan_truncated=self._library_scan_truncated,
-                blockers=[*blockers, "arr_anchor_scan_disabled"],
+                blockers=[*catalog_blockers, *fs_blockers, "arr_anchor_scan_disabled"],
             )
         if not self.policy.arr_library_roots:
             return _AnchorScanResult(
@@ -619,7 +619,7 @@ class _PlacementAnchorScanner:
                 source="filesystem",
                 library_files_checked=self._library_files_checked,
                 library_scan_truncated=self._library_scan_truncated,
-                blockers=[*blockers, "arr_library_roots_not_configured"],
+                blockers=[*catalog_blockers, *fs_blockers, "arr_library_roots_not_configured"],
             )
 
         anchor_paths: list[str] = []
@@ -649,10 +649,10 @@ class _PlacementAnchorScanner:
                 library_files_checked=self._library_files_checked,
                 payload_scan_truncated=payload_scan_truncated,
                 library_scan_truncated=self._library_scan_truncated,
-                blockers=blockers,
+                blockers=fs_blockers,
             )
         if payload_scan_truncated or self._library_scan_truncated:
-            blockers.append("arr_anchor_scan_incomplete")
+            blockers = [*catalog_blockers, *fs_blockers, "arr_anchor_scan_incomplete"]
             return _AnchorScanResult(
                 has_arr_anchor=None,
                 source="filesystem",
@@ -667,7 +667,7 @@ class _PlacementAnchorScanner:
             source="filesystem",
             payload_files_checked=payload_files_checked,
             library_files_checked=self._library_files_checked,
-            blockers=blockers,
+            blockers=fs_blockers,
         )
 
     def _scan_catalog(self, paths: Iterable[str]) -> _AnchorScanResult:
