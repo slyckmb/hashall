@@ -291,6 +291,68 @@ These are policy-proven pool candidates, but neither client currently points at 
 - The first live pilot candidate should be one of the three straightforward repoint-only rows, after human inspection of the exact target paths.
 - Phase 2H, if needed, should turn the three straightforward dry-run candidates into explicit one-hash pilot commands with pre/post checks and rollback notes.
 
+## 2026-05-06 Phase 2H One-Hash Pilot Command Plan
+
+2H selected pilot candidate:
+
+- hash: `2d9004e9af6618c192d965c8950189955326b3e2`
+- name: `The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- policy result: pool-proven by selected filesystem no-ARR-anchor evidence
+- current qB path: `/pool/media/torrents/seeding/cross-seed/aither`
+- current qB content: `/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- current RT path: `/data/media/torrents/seeding/cross-seed/2d9004e9af6618c192d965c8950189955326b3e2/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+
+Dry-run command executed:
+
+```bash
+python3 -m hashall.cli rt repoint \
+  --hash 2d9004e9af6618c192d965c8950189955326b3e2 \
+  --target-directory /pool/media/torrents/seeding/cross-seed/aither
+```
+
+Dry-run result:
+
+- command is non-mutating without `--apply`
+- `apply: False`
+- no normalization surprise when targeting the qB save root directly
+
+Apply command if human approves:
+
+```bash
+python3 -m hashall.cli rt repoint \
+  --hash 2d9004e9af6618c192d965c8950189955326b3e2 \
+  --target-directory /pool/media/torrents/seeding/cross-seed/aither \
+  --apply
+```
+
+Required prechecks before apply:
+
+- qB cache still shows:
+  - `save_path=/pool/media/torrents/seeding/cross-seed/aither`
+  - `content_path=/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+  - `state=stoppedUP`
+  - `progress=1`
+- RT cache still shows the old stash/data path and healthy complete state.
+- both qB target save/content paths still exist.
+- selected no-ARR-anchor evidence is still valid.
+
+Expected postchecks after apply:
+
+- refresh or wait for the RT cache update before declaring success.
+- `client-drift audit --side path_drift --hash 2d9004e9` should clear or change to aligned.
+- qB remains complete/seed-ready.
+- RT remains complete/seed-ready.
+
+Rollback note:
+
+- if the RT repoint misbehaves, repoint RT back to:
+  - `/data/media/torrents/seeding/cross-seed/2d9004e9af6618c192d965c8950189955326b3e2/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+
+Decision point:
+
+- human approval is required before running the `--apply` command.
+- 2I is only needed if we want this exact pilot packaged into a reusable guarded script/manifest instead of running the existing `rt repoint` command manually.
+
 ## Big-Picture Seed Folder Cleanup TODO
 
 Keep this list as the high-level operator target while working through the detailed waves.
