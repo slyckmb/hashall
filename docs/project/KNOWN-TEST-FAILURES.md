@@ -1,10 +1,13 @@
 # Known Pre-Existing Test Failures
 
-**Last verified:** 2026-03-19
-**Baseline:** 636 pass / 13 fail / 2 skip (full suite on this host)
+**Last verified:** 2026-05-06
+**Baseline:** 11 known failures remain from the prior 13-failure baseline.
 
-These 13 failures pre-date the 2026-03-18/19 audit session and are unrelated to
-any recent code changes. Each failure has a known root cause and a proposed fix.
+These failures pre-date the 2026-03-18/19 audit session and are unrelated to
+recent code changes. Each failure has a known root cause and a proposed fix.
+
+Resolved since prior baseline:
+- `tests/test_payload_auto_workflow.py` now passes (`19 passed` on 2026-05-06).
 
 ---
 
@@ -151,58 +154,13 @@ the script (or in a conftest skip fixture) to prevent CI runs from executing the
 
 ---
 
-## Group 3 — `test_payload_auto_workflow.py` (2 failures)
-
-### Failing tests
-```
-test_main_fail_closed_stops_on_stale_qbit_manage
-test_main_dry_run_previews_once_when_upgrade_needed
-```
-
-### Root cause
-Both tests patch `workflow._load_completed_torrent_hashes` (leading underscore):
-```python
-monkeypatch.setattr(workflow, "_load_completed_torrent_hashes", lambda: (set(), True, None))
-```
-
-The function in `scripts/payload_auto_workflow.py` was renamed to the public
-form `load_completed_torrent_hashes` (no leading underscore):
-```python
-completed_hashes, completion_filter_active, completion_filter_error = load_completed_torrent_hashes()
-```
-
-`monkeypatch.setattr` silently **adds** a new attribute `_load_completed_torrent_hashes`
-to the module object without touching the real function. The real
-`load_completed_torrent_hashes` runs instead, which requires a live qB cache
-file or QB connection, and fails in the test environment.
-
-### Proposed fix
-**Minimal fix (one line per test):**
-Change both monkeypatches from `_load_completed_torrent_hashes` to
-`load_completed_torrent_hashes`.
-
-```python
-# Before
-monkeypatch.setattr(workflow, "_load_completed_torrent_hashes", lambda: (set(), True, None))
-# After
-monkeypatch.setattr(workflow, "load_completed_torrent_hashes", lambda: (set(), True, None))
-```
-
-This is a pure test fix with no production code changes required.
-
-**Effort:** ~5 minutes.
-
----
-
 ## Summary Table
 
 | Test file | Count | Root cause | Effort | Priority |
 |---|---|---|---|---|
 | `test_scan_integration.py` | 7 | Host `/tmp` on root partition — `findmnt -T` returns wrong device ID | Low–Medium | Medium |
 | `test_codex_says_run_this_next_script.py` | 4 | Script/test interface mismatch — nohl-restart mode not implemented | Medium (implement) or Low (xfail/delete) | Low |
-| `test_payload_auto_workflow.py` | 2 | Monkeypatch targets `_load_completed_torrent_hashes` (private), function is now public `load_completed_torrent_hashes` | Trivial (5 min) | **High** |
 
 **Recommended order of attack:**
-1. Fix `test_payload_auto_workflow.py` — trivial rename, highest value (recovers 2 tests immediately).
-2. Fix `test_scan_integration.py` — either skip fixture or Option C mock; recovers 7 tests.
-3. Decide on `test_codex_says_run_this_next_script.py` — implement or delete.
+1. Fix `test_scan_integration.py` — either skip fixture or Option C mock; recovers 7 tests.
+2. Decide on `test_codex_says_run_this_next_script.py` — implement, xfail, or delete. Do not run it until guarded against live filesystem scans.
