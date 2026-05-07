@@ -30,6 +30,77 @@ Non-negotiable invariant:
   `stash/media` filesystem. They are not separate evidence streams and must not
   be counted as independent copies.
 
+## 2026-05-06 Alias-Hardened Drift Cleanup Restart
+
+Repo hardening completed on this branch:
+
+- `a186af1 docs(agents): require hashall context gate`
+- `ff1bee5 fix(client-drift): honor media mount aliases`
+- `900e96b fix(client-drift): allow bounded filesystem anchor fallback`
+
+Verification:
+
+- `python3 scripts/check_doc_links.py` -> `BROKEN_LINKS=0`
+- `python3 -m py_compile src/hashall/client_drift.py tests/test_client_drift.py`
+- `pytest -q tests/test_client_drift.py` -> `30 passed`
+- read-only alias-aware `client-drift audit` against silo qB/RT caches
+
+Corrected read-only drift baseline:
+
+- qB rows: `5202`
+- RT rows: `5202`
+- common hashes: `5202`
+- qB-only: `0`
+- RT-only: `0`
+- alias-aware same-hash path drift: `12`
+- bounded filesystem anchor scan: `--anchor-scan-max-files 200000`
+- desired placement:
+  - stash: `8`
+  - pool: `4`
+- proposed high-confidence one-client repoints:
+  - `4f454ed3bdf830f0` Alien Resurrection: desired stash, qB on pool,
+    RT on stash -> proposed `repoint_qb_to_rt_path`
+  - `97343f6005da2ed8` Cinderella: desired pool, qB on pool, RT on stash
+    -> proposed `repoint_rt_to_qb_path`
+- manual-review rows:
+  - `7` stash-desired rows where both clients are already on stash but at
+    different same-placement paths; these need canonical tree/shape selection,
+    not blind repoint.
+  - `3` pool-desired rows where both clients are still on stash; these need
+    rehome/donor planning before any client repoint.
+
+Current blockers removed:
+
+- `/data/media` and `/stash/media` are now deduped as mount aliases for path
+  alignment, placement classification, catalog alias lookup, and filesystem
+  anchor scanning.
+- Missing catalog payload rows no longer block selected bounded filesystem
+  proof when the filesystem scan completes and gives definite anchor evidence.
+
+Remaining blockers:
+
+- Catalog still misses the 12 drift payload paths, even after alias expansion.
+  This is a catalog coverage/freshness issue, not proof that the payloads are
+  absent.
+- The 10 manual-review rows require per-hash tree-shape or rehome analysis.
+- Live mutation remains frozen until the operator reviews this corrected plan.
+
+Started drift cleanup plan:
+
+1. Phase D1: produce dry-run-only precheck manifests for the two high-confidence
+   one-client repoint candidates (`4f454...`, `97343...`).
+2. Phase D2: for the `7` stash/stash rows, build a canonical tree-choice table:
+   qB save/content, RT directory/content, device/inode identity, file counts,
+   ARR anchor paths, and preferred canonical root. Do not mutate.
+3. Phase D3: for the `3` pool-desired stash/stash rows (`29e2...`, `2fb25...`,
+   `a5a2...`), build a rehome-before-repoint plan using the shared
+   donor/acquisition + attach/repoint constructor. Do not use direct qB
+   `setLocation`.
+4. Phase D4: investigate catalog coverage for these 12 paths with targeted
+   read-only payload/catalog checks before refreshing broad roots.
+5. Phase D5: after human review, apply at most one live repoint pilot, then
+   re-run alias-aware `client-drift audit` and qB/RT postchecks before widening.
+
 ## 2026-05-06 Phase 0 Baseline
 
 Read-only baseline from the `cr/hashall-20260505-112759-codex` worktree:
