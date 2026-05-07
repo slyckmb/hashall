@@ -13,15 +13,21 @@ from typing import Optional
 
 from .qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
 from .rt_cache import load_rt_cache_snapshot
+from .rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_session_directories, rt_path_aligned
 from .utils import find_db_path
 
 
 class HitchhikerStatus(str, Enum):
     """Classification of N→1 payload groups."""
+    BLOCKED = "blocked"           # stale catalog/client drift/unsafe to split
     UNSPLIT = "unsplit"           # all N hashes point to same root, none in _rehome-unique
     PARTIALLY_SPLIT = "partially_split"  # some hashes already in _rehome-unique
     BUSY = "busy"                 # one or more hashes in checking/active state
     SAFE_TO_SPLIT = "safe_to_split"  # all hashes stopped, no busy, not partially split
+
+
+HEALTHY_QB_SPLIT_STATES = {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
+HEALTHY_RT_SPLIT_STATES = {"uploading", "stalledUP", "stoppedUP", "pausedUP", "stopped", "paused"}
 
 
 @dataclass
@@ -67,6 +73,7 @@ def query_hitchhiker_groups(db_path: Optional[str] = None, limit: Optional[int] 
 def audit_hitchhiker_groups(
     db_path: Optional[str] = None,
     limit: Optional[int] = None,
+    session_dir: Path = DEFAULT_RT_SESSION_DIR,
 ) -> list[HitchhikerGroup]:
     """
     Audit all N→1 payload groups: classify by safety to split.
@@ -111,7 +118,9 @@ def audit_hitchhiker_groups(
     except Exception:
         pass  # qB not accessible; continue with what we have
 
-    # Load RT state from cache snapshot and index by hash
+    # Load RT state from cache snapshot and session files and index by hash.
+    # The shared RT cache can lag or omit directory values; session files are
+    # the safer source for split/path-alignment checks.
     rt_by_hash: dict = {}
     try:
         snapshot = load_rt_cache_snapshot() or {}
@@ -119,6 +128,10 @@ def audit_hitchhiker_groups(
         rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
     except Exception:
         pass
+    try:
+        rt_session_dirs = load_rt_session_directories(session_dir)
+    except Exception:
+        rt_session_dirs = {}
 
     # Classify each group
     groups = []
@@ -128,22 +141,53 @@ def audit_hitchhiker_groups(
         status = HitchhikerStatus.UNSPLIT
         busy_hashes = []
         partial_hashes = []
+        blocked_hashes = []
         all_stopped = True
 
         for hash_val in hashes:
             # Check qB state
-            qb_torrent = qb_by_hash.get(hash_val.lower())
+            hash_key = hash_val.lower()
+            qb_torrent = qb_by_hash.get(hash_key)
             qb_state = qb_torrent.state if qb_torrent else "unknown"
             qb_save = qb_torrent.save_path if qb_torrent else ""
+            qb_content = getattr(qb_torrent, "content_path", "") if qb_torrent else ""
 
             # Check RT state
-            rt_info = rt_by_hash.get(hash_val.lower(), {})
-            rt_dir = rt_info.get("directory", "")
+            rt_info = rt_by_hash.get(hash_key, {})
+            rt_session_entry = rt_session_dirs.get(hash_key)
+            rt_state = str(rt_info.get("state") or "").strip()
+            rt_dir = str(
+                rt_info.get("directory")
+                or rt_info.get("save_path")
+                or (rt_session_entry.directory if rt_session_entry else "")
+                or ""
+            ).strip()
+            in_qb = qb_torrent is not None
+            in_rt = bool(rt_info) or rt_session_entry is not None
 
             # Check if already split (under _rehome-unique)
             if "_rehome-unique" in qb_save or "_rehome-unique" in rt_dir:
                 partial_hashes.append(hash_val)
                 notes.append(f"  {hash_val[:12]}: already in _rehome-unique")
+
+            if not in_qb and not in_rt:
+                blocked_hashes.append(hash_val)
+                all_stopped = False
+                notes.append(f"  {hash_val[:12]}: missing from both qB and RT (stale catalog row)")
+                continue
+
+            if in_qb and in_rt and not rt_path_aligned(
+                rt_dir,
+                qb_save_path=qb_save,
+                qb_content_path=qb_content,
+            ):
+                blocked_hashes.append(hash_val)
+                all_stopped = False
+                notes.append(
+                    f"  {hash_val[:12]}: qB/RT path drift blocks blind split "
+                    f"(qb={qb_save or qb_content!r} rt={rt_dir!r})"
+                )
+                continue
 
             # Check if busy
             if qb_state in ("checkingDL", "checkingUP", "forcedDL", "forcedUP"):
@@ -152,18 +196,22 @@ def audit_hitchhiker_groups(
                 all_stopped = False
             elif qb_state == "unknown":
                 # Hash not in qB. Check if still active in RT.
-                # If not in qB but in RT + active → block. If in neither → safe (orphaned).
-                rt_state = rt_info.get("state", "")
+                # If not in qB but RT still owns it, this broad split path is unsafe.
                 if rt_state and rt_state not in ("stopped", "paused"):
                     all_stopped = False
                     notes.append(f"  {hash_val[:12]}: missing from qB but active in RT")
-                # else: not in either client, treat as safe (orphaned)
-            elif qb_state not in ("stoppedDL", "stoppedUP", "pausedDL", "pausedUP"):
+            elif qb_state not in HEALTHY_QB_SPLIT_STATES:
                 # Not in a stopped/paused state
+                all_stopped = False
+            if rt_state and rt_state not in HEALTHY_RT_SPLIT_STATES:
+                busy_hashes.append(hash_val)
+                notes.append(f"  {hash_val[:12]}: rt state={rt_state} (busy)")
                 all_stopped = False
 
         # Classify status
-        if busy_hashes:
+        if blocked_hashes:
+            status = HitchhikerStatus.BLOCKED
+        elif busy_hashes:
             status = HitchhikerStatus.BUSY
         elif partial_hashes:
             status = HitchhikerStatus.PARTIALLY_SPLIT
@@ -221,6 +269,7 @@ def format_hitchhiker_report(groups: list[HitchhikerGroup], json_output: bool = 
         by_status.setdefault(g.status, []).append(g)
 
     for status in [
+        HitchhikerStatus.BLOCKED,
         HitchhikerStatus.SAFE_TO_SPLIT,
         HitchhikerStatus.UNSPLIT,
         HitchhikerStatus.PARTIALLY_SPLIT,
@@ -233,6 +282,7 @@ def format_hitchhiker_report(groups: list[HitchhikerGroup], json_output: bool = 
 
     # Detail per group
     for status in [
+        HitchhikerStatus.BLOCKED,
         HitchhikerStatus.SAFE_TO_SPLIT,
         HitchhikerStatus.UNSPLIT,
         HitchhikerStatus.PARTIALLY_SPLIT,

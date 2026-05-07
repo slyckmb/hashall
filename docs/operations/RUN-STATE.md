@@ -1,6 +1,6 @@
 # Operational Run State
 
-Last updated: 2026-05-06
+Last updated: 2026-05-07
 
 ## 2026-05-06 Critical Context Compliance Gate
 
@@ -321,6 +321,179 @@ Detailed Phase 3 plan:
 5. If Phase 3 finds qB-on-pool but ARR-anchor-on-stash contradictions like
    `4f454...`, prioritize tooling to dry-run qB save-path repair before any
    raw qB API action.
+
+## 2026-05-07 Phase 2 Execution + Alien Hitchhiker Review
+
+Phase 2 executed the single approved Cinderella RT repoint pilot:
+
+- hash: `97343f6005da2ed8139cca3f88abd0bf0b5632ec`
+- target RT directory:
+  `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)`
+- dry-run result: clean, `apply: False`
+- apply result:
+  - the CLI process returned an rTorrent XMLRPC read timeout after `20s`
+  - live RT later answered with the new `/pool` directory using a `60s` read
+    timeout
+  - no rollback was run because live RT state confirmed the intended mutation
+- postcheck:
+  - qB remained complete at the `/pool` save path
+  - live RT `d.directory` now equals the `/pool` target
+  - selected alias-aware `client-drift audit --hash 97343...` reports
+    `drift_total=0`
+  - full alias-aware audit now reports:
+    - qB rows: `5203`
+    - RT rows: `5203`
+    - common hashes: `5203`
+    - qB-only: `0`
+    - RT-only: `0`
+    - path drift: `11`
+    - drift total: `11`
+    - action counts: `manual_review=11`
+- caution:
+  - the RT shared cache row for this hash may show `directory=null` while live
+    RT and session-backed drift audit know the true directory; for this lane,
+    trust direct live RT postcheck over a bare cache row.
+
+Alien Resurrection `4f454ed3bdf830f0` follow-up findings:
+
+- The item is not just a simple same-hash save-path drift row.
+- Catalog payload `13555` is a `/pool` N->1 hitchhiker group:
+  - `9` catalog hashes share the same pool payload root
+  - `4f454...` is one of those hashes
+  - qB for `4f454...` points at the pool copy
+- The same title also has stash payload `16307`:
+  - `46bba44c...` and `e4a7ee7a...` point at the stash copy
+  - the stash copy is hardlinked to the ARR movie library
+- Live RT for `4f454...` points at the stash copy, and the RT/stash file is
+  samefile with:
+  `/data/media/movies/Alien Resurrection (1997) {tmdb-8078}/Alien Resurrection (1997) {tmdb-8078} {edition-Extended} [Remux-1080p][DTS-HD MA 5.1][AVC]-EPSiLON.mkv`
+- A selected bounded `client-drift audit --hash 4f454... --anchor-scan-max-files 200000`
+  correctly selects `repoint_qb_to_rt_path` with desired placement `stash`.
+- That selected drift action is not enough by itself, because blindly repointing
+  qB to the current RT save path would leave `4f454...` sharing the existing
+  stash payload tree instead of giving it a canonical unique payload view.
+- A selected dry-run of existing `payload hitchhiker-split` logic for payload
+  `13555` would:
+  - keep lexicographic primary `0645960180051110...` at the original pool root
+  - create `_rehome-unique/<hash16>/` hardlink views for the other `8` hashes
+  - place `4f454...` under `/pool/media/torrents/seeding/_rehome-unique/4f454ed3bdf830f0`
+- That existing split plan is not safe to execute for `4f454...` without
+  hardening, because it is not placement-aware and does not choose the stash ARR
+  anchor as the source/target for an ARR-hardlinked item.
+
+Required follow-up Phase 2B: selected hitchhiker split hardening before live Alien work.
+
+1. Add or harden a read-only selected hitchhiker planner with `--hash` and/or
+   `--payload-id`; do not require ad hoc Python to inspect one group.
+2. For each selected hash, emit live qB path, live RT path, catalog payload
+   group(s), file device/inode/nlink, ARR samefile anchors, `~noHL` tag, and
+   target collision checks for `_rehome-unique`.
+3. Replace the current lexicographic-primary assumption with an explicit
+   primary/secondary decision:
+   - prefer the ARR-anchored stash tree for hashes that must remain hardlinked
+     to ARR media
+   - prefer pool only when filesystem proof shows no ARR hardlink anchor
+   - require a human-selected primary if multiple equivalent client owners
+     remain plausible
+4. Make dry-run detect and report existing target directories/files, empty
+   stubs, non-empty collisions, missing client rows, and stale catalog-only
+   hashes such as `ea7ce999...`.
+5. Add a selected apply path only after dry-run proves:
+   - one hash
+   - one source tree
+   - one destination tree
+   - same-device hardlink creation where required
+   - qB and RT both repointed to the same unique payload save path
+   - rollback path and pre/post snapshots are recorded
+6. Do not run existing `payload hitchhiker-split --execute` broadly for Alien.
+   It processes all safe groups by size/limit and has no selected hash/payload
+   guard.
+
+Proposed Phase 3 after 2B:
+
+1. Use the selected planner on `4f454...` and its sibling Alien payloads.
+2. Produce a human review table that chooses one of:
+   - create a stash unique hardlink view for `4f454...` and repoint qB to it
+   - leave `4f454...` on the shared stash payload temporarily and only align qB
+     after an explicit acceptance of the shared tree
+   - split the whole Alien family into per-hash views in controlled batches
+3. Run only dry-run/simulation until the operator approves the exact selected
+   Alien hash, source tree, target tree, and rollback path.
+
+## 2026-05-07 Phase 2B Hitchhiker Guard Hardening
+
+Phase 2B converted the old broad hitchhiker split lane into a selected-safe,
+fail-closed lane:
+
+- `payload hitchhiker-audit` now accepts `--hash` and `--payload-id`.
+- `payload hitchhiker-split` now accepts `--hash` and `--payload-id`.
+- `payload hitchhiker-split --execute` now refuses to run without one of those
+  selectors.
+- Selected split dry-runs now report unsafe selected groups instead of returning
+  an empty result.
+- Selected split execute now exits nonzero if the selected group is blocked or
+  any action fails.
+- Hitchhiker audit now marks groups `blocked` when:
+  - a catalog hash is absent from both qB and RT
+  - qB and RT paths drift for the same hash
+  - a client state is unsafe for blind split
+- Split planning now reports:
+  - missing source roots
+  - existing empty target stubs
+  - existing non-empty target dirs
+  - existing target content
+  - source/target device mismatch
+
+Alien `4f454ed3bdf830f0` now fails closed:
+
+```bash
+python3 -m hashall.cli payload hitchhiker-audit --payload-id 13555 --json-output
+```
+
+reports payload `13555` as `blocked` because:
+
+- `4f454...` has qB/RT path drift:
+  qB on `/pool/media/torrents/seeding/cross-seed/FearNoPeer`, RT on
+  `/data/media/torrents/seeding/cross-seed/FearNoPeer`
+- `ea7ce999...` is a stale catalog row absent from both qB and RT
+
+```bash
+python3 -m hashall.cli payload hitchhiker-split --execute --payload-id 13555 --json-output
+```
+
+now exits `1` without mutation and reports:
+
+- `success=false`
+- `error="group not safe to split: status=blocked"`
+
+Simulation/code-walk loop results:
+
+1. First loop found current broad split was unsafe for selected Alien work.
+2. First patch added selectors, stale-client blocking, qB/RT path-drift
+   blocking, and target/source dry-run evidence.
+3. Second loop found selected blocked dry-runs returned an empty result.
+4. Second patch made selected dry-runs report blocked groups explicitly.
+5. Third loop found selected blocked `--execute` could still exit `0`.
+6. Third patch made selected failed execute return nonzero.
+7. Final loop found no further 2B logic issue in:
+   - selected Alien dry-run
+   - selected Alien blocked execute
+   - broad execute guard
+   - target-stub and target-content collision tests
+
+Verification:
+
+- `pytest -q tests/test_hitchhiker.py tests/test_client_drift.py tests/test_save_path_inference.py`
+  -> `62 passed`
+- `python3 -m py_compile src/hashall/hitchhiker.py src/hashall/hitchhiker_split.py src/hashall/cli.py tests/test_hitchhiker.py`
+  -> passed
+
+Remaining next step:
+
+- Build the actual Alien repair planner after this hardening: it should choose a
+  stash unique payload view for ARR-anchored hashes only after a selected
+  read-only evidence table confirms exact source tree, target tree, collision
+  state, and rollback path.
 
 ## 2026-05-06 Phase 0 Baseline
 

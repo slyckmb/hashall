@@ -2203,7 +2203,9 @@ def payload_normalize_cross_seed_link_cmd(torrent_hash, rpc_url, do_apply, json_
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option("--json-output", is_flag=True, help="Emit JSON output.")
 @click.option("--limit", type=int, default=None, help="Limit number of catalog groups queried.")
-def payload_hitchhiker_audit_cmd(db, json_output, limit):
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict audit to hash prefix(es).")
+@click.option("--payload-id", "payload_ids", multiple=True, type=int, help="Restrict audit to payload id(s).")
+def payload_hitchhiker_audit_cmd(db, json_output, limit, hash_filters, payload_ids):
     """
     Audit N→1 hitchhiker payload groups (multiple hashes sharing one on-disk tree).
 
@@ -2214,8 +2216,28 @@ def payload_hitchhiker_audit_cmd(db, json_output, limit):
     from hashall.hitchhiker import audit_hitchhiker_groups, format_hitchhiker_report
 
     groups = audit_hitchhiker_groups(db_path=db, limit=limit)
+    groups = _filter_hitchhiker_groups(groups, hash_filters=hash_filters, payload_ids=payload_ids)
     report = format_hitchhiker_report(groups, json_output=json_output)
     print(report)
+
+
+def _filter_hitchhiker_groups(groups, *, hash_filters=(), payload_ids=()):
+    hash_prefixes = tuple(str(item or "").strip().lower() for item in hash_filters if str(item or "").strip())
+    payload_id_set = {int(item) for item in payload_ids if item is not None}
+    if not hash_prefixes and not payload_id_set:
+        return list(groups)
+    selected = []
+    for group in groups:
+        if payload_id_set and int(group.payload_id) in payload_id_set:
+            selected.append(group)
+            continue
+        if hash_prefixes and any(
+            str(hash_val or "").lower().startswith(prefix)
+            for hash_val in group.hashes
+            for prefix in hash_prefixes
+        ):
+            selected.append(group)
+    return selected
 
 
 @payload.command("hitchhiker-split")
@@ -2226,8 +2248,10 @@ def payload_hitchhiker_audit_cmd(db, json_output, limit):
     help="Dry-run (default) shows planned actions. --execute performs hardlinks + qB/RT repoint.",
 )
 @click.option("--limit", type=int, default=None, help="Limit number of groups to split.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict split to hash prefix(es). Required for --execute unless --payload-id is used.")
+@click.option("--payload-id", "payload_ids", multiple=True, type=int, help="Restrict split to payload id(s). Required for --execute unless --hash is used.")
 @click.option("--json-output", is_flag=True, help="Emit JSON output.")
-def payload_hitchhiker_split_cmd(db, dry_run, limit, json_output):
+def payload_hitchhiker_split_cmd(db, dry_run, limit, hash_filters, payload_ids, json_output):
     """
     Split N→1 hitchhiker payload groups: for each secondary hash, create a
     hardlinked copy of the shared content tree under _rehome-unique/<hash16>/
@@ -2242,10 +2266,21 @@ def payload_hitchhiker_split_cmd(db, dry_run, limit, json_output):
     from hashall.hitchhiker import audit_hitchhiker_groups
     from hashall.hitchhiker_split import split_hitchhiker_groups, format_split_report
 
+    if not dry_run and not hash_filters and not payload_ids:
+        raise click.ClickException("hitchhiker-split --execute requires --hash or --payload-id")
+
     groups = audit_hitchhiker_groups(db_path=db)
-    results = split_hitchhiker_groups(groups, dry_run=dry_run, limit=limit)
+    groups = _filter_hitchhiker_groups(groups, hash_filters=hash_filters, payload_ids=payload_ids)
+    results = split_hitchhiker_groups(
+        groups,
+        dry_run=dry_run,
+        limit=limit,
+        include_unsafe=bool(hash_filters or payload_ids),
+    )
     report = format_split_report(results, dry_run=dry_run, json_output=json_output)
     print(report)
+    if not dry_run and any(not result.success for result in results):
+        raise click.ClickException("hitchhiker-split execute failed or selected group was blocked")
 
 
 @payload.command("save-path-audit")
