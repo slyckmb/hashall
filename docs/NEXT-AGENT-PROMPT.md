@@ -3,6 +3,57 @@
 Canonical state document:
 `docs/operations/RUN-STATE.md`
 
+Current repair handoff:
+`docs/operations/RT-QB-REPAIR-HANDOFF-2026-04-09.md`
+
+Prompt-critical context (2026-05-08):
+
+- The fast-refresh project is complete on another branch. This lane is now back
+  to qB/RT repair.
+- Use worktree/branch:
+  - `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260505-112759-codex`
+  - `cr/hashall-20260505-112759-codex`
+- Required invariant:
+  - `/data/media` and `/stash/media` are the same mounted `stash/media`
+    filesystem. Treat them as aliases, never as independent copies.
+- Repair policy:
+  - ARR-hardlinked items belong on `/data/media` / `/stash/media`.
+  - non-ARR-hardlinked seeded payloads belong on `/pool/media`.
+  - qB `~noHL` is advisory only; confirm real filesystem state before mutation.
+- Latest fresh evidence:
+  - qB cache: `5203` rows, `daemon_live`, fetched `2026-05-08T23:07:42Z`
+  - RT cache: `5210` rows, `daemon_live`, fetched `2026-05-08T23:07:30Z`
+  - catalog DB target mtime: `2026-05-08 18:23:08 -0400`
+  - latest read-only audit: qB-only `0`, RT-only `7`, same-hash path drift `11`
+- DONE:
+  - alias-aware client drift tooling landed
+  - selected drift/ranking commands exist
+  - hitchhiker split tooling is selected-safe and fail-closed
+  - live Cinderella pilot `97343f6005da2ed8` succeeded and reduced path drift
+    from `12` to `11`
+- Current queue:
+  - easy: `5c86280a99d10071` Spider-Man Into the Spider-Verse
+  - medium: `20555f704e0ae477`, `e2a7eab3a5be76f7`,
+    `1a06655541134463`, `4052607092357bfe`, `2a4e075ecf0962ba`
+  - hard: `4f454ed3bdf830f0`, `2fb25fdf2ef20ae5`,
+    `29e2b889867a8fbb`, `a5a2b78798009b38`, `c7845e03fe21e7fa`
+- Recommended next step:
+
+  ```bash
+  make client-drift-selected HASH=5c86280a99d10071 JSON=1
+  make client-drift-rank HASH=5c86280a99d10071
+  ```
+
+- Before any apply:
+  - gather direct `stat` / samefile / ARR-anchor evidence
+  - dry-run exact command
+  - identify rollback path
+  - stop for human review
+- Do not work Alien as a simple qB save-path repoint. It is a hitchhiker /
+  ARR-anchor / unique-view planning problem.
+- Do not mutate the `7` RT-only rows until the operator decides whether RT-only
+  means mirror to qB, leave intentional, repair, or remove.
+
 Prompt-critical context (2026-03-12):
 
 - `hashall` is now `0.8.0`.
