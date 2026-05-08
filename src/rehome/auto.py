@@ -1158,6 +1158,8 @@ def run_refresh(
                     elif metrics["dedup_start_time"] is not None:
                         dedup_elapsed = time.time() - metrics["dedup_start_time"]
                         print(f"  dedup elapsed: {_fmt_elapsed(dedup_elapsed)}")
+                    elif skip_dedup:
+                        print(f"  dedup: skipped (profile: {profile} profile disables dedup)")
                     if metrics["parallel_scans_enabled"]:
                         print(f"  parallel scans: enabled (max={parallel_scans})")
 
