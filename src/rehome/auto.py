@@ -775,6 +775,18 @@ def run_refresh(
     # Phase 3B: Track if any scans detected changes (for dedup gating)
     any_root_had_changes = False
 
+    # Phase 4C: Observability metrics
+    import time
+    metrics = {
+        "scan_roots_count": 0,
+        "scan_roots_with_changes": 0,
+        "dedup_skipped_count": 0,
+        "scan_start_time": time.time(),
+        "dedup_start_time": None,
+        "parallel_scans_enabled": parallel_scans > 0,
+        "gate_dedup_enabled": gate_dedup_on_unchanged,
+    }
+
     # Apply backwards-compat fallbacks
     active_root = active_root or seeding_root or ""
     dest_root = dest_root or pool_payload_root or ""
@@ -955,8 +967,10 @@ def run_refresh(
                             drift_policy=drift_policy,
                             max_parallel=parallel_scans,
                         )
-                        # Aggregate results
+                        # Aggregate results and track metrics
                         any_root_had_changes = any(parallel_results.values())
+                        metrics["scan_roots_count"] = len(parallel_results)
+                        metrics["scan_roots_with_changes"] = sum(1 for changed in parallel_results.values() if changed)
                         print(f"  [refresh] parallel scan complete: {len(parallel_results)} roots scanned")
                         for label, had_changes in parallel_results.items():
                             print(f"    {label:<20} {'changes' if had_changes else 'unchanged'}")
@@ -973,6 +987,7 @@ def run_refresh(
                              "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
+                        metrics["scan_roots_count"] += 1
                         # Phase 3B: Detect changes for gating
                         if gate_dedup_on_unchanged:
                             had_changes = _scan_with_change_detection(
@@ -982,6 +997,8 @@ def run_refresh(
                                 drift_policy=drift_policy,
                             )
                             any_root_had_changes = any_root_had_changes or had_changes
+                            if had_changes:
+                                metrics["scan_roots_with_changes"] += 1
 
                         # ── Step 2: scan dest_root ────────────────────────────────────────────
                         if dest_root != active_root:
@@ -994,6 +1011,7 @@ def run_refresh(
                                  "--drift-policy", str(drift_policy)] + db_args,
                             )
                             overall_ok = overall_ok and ok
+                            metrics["scan_roots_count"] += 1
                             # Phase 3B: Detect changes for gating
                             if gate_dedup_on_unchanged:
                                 had_changes = _scan_with_change_detection(
@@ -1003,6 +1021,8 @@ def run_refresh(
                                     drift_policy=drift_policy,
                                 )
                                 any_root_had_changes = any_root_had_changes or had_changes
+                                if had_changes:
+                                    metrics["scan_roots_with_changes"] += 1
 
                         # ── Managed roots: scan first; dedup targets resolved after scan ─────
                         for managed_path, managed_alias in (managed_roots or []):
@@ -1015,6 +1035,7 @@ def run_refresh(
                                  "--drift-policy", str(drift_policy)] + db_args,
                             )
                             overall_ok = overall_ok and ok
+                            metrics["scan_roots_count"] += 1
                             # Phase 3B: Detect changes for gating
                             if gate_dedup_on_unchanged:
                                 had_changes = _scan_with_change_detection(
@@ -1024,15 +1045,20 @@ def run_refresh(
                                     drift_policy=drift_policy,
                                 )
                                 any_root_had_changes = any_root_had_changes or had_changes
+                                if had_changes:
+                                    metrics["scan_roots_with_changes"] += 1
 
                     dedup_aliases = _resolve_refresh_dedup_aliases(catalog_path, all_roots)
                     # Phase 3B: Apply dedup gating based on scan results
                     if gate_dedup_on_unchanged and not any_root_had_changes:
                         skip_dedup = True
+                        metrics["dedup_skipped_count"] = 1
                         print("  [refresh] dedup gate: no changes detected; skipping dedup + link stages")
                     if skip_dedup:
                         print("  dedup_targets skipped")
                     else:
+                        # Phase 4C: Track dedup start time
+                        metrics["dedup_start_time"] = time.time()
                         print(f"  dedup_targets {', '.join(dedup_aliases)}")
 
                         for dev_alias in dedup_aliases:
@@ -1119,6 +1145,21 @@ def run_refresh(
                 else:
                     print("refresh  PARTIAL — one or more steps failed (see above)")
                 print(f"log  {log_path}")
+
+                # Phase 4C: Report observability metrics
+                if metrics["scan_roots_count"] > 0:
+                    scan_elapsed = time.time() - metrics["scan_start_time"]
+                    print()
+                    print("observability metrics:")
+                    print(f"  scans: {metrics['scan_roots_count']} roots, {metrics['scan_roots_with_changes']} with changes")
+                    print(f"  scan elapsed: {_fmt_elapsed(scan_elapsed)}")
+                    if metrics["dedup_skipped_count"] > 0:
+                        print(f"  dedup: skipped (gate: no changes detected)")
+                    elif metrics["dedup_start_time"] is not None:
+                        dedup_elapsed = time.time() - metrics["dedup_start_time"]
+                        print(f"  dedup elapsed: {_fmt_elapsed(dedup_elapsed)}")
+                    if metrics["parallel_scans_enabled"]:
+                        print(f"  parallel scans: enabled (max={parallel_scans})")
 
                 logger.dump_json(json_path)
     finally:
