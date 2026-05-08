@@ -2201,11 +2201,24 @@ _REFRESH_PROFILE_CHOICES = ("freshness", "maintenance", "integrity")
 @click.option("--seeding-root", default=None, hidden=True)
 @click.option("--pool-payload-root", default=None, hidden=True)
 @click.option("--catalog", default=None, help="Override config catalog path")
+@click.option(
+    "--gate-dedup-on-unchanged/--no-gate-dedup-on-unchanged",
+    "gate_dedup_on_unchanged",
+    default=False,
+    help="Phase 3B: Skip dedup if no changes detected in scanned roots.",
+)
+@click.option(
+    "--parallel-scans",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Phase 4A: Max concurrent scans (0=disabled, use subprocess; recommended: 4).",
+)
 def refresh_cmd(profile, workers, scan_hash_mode, drift_policy, dedup, payload_upgrade_missing, verbose, debug,
                 payload_source, rt_session_dir,
                 active_device, dest_device, active_root, dest_root,
                 stash_device, pool_device, seeding_root, pool_payload_root,
-                catalog):
+                catalog, gate_dedup_on_unchanged, parallel_scans):
     """Scan managed roots and sync torrent-backed payload evidence.
 
     The freshness profile is intended for client repair tooling: metadata-based
@@ -2245,6 +2258,8 @@ def refresh_cmd(profile, workers, scan_hash_mode, drift_policy, dedup, payload_u
         debug=debug,
         payload_source=str(payload_source).lower(),
         rt_session_dir=str(rt_session_dir),
+        gate_dedup_on_unchanged=gate_dedup_on_unchanged,
+        parallel_scans=parallel_scans,
     )
     if exit_code != 0:
         raise click.exceptions.Exit(exit_code)
