@@ -694,7 +694,19 @@ class QBittorrentClient:
         category: Optional[str] = None,
         tag: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Fetch normalized raw torrent payloads from qB."""
+        """Fetch normalized raw torrent payloads from qB.
+
+        Proactively uses cache if fresh (< 30s), otherwise hits live API.
+        Falls back to stale cache on API failures.
+        """
+        # Proactively check if cache is fresh enough
+        cached_fresh = self._cached_payloads(
+            category=category, tag=tag, max_age_s=30.0
+        )
+        if cached_fresh:
+            self.last_error = None
+            return cached_fresh
+
         try:
             self._ensure_authenticated()
         except RuntimeError as e:
