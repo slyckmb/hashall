@@ -23,6 +23,7 @@ from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 
 BATCH_SIZE = 500
+BATCH_SIZE_METADATA_MODE = 2000  # Larger batches for read-mostly metadata-only scans
 
 T = TypeVar("T")
 
@@ -1558,6 +1559,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     progress = TwoLineProgress(total=file_count, prefix="📦 Scanning", unit="files", enabled=use_two_line)
     progress_position = tqdm_position
     progress_file = None
+    commit_threshold = BATCH_SIZE_METADATA_MODE if drift_policy == "metadata" else BATCH_SIZE
 
     if not parallel:
         # Sequential scanning
@@ -1596,7 +1598,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 progress.update(desc=work_item['representative_path'], advance=len(results))
 
                 # Commit periodically
-                if stats.files_scanned % 500 == 0:
+                if stats.files_scanned % commit_threshold == 0:
                     conn.commit()
 
             conn.commit()
@@ -1635,7 +1637,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 stats.files_scanned += len(results)
 
                 # Commit periodically
-                if stats.files_scanned % 500 == 0:
+                if stats.files_scanned % commit_threshold == 0:
                     conn.commit()
 
             conn.commit()
@@ -1644,7 +1646,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         # Parallel scanning
         workers = max(1, workers or (os.cpu_count() or 1))
         max_inflight = workers * 10
-        batch_size = batch_size or BATCH_SIZE
+        effective_batch_size = BATCH_SIZE_METADATA_MODE if drift_policy == "metadata" else BATCH_SIZE
+        batch_size = batch_size or effective_batch_size
         pending = set()
         batch_rows = []
         work_iter = iter(work_items)
