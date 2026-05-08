@@ -93,6 +93,32 @@ class ScanStats:
     safety_guard_triggered: bool = False
 
 
+@dataclass
+class ScanResult:
+    """Result of a filesystem scan operation (Phase 3A: changed-scope gating).
+
+    Combines ScanStats + metadata for changed-scope gating, backward compatible with
+    existing code that expects ScanStats fields.
+    """
+    # Core metadata for gating
+    root_path: Path
+    device_id: int
+    fs_uuid: str
+    had_changes: bool  # True if any additions, updates, or deletions
+
+    # ScanStats fields (backward compatibility)
+    files_scanned: int = 0
+    files_added: int = 0
+    files_updated: int = 0
+    files_deleted: int = 0
+    files_unchanged: int = 0
+    files_skipped_other_device: int = 0
+    bytes_hashed: int = 0
+    inode_groups_hashed: int = 0
+    hardlinks_propagated: int = 0
+    safety_guard_triggered: bool = False
+
+
 def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
     """
     Load existing files from DB for incremental scan (scoped to root_path).
@@ -2037,4 +2063,21 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     # Close connection to prevent resource leaks with hierarchical scanning
     conn.close()
 
-    return stats
+    # Phase 3A: Return ScanResult with had_changes flag for gating
+    had_changes = (stats.files_added + stats.files_updated + stats.files_deleted) > 0
+    return ScanResult(
+        root_path=canonical_root,
+        device_id=device_id,
+        fs_uuid=fs_uuid,
+        had_changes=had_changes,
+        files_scanned=stats.files_scanned,
+        files_added=stats.files_added,
+        files_updated=stats.files_updated,
+        files_deleted=stats.files_deleted,
+        files_unchanged=stats.files_unchanged,
+        files_skipped_other_device=stats.files_skipped_other_device,
+        bytes_hashed=stats.bytes_hashed,
+        inode_groups_hashed=stats.inode_groups_hashed,
+        hardlinks_propagated=stats.hardlinks_propagated,
+        safety_guard_triggered=stats.safety_guard_triggered,
+    )
