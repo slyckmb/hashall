@@ -8,6 +8,7 @@ REHOME_CLI := python3 -m rehome.cli
 CATALOG ?= $(HOME)/.hashall/catalog.db
 
 .PHONY: help test db-refresh db-refresh-verbose db-refresh-fast db-refresh-maintenance db-refresh-integrity \
+	db-refresh-fast-gated db-refresh-fast-parallel db-refresh-fast-gated-parallel \
         rt-qb-mirror-drift rt-qb-mirror-apply rt-qb-mirror-pause-seeding rt-qb-mirror-queue-apply \
         client-drift-audit client-drift-path-drift client-drift-selected \
         client-drift-rank \
@@ -31,6 +32,9 @@ help:
 	@echo "  make test                    — run test suite"
 	@echo "  make db-refresh              — maintenance refresh (scan + dedup + payload SHA256 upgrade)"
 	@echo "  make db-refresh-fast         — fast freshness refresh for client-repair evidence"
+	@echo "  make db-refresh-fast-gated   — fast refresh + skip dedup if no changes (Phase 3B)"
+	@echo "  make db-refresh-fast-parallel — fast refresh with parallel 4-root scanning (Phase 4A)"
+	@echo "  make db-refresh-fast-gated-parallel — fast refresh with both optimizations (recommended)"
 	@echo "  make db-refresh-maintenance  — explicit maintenance refresh"
 	@echo "  make db-refresh-integrity    — slow full rehash integrity refresh"
 	@echo "  make db-refresh-verbose      — maintenance refresh with verbose output and logging"
@@ -84,6 +88,15 @@ db-refresh:
 
 db-refresh-fast:
 	python3 -m hashall refresh --profile freshness $(REFRESH_OPTS)
+
+db-refresh-fast-gated:
+	python3 -m hashall refresh --profile freshness --gate-dedup-on-unchanged $(REFRESH_OPTS)
+
+db-refresh-fast-parallel:
+	python3 -m hashall refresh --profile freshness --parallel-scans 4 $(REFRESH_OPTS)
+
+db-refresh-fast-gated-parallel:
+	python3 -m hashall refresh --profile freshness --gate-dedup-on-unchanged --parallel-scans 4 $(REFRESH_OPTS)
 
 db-refresh-maintenance:
 	python3 -m hashall refresh --profile maintenance $(REFRESH_OPTS)
