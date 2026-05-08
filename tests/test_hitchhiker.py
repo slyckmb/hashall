@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from hashall.cli import cli
 from hashall.hitchhiker import HitchhikerStatus, audit_hitchhiker_groups, query_hitchhiker_groups
+from hashall.hitchhiker_plan import build_hitchhiker_repair_plan
 from hashall.hitchhiker_split import execute_split_group, plan_split_actions, split_hitchhiker_groups
 from hashall.rtorrent import RTSessionEntry
 
@@ -321,3 +322,93 @@ def test_selected_split_reports_blocked_group():
     assert len(results) == 1
     assert results[0].success is False
     assert "group not safe to split" in results[0].error
+
+
+def test_hitchhiker_plan_reports_selected_path_drift_sources(tmp_path):
+    db = tmp_path / "hitchhiker.db"
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    pool_seed.mkdir(parents=True)
+    stash_seed.mkdir(parents=True)
+    qb_content = pool_seed / "Alien.Resurrection.mkv"
+    rt_content = stash_seed / "Alien.Resurrection.mkv"
+    qb_content.write_text("payload", encoding="utf-8")
+    rt_content.write_text("payload", encoding="utf-8")
+    selected_hash = "4f454ed3bdf830f0aaa111"
+    stale_hash = "bbb222"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY,
+            payload_hash TEXT,
+            root_path TEXT,
+            file_count INTEGER DEFAULT 1,
+            total_bytes INTEGER DEFAULT 7
+        );
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER NOT NULL,
+            save_path TEXT DEFAULT '',
+            FOREIGN KEY (payload_id) REFERENCES payloads(payload_id)
+        );
+    """)
+    conn.execute(
+        "INSERT INTO payloads VALUES (10, 'payloadhash1', ?, 1, 7)",
+        (str(qb_content),),
+    )
+    conn.execute(
+        "INSERT INTO torrent_instances VALUES (?, 10, ?)",
+        (selected_hash, str(pool_seed)),
+    )
+    conn.execute(
+        "INSERT INTO torrent_instances VALUES (?, 10, ?)",
+        (stale_hash, str(pool_seed)),
+    )
+    conn.commit()
+    conn.close()
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    qb_cache.write_text(
+        f"""[
+          {{
+            "hash": "{selected_hash}",
+            "name": "Alien.Resurrection.mkv",
+            "save_path": "{pool_seed}",
+            "content_path": "{qb_content}",
+            "state": "stoppedUP",
+            "progress": 1
+          }}
+        ]""",
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        f"""[
+          {{
+            "hash": "{selected_hash}",
+            "name": "Alien.Resurrection.mkv",
+            "directory": "{rt_content}",
+            "state": "stalledUP",
+            "complete": 1
+          }}
+        ]""",
+        encoding="utf-8",
+    )
+
+    plan = build_hitchhiker_repair_plan(
+        db_path=db,
+        hash_filters=(selected_hash[:16],),
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+    )
+
+    group = plan["groups"][0]
+    selected = [item for item in group["hash_items"] if item["hash"] == selected_hash][0]
+    assert group["status"] == "blocked"
+    assert selected["path_drift"] is True
+    assert "same_hash_qb_rt_path_drift_requires_source_selection" in selected["blockers"]
+    sources = {(item["source"], item["path"]) for item in selected["source_candidates"]}
+    assert ("qb_content", str(qb_content)) in sources
+    assert ("rt_content", str(rt_content)) in sources

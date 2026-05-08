@@ -74,6 +74,8 @@ def audit_hitchhiker_groups(
     db_path: Optional[str] = None,
     limit: Optional[int] = None,
     session_dir: Path = DEFAULT_RT_SESSION_DIR,
+    qb_cache_file: Path = DEFAULT_QB_CACHE_FILE,
+    rt_cache_file: Path | None = None,
 ) -> list[HitchhikerGroup]:
     """
     Audit all N→1 payload groups: classify by safety to split.
@@ -102,7 +104,7 @@ def audit_hitchhiker_groups(
     # Load qB state from file cache (avoids live API hit)
     qb_by_hash: dict = {}
     try:
-        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
+        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=qb_cache_file)
         if cached_raw is not None:
             qb_client = QBittorrentClient()
             for r in cached_raw:
@@ -123,7 +125,8 @@ def audit_hitchhiker_groups(
     # the safer source for split/path-alignment checks.
     rt_by_hash: dict = {}
     try:
-        snapshot = load_rt_cache_snapshot() or {}
+        kwargs = {"cache_file": rt_cache_file} if rt_cache_file is not None else {}
+        snapshot = load_rt_cache_snapshot(**kwargs) or {}
         rows = snapshot.get("rows") or []
         rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
     except Exception:

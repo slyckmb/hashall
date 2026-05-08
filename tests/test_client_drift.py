@@ -1265,7 +1265,193 @@ def test_client_drift_apply_rejects_remove_actions() -> None:
     )
 
     assert result.exit_code != 0
-    assert "remove actions are audit-only" in result.output
+    assert "Invalid value for '--action'" in result.output
+
+
+def test_client_drift_apply_path_drift_dry_run_does_not_mutate_clients(tmp_path: Path, monkeypatch) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One"
+    rt_content = stash_seed / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    (rt_content / "file.bin").write_text("payload", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps(
+            {
+                "pool_roots": [str(tmp_path / "pool" / "torrents" / "seeding")],
+                "stash_roots": [str(tmp_path / "stash" / "torrents" / "seeding")],
+                "arr_library_roots": [str(library_root)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_client():
+        raise AssertionError("dry-run must not construct qB client")
+
+    def fail_rt(*args, **kwargs):
+        raise AssertionError("dry-run must not repoint RT")
+
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", fail_client)
+    monkeypatch.setattr("hashall.rtorrent.rt_apply_directory_repoint", fail_rt)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "client-drift",
+            "apply",
+            "--action",
+            "repoint_rt_to_qb_path",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--anchor-scan-max-files",
+            "1000",
+            "--hash",
+            torrent_hash,
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "selected: 1" in result.output
+    assert "repoint_rt_to_qb_path" in result.output
+
+
+def test_client_drift_apply_path_drift_can_set_qb_location(tmp_path: Path, monkeypatch) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One"
+    rt_content = stash_seed / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    rt_file = rt_content / "file.bin"
+    rt_file.write_text("payload", encoding="utf-8")
+    (library_root / "Release.One.bin").hardlink_to(rt_file)
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps(
+            {
+                "pool_roots": [str(tmp_path / "pool" / "torrents" / "seeding")],
+                "stash_roots": [str(tmp_path / "stash" / "torrents" / "seeding")],
+                "arr_library_roots": [str(library_root)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeQbit:
+        last_error = None
+
+        def __init__(self) -> None:
+            self.locations: list[tuple[str, str]] = []
+
+        def set_location(self, torrent_hash: str, target: str) -> bool:
+            self.locations.append((torrent_hash, target))
+            return True
+
+    fake = FakeQbit()
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", lambda: fake)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "client-drift",
+            "apply",
+            "--action",
+            "repoint_qb_to_rt_path",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--anchor-scan-max-files",
+            "1000",
+            "--hash",
+            torrent_hash,
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+            "--sleep-row",
+            "0",
+            "--apply",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert fake.locations == [(torrent_hash, str(stash_seed))]
 
 
 def test_client_drift_journal_does_not_skip_failed_verify(tmp_path: Path) -> None:
