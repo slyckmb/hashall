@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
+from hashall.scan import scan_path  # Phase 3B: For in-process scans with changed-scope gating
 
 # States acceptable after a successful rehome (lower-case for comparison).
 SEED_READY = {"uploading", "stalledup", "queuedup", "forcedup", "pausedup", "stoppedup"}
@@ -625,6 +626,37 @@ def _inline_verify(
     return ok, summary
 
 
+# Phase 3B: In-process scan with change detection
+def _scan_with_change_detection(
+    catalog_path: Path,
+    root_path: str,
+    *,
+    workers: int = 8,
+    scan_hash_mode: str = "fast",
+    drift_policy: str = "metadata",
+) -> bool:
+    """Scan a root in-process and return whether changes were detected.
+
+    Returns True if had_changes, False otherwise.
+    """
+    if not root_path or not Path(root_path).exists():
+        return False
+    try:
+        result = scan_path(
+            db_path=catalog_path,
+            root_path=Path(root_path),
+            parallel=True,
+            workers=workers,
+            hash_mode=scan_hash_mode,
+            drift_policy=drift_policy,
+            quiet=True,
+        )
+        return bool(result.had_changes)
+    except Exception:
+        # If in-process scan fails, assume no changes to be conservative
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Preflight refresh
 # ---------------------------------------------------------------------------
@@ -646,6 +678,7 @@ def run_refresh(
     debug: bool = False,
     payload_source: str = "qb",
     rt_session_dir: str = str(DEFAULT_RT_SESSION_DIR),
+    gate_dedup_on_unchanged: bool = False,  # Phase 3B: Skip dedup if no changes detected
     # Backwards-compat params (old names)
     seeding_root: "str | None" = None,
     pool_payload_root: "str | None" = None,
@@ -667,6 +700,10 @@ def run_refresh(
       4b. hashall link execute <plan_id> [--dry-run]                     (if dedup enabled)
       5. hashall payload sync [--upgrade-missing] --source <payload_source>
 
+    Phase 3B gate_dedup_on_unchanged:
+      If enabled and no changes detected in any scanned root (all had_changes=False),
+      skip dedup/link stages and proceed directly to payload sync.
+
     Returns exit code (0 = all steps succeeded, 1 = at least one failed).
     """
     profile_settings = resolve_refresh_profile(
@@ -681,6 +718,9 @@ def run_refresh(
     drift_policy = str(profile_settings["drift_policy"])
     skip_dedup = bool(profile_settings["skip_dedup"])
     payload_upgrade_missing = bool(profile_settings["payload_upgrade_missing"])
+
+    # Phase 3B: Track if any scans detected changes (for dedup gating)
+    any_root_had_changes = False
 
     # Apply backwards-compat fallbacks
     active_root = active_root or seeding_root or ""
@@ -851,6 +891,15 @@ def run_refresh(
                          "--drift-policy", str(drift_policy)] + db_args,
                     )
                     overall_ok = overall_ok and ok
+                    # Phase 3B: Detect changes for gating
+                    if gate_dedup_on_unchanged:
+                        had_changes = _scan_with_change_detection(
+                            catalog_path, active_root,
+                            workers=workers,
+                            scan_hash_mode=scan_hash_mode,
+                            drift_policy=drift_policy,
+                        )
+                        any_root_had_changes = any_root_had_changes or had_changes
 
                     # ── Step 2: scan dest_root ────────────────────────────────────────────
                     if dest_root != active_root:
@@ -863,6 +912,15 @@ def run_refresh(
                              "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
+                        # Phase 3B: Detect changes for gating
+                        if gate_dedup_on_unchanged:
+                            had_changes = _scan_with_change_detection(
+                                catalog_path, dest_root,
+                                workers=workers,
+                                scan_hash_mode=scan_hash_mode,
+                                drift_policy=drift_policy,
+                            )
+                            any_root_had_changes = any_root_had_changes or had_changes
 
                     # ── Managed roots: scan first; dedup targets resolved after scan ─────
                     for managed_path, managed_alias in (managed_roots or []):
@@ -875,8 +933,21 @@ def run_refresh(
                              "--drift-policy", str(drift_policy)] + db_args,
                         )
                         overall_ok = overall_ok and ok
+                        # Phase 3B: Detect changes for gating
+                        if gate_dedup_on_unchanged:
+                            had_changes = _scan_with_change_detection(
+                                catalog_path, managed_path,
+                                workers=workers,
+                                scan_hash_mode=scan_hash_mode,
+                                drift_policy=drift_policy,
+                            )
+                            any_root_had_changes = any_root_had_changes or had_changes
 
                     dedup_aliases = _resolve_refresh_dedup_aliases(catalog_path, all_roots)
+                    # Phase 3B: Apply dedup gating based on scan results
+                    if gate_dedup_on_unchanged and not any_root_had_changes:
+                        skip_dedup = True
+                        print("  [refresh] dedup gate: no changes detected; skipping dedup + link stages")
                     if skip_dedup:
                         print("  dedup_targets skipped")
                     else:
