@@ -1149,3 +1149,312 @@ def build_client_drift_report(
         "action_counts": dict(action_counts),
     }
     return {"summary": summary, "rows": drift_rows}
+
+
+def _catalog_context_for_hashes(catalog_path: Path | None, torrent_hashes: Iterable[str]) -> dict[str, dict[str, Any]]:
+    if catalog_path is None:
+        return {}
+    path = Path(catalog_path).expanduser()
+    if not path.exists():
+        return {}
+    wanted = sorted({_norm_hash(value) for value in torrent_hashes if _norm_hash(value)})
+    if not wanted:
+        return {}
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(payloads)").fetchall()
+        }
+        torrent_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(torrent_instances)").fetchall()
+        }
+        payload_hash_expr = "p.payload_hash" if "payload_hash" in payload_columns else "''"
+        payload_status_expr = "p.status" if "status" in payload_columns else "''"
+        payload_file_count_expr = "p.file_count" if "file_count" in payload_columns else "0"
+        payload_total_bytes_expr = "p.total_bytes" if "total_bytes" in payload_columns else "0"
+        payload_device_expr = "p.device_id" if "device_id" in payload_columns else "0"
+        ti_save_path_expr = "ti.save_path" if "save_path" in torrent_columns else "''"
+        placeholders = ",".join("?" for _ in wanted)
+        rows = conn.execute(
+            f"""
+            SELECT lower(ti.torrent_hash) AS torrent_hash,
+                   ti.payload_id,
+                   {ti_save_path_expr} AS torrent_save_path,
+                   {payload_hash_expr} AS payload_hash,
+                   p.root_path,
+                   {payload_status_expr} AS payload_status,
+                   {payload_file_count_expr} AS file_count,
+                   {payload_total_bytes_expr} AS total_bytes,
+                   {payload_device_expr} AS device_id
+            FROM torrent_instances ti
+            JOIN payloads p ON p.payload_id = ti.payload_id
+            WHERE lower(ti.torrent_hash) IN ({placeholders})
+            ORDER BY ti.torrent_hash
+            """,
+            wanted,
+        ).fetchall()
+        context: dict[str, dict[str, Any]] = {}
+        by_payload_hash: dict[str, list[sqlite3.Row]] = {}
+        payload_ids = sorted({int(row["payload_id"] or 0) for row in rows if row["payload_id"]})
+        payload_hashes = sorted({str(row["payload_hash"] or "") for row in rows if row["payload_hash"]})
+        if payload_hashes and "payload_hash" in payload_columns:
+            hash_placeholders = ",".join("?" for _ in payload_hashes)
+            family_rows = conn.execute(
+                f"""
+                SELECT p.payload_id, p.payload_hash, p.root_path,
+                       {payload_status_expr} AS payload_status,
+                       {payload_file_count_expr} AS file_count,
+                       {payload_total_bytes_expr} AS total_bytes,
+                       COUNT(ti.torrent_hash) AS torrent_count
+                FROM payloads p
+                LEFT JOIN torrent_instances ti ON ti.payload_id = p.payload_id
+                WHERE p.payload_hash IN ({hash_placeholders})
+                GROUP BY p.payload_id
+                ORDER BY p.payload_hash, p.payload_id
+                """,
+                payload_hashes,
+            ).fetchall()
+            for row in family_rows:
+                by_payload_hash.setdefault(str(row["payload_hash"] or ""), []).append(row)
+        torrent_counts: dict[int, int] = {}
+        if payload_ids:
+            id_placeholders = ",".join("?" for _ in payload_ids)
+            count_rows = conn.execute(
+                f"""
+                SELECT payload_id, COUNT(*) AS torrent_count
+                FROM torrent_instances
+                WHERE payload_id IN ({id_placeholders})
+                GROUP BY payload_id
+                """,
+                payload_ids,
+            ).fetchall()
+            torrent_counts = {int(row["payload_id"] or 0): int(row["torrent_count"] or 0) for row in count_rows}
+        for row in rows:
+            payload_hash = str(row["payload_hash"] or "")
+            sibling_payloads = [
+                {
+                    "payload_id": int(sib["payload_id"] or 0),
+                    "payload_hash": str(sib["payload_hash"] or ""),
+                    "root_path": str(sib["root_path"] or ""),
+                    "status": str(sib["payload_status"] or ""),
+                    "file_count": int(sib["file_count"] or 0),
+                    "total_bytes": int(sib["total_bytes"] or 0),
+                    "torrent_count": int(sib["torrent_count"] or 0),
+                }
+                for sib in by_payload_hash.get(payload_hash, [])
+            ]
+            payload_id = int(row["payload_id"] or 0)
+            context[str(row["torrent_hash"])] = {
+                "payload_id": payload_id,
+                "payload_hash": payload_hash,
+                "root_path": str(row["root_path"] or ""),
+                "save_path": str(row["torrent_save_path"] or ""),
+                "status": str(row["payload_status"] or ""),
+                "file_count": int(row["file_count"] or 0),
+                "total_bytes": int(row["total_bytes"] or 0),
+                "device_id": int(row["device_id"] or 0),
+                "payload_torrent_count": int(torrent_counts.get(payload_id, 0)),
+                "sibling_payloads": sibling_payloads,
+                "sibling_payload_count": len([sib for sib in sibling_payloads if int(sib["payload_id"]) != payload_id]),
+            }
+        return context
+    finally:
+        conn.close()
+
+
+def _arr_status_from_anchor(anchor: dict[str, Any]) -> str:
+    value = anchor.get("has_arr_anchor")
+    if value is True:
+        return "linked_to_arr"
+    if value is False:
+        return "not_linked_to_arr"
+    return "unknown"
+
+
+def _difficulty_for_path_drift(row: dict[str, Any], catalog: dict[str, Any]) -> tuple[str, list[str]]:
+    placement = row.get("placement") or {}
+    blockers = list(row.get("blockers") or [])
+    reasons: list[str] = []
+    action = str(row.get("action") or "")
+    desired = str(placement.get("desired") or "")
+    qb_kind = str(placement.get("qb_kind") or "")
+    rt_kind = str(placement.get("rt_kind") or "")
+    file_count = int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0)
+    payload_torrent_count = int(catalog.get("payload_torrent_count") or 0)
+    sibling_payload_count = int(catalog.get("sibling_payload_count") or 0)
+
+    if action in {"repoint_rt_to_qb_path", "repoint_qb_to_rt_path"}:
+        reasons.append(f"tool_selected:{action}")
+        level = "easy"
+    elif desired and qb_kind == desired and rt_kind == desired:
+        reasons.append("both_clients_on_desired_root_class")
+        level = "easy"
+    elif desired and (qb_kind == desired or rt_kind == desired):
+        reasons.append("one_client_on_desired_root_class")
+        level = "medium"
+    elif desired:
+        reasons.append("no_client_on_desired_root_class")
+        level = "hard"
+    else:
+        reasons.append("placement_unknown")
+        level = "hard"
+
+    if "both_clients_on_required_placement_but_paths_differ" in blockers:
+        reasons.append("same_root_class_path_choice_needed")
+    if "no_client_on_required_pool_placement" in blockers or "no_client_on_required_stash_placement" in blockers:
+        reasons.append("needs_rehome_or_missing_target_discovery")
+        level = "hard"
+    if payload_torrent_count > 1:
+        reasons.append(f"n_to_1_payload:{payload_torrent_count}_hashes")
+        level = "hard"
+    if sibling_payload_count > 0:
+        reasons.append(f"sibling_payloads:{sibling_payload_count}")
+        if level == "easy":
+            level = "medium"
+    if file_count > 1 and level == "easy":
+        reasons.append(f"multi_file:{file_count}")
+        level = "medium"
+    if placement.get("qb_has_nohl_tag"):
+        reasons.append("qb_nohl_advisory")
+    if "rehome_verify_pending" in str((row.get("qb") or {}).get("tags") or "") and level == "easy":
+        reasons.append("rehome_verify_pending")
+        level = "medium"
+    return level, reasons
+
+
+def build_path_drift_rank_report(
+    *,
+    qb_cache_file: Path = DEFAULT_QB_CACHE_FILE,
+    rt_cache_file: Path = DEFAULT_RT_SHARED_CACHE_FILE,
+    rt_session_dir: Path = DEFAULT_RT_SESSION_DIR,
+    policy: ClientDriftPolicy | None = None,
+    hash_filters: Iterable[str] = (),
+    catalog_path: Path | None = DEFAULT_CATALOG_PATH,
+) -> dict[str, Any]:
+    active_policy = policy or default_policy()
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache_file,
+        rt_cache_file=rt_cache_file,
+        rt_session_dir=rt_session_dir,
+        policy=active_policy,
+        hash_filters=hash_filters,
+        catalog_path=catalog_path,
+    )
+    rows = [row for row in report.get("rows") or [] if row.get("side") == "path_drift"]
+    catalog_by_hash = _catalog_context_for_hashes(catalog_path, (row.get("hash") for row in rows))
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        placement = row.get("placement") or {}
+        anchor = placement.get("anchor_scan") or {}
+        catalog = catalog_by_hash.get(torrent_hash, {})
+        difficulty, difficulty_reasons = _difficulty_for_path_drift(row, catalog)
+        items.append(
+            {
+                "hash": torrent_hash,
+                "name": row.get("name") or "",
+                "difficulty": difficulty,
+                "difficulty_reasons": difficulty_reasons,
+                "action": row.get("action") or "",
+                "desired_root": placement.get("desired") or "",
+                "arr_status": _arr_status_from_anchor(anchor),
+                "arr_anchor_source": anchor.get("source") or "",
+                "arr_anchor_paths": anchor.get("anchor_paths") or [],
+                "qb_nohl": bool(placement.get("qb_has_nohl_tag")),
+                "qb_root_kind": placement.get("qb_kind") or "",
+                "rt_root_kind": placement.get("rt_kind") or "",
+                "qb_save_path": placement.get("qb_save_path") or "",
+                "qb_content_path": placement.get("qb_content_path") or "",
+                "rt_save_path": placement.get("rt_save_path") or "",
+                "rt_target_qb_save_path": placement.get("rt_target_qb_save_path") or "",
+                "rt_content_path": placement.get("rt_content_path") or "",
+                "file_count": int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0),
+                "blockers": row.get("blockers") or [],
+                "tags": (row.get("qb") or {}).get("tags") or "",
+                "catalog": catalog,
+            }
+        )
+
+    order = {"easy": 0, "medium": 1, "hard": 2}
+    items.sort(
+        key=lambda item: (
+            order.get(str(item["difficulty"]), 99),
+            int(item.get("file_count") or 0),
+            str(item.get("name") or "").lower(),
+        )
+    )
+    groups = {
+        level: [item for item in items if item["difficulty"] == level]
+        for level in ("easy", "medium", "hard")
+    }
+    return {
+        "summary": {
+            "path_drift": len(items),
+            "easy": len(groups["easy"]),
+            "medium": len(groups["medium"]),
+            "hard": len(groups["hard"]),
+            "anchor_scan_max_files": active_policy.anchor_scan_max_files,
+            "catalog_path": str(catalog_path.expanduser()) if catalog_path is not None else "",
+        },
+        "groups": groups,
+        "items": items,
+        "source_summary": report.get("summary") or {},
+    }
+
+
+def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool = False) -> str:
+    if json_output:
+        return json.dumps(report, indent=2)
+    summary = report.get("summary") or {}
+    lines = [
+        "Path Drift Repair Ranking",
+        (
+            f"  total={summary.get('path_drift', 0)} "
+            f"easy={summary.get('easy', 0)} medium={summary.get('medium', 0)} hard={summary.get('hard', 0)} "
+            f"anchor_scan_max_files={summary.get('anchor_scan_max_files', 0)}"
+        ),
+        "",
+    ]
+    for level in ("easy", "medium", "hard"):
+        items = (report.get("groups") or {}).get(level) or []
+        lines.append(f"{level.upper()}: {len(items)}")
+        for item in items:
+            catalog = item.get("catalog") or {}
+            sibling_payloads = catalog.get("sibling_payloads") or []
+            sibling_roots = [
+                str(sib.get("root_path") or "")
+                for sib in sibling_payloads
+                if int(sib.get("payload_id") or 0) != int(catalog.get("payload_id") or 0)
+            ]
+            lines.append(f"  {str(item.get('hash') or '')[:16]}  {item.get('name')}")
+            lines.append(
+                f"    desired={item.get('desired_root') or '-'} arr={item.get('arr_status')} "
+                f"noHL={'yes' if item.get('qb_nohl') else 'no'} files={item.get('file_count')}"
+            )
+            lines.append(
+                f"    qb={item.get('qb_root_kind') or '-'}:{item.get('qb_save_path')}"
+            )
+            lines.append(
+                f"    rt={item.get('rt_root_kind') or '-'}:{item.get('rt_target_qb_save_path') or item.get('rt_save_path')}"
+            )
+            if catalog:
+                lines.append(
+                    f"    catalog_payload={catalog.get('payload_id') or '-'} "
+                    f"payload_torrents={catalog.get('payload_torrent_count') or 0} "
+                    f"root={catalog.get('root_path') or '-'}"
+                )
+            if sibling_roots:
+                lines.append(f"    sibling_payload_roots={len(sibling_roots)}")
+                for root in sibling_roots[:3]:
+                    lines.append(f"      - {root}")
+            reasons = ",".join(item.get("difficulty_reasons") or [])
+            blockers = ",".join(item.get("blockers") or [])
+            if reasons:
+                lines.append(f"    rank_reasons={reasons}")
+            if blockers:
+                lines.append(f"    blockers={blockers}")
+        lines.append("")
+    return "\n".join(lines).rstrip()

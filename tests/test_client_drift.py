@@ -12,6 +12,7 @@ from hashall.cli import _rt_qb_monitor_classify
 from hashall.client_drift import (
     ClientDriftPolicy,
     build_client_drift_report,
+    build_path_drift_rank_report,
     default_policy,
 )
 
@@ -1109,6 +1110,107 @@ def test_client_drift_nohl_tag_is_advisory_not_proof(tmp_path: Path) -> None:
     assert "qb_nohl_tag_present_advisory" in row["reasons"]
     assert "hardlink_anchor_evidence_required_for_placement" in row["blockers"]
     assert row["placement"]["proposed_source_client"] == ""
+
+
+def test_path_drift_rank_report_includes_arr_nohl_and_sibling_payloads(tmp_path: Path) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One"
+    rt_content = stash_seed / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    rt_file = rt_content / "file.bin"
+    rt_file.write_text("payload", encoding="utf-8")
+    (library_root / "Release.One.bin").hardlink_to(rt_file)
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.executescript("""
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT,
+            file_count INTEGER,
+            total_bytes INTEGER,
+            status TEXT
+        );
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER,
+            save_path TEXT
+        );
+    """)
+    conn.execute(
+        "INSERT INTO payloads VALUES (1, 'payload-shared', 1, ?, 1, 7, 'complete')",
+        (str(qb_content),),
+    )
+    conn.execute(
+        "INSERT INTO payloads VALUES (2, 'payload-shared', 2, ?, 1, 7, 'complete')",
+        (str(rt_content),),
+    )
+    conn.execute(
+        "INSERT INTO torrent_instances VALUES ('aaa111', 1, ?)",
+        (str(pool_seed),),
+    )
+    conn.execute(
+        "INSERT INTO torrent_instances VALUES ('bbb222', 2, ?)",
+        (str(stash_seed),),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    _write_rt_session(session_dir, "aaa111", rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": "aaa111",
+                "name": "Release.One",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+                "tags": "~noHL, private",
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": "aaa111",
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_path_drift_rank_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        catalog_path=catalog,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool" / "torrents" / "seeding"),),
+            stash_roots=(str(tmp_path / "stash" / "torrents" / "seeding"),),
+            arr_library_roots=(str(library_root),),
+            anchor_scan_max_files=1000,
+        ),
+    )
+
+    item = report["items"][0]
+    assert item["arr_status"] == "linked_to_arr"
+    assert item["qb_nohl"] is True
+    assert item["qb_root_kind"] == "pool"
+    assert item["rt_root_kind"] == "stash"
+    assert item["catalog"]["sibling_payload_count"] == 1
+    assert item["catalog"]["sibling_payloads"][1]["root_path"] == str(rt_content)
 
 
 def test_client_drift_remove_requires_explicit_policy(tmp_path: Path) -> None:

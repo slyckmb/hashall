@@ -3357,6 +3357,51 @@ def client_drift_audit_cmd(
             print(f"      reasons={reason}")
 
 
+@client_drift.command("rank")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
+@click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for placement roots.")
+@click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict report to specific torrent hash(es). Prefixes are accepted.")
+@click.option("--anchor-scan-max-files", type=int, default=200000, show_default=True, help="Filesystem anchor scan limit for ARR hardlink evidence.")
+@click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), default=str(DEFAULT_DB_PATH), show_default=True, help="Read-only catalog DB for payload/sibling evidence.")
+@click.option("--json-output", is_flag=True, help="Emit JSON report to stdout.")
+def client_drift_rank_cmd(
+    qb_cache_file,
+    rt_cache_file,
+    rt_session_dir,
+    policy_path,
+    policy_mode,
+    hash_filters,
+    anchor_scan_max_files,
+    catalog_path,
+    json_output,
+):
+    """Rank qB/RT path-drift rows from easiest to hardest with payload evidence."""
+    from dataclasses import replace
+    from hashall.client_drift import (
+        build_path_drift_rank_report,
+        format_path_drift_rank_report,
+        load_policy,
+    )
+
+    policy = load_policy(
+        Path(policy_path).expanduser() if policy_path else None,
+        mode=policy_mode,
+    )
+    policy = replace(policy, anchor_scan_max_files=max(0, int(anchor_scan_max_files)))
+    report = build_path_drift_rank_report(
+        qb_cache_file=Path(qb_cache_file).expanduser(),
+        rt_cache_file=Path(rt_cache_file).expanduser(),
+        rt_session_dir=Path(rt_session_dir).expanduser(),
+        policy=policy,
+        hash_filters=hash_filters,
+        catalog_path=Path(catalog_path).expanduser() if catalog_path else None,
+    )
+    print(format_path_drift_rank_report(report, json_output=json_output))
+
+
 @client_drift.command("apply")
 @click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
 @click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")

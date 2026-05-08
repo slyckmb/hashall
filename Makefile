@@ -10,6 +10,7 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
 .PHONY: help test db-refresh db-refresh-verbose \
         rt-qb-mirror-drift rt-qb-mirror-apply rt-qb-mirror-pause-seeding rt-qb-mirror-queue-apply \
         client-drift-audit client-drift-path-drift client-drift-selected \
+        client-drift-rank \
         client-drift-rt-to-qb-dry client-drift-rt-to-qb-apply \
         client-drift-qb-to-rt-dry client-drift-qb-to-rt-apply \
         rt-repoint-dry rt-repoint-apply \
@@ -39,6 +40,7 @@ help:
 	@echo ""
 	@echo "  make client-drift-audit        — classify qB/RT membership + path drift from caches"
 	@echo "  make client-drift-path-drift   — show only same-hash qB/RT path drift"
+	@echo "  make client-drift-rank         — group path drift easy→hard with ARR/noHL/payload evidence"
 	@echo "  make client-drift-selected HASH=<hash> ANCHOR_SCAN=200000 — selected drift evidence"
 	@echo "  make client-drift-rt-to-qb-dry HASH=<hash> — dry-run RT repoint to qB path"
 	@echo "  make client-drift-rt-to-qb-apply HASH=<hash> — apply RT repoint to qB path"
@@ -97,6 +99,9 @@ client-drift-audit:
 
 client-drift-path-drift:
 	@$(HASHALL_CLI) client-drift audit --catalog "$(CATALOG)" --side path_drift --anchor-scan-max-files $${ANCHOR_SCAN:-0} --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
+
+client-drift-rank:
+	@$(HASHALL_CLI) client-drift rank --catalog "$(CATALOG)" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 client-drift-selected:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift audit --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
