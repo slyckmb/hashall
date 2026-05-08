@@ -657,6 +657,54 @@ def _scan_with_change_detection(
         return False
 
 
+# Phase 3C: Parallel multi-root scanning
+def _scan_roots_parallel(
+    catalog_path: Path,
+    roots: list[tuple[str, str]],  # [(root_path, label), ...]
+    *,
+    workers: int = 8,
+    scan_hash_mode: str = "fast",
+    drift_policy: str = "metadata",
+    max_parallel: int = 4,  # Max parallel scans to avoid contention
+) -> dict[str, bool]:  # {label: had_changes}
+    """Scan multiple roots in parallel and return change detection for each.
+
+    Uses ThreadPoolExecutor to scan multiple roots concurrently.
+    Returns dict mapping label → had_changes for each root.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results = {}
+    if not roots:
+        return results
+
+    def _scan_root(root_path: str, label: str) -> tuple[str, bool]:
+        """Scan one root and return (label, had_changes)."""
+        had_changes = _scan_with_change_detection(
+            catalog_path,
+            root_path,
+            workers=workers,
+            scan_hash_mode=scan_hash_mode,
+            drift_policy=drift_policy,
+        )
+        return label, had_changes
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(len(roots), max_parallel)) as executor:
+            futures = {
+                executor.submit(_scan_root, root_path, label): label
+                for root_path, label in roots
+            }
+            for future in as_completed(futures):
+                label, had_changes = future.result()
+                results[label] = had_changes
+    except Exception:
+        # If parallel scanning fails, treat all roots as having changes (safe default)
+        results = {label: True for _, label in roots}
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Preflight refresh
 # ---------------------------------------------------------------------------
