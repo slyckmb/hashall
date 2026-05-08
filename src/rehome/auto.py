@@ -86,6 +86,58 @@ def _unique_aliases_in_order(values: Iterable[str]) -> list[str]:
     return out
 
 
+REFRESH_PROFILES: dict[str, dict[str, Any]] = {
+    "freshness": {
+        "scan_hash_mode": "fast",
+        "drift_policy": "metadata",
+        "skip_dedup": True,
+        "payload_upgrade_missing": False,
+        "description": "fast catalog/client evidence refresh for repair tooling",
+    },
+    "maintenance": {
+        "scan_hash_mode": "fast",
+        "drift_policy": "quick",
+        "skip_dedup": False,
+        "payload_upgrade_missing": True,
+        "description": "current full maintenance pipeline with quick drift checks and dedup",
+    },
+    "integrity": {
+        "scan_hash_mode": "full",
+        "drift_policy": "full",
+        "skip_dedup": False,
+        "payload_upgrade_missing": True,
+        "description": "slow verification pass that rehashes unchanged files",
+    },
+}
+
+
+def resolve_refresh_profile(
+    profile: str = "maintenance",
+    *,
+    scan_hash_mode: Optional[str] = None,
+    drift_policy: Optional[str] = None,
+    skip_dedup: Optional[bool] = None,
+    payload_upgrade_missing: Optional[bool] = None,
+) -> dict[str, Any]:
+    """Resolve a refresh profile plus explicit CLI overrides."""
+    profile_name = str(profile or "maintenance").strip().lower()
+    if profile_name not in REFRESH_PROFILES:
+        valid = ", ".join(sorted(REFRESH_PROFILES))
+        raise ValueError(f"Unknown refresh profile {profile_name!r}; expected one of: {valid}")
+
+    resolved = dict(REFRESH_PROFILES[profile_name])
+    resolved["profile"] = profile_name
+    if scan_hash_mode is not None:
+        resolved["scan_hash_mode"] = str(scan_hash_mode).lower()
+    if drift_policy is not None:
+        resolved["drift_policy"] = str(drift_policy).lower()
+    if skip_dedup is not None:
+        resolved["skip_dedup"] = bool(skip_dedup)
+    if payload_upgrade_missing is not None:
+        resolved["payload_upgrade_missing"] = bool(payload_upgrade_missing)
+    return resolved
+
+
 def _resolve_refresh_dedup_aliases(
     catalog_path: Path,
     roots: list[tuple[str, str, str]],
@@ -584,9 +636,11 @@ def run_refresh(
     active_device: str = "",
     dest_device: str = "",
     workers: int = 8,
-    scan_hash_mode: str = "fast",
-    drift_policy: str = "quick",
-    skip_dedup: bool = False,
+    profile: str = "maintenance",
+    scan_hash_mode: Optional[str] = None,
+    drift_policy: Optional[str] = None,
+    skip_dedup: Optional[bool] = None,
+    payload_upgrade_missing: Optional[bool] = None,
     managed_roots: "list[tuple[str, str]]" = [],
     verbose: bool = False,
     debug: bool = False,
@@ -600,21 +654,34 @@ def run_refresh(
     extra_roots: "list[tuple[str, str]] | None" = None,
 ) -> int:
     """
-    Preflight refresh: scan all managed roots, upgrade SHA256 for collision groups,
-    optionally dedup (plan + execute), then sync qBit payloads.
+    Preflight refresh: scan all managed roots, optionally upgrade collision groups,
+    optionally dedup (plan + execute), then sync torrent-backed payloads.
 
     Steps:
       1. hashall scan <active_root> --parallel --workers N
       2. hashall scan <dest_root> --parallel --workers N  (skip if same path)
-      3a. hashall dupes --device <active_device> --auto-upgrade
-      3b. hashall dupes --device <dest_device> --auto-upgrade
+      3a. hashall dupes --device <active_device> --auto-upgrade          (if dedup enabled)
+      3b. hashall dupes --device <dest_device> --auto-upgrade            (if dedup enabled)
       3c. (for each managed root) hashall dupes --device <alias> --auto-upgrade
-      4a. hashall link plan <name> --device <alias> --min-size 1048576  (if not skip_dedup)
-      4b. hashall link execute <plan_id> [--dry-run]                    (if not skip_dedup)
-      5. hashall payload sync --upgrade-missing --source <payload_source>
+      4a. hashall link plan <name> --device <alias> --min-size 1048576   (if dedup enabled)
+      4b. hashall link execute <plan_id> [--dry-run]                     (if dedup enabled)
+      5. hashall payload sync [--upgrade-missing] --source <payload_source>
 
     Returns exit code (0 = all steps succeeded, 1 = at least one failed).
     """
+    profile_settings = resolve_refresh_profile(
+        profile,
+        scan_hash_mode=scan_hash_mode,
+        drift_policy=drift_policy,
+        skip_dedup=skip_dedup,
+        payload_upgrade_missing=payload_upgrade_missing,
+    )
+    profile = str(profile_settings["profile"])
+    scan_hash_mode = str(profile_settings["scan_hash_mode"])
+    drift_policy = str(profile_settings["drift_policy"])
+    skip_dedup = bool(profile_settings["skip_dedup"])
+    payload_upgrade_missing = bool(profile_settings["payload_upgrade_missing"])
+
     # Apply backwards-compat fallbacks
     active_root = active_root or seeding_root or ""
     dest_root = dest_root or pool_payload_root or ""
@@ -706,10 +773,12 @@ def run_refresh(
             with logger.patch_stdout():
                 print(f"\nRehome Refresh  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
                 print(f"  catalog  {catalog_path}")
+                print(f"  profile  {profile}")
                 print(f"  workers  {workers}")
                 print(f"  scan-hash-mode  {scan_hash_mode}")
                 print(f"  drift-policy  {drift_policy}")
                 print(f"  dedup    {dedup_mode}")
+                print(f"  payload-upgrade-missing  {'on' if payload_upgrade_missing else 'off'}")
                 if logger.verbose:
                     print(f"  log      {log_path}")
                 if published_seed_state_path is not None:
@@ -808,17 +877,19 @@ def run_refresh(
                         overall_ok = overall_ok and ok
 
                     dedup_aliases = _resolve_refresh_dedup_aliases(catalog_path, all_roots)
-                    print(f"  dedup_targets {', '.join(dedup_aliases)}")
+                    if skip_dedup:
+                        print("  dedup_targets skipped")
+                    else:
+                        print(f"  dedup_targets {', '.join(dedup_aliases)}")
 
-                    for dev_alias in dedup_aliases:
-                        ok, _ = _run_step(
-                            f"dupes auto-upgrade ({dev_alias})",
-                            [python, "-m", "hashall.cli", "dupes",
-                             "--device", dev_alias, "--auto-upgrade"] + db_args,
-                        )
-                        overall_ok = overall_ok and ok
+                        for dev_alias in dedup_aliases:
+                            ok, _ = _run_step(
+                                f"dupes auto-upgrade ({dev_alias})",
+                                [python, "-m", "hashall.cli", "dupes",
+                                 "--device", dev_alias, "--auto-upgrade"] + db_args,
+                            )
+                            overall_ok = overall_ok and ok
 
-                    if not skip_dedup:
                         for dev_alias in dedup_aliases:
                             plan_name = f"refresh-{dev_alias}-{timestamp}"
                             ok, stdout = _run_step(
@@ -843,18 +914,24 @@ def run_refresh(
                                 else:
                                     print(f"  [refresh] no parsable plan_id in link plan output for {dev_alias} — skipping execute")
 
-                    # ── Step 5: payload sync --upgrade-missing ────────────────────────────
+                    # ── Step 5: payload sync ───────────────────────────────────────────────
+                    payload_label = "payload sync --upgrade-missing" if payload_upgrade_missing else "payload sync"
+                    payload_cmd = [
+                        python, "-m", "hashall.cli", "payload", "sync",
+                        "--source", str(payload_source),
+                    ]
+                    if payload_upgrade_missing:
+                        payload_cmd.append("--upgrade-missing")
+                    if str(payload_source).lower() == "rt":
+                        payload_cmd += ["--rt-session-dir", str(rt_session_dir)]
+                    payload_cmd += db_args
                     ok, payload_stdout = _run_step(
-                        "payload sync --upgrade-missing",
-                        [python, "-m", "hashall.cli", "payload", "sync",
-                         "--upgrade-missing",
-                         "--source", str(payload_source)] +
-                        (["--rt-session-dir", str(rt_session_dir)] if str(payload_source).lower() == "rt" else []) +
-                        db_args,
+                        payload_label,
+                        payload_cmd,
                         capture=True,
                     )
                     overall_ok = overall_ok and ok
-                    if ok:
+                    if ok and payload_upgrade_missing:
                         upgrade_summary = _parse_upgrade_summary(payload_stdout)
                         min_ratio_env = os.environ.get("HASHALL_REFRESH_UPGRADE_MIN_COMPLETE_RATIO", "0.90")
                         try:
@@ -878,6 +955,8 @@ def run_refresh(
                             if failed > 0 or ratio < min_ratio:
                                 overall_ok = False
                                 print("  [refresh] payload sync quality gate FAILED")
+                    elif ok:
+                        print("  payload_sync_gate skipped reason=upgrade_missing_disabled")
 
                 # ── Summary ───────────────────────────────────────────────────────────
                 sep = "─" * 57

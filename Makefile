@@ -7,7 +7,7 @@ HASHALL_CLI := python3 -m hashall.cli
 REHOME_CLI := python3 -m rehome.cli
 CATALOG ?= $(HOME)/.hashall/catalog.db
 
-.PHONY: help test db-refresh db-refresh-verbose \
+.PHONY: help test db-refresh db-refresh-verbose db-refresh-fast db-refresh-maintenance db-refresh-integrity \
         rt-qb-mirror-drift rt-qb-mirror-apply rt-qb-mirror-pause-seeding rt-qb-mirror-queue-apply \
         client-drift-audit client-drift-path-drift client-drift-selected \
         client-drift-rank \
@@ -29,8 +29,11 @@ help:
 	@echo "  hashall --help"
 	@echo ""
 	@echo "  make test                    — run test suite"
-	@echo "  make db-refresh              — incremental catalog update + dedup"
-	@echo "  make db-refresh-verbose      — same, with verbose output and logging"
+	@echo "  make db-refresh              — maintenance refresh (scan + dedup + payload SHA256 upgrade)"
+	@echo "  make db-refresh-fast         — fast freshness refresh for client-repair evidence"
+	@echo "  make db-refresh-maintenance  — explicit maintenance refresh"
+	@echo "  make db-refresh-integrity    — slow full rehash integrity refresh"
+	@echo "  make db-refresh-verbose      — maintenance refresh with verbose output and logging"
 	@echo ""
 	@echo "  make rt-qb-mirror-drift      — show RT-only items safe to mirror into qB"
 	@echo "  make rt-qb-mirror-apply      — add safe RT-only items, recheck, monitor, re-stop"
@@ -77,10 +80,19 @@ test:
 	python -m pytest tests/ -q
 
 db-refresh:
-	python3 -m hashall refresh $(REFRESH_OPTS)
+	python3 -m hashall refresh --profile maintenance $(REFRESH_OPTS)
+
+db-refresh-fast:
+	python3 -m hashall refresh --profile freshness $(REFRESH_OPTS)
+
+db-refresh-maintenance:
+	python3 -m hashall refresh --profile maintenance $(REFRESH_OPTS)
+
+db-refresh-integrity:
+	python3 -m hashall refresh --profile integrity $(REFRESH_OPTS)
 
 db-refresh-verbose:
-	python3 -m hashall refresh --verbose $(REFRESH_OPTS) 2>&1 | tee ~/.logs/hashall/refresh-$$(date +%Y%m%d-%H%M%S).log
+	python3 -m hashall refresh --profile maintenance --verbose $(REFRESH_OPTS) 2>&1 | tee ~/.logs/hashall/refresh-$$(date +%Y%m%d-%H%M%S).log
 
 rt-qb-mirror-drift:
 	@python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --sleep-row 0 --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-drift.jsonl}

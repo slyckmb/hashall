@@ -12,6 +12,7 @@ from rehome.auto import (
     _parse_upgrade_summary,
     _resolve_refresh_dedup_aliases,
     _run_catalog_preflight,
+    resolve_refresh_profile,
 )
 
 
@@ -64,6 +65,15 @@ def test_parse_link_plan_id_extracts_machine_marker() -> None:
 def test_parse_link_plan_id_extracts_human_summary_header() -> None:
     stdout = "📋 Plan #57: refresh-pool-media-20260306-230645\n   Execute with: hashall link execute 57 --dry-run\n"
     assert _parse_link_plan_id(stdout) == "57"
+
+
+def test_resolve_refresh_profile_freshness_is_repair_evidence_fast_path() -> None:
+    settings = resolve_refresh_profile("freshness")
+
+    assert settings["scan_hash_mode"] == "fast"
+    assert settings["drift_policy"] == "metadata"
+    assert settings["skip_dedup"] is True
+    assert settings["payload_upgrade_missing"] is False
 
 
 def test_run_refresh_executes_dedup_plans_when_stdout_uses_plan_header(
@@ -271,6 +281,103 @@ def test_run_refresh_passes_scan_hash_mode_and_drift_policy(
         assert cmd[cmd.index("--hash-mode") + 1] == "full"
         assert "--drift-policy" in cmd
         assert cmd[cmd.index("--drift-policy") + 1] == "quick"
+
+
+def test_run_refresh_freshness_profile_skips_dedup_and_payload_upgrade(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "catalog.db"
+    db_path.write_text("")
+
+    commands: list[list[str]] = []
+
+    class _FakePopen:
+        def __init__(self, cmd):
+            commands.append(list(cmd))
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    class _FakeRunLogger:
+        def __init__(self, *args, **kwargs):
+            self.verbose = False
+            self.debug = False
+
+        @contextmanager
+        def patch_stdout(self):
+            yield
+
+        def write_raw(self, text: str) -> None:
+            return None
+
+        def record_step(self, *args, **kwargs) -> None:
+            return None
+
+        def dump_json(self, *args, **kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def _fake_stream(cmd, heartbeat_s=30):
+        commands.append(list(cmd))
+        # Freshness does not request --upgrade-missing, so no upgrade_summary
+        # should be required for a successful refresh.
+        return auto_mod.subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""), ""
+
+    monkeypatch.setattr(auto_mod, "_validate_refresh_roots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        auto_mod,
+        "_run_catalog_preflight",
+        lambda *args, **kwargs: (
+            True,
+            {"ok": True, "checks": [], "summary": {"failed_error": 0, "failed_warning": 0, "total_checks": 1}},
+        ),
+    )
+    monkeypatch.setattr(auto_mod.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(auto_mod, "_stream_subprocess_output", _fake_stream)
+    monkeypatch.setattr("rehome.runlog.RunLogger", _FakeRunLogger)
+    monkeypatch.setattr(
+        "rehome.seed_state.publish_seed_root_state",
+        lambda cfg=None, path=None: (Path("/tmp/seed-root-state.json"), {"writer": "hashall"}),
+    )
+    monkeypatch.setattr("rehome.cli._acquire_refresh_lock", lambda: _DummyLock())
+
+    exit_code = auto_mod.run_refresh(
+        catalog_path=db_path,
+        active_root="/stash/media",
+        dest_root="/pool/media/torrents/seeding",
+        active_device="stash",
+        dest_device="pool-media",
+        workers=2,
+        profile="freshness",
+        managed_roots=[("/pool/data", "pool-data")],
+        verbose=False,
+        debug=False,
+        payload_source="rt",
+    )
+
+    assert exit_code == 0
+    command_lines = [" ".join(cmd) for cmd in commands]
+    scan_commands = [
+        cmd for cmd in commands
+        if len(cmd) >= 4 and cmd[:4] == [auto_mod.sys.executable, "-m", "hashall.cli", "scan"]
+    ]
+    assert scan_commands
+    for cmd in scan_commands:
+        assert cmd[cmd.index("--hash-mode") + 1] == "fast"
+        assert cmd[cmd.index("--drift-policy") + 1] == "metadata"
+    assert not any(" dupes " in f" {line} " for line in command_lines)
+    assert not any(" link plan " in f" {line} " for line in command_lines)
+    payload_commands = [cmd for cmd in commands if "payload" in cmd and "sync" in cmd]
+    assert len(payload_commands) == 1
+    assert "--upgrade-missing" not in payload_commands[0]
+    assert "--source" in payload_commands[0]
+    assert payload_commands[0][payload_commands[0].index("--source") + 1] == "rt"
 
 
 def test_run_refresh_keeps_logger_open_while_patch_stdout_is_active(
