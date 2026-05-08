@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Pause any qB mirror-tagged items currently in a seeding state."""
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.hashall.qbittorrent import get_qbittorrent_client
+from src.hashall.qbittorrent import get_qbittorrent_client, get_torrents_from_cache
 
 qb = get_qbittorrent_client()
-cache = json.loads(Path.home().joinpath(".cache/hashall-qb/torrents-info.json").read_text())
+cache = get_torrents_from_cache(max_age_s=300)
+if cache is None:
+    print("No fresh qB cache available.", file=sys.stderr)
+    sys.exit(1)
 
 SEEDING_STATES = {"stalledUP", "uploading", "forcedUP", "queuedUP"}
 MIRROR_TAGS = {"hashall-client-drift", "hashall-rt-qb-mirror"}

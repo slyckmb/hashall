@@ -513,6 +513,31 @@ def test_get_torrents_from_cache_defaults_to_hashall_cache_path(monkeypatch, tmp
     assert payload == []
 
 
+def test_get_torrents_from_cache_falls_back_to_legacy_when_default_absent(monkeypatch, tmp_path):
+    default_cache = tmp_path / "silo-qb" / "torrents-info.json"
+    legacy_cache = tmp_path / "hashall-qb" / "torrents-info.json"
+    legacy_cache.parent.mkdir()
+    legacy_cache.write_text('[{"hash": "abc"}]', encoding="utf-8")
+    monkeypatch.setattr("hashall.qbittorrent.DEFAULT_QB_CACHE_FILE", default_cache)
+    monkeypatch.setattr("hashall.qbittorrent.LEGACY_QB_CACHE_FILE", legacy_cache)
+
+    payload = get_torrents_from_cache(max_age_s=30.0)
+
+    assert payload == [{"hash": "abc"}]
+
+
+def test_get_torrents_from_cache_explicit_path_does_not_fallback(monkeypatch, tmp_path):
+    explicit_cache = tmp_path / "explicit.json"
+    legacy_cache = tmp_path / "hashall-qb" / "torrents-info.json"
+    legacy_cache.parent.mkdir()
+    legacy_cache.write_text('[{"hash": "legacy"}]', encoding="utf-8")
+    monkeypatch.setattr("hashall.qbittorrent.LEGACY_QB_CACHE_FILE", legacy_cache)
+
+    payload = get_torrents_from_cache(max_age_s=30.0, cache_path=explicit_cache)
+
+    assert payload is None
+
+
 def test_get_torrents_normalizes_pause_alias_and_derives_content_path(monkeypatch):
     client = QBittorrentClient(base_url="http://example", username="u", password="p")
     monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)

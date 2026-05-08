@@ -33,6 +33,14 @@ class SplitAction:
     target_parent_fs: str       # filesystem path: <seeding_root_fs>/_rehome-unique/<hash16>/
     target_parent_api: str      # qB/RT API path: <seeding_root_api>/_rehome-unique/<hash16>/
     is_dir: bool                # True = multi-file torrent (source is directory)
+    target_content_fs: str = ""
+    source_exists: bool = False
+    target_parent_exists: bool = False
+    target_content_exists: bool = False
+    target_parent_entries: int = 0
+    same_device: Optional[bool] = None
+    warnings: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
     files_linked: int = 0
     completed: bool = False
     error: Optional[str] = None
@@ -81,6 +89,8 @@ def _hardlink_tree(src: Path, dst_parent: Path, *, dry_run: bool) -> int:
     count = 0
     if src.is_file():
         dst = dst_parent / src.name
+        if dst.exists():
+            raise FileExistsError(f"target already exists: {dst}")
         if not dry_run:
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.link(str(src), str(dst))
@@ -97,7 +107,58 @@ def _hardlink_tree(src: Path, dst_parent: Path, *, dry_run: bool) -> int:
                     raise FileExistsError(f"target already exists: {dst_file}")
                 os.link(str(item), str(dst_file))
             count += 1
+    else:
+        raise FileNotFoundError(f"source root not found or unsupported: {src}")
     return count
+
+
+def _inspect_split_target(src: Path, dst_parent: Path) -> tuple[str, bool, bool, bool, int, Optional[bool], list[str], list[str]]:
+    target_content = dst_parent / src.name
+    source_exists = src.is_file() or src.is_dir()
+    target_parent_exists = dst_parent.exists()
+    target_content_exists = target_content.exists()
+    entries = 0
+    warnings: list[str] = []
+    blockers: list[str] = []
+    same_device: Optional[bool] = None
+
+    if not source_exists:
+        blockers.append("source_root_missing_or_not_file_or_dir")
+    if target_parent_exists:
+        if dst_parent.is_dir():
+            try:
+                entries = sum(1 for _ in dst_parent.iterdir())
+            except OSError:
+                blockers.append("target_parent_unreadable")
+        else:
+            blockers.append("target_parent_exists_not_directory")
+        if entries == 0:
+            warnings.append("target_parent_exists_empty")
+        elif entries > 0:
+            blockers.append("target_parent_exists_non_empty")
+    if target_content_exists:
+        blockers.append("target_content_exists")
+
+    try:
+        base = dst_parent.parent
+        if source_exists and base.exists():
+            same_device = os.stat(src).st_dev == os.stat(base).st_dev
+            if not same_device:
+                blockers.append("source_and_target_on_different_devices")
+    except OSError:
+        same_device = None
+        blockers.append("unable_to_verify_source_target_device")
+
+    return (
+        str(target_content),
+        source_exists,
+        target_parent_exists,
+        target_content_exists,
+        entries,
+        same_device,
+        warnings,
+        blockers,
+    )
 
 
 def plan_split_actions(group: HitchhikerGroup) -> list[SplitAction]:
@@ -117,6 +178,16 @@ def plan_split_actions(group: HitchhikerGroup) -> list[SplitAction]:
         slug = secondary_hash[:16]
         target_parent_fs = f"{fs_root}/_rehome-unique/{slug}"
         target_parent_api = f"{api_root}/_rehome-unique/{slug}"
+        (
+            target_content_fs,
+            source_exists,
+            target_parent_exists,
+            target_content_exists,
+            target_parent_entries,
+            same_device,
+            warnings,
+            blockers,
+        ) = _inspect_split_target(src, Path(target_parent_fs))
         actions.append(
             SplitAction(
                 hash_val=secondary_hash,
@@ -124,6 +195,14 @@ def plan_split_actions(group: HitchhikerGroup) -> list[SplitAction]:
                 target_parent_fs=target_parent_fs,
                 target_parent_api=target_parent_api,
                 is_dir=is_dir,
+                target_content_fs=target_content_fs,
+                source_exists=source_exists,
+                target_parent_exists=target_parent_exists,
+                target_content_exists=target_content_exists,
+                target_parent_entries=target_parent_entries,
+                same_device=same_device,
+                warnings=warnings,
+                blockers=blockers,
             )
         )
     return actions
@@ -163,6 +242,8 @@ def execute_split_group(
 
     for action in actions:
         try:
+            if action.blockers:
+                raise RuntimeError(f"split action blocked: {','.join(action.blockers)}")
             # 1. Hardlink the content tree
             src = Path(action.source_root_path)
             dst_parent = Path(action.target_parent_fs)
@@ -203,12 +284,14 @@ def split_hitchhiker_groups(
     dry_run: bool = True,
     limit: Optional[int] = None,
     rpc_url: str = DEFAULT_RT_RPC_URL,
+    include_unsafe: bool = False,
 ) -> list[SplitGroupResult]:
     """
     Split a list of hitchhiker groups (SAFE_TO_SPLIT only), smallest-first.
     """
-    # Only process safe groups, smallest first (by file_count then bytes)
-    safe = [g for g in groups if g.status == HitchhikerStatus.SAFE_TO_SPLIT]
+    # Broad mode only processes safe groups; selected dry-runs include unsafe
+    # groups so the operator sees why a requested target is blocked.
+    safe = list(groups) if include_unsafe else [g for g in groups if g.status == HitchhikerStatus.SAFE_TO_SPLIT]
     safe.sort(key=lambda g: (g.file_count, g.total_bytes))
     if limit:
         safe = safe[:limit]
@@ -248,6 +331,14 @@ def format_split_report(
                         {
                             "hash": a.hash_val[:16],
                             "target_parent": a.target_parent_api,
+                            "target_content_fs": a.target_content_fs,
+                            "source_exists": a.source_exists,
+                            "target_parent_exists": a.target_parent_exists,
+                            "target_content_exists": a.target_content_exists,
+                            "target_parent_entries": a.target_parent_entries,
+                            "same_device": a.same_device,
+                            "warnings": a.warnings,
+                            "blockers": a.blockers,
                             "files": a.files_linked,
                             "completed": a.completed,
                             "error": a.error,
@@ -280,6 +371,10 @@ def format_split_report(
             lines.append(
                 f"        [{a_status}] {a.hash_val[:16]} → {a.target_parent_api}  files={a.files_linked}"
             )
+            if a.warnings:
+                lines.append(f"               warnings: {', '.join(a.warnings)}")
+            if a.blockers:
+                lines.append(f"               blockers: {', '.join(a.blockers)}")
             if a.error:
                 lines.append(f"               error: {a.error}")
         if r.error:

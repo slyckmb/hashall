@@ -3,13 +3,31 @@
 ## Quick Reference
 
 ```bash
-# INCREMENTAL (recommended for normal use) — minutes to ~1 hour
+# FAST FRESHNESS (client-repair evidence) — cheapest normal refresh
+make db-refresh-fast
+python3 -m hashall refresh --profile freshness --payload-source rt
+
+# MAINTENANCE (scan + dedup + payload SHA256 upgrade) — heavier
 make db-refresh
+make db-refresh-maintenance
 make db-refresh-verbose
 
 # FULL INTEGRITY AUDIT (very slow, only for verification) — 100+ hours
-python3 -m hashall refresh --scan-hash-mode full --drift-policy full
+make db-refresh-integrity
+python3 -m hashall refresh --profile integrity
 ```
+
+## Refresh Profiles
+
+| Profile | Scan | Dedup | Payload sync | When to Use |
+|---------|------|-------|--------------|-------------|
+| `freshness` | `fast` + `metadata` | off | no SHA256 backfill | Update catalog/client evidence before qB/RT repair audits and dry-runs |
+| `maintenance` | `fast` + `quick` | on | `--upgrade-missing` | Periodic duplicate cleanup and payload completeness maintenance |
+| `integrity` | `full` + `full` | on | `--upgrade-missing` | Slow corruption/drift verification |
+
+Freshness refresh is designed to support repair tooling evidence without doing
+broad dedupe or hash-backfill work. It still scans managed roots and runs payload
+sync, so qB/RT path and payload mappings are current enough for repair planning.
 
 ## Understanding Scan Modes
 
@@ -31,19 +49,29 @@ python3 -m hashall refresh --scan-hash-mode full --drift-policy full
 
 ## Common Operations
 
-### Normal incremental refresh (dedup + update)
+### Fast freshness refresh (client repair evidence)
+```bash
+make db-refresh-fast
+# or
+python3 -m hashall refresh --profile freshness --payload-source rt --verbose
+```
+
+**Expected:** fastest available full-root catalog/client evidence pass  
+**What it does:** metadata-based scans, skips dedup, syncs torrent-backed payload mappings without broad SHA256 backfill
+
+### Maintenance refresh (dedup + update)
 ```bash
 make db-refresh-verbose
 # or
-python3 -m hashall refresh
+python3 -m hashall refresh --profile maintenance
 ```
 
 **Expected:** minutes to ~1 hour  
-**What it does:** scans for new/changed files, updates hashes, runs dedup
+**What it does:** quick drift scans, duplicate detection/linking, payload SHA256 upgrade
 
 ### Full integrity audit (find corruption, verify all files)
 ```bash
-python3 -m hashall refresh --scan-hash-mode full --drift-policy full --verbose
+python3 -m hashall refresh --profile integrity --verbose
 ```
 
 **Expected:** 100+ hours (rehashes entire 35.7 TB dataset)  
@@ -106,9 +134,9 @@ make db-refresh-verbose
 ```
 
 ### Very slow incremental refresh
-Check if using `--scan-hash-mode full`. If so:
+Check if using the `integrity` profile or `--scan-hash-mode full`. If so:
 - Cancel with Ctrl+C
-- Retry with `make db-refresh` (uses fast mode)
+- Retry with `make db-refresh-fast` for repair evidence or `make db-refresh` for maintenance
 - Full mode is overkill for normal use
 
 ### Dedup not freeing space

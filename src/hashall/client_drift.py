@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import json
+import stat
+import sqlite3
 import time
 from typing import Any, Iterable
 
+from hashall.fs_utils import get_mount_point
+from hashall.pathing import canonicalize_path, remap_to_mount_alias
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE
-from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, resolve_rt_session_files
+from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, normalize_rt_target_directory, resolve_rt_session_files, rt_path_aligned
 
 
 HEALTHY_QB_STATES = {"uploading", "stalledUP", "stoppedUP", "pausedUP"}
@@ -21,9 +26,37 @@ DEFAULT_MIRROR_ROOTS = (
     "/stash/media/torrents/seeding",
 )
 
+DEFAULT_POOL_PLACEMENT_ROOTS = (
+    "/pool/media/torrents/seeding",
+)
+
+DEFAULT_STASH_PLACEMENT_ROOTS = (
+    "/data/media/torrents/seeding",
+    "/stash/media/torrents/seeding",
+)
+
+DEFAULT_ARR_LIBRARY_ROOTS = (
+    "/data/media/books",
+    "/data/media/downloads",
+    "/data/media/movies",
+    "/data/media/music",
+    "/data/media/shows",
+    "/data/media/tv",
+    "/stash/media/books",
+    "/stash/media/downloads",
+    "/stash/media/movies",
+    "/stash/media/music",
+    "/stash/media/shows",
+    "/stash/media/tv",
+)
+
+DEFAULT_ANCHOR_SCAN_MAX_FILES = 0
+DEFAULT_CATALOG_PATH = Path("~/.hashall/catalog.db")
+
 
 RT_MIRROR_TAG = "~rt-mirrored"   # qB tag: item was added via RT→qB mirror
 QB_MIRROR_TAG = "~qb-mirrored"   # RT d.custom2 tag: item has a qB mirror
+NO_HARDLINK_TAG = "~noHL"        # qB tag: qbit_manage did not find ARR hardlinks
 
 
 @dataclass(frozen=True)
@@ -39,6 +72,10 @@ class ClientDriftPolicy:
     remove_from_qb_categories: tuple[str, ...] = ()
     remove_from_rt_path_prefixes: tuple[str, ...] = ()
     remove_from_qb_path_prefixes: tuple[str, ...] = ()
+    pool_roots: tuple[str, ...] = DEFAULT_POOL_PLACEMENT_ROOTS
+    stash_roots: tuple[str, ...] = DEFAULT_STASH_PLACEMENT_ROOTS
+    arr_library_roots: tuple[str, ...] = DEFAULT_ARR_LIBRARY_ROOTS
+    anchor_scan_max_files: int = DEFAULT_ANCHOR_SCAN_MAX_FILES
     recent_seconds: int = 0
     mode: str = "conservative"
 
@@ -148,6 +185,84 @@ def _path_exists(path: str) -> bool:
     return bool(path and Path(path).exists())
 
 
+def _policy_mount_points(policy: ClientDriftPolicy) -> tuple[Path, ...]:
+    roots = (
+        *policy.mirror_roots,
+        *policy.pool_roots,
+        *policy.stash_roots,
+        *policy.arr_library_roots,
+    )
+    out: list[Path] = []
+    seen: set[str] = set()
+    for raw_root in roots:
+        root = str(raw_root or "").strip()
+        if not root:
+            continue
+        try:
+            mount = get_mount_point(root) or ""
+        except Exception:
+            mount = ""
+        if not mount:
+            continue
+        mount_text = str(Path(mount))
+        if mount_text not in seen:
+            seen.add(mount_text)
+            out.append(Path(mount_text))
+    return tuple(out)
+
+
+def _path_variants(path: str, policy: ClientDriftPolicy) -> tuple[str, ...]:
+    text = _norm_path(path).rstrip("/")
+    if not text:
+        return ()
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str | Path | None) -> None:
+        value = str(candidate or "").rstrip("/")
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+
+    add(text)
+    try:
+        add(canonicalize_path(Path(text)))
+    except Exception:
+        pass
+
+    for mount_point in _policy_mount_points(policy):
+        for candidate in tuple(out):
+            try:
+                remapped = remap_to_mount_alias(Path(candidate), mount_point)
+            except Exception:
+                remapped = None
+            if remapped is None:
+                continue
+            add(remapped)
+            try:
+                add(canonicalize_path(remapped))
+            except Exception:
+                pass
+
+    return tuple(out)
+
+
+def _path_variants_many(paths: Iterable[str], policy: ClientDriftPolicy) -> tuple[str, ...]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        for variant in _path_variants(path, policy):
+            if variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    return tuple(out)
+
+
+def _under_any_policy_prefix(path: str, prefixes: Iterable[str], policy: ClientDriftPolicy) -> bool:
+    return any(_under_any_prefix(variant, prefixes) for variant in _path_variants(path, policy))
+
+
 def _under_any_prefix(path: str, prefixes: Iterable[str]) -> bool:
     candidate = str(path or "").rstrip("/")
     if not candidate:
@@ -184,6 +299,39 @@ def _infer_category_from_path(path: str, mirror_roots: Iterable[str]) -> str:
     return ""
 
 
+def _rt_path_aligned_with_policy(
+    rt_directory: str | None,
+    *,
+    qb_save_path: str | None,
+    qb_content_path: str | None,
+    policy: ClientDriftPolicy,
+) -> bool:
+    if rt_path_aligned(rt_directory, qb_save_path=qb_save_path, qb_content_path=qb_content_path):
+        return True
+
+    rt_variants = set(_path_variants(str(rt_directory or ""), policy))
+    if not rt_variants:
+        return False
+
+    candidates: list[str] = []
+    for raw in (qb_save_path, qb_content_path):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        candidates.append(text)
+        try:
+            parent = str(Path(text).parent)
+        except Exception:
+            parent = ""
+        if parent:
+            candidates.append(parent)
+
+    for candidate in candidates:
+        if rt_variants.intersection(_path_variants(candidate, policy)):
+            return True
+    return False
+
+
 def default_policy(mode: str = "conservative") -> ClientDriftPolicy:
     policy_mode = str(mode or "conservative").strip().lower()
     if policy_mode == "rt-authoritative-mirror":
@@ -214,6 +362,10 @@ def load_policy(path: Path | None = None, *, mode: str = "conservative") -> Clie
         "remove_from_qb_categories": _as_tuple(payload.get("remove_from_qb_categories", base.remove_from_qb_categories)),
         "remove_from_rt_path_prefixes": _as_tuple(payload.get("remove_from_rt_path_prefixes", base.remove_from_rt_path_prefixes)),
         "remove_from_qb_path_prefixes": _as_tuple(payload.get("remove_from_qb_path_prefixes", base.remove_from_qb_path_prefixes)),
+        "pool_roots": _as_tuple(payload.get("pool_roots", base.pool_roots)),
+        "stash_roots": _as_tuple(payload.get("stash_roots", base.stash_roots)),
+        "arr_library_roots": _as_tuple(payload.get("arr_library_roots", base.arr_library_roots)),
+        "anchor_scan_max_files": _to_int(payload.get("anchor_scan_max_files", base.anchor_scan_max_files)),
         "recent_seconds": _to_int(payload.get("recent_seconds", base.recent_seconds)),
         "mode": str(payload.get("mode") or base.mode),
     }
@@ -325,10 +477,10 @@ def _is_recent(row: ClientTorrentRow, policy: ClientDriftPolicy, now: float) -> 
 def _classify_rt_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: float) -> tuple[str, str, list[str], list[str]]:
     reasons: list[str] = ["present_in_rt_missing_in_qb"]
     blockers: list[str] = []
-    if _category_in(row.category, policy.ignore_rt_only_categories) or _under_any_prefix(row.save_path, policy.ignore_rt_only_path_prefixes):
+    if _category_in(row.category, policy.ignore_rt_only_categories) or _under_any_policy_prefix(row.save_path, policy.ignore_rt_only_path_prefixes, policy):
         reasons.append("explicit_rt_only_ignore_policy")
         return "ignore_intentional_rt_only", "high", reasons, blockers
-    if _category_in(row.category, policy.remove_from_rt_categories) or _under_any_prefix(row.save_path, policy.remove_from_rt_path_prefixes):
+    if _category_in(row.category, policy.remove_from_rt_categories) or _under_any_policy_prefix(row.save_path, policy.remove_from_rt_path_prefixes, policy):
         reasons.append("explicit_remove_from_rt_policy")
         return "remove_from_rt", "high", reasons, blockers
     if _is_recent(row, policy, now):
@@ -341,7 +493,7 @@ def _classify_rt_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
         blockers.append("rt_torrent_file_missing")
     if not row.meta_loaded:
         blockers.append("rt_torrent_meta_missing")
-    mirrorable_by_root = _under_any_prefix(row.target_qb_save_path or row.save_path, policy.mirror_roots)
+    mirrorable_by_root = _under_any_policy_prefix(row.target_qb_save_path or row.save_path, policy.mirror_roots, policy)
     mirrorable_by_category = _category_in(row.category, policy.mirror_rt_to_qb_categories)
     if mirrorable_by_root:
         reasons.append("under_mirror_root")
@@ -365,10 +517,10 @@ def _classify_qb_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
     if _has_tag(row.tags, RT_MIRROR_TAG):
         reasons.append("orphaned_rt_mirror")
         return "remove_from_qb", "high", reasons, blockers
-    if _category_in(row.category, policy.ignore_qb_only_categories) or _under_any_prefix(row.save_path, policy.ignore_qb_only_path_prefixes):
+    if _category_in(row.category, policy.ignore_qb_only_categories) or _under_any_policy_prefix(row.save_path, policy.ignore_qb_only_path_prefixes, policy):
         reasons.append("explicit_qb_only_ignore_policy")
         return "ignore_intentional_qb_only", "high", reasons, blockers
-    if _category_in(row.category, policy.remove_from_qb_categories) or _under_any_prefix(row.save_path, policy.remove_from_qb_path_prefixes):
+    if _category_in(row.category, policy.remove_from_qb_categories) or _under_any_policy_prefix(row.save_path, policy.remove_from_qb_path_prefixes, policy):
         reasons.append("explicit_remove_from_qb_policy")
         return "remove_from_qb", "high", reasons, blockers
     if _is_recent(row, policy, now):
@@ -379,7 +531,7 @@ def _classify_qb_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
         blockers.append(f"qb_progress_not_complete:{row.progress:.3f}")
     if not row.path_exists:
         blockers.append("qb_content_path_missing")
-    mirrorable_by_root = _under_any_prefix(row.save_path or row.content_path, policy.mirror_roots)
+    mirrorable_by_root = _under_any_policy_prefix(row.save_path or row.content_path, policy.mirror_roots, policy)
     mirrorable_by_category = _category_in(row.category, policy.mirror_qb_to_rt_categories)
     if mirrorable_by_root:
         reasons.append("under_mirror_root")
@@ -395,12 +547,495 @@ def _classify_qb_only(row: ClientTorrentRow, policy: ClientDriftPolicy, now: flo
     return "manual_review", "medium", reasons, blockers
 
 
+@dataclass
+class _AnchorScanResult:
+    has_arr_anchor: bool | None
+    source: str = ""
+    anchor_paths: list[str] = field(default_factory=list)
+    payload_files_checked: int = 0
+    library_files_checked: int = 0
+    payload_scan_truncated: bool = False
+    library_scan_truncated: bool = False
+    blockers: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "has_arr_anchor": self.has_arr_anchor,
+            "source": self.source,
+            "anchor_paths": self.anchor_paths[:20],
+            "payload_files_checked": self.payload_files_checked,
+            "library_files_checked": self.library_files_checked,
+            "payload_scan_truncated": self.payload_scan_truncated,
+            "library_scan_truncated": self.library_scan_truncated,
+            "blockers": self.blockers,
+        }
+
+
+class _PlacementAnchorScanner:
+    def __init__(self, policy: ClientDriftPolicy, *, catalog_path: Path | None = None) -> None:
+        self.policy = policy
+        self.catalog_path = catalog_path
+        self._library_index: dict[tuple[int, int], list[str]] | None = None
+        self._library_files_checked = 0
+        self._library_scan_truncated = False
+        self._library_blockers: list[str] = []
+
+    def scan_paths(self, paths: Iterable[str]) -> _AnchorScanResult:
+        raw_paths = tuple(str(path or "").strip() for path in paths if str(path or "").strip())
+        path_tuple = _path_variants_many(raw_paths, self.policy)
+        catalog_result = self._scan_catalog(path_tuple)
+        if catalog_result.has_arr_anchor is not None:
+            return catalog_result
+        catalog_blockers = [
+            blocker
+            for blocker in catalog_result.blockers
+            if blocker != "catalog_anchor_lookup_not_configured"
+        ]
+        max_files = max(0, int(self.policy.anchor_scan_max_files))
+        if (
+            max_files <= 0
+            and "catalog_negative_anchor_requires_filesystem_confirmation" in catalog_blockers
+        ):
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="catalog",
+                payload_files_checked=catalog_result.payload_files_checked,
+                blockers=[*catalog_blockers, "arr_anchor_scan_disabled"],
+            )
+
+        library_index = self._load_library_index()
+        fs_blockers = [*self._library_blockers]
+        if max_files <= 0:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="filesystem",
+                library_files_checked=self._library_files_checked,
+                library_scan_truncated=self._library_scan_truncated,
+                blockers=[*catalog_blockers, *fs_blockers, "arr_anchor_scan_disabled"],
+            )
+        if not self.policy.arr_library_roots:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="filesystem",
+                library_files_checked=self._library_files_checked,
+                library_scan_truncated=self._library_scan_truncated,
+                blockers=[*catalog_blockers, *fs_blockers, "arr_library_roots_not_configured"],
+            )
+
+        anchor_paths: list[str] = []
+        payload_files_checked = 0
+        payload_scan_truncated = False
+        for payload_file in self._iter_files(path_tuple):
+            payload_files_checked += 1
+            if payload_files_checked > max_files:
+                payload_scan_truncated = True
+                break
+            try:
+                st = payload_file.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink <= 1:
+                continue
+            for library_path in library_index.get((int(st.st_dev), int(st.st_ino)), []):
+                if str(payload_file) != library_path and library_path not in anchor_paths:
+                    anchor_paths.append(library_path)
+
+        if anchor_paths:
+            return _AnchorScanResult(
+                has_arr_anchor=True,
+                source="filesystem",
+                anchor_paths=anchor_paths,
+                payload_files_checked=payload_files_checked,
+                library_files_checked=self._library_files_checked,
+                payload_scan_truncated=payload_scan_truncated,
+                library_scan_truncated=self._library_scan_truncated,
+                blockers=fs_blockers,
+            )
+        if payload_scan_truncated or self._library_scan_truncated:
+            blockers = [*catalog_blockers, *fs_blockers, "arr_anchor_scan_incomplete"]
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="filesystem",
+                payload_files_checked=payload_files_checked,
+                library_files_checked=self._library_files_checked,
+                payload_scan_truncated=payload_scan_truncated,
+                library_scan_truncated=self._library_scan_truncated,
+                blockers=blockers,
+            )
+        return _AnchorScanResult(
+            has_arr_anchor=False,
+            source="filesystem",
+            payload_files_checked=payload_files_checked,
+            library_files_checked=self._library_files_checked,
+            blockers=fs_blockers,
+        )
+
+    def _scan_catalog(self, paths: Iterable[str]) -> _AnchorScanResult:
+        if self.catalog_path is None:
+            return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["catalog_anchor_lookup_not_configured"])
+        catalog_path = self.catalog_path.expanduser()
+        if not catalog_path.exists():
+            return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["catalog_not_found"])
+        if not self.policy.arr_library_roots:
+            return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["arr_library_roots_not_configured"])
+
+        try:
+            conn = sqlite3.connect(f"file:{catalog_path.resolve()}?mode=ro", uri=True)
+            try:
+                tables = self._catalog_files_tables(conn)
+                if not tables:
+                    return _AnchorScanResult(has_arr_anchor=None, source="catalog", blockers=["catalog_files_tables_missing"])
+                anchor_paths: list[str] = []
+                payload_files_checked = 0
+                blockers: list[str] = []
+                for table in tables:
+                    if not self._catalog_table_has_column(conn, table, "path") or not self._catalog_table_has_column(conn, table, "inode"):
+                        continue
+                    identity_column = self._catalog_identity_column(conn, table)
+                    table_scoped_identity = self._catalog_table_scopes_inode_identity(table)
+                    if identity_column is None and not table_scoped_identity:
+                        blockers.append(f"catalog_table_lacks_filesystem_identity:{table}")
+                        continue
+                    has_status = self._catalog_table_has_column(conn, table, "status")
+                    payload_rows = self._catalog_payload_rows(
+                        conn,
+                        table,
+                        paths,
+                        has_status=has_status,
+                        identity_column=identity_column,
+                        table_scoped_identity=table_scoped_identity,
+                    )
+                    payload_files_checked += len(payload_rows)
+                    if not payload_rows:
+                        continue
+                    identity_groups: dict[str, list[int]] = {}
+                    for _path, inode, identity in payload_rows:
+                        identity_groups.setdefault(identity, []).append(int(inode))
+                    for identity, inode_values_raw in sorted(identity_groups.items()):
+                        inode_values = sorted(set(inode_values_raw))
+                        for inode_chunk in self._chunks(inode_values, 500):
+                            placeholders = ",".join("?" for _ in inode_chunk)
+                            status_clause = "status = 'active' AND " if has_status else ""
+                            params: list[Any] = []
+                            identity_clause = ""
+                            if identity_column is not None:
+                                identity_clause = f"{identity_column} = ? AND "
+                                params.append(identity)
+                            rows = conn.execute(
+                                f"SELECT path, inode FROM {table} WHERE {status_clause}{identity_clause}inode IN ({placeholders})",
+                                [*params, *inode_chunk],
+                            ).fetchall()
+                            for link_path, _inode in rows:
+                                link_text = str(link_path or "")
+                                if self._under_library_root(link_text) and link_text not in anchor_paths:
+                                    anchor_paths.append(link_text)
+                if anchor_paths:
+                    return _AnchorScanResult(
+                        has_arr_anchor=True,
+                        source="catalog",
+                        anchor_paths=sorted(anchor_paths),
+                        payload_files_checked=payload_files_checked,
+                        blockers=blockers,
+                    )
+                if payload_files_checked > 0:
+                    return _AnchorScanResult(
+                        has_arr_anchor=None,
+                        source="catalog",
+                        payload_files_checked=payload_files_checked,
+                        blockers=[*blockers, "catalog_negative_anchor_requires_filesystem_confirmation"],
+                    )
+                if blockers:
+                    return _AnchorScanResult(
+                        has_arr_anchor=None,
+                        source="catalog",
+                        blockers=blockers,
+                    )
+                return _AnchorScanResult(
+                    has_arr_anchor=None,
+                    source="catalog",
+                    blockers=["catalog_payload_paths_missing"],
+                )
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="catalog",
+                blockers=[f"catalog_error:{exc}"],
+            )
+
+    @staticmethod
+    def _catalog_table_scopes_inode_identity(table: str) -> bool:
+        return str(table or "").startswith("files_")
+
+    @staticmethod
+    def _catalog_identity_column(conn: sqlite3.Connection, table: str) -> str | None:
+        for column in ("fs_uuid", "device_id"):
+            if _PlacementAnchorScanner._catalog_table_has_column(conn, table, column):
+                return column
+        return None
+
+    @staticmethod
+    def _catalog_identity_value(
+        *,
+        table: str,
+        identity_column: str | None,
+        table_scoped_identity: bool,
+        row_identity: Any,
+    ) -> str:
+        if identity_column is not None:
+            if row_identity is None:
+                return ""
+            return str(row_identity).strip()
+        if table_scoped_identity:
+            return f"table:{table}"
+        return ""
+
+    @staticmethod
+    def _catalog_files_tables(conn: sqlite3.Connection) -> list[str]:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        out = []
+        for (name,) in rows:
+            text = str(name or "")
+            if text == "files" or text.startswith("files_"):
+                out.append(text)
+        return out
+
+    @staticmethod
+    def _catalog_table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+        return any(str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+    @staticmethod
+    def _catalog_payload_rows(
+        conn: sqlite3.Connection,
+        table: str,
+        paths: Iterable[str],
+        *,
+        has_status: bool,
+        identity_column: str | None,
+        table_scoped_identity: bool,
+    ) -> list[tuple[str, int, str]]:
+        out: list[tuple[str, int, str]] = []
+        seen: set[tuple[str, int, str]] = set()
+        status_clause = "status = 'active' AND " if has_status else ""
+        identity_select = f", {identity_column}" if identity_column is not None else ""
+        for raw_path in paths:
+            path = str(raw_path or "").rstrip("/")
+            if not path:
+                continue
+            rows = conn.execute(
+                f"SELECT path, inode{identity_select} FROM {table} WHERE {status_clause}(path = ? OR path LIKE ?)",
+                (path, f"{path}/%"),
+            ).fetchall()
+            for row in rows:
+                file_path, inode, *identity_values = row
+                row_identity = identity_values[0] if identity_values else None
+                identity = _PlacementAnchorScanner._catalog_identity_value(
+                    table=table,
+                    identity_column=identity_column,
+                    table_scoped_identity=table_scoped_identity,
+                    row_identity=row_identity,
+                )
+                if not identity:
+                    continue
+                try:
+                    key = (str(file_path), int(inode), identity)
+                except Exception:
+                    continue
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+        return out
+
+    def _under_library_root(self, path: str) -> bool:
+        return _under_any_policy_prefix(path, self.policy.arr_library_roots, self.policy)
+
+    @staticmethod
+    def _chunks(values: list[int], size: int) -> Iterable[list[int]]:
+        for index in range(0, len(values), size):
+            yield values[index:index + size]
+
+    def _load_library_index(self) -> dict[tuple[int, int], list[str]]:
+        if self._library_index is not None:
+            return self._library_index
+        self._library_index = {}
+        max_files = max(0, int(self.policy.anchor_scan_max_files))
+        if max_files <= 0:
+            return self._library_index
+        existing_roots = [Path(root) for root in self.policy.arr_library_roots if root and Path(root).exists()]
+        if not existing_roots:
+            self._library_blockers.append("arr_library_roots_missing")
+            return self._library_index
+        for library_file in self._iter_files(str(root) for root in existing_roots):
+            self._library_files_checked += 1
+            if self._library_files_checked > max_files:
+                self._library_scan_truncated = True
+                break
+            try:
+                st = library_file.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                self._library_index.setdefault((int(st.st_dev), int(st.st_ino)), []).append(str(library_file))
+        return self._library_index
+
+    @staticmethod
+    def _iter_files(paths: Iterable[str]) -> Iterable[Path]:
+        seen: set[str] = set()
+        seen_inodes: set[tuple[int, int]] = set()
+        for raw_path in paths:
+            path_text = str(raw_path or "").strip()
+            if not path_text or path_text in seen:
+                continue
+            seen.add(path_text)
+            path = Path(path_text)
+            if path.is_file():
+                try:
+                    st = path.stat(follow_symlinks=False)
+                    inode_key = (int(st.st_dev), int(st.st_ino))
+                except OSError:
+                    inode_key = None
+                if inode_key is not None:
+                    if inode_key in seen_inodes:
+                        continue
+                    seen_inodes.add(inode_key)
+                yield path
+                continue
+            if not path.is_dir():
+                continue
+            for root, dirs, files in os.walk(path, followlinks=False):
+                dirs.sort()
+                for name in sorted(files):
+                    file_path = Path(root) / name
+                    try:
+                        st = file_path.stat(follow_symlinks=False)
+                        inode_key = (int(st.st_dev), int(st.st_ino))
+                    except OSError:
+                        inode_key = None
+                    if inode_key is not None:
+                        if inode_key in seen_inodes:
+                            continue
+                        seen_inodes.add(inode_key)
+                    yield file_path
+
+
+def _placement_kind(path: str, policy: ClientDriftPolicy) -> str:
+    if _under_any_policy_prefix(path, policy.pool_roots, policy):
+        return "pool"
+    if _under_any_policy_prefix(path, policy.stash_roots, policy):
+        return "stash"
+    return "other"
+
+
+def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
+    if not content_path:
+        return ""
+    if rt_row.is_multi_file and rt_row.name and Path(content_path).name == rt_row.name:
+        return str(Path(content_path).parent)
+    if rt_row.is_multi_file is False:
+        return str(Path(content_path).parent)
+    return normalize_rt_target_directory(content_path, None)
+
+
+def _classify_common_path_drift(
+    qb_row: ClientTorrentRow,
+    rt_row: ClientTorrentRow,
+    policy: ClientDriftPolicy,
+    anchor_scanner: _PlacementAnchorScanner,
+) -> tuple[str, str, list[str], list[str], dict[str, Any]]:
+    reasons = ["present_in_both_clients", "same_hash_path_drift", "rt_qb_path_not_aligned"]
+    blockers: list[str] = []
+    if qb_row.state not in HEALTHY_QB_STATES:
+        blockers.append(f"qb_state_not_healthy:{qb_row.state or 'unknown'}")
+    if qb_row.progress < 0.999:
+        blockers.append(f"qb_progress_not_complete:{qb_row.progress:.3f}")
+    if rt_row.state not in HEALTHY_RT_STATES:
+        blockers.append(f"rt_state_not_healthy:{rt_row.state or 'unknown'}")
+    if not qb_row.path_exists:
+        blockers.append("qb_content_path_missing")
+    if not rt_row.path_exists:
+        blockers.append("rt_content_path_missing")
+
+    anchor = anchor_scanner.scan_paths(
+        path for path in (qb_row.content_path, rt_row.content_path) if path
+    )
+    blockers.extend(anchor.blockers)
+    qb_has_nohl_tag = _has_tag(qb_row.tags, NO_HARDLINK_TAG)
+    if qb_has_nohl_tag:
+        reasons.append("qb_nohl_tag_present_advisory")
+    desired_placement = ""
+    if anchor.has_arr_anchor is True:
+        desired_placement = "stash"
+        reasons.append("arr_library_hardlink_anchor_present")
+    elif anchor.has_arr_anchor is False:
+        desired_placement = "pool"
+        reasons.append("no_arr_library_hardlink_anchor_found")
+    else:
+        blockers.append("hardlink_anchor_evidence_required_for_placement")
+
+    qb_kind = _placement_kind(qb_row.save_path or qb_row.content_path, policy)
+    rt_kind = _placement_kind(rt_row.target_qb_save_path or rt_row.save_path or rt_row.content_path, policy)
+    placement = {
+        "desired": desired_placement,
+        "qb_kind": qb_kind,
+        "rt_kind": rt_kind,
+        "qb_save_path": qb_row.save_path,
+        "qb_content_path": qb_row.content_path,
+        "rt_save_path": rt_row.save_path,
+        "rt_target_qb_save_path": rt_row.target_qb_save_path,
+        "rt_content_path": rt_row.content_path,
+        "qb_has_nohl_tag": qb_has_nohl_tag,
+        "proposed_qb_save_path": "",
+        "proposed_rt_directory": "",
+        "proposed_rt_content_path": "",
+        "proposed_rt_repoint_target": "",
+        "proposed_source_client": "",
+        "anchor_scan": anchor.to_dict(),
+    }
+
+    action = "manual_review"
+    if desired_placement:
+        qb_matches = qb_kind == desired_placement
+        rt_matches = rt_kind == desired_placement
+        if qb_matches and not rt_matches:
+            action = "repoint_rt_to_qb_path"
+            reasons.append(f"qb_on_required_{desired_placement}_placement")
+            placement["proposed_source_client"] = "qb"
+            placement["proposed_rt_directory"] = qb_row.content_path
+            placement["proposed_rt_content_path"] = qb_row.content_path
+            placement["proposed_rt_repoint_target"] = _rt_repoint_target_for_content_path(qb_row.content_path, rt_row)
+            if not qb_row.path_exists:
+                blockers.append("selected_qb_target_missing")
+        elif rt_matches and not qb_matches:
+            action = "repoint_qb_to_rt_path"
+            reasons.append(f"rt_on_required_{desired_placement}_placement")
+            placement["proposed_source_client"] = "rt"
+            placement["proposed_qb_save_path"] = rt_row.target_qb_save_path or rt_row.save_path
+            if not rt_row.path_exists:
+                blockers.append("selected_rt_target_missing")
+        elif qb_matches and rt_matches:
+            blockers.append("both_clients_on_required_placement_but_paths_differ")
+        else:
+            blockers.append(f"no_client_on_required_{desired_placement}_placement")
+
+    if blockers:
+        return "manual_review", "low", reasons, blockers, placement
+    if action != "manual_review":
+        return action, "high", reasons, blockers, placement
+    blockers.append("unable_to_select_repoint_source")
+    return "manual_review", "medium", reasons, blockers, placement
+
+
 def build_client_drift_report(
     *,
     qb_cache_file: Path = DEFAULT_QB_CACHE_FILE,
     rt_cache_file: Path = DEFAULT_RT_SHARED_CACHE_FILE,
     rt_session_dir: Path = DEFAULT_RT_SESSION_DIR,
     policy: ClientDriftPolicy | None = None,
+    hash_filters: Iterable[str] = (),
+    catalog_path: Path | None = None,
 ) -> dict[str, Any]:
     active_policy = policy or default_policy()
     qb_rows = load_qb_cache_rows(qb_cache_file)
@@ -408,10 +1043,52 @@ def build_client_drift_report(
     qb_hashes = set(qb_rows)
     rt_hashes = set(rt_rows)
     common = qb_hashes & rt_hashes
+    hash_prefixes = tuple(_norm_hash(item) for item in hash_filters if _norm_hash(item))
+
+    def _selected_hash(torrent_hash: str) -> bool:
+        return not hash_prefixes or any(torrent_hash.startswith(prefix) for prefix in hash_prefixes)
+
     now = time.time()
     drift_rows: list[dict[str, Any]] = []
+    anchor_scanner = _PlacementAnchorScanner(active_policy, catalog_path=catalog_path)
+
+    for torrent_hash in sorted(common):
+        if not _selected_hash(torrent_hash):
+            continue
+        qb_row = qb_rows[torrent_hash]
+        rt_row = rt_rows[torrent_hash]
+        aligned = _rt_path_aligned_with_policy(
+            rt_row.save_path,
+            qb_save_path=qb_row.save_path,
+            qb_content_path=qb_row.content_path,
+            policy=active_policy,
+        )
+        if aligned:
+            continue
+        action, confidence, reasons, blockers, placement = _classify_common_path_drift(
+            qb_row,
+            rt_row,
+            active_policy,
+            anchor_scanner,
+        )
+        drift_rows.append(
+            {
+                "hash": torrent_hash,
+                "side": "path_drift",
+                "action": action,
+                "confidence": confidence,
+                "reasons": reasons,
+                "blockers": blockers,
+                "name": qb_row.name or rt_row.name,
+                "placement": placement,
+                "rt": rt_row.to_dict(),
+                "qb": qb_row.to_dict(),
+            }
+        )
 
     for torrent_hash in sorted(rt_hashes - qb_hashes):
+        if not _selected_hash(torrent_hash):
+            continue
         row = rt_rows[torrent_hash]
         action, confidence, reasons, blockers = _classify_rt_only(row, active_policy, now)
         drift_rows.append(
@@ -429,6 +1106,8 @@ def build_client_drift_report(
         )
 
     for torrent_hash in sorted(qb_hashes - rt_hashes):
+        if not _selected_hash(torrent_hash):
+            continue
         row = qb_rows[torrent_hash]
         action, confidence, reasons, blockers = _classify_qb_only(row, active_policy, now)
         drift_rows.append(
@@ -453,13 +1132,329 @@ def build_client_drift_report(
         "rt_session_dir": str(rt_session_dir.expanduser()),
         "policy_mode": active_policy.mode,
         "mirror_roots": list(active_policy.mirror_roots),
+        "pool_roots": list(active_policy.pool_roots),
+        "stash_roots": list(active_policy.stash_roots),
+        "arr_library_roots": list(active_policy.arr_library_roots),
+        "anchor_scan_max_files": active_policy.anchor_scan_max_files,
+        "hash_filters": list(hash_prefixes),
+        "catalog_path": str(catalog_path.expanduser()) if catalog_path is not None else "",
         "qb_total": len(qb_rows),
         "rt_total": len(rt_rows),
         "common": len(common),
         "qb_only": len(qb_hashes - rt_hashes),
         "rt_only": len(rt_hashes - qb_hashes),
+        "path_drift": side_counts.get("path_drift", 0),
         "drift_total": len(drift_rows),
         "side_counts": dict(side_counts),
         "action_counts": dict(action_counts),
     }
     return {"summary": summary, "rows": drift_rows}
+
+
+def _catalog_context_for_hashes(catalog_path: Path | None, torrent_hashes: Iterable[str]) -> dict[str, dict[str, Any]]:
+    if catalog_path is None:
+        return {}
+    path = Path(catalog_path).expanduser()
+    if not path.exists():
+        return {}
+    wanted = sorted({_norm_hash(value) for value in torrent_hashes if _norm_hash(value)})
+    if not wanted:
+        return {}
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(payloads)").fetchall()
+        }
+        torrent_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(torrent_instances)").fetchall()
+        }
+        payload_hash_expr = "p.payload_hash" if "payload_hash" in payload_columns else "''"
+        payload_status_expr = "p.status" if "status" in payload_columns else "''"
+        payload_file_count_expr = "p.file_count" if "file_count" in payload_columns else "0"
+        payload_total_bytes_expr = "p.total_bytes" if "total_bytes" in payload_columns else "0"
+        payload_device_expr = "p.device_id" if "device_id" in payload_columns else "0"
+        ti_save_path_expr = "ti.save_path" if "save_path" in torrent_columns else "''"
+        placeholders = ",".join("?" for _ in wanted)
+        rows = conn.execute(
+            f"""
+            SELECT lower(ti.torrent_hash) AS torrent_hash,
+                   ti.payload_id,
+                   {ti_save_path_expr} AS torrent_save_path,
+                   {payload_hash_expr} AS payload_hash,
+                   p.root_path,
+                   {payload_status_expr} AS payload_status,
+                   {payload_file_count_expr} AS file_count,
+                   {payload_total_bytes_expr} AS total_bytes,
+                   {payload_device_expr} AS device_id
+            FROM torrent_instances ti
+            JOIN payloads p ON p.payload_id = ti.payload_id
+            WHERE lower(ti.torrent_hash) IN ({placeholders})
+            ORDER BY ti.torrent_hash
+            """,
+            wanted,
+        ).fetchall()
+        context: dict[str, dict[str, Any]] = {}
+        by_payload_hash: dict[str, list[sqlite3.Row]] = {}
+        payload_ids = sorted({int(row["payload_id"] or 0) for row in rows if row["payload_id"]})
+        payload_hashes = sorted({str(row["payload_hash"] or "") for row in rows if row["payload_hash"]})
+        if payload_hashes and "payload_hash" in payload_columns:
+            hash_placeholders = ",".join("?" for _ in payload_hashes)
+            family_rows = conn.execute(
+                f"""
+                SELECT p.payload_id, p.payload_hash, p.root_path,
+                       {payload_status_expr} AS payload_status,
+                       {payload_file_count_expr} AS file_count,
+                       {payload_total_bytes_expr} AS total_bytes,
+                       COUNT(ti.torrent_hash) AS torrent_count
+                FROM payloads p
+                LEFT JOIN torrent_instances ti ON ti.payload_id = p.payload_id
+                WHERE p.payload_hash IN ({hash_placeholders})
+                GROUP BY p.payload_id
+                ORDER BY p.payload_hash, p.payload_id
+                """,
+                payload_hashes,
+            ).fetchall()
+            for row in family_rows:
+                by_payload_hash.setdefault(str(row["payload_hash"] or ""), []).append(row)
+        torrent_counts: dict[int, int] = {}
+        if payload_ids:
+            id_placeholders = ",".join("?" for _ in payload_ids)
+            count_rows = conn.execute(
+                f"""
+                SELECT payload_id, COUNT(*) AS torrent_count
+                FROM torrent_instances
+                WHERE payload_id IN ({id_placeholders})
+                GROUP BY payload_id
+                """,
+                payload_ids,
+            ).fetchall()
+            torrent_counts = {int(row["payload_id"] or 0): int(row["torrent_count"] or 0) for row in count_rows}
+        for row in rows:
+            payload_hash = str(row["payload_hash"] or "")
+            sibling_payloads = [
+                {
+                    "payload_id": int(sib["payload_id"] or 0),
+                    "payload_hash": str(sib["payload_hash"] or ""),
+                    "root_path": str(sib["root_path"] or ""),
+                    "status": str(sib["payload_status"] or ""),
+                    "file_count": int(sib["file_count"] or 0),
+                    "total_bytes": int(sib["total_bytes"] or 0),
+                    "torrent_count": int(sib["torrent_count"] or 0),
+                }
+                for sib in by_payload_hash.get(payload_hash, [])
+            ]
+            payload_id = int(row["payload_id"] or 0)
+            context[str(row["torrent_hash"])] = {
+                "payload_id": payload_id,
+                "payload_hash": payload_hash,
+                "root_path": str(row["root_path"] or ""),
+                "save_path": str(row["torrent_save_path"] or ""),
+                "status": str(row["payload_status"] or ""),
+                "file_count": int(row["file_count"] or 0),
+                "total_bytes": int(row["total_bytes"] or 0),
+                "device_id": int(row["device_id"] or 0),
+                "payload_torrent_count": int(torrent_counts.get(payload_id, 0)),
+                "sibling_payloads": sibling_payloads,
+                "sibling_payload_count": len([sib for sib in sibling_payloads if int(sib["payload_id"]) != payload_id]),
+            }
+        return context
+    finally:
+        conn.close()
+
+
+def _arr_status_from_anchor(anchor: dict[str, Any]) -> str:
+    value = anchor.get("has_arr_anchor")
+    if value is True:
+        return "linked_to_arr"
+    if value is False:
+        return "not_linked_to_arr"
+    return "unknown"
+
+
+def _difficulty_for_path_drift(row: dict[str, Any], catalog: dict[str, Any]) -> tuple[str, list[str]]:
+    placement = row.get("placement") or {}
+    blockers = list(row.get("blockers") or [])
+    reasons: list[str] = []
+    action = str(row.get("action") or "")
+    desired = str(placement.get("desired") or "")
+    qb_kind = str(placement.get("qb_kind") or "")
+    rt_kind = str(placement.get("rt_kind") or "")
+    file_count = int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0)
+    payload_torrent_count = int(catalog.get("payload_torrent_count") or 0)
+    sibling_payload_count = int(catalog.get("sibling_payload_count") or 0)
+
+    if action in {"repoint_rt_to_qb_path", "repoint_qb_to_rt_path"}:
+        reasons.append(f"tool_selected:{action}")
+        level = "easy"
+    elif desired and qb_kind == desired and rt_kind == desired:
+        reasons.append("both_clients_on_desired_root_class")
+        level = "easy"
+    elif desired and (qb_kind == desired or rt_kind == desired):
+        reasons.append("one_client_on_desired_root_class")
+        level = "medium"
+    elif desired:
+        reasons.append("no_client_on_desired_root_class")
+        level = "hard"
+    else:
+        reasons.append("placement_unknown")
+        level = "hard"
+
+    if "both_clients_on_required_placement_but_paths_differ" in blockers:
+        reasons.append("same_root_class_path_choice_needed")
+    if "no_client_on_required_pool_placement" in blockers or "no_client_on_required_stash_placement" in blockers:
+        reasons.append("needs_rehome_or_missing_target_discovery")
+        level = "hard"
+    if payload_torrent_count > 1:
+        reasons.append(f"n_to_1_payload:{payload_torrent_count}_hashes")
+        level = "hard"
+    if sibling_payload_count > 0:
+        reasons.append(f"sibling_payloads:{sibling_payload_count}")
+        if level == "easy":
+            level = "medium"
+    if file_count > 1 and level == "easy":
+        reasons.append(f"multi_file:{file_count}")
+        level = "medium"
+    if placement.get("qb_has_nohl_tag"):
+        reasons.append("qb_nohl_advisory")
+    if "rehome_verify_pending" in str((row.get("qb") or {}).get("tags") or "") and level == "easy":
+        reasons.append("rehome_verify_pending")
+        level = "medium"
+    return level, reasons
+
+
+def build_path_drift_rank_report(
+    *,
+    qb_cache_file: Path = DEFAULT_QB_CACHE_FILE,
+    rt_cache_file: Path = DEFAULT_RT_SHARED_CACHE_FILE,
+    rt_session_dir: Path = DEFAULT_RT_SESSION_DIR,
+    policy: ClientDriftPolicy | None = None,
+    hash_filters: Iterable[str] = (),
+    catalog_path: Path | None = DEFAULT_CATALOG_PATH,
+) -> dict[str, Any]:
+    active_policy = policy or default_policy()
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache_file,
+        rt_cache_file=rt_cache_file,
+        rt_session_dir=rt_session_dir,
+        policy=active_policy,
+        hash_filters=hash_filters,
+        catalog_path=catalog_path,
+    )
+    rows = [row for row in report.get("rows") or [] if row.get("side") == "path_drift"]
+    catalog_by_hash = _catalog_context_for_hashes(catalog_path, (row.get("hash") for row in rows))
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        placement = row.get("placement") or {}
+        anchor = placement.get("anchor_scan") or {}
+        catalog = catalog_by_hash.get(torrent_hash, {})
+        difficulty, difficulty_reasons = _difficulty_for_path_drift(row, catalog)
+        items.append(
+            {
+                "hash": torrent_hash,
+                "name": row.get("name") or "",
+                "difficulty": difficulty,
+                "difficulty_reasons": difficulty_reasons,
+                "action": row.get("action") or "",
+                "desired_root": placement.get("desired") or "",
+                "arr_status": _arr_status_from_anchor(anchor),
+                "arr_anchor_source": anchor.get("source") or "",
+                "arr_anchor_paths": anchor.get("anchor_paths") or [],
+                "qb_nohl": bool(placement.get("qb_has_nohl_tag")),
+                "qb_root_kind": placement.get("qb_kind") or "",
+                "rt_root_kind": placement.get("rt_kind") or "",
+                "qb_save_path": placement.get("qb_save_path") or "",
+                "qb_content_path": placement.get("qb_content_path") or "",
+                "rt_save_path": placement.get("rt_save_path") or "",
+                "rt_target_qb_save_path": placement.get("rt_target_qb_save_path") or "",
+                "rt_content_path": placement.get("rt_content_path") or "",
+                "file_count": int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0),
+                "blockers": row.get("blockers") or [],
+                "tags": (row.get("qb") or {}).get("tags") or "",
+                "catalog": catalog,
+            }
+        )
+
+    order = {"easy": 0, "medium": 1, "hard": 2}
+    items.sort(
+        key=lambda item: (
+            order.get(str(item["difficulty"]), 99),
+            int(item.get("file_count") or 0),
+            str(item.get("name") or "").lower(),
+        )
+    )
+    groups = {
+        level: [item for item in items if item["difficulty"] == level]
+        for level in ("easy", "medium", "hard")
+    }
+    return {
+        "summary": {
+            "path_drift": len(items),
+            "easy": len(groups["easy"]),
+            "medium": len(groups["medium"]),
+            "hard": len(groups["hard"]),
+            "anchor_scan_max_files": active_policy.anchor_scan_max_files,
+            "catalog_path": str(catalog_path.expanduser()) if catalog_path is not None else "",
+        },
+        "groups": groups,
+        "items": items,
+        "source_summary": report.get("summary") or {},
+    }
+
+
+def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool = False) -> str:
+    if json_output:
+        return json.dumps(report, indent=2)
+    summary = report.get("summary") or {}
+    lines = [
+        "Path Drift Repair Ranking",
+        (
+            f"  total={summary.get('path_drift', 0)} "
+            f"easy={summary.get('easy', 0)} medium={summary.get('medium', 0)} hard={summary.get('hard', 0)} "
+            f"anchor_scan_max_files={summary.get('anchor_scan_max_files', 0)}"
+        ),
+        "",
+    ]
+    for level in ("easy", "medium", "hard"):
+        items = (report.get("groups") or {}).get(level) or []
+        lines.append(f"{level.upper()}: {len(items)}")
+        for item in items:
+            catalog = item.get("catalog") or {}
+            sibling_payloads = catalog.get("sibling_payloads") or []
+            sibling_roots = [
+                str(sib.get("root_path") or "")
+                for sib in sibling_payloads
+                if int(sib.get("payload_id") or 0) != int(catalog.get("payload_id") or 0)
+            ]
+            lines.append(f"  {str(item.get('hash') or '')[:16]}  {item.get('name')}")
+            lines.append(
+                f"    desired={item.get('desired_root') or '-'} arr={item.get('arr_status')} "
+                f"noHL={'yes' if item.get('qb_nohl') else 'no'} files={item.get('file_count')}"
+            )
+            lines.append(
+                f"    qb={item.get('qb_root_kind') or '-'}:{item.get('qb_save_path')}"
+            )
+            lines.append(
+                f"    rt={item.get('rt_root_kind') or '-'}:{item.get('rt_target_qb_save_path') or item.get('rt_save_path')}"
+            )
+            if catalog:
+                lines.append(
+                    f"    catalog_payload={catalog.get('payload_id') or '-'} "
+                    f"payload_torrents={catalog.get('payload_torrent_count') or 0} "
+                    f"root={catalog.get('root_path') or '-'}"
+                )
+            if sibling_roots:
+                lines.append(f"    sibling_payload_roots={len(sibling_roots)}")
+                for root in sibling_roots[:3]:
+                    lines.append(f"      - {root}")
+            reasons = ",".join(item.get("difficulty_reasons") or [])
+            blockers = ",".join(item.get("blockers") or [])
+            if reasons:
+                lines.append(f"    rank_reasons={reasons}")
+            if blockers:
+                lines.append(f"    blockers={blockers}")
+        lines.append("")
+    return "\n".join(lines).rstrip()

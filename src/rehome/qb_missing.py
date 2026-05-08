@@ -865,7 +865,7 @@ def _classify_root_cause(
     )
     healthy_sibling_target_exists = any(bool(row.get("healthy")) for row in sibling_targets)
 
-    if (not qb_content_exists) and mapped_exists and save_looks_old and fr_looks_old and latest_reuse_success:
+    if mapped_exists and save_looks_old and fr_looks_old and latest_reuse_success:
         return "root_drift_after_rehome_reuse"
     if (not qb_content_exists) and (not mapped_exists) and save_looks_old and fr_looks_old and healthy_sibling_target_exists:
         return "root_drift_to_surviving_sibling_target"

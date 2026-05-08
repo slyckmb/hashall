@@ -478,6 +478,16 @@ def _parse_refresh_dedup_mode(lines: list[str]) -> str:
     return "execute"
 
 
+def _parse_refresh_payload_label(lines: list[str]) -> str:
+    for line in lines:
+        if line.startswith("  payload-upgrade-missing"):
+            value = line.split()[-1].strip().lower()
+            if value in {"off", "false", "0", "no"}:
+                return "payload sync"
+            return "payload sync --upgrade-missing"
+    return "payload sync --upgrade-missing"
+
+
 def _build_refresh_phase_plan(lines: list[str]) -> list[str]:
     roots = _parse_refresh_roots_from_log(lines)
     dedup_mode = _parse_refresh_dedup_mode(lines)
@@ -490,23 +500,28 @@ def _build_refresh_phase_plan(lines: list[str]) -> list[str]:
     phases.append(f"scan active_root ({active_root})")
     if dest_root != active_root:
         phases.append(f"scan dest_root ({dest_root})")
-    phases.append(f"dupes auto-upgrade (active={active_alias})")
-    phases.append(f"dupes auto-upgrade (dest={dest_alias})")
 
     managed = [(path, alias) for path, alias, role in roots if role == "managed"]
     for managed_path, managed_alias in managed:
         phases.append(f"scan managed root ({managed_path})")
-        phases.append(f"dupes auto-upgrade (managed={managed_alias})")
-        if dedup_mode != "off":
+
+    if dedup_mode != "off":
+        phases.append(f"dupes auto-upgrade (active={active_alias})")
+        phases.append(f"dupes auto-upgrade (dest={dest_alias})")
+        for _managed_path, managed_alias in managed:
+            phases.append(f"dupes auto-upgrade (managed={managed_alias})")
+        for managed_path, managed_alias in managed:
+            # The scan phase is already listed above; link phases stay after all
+            # duplicate discovery to match the refresh execution order.
+            _ = managed_path
             phases.append(f"link plan ({managed_alias})")
             phases.append(f"link execute ({managed_alias})")
 
-    if dedup_mode != "off":
         for alias in (active_alias, dest_alias):
             phases.append(f"link plan ({alias})")
             phases.append(f"link execute ({alias})")
 
-    phases.append("payload sync --upgrade-missing")
+    phases.append(_parse_refresh_payload_label(lines))
     return phases
 
 
@@ -2122,24 +2137,44 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
         raise click.exceptions.Exit(exit_code)
 
 
+_REFRESH_PROFILE_CHOICES = ("freshness", "maintenance", "integrity")
+
+
 @cli.command("refresh")
+@click.option(
+    "--profile",
+    type=click.Choice(_REFRESH_PROFILE_CHOICES, case_sensitive=False),
+    default="maintenance",
+    show_default=True,
+    help=(
+        "Refresh profile: freshness=fast repair evidence, "
+        "maintenance=current dedup/upgrade pipeline, integrity=slow full rehash."
+    ),
+)
 @click.option("--workers", default=8, show_default=True, help="Scan worker threads")
 @click.option(
     "--scan-hash-mode",
     type=click.Choice(["fast", "full", "upgrade"], case_sensitive=False),
-    default="fast",
-    show_default=True,
-    help="Hash mode to use for refresh scans.",
+    default=None,
+    help="Override profile hash mode for refresh scans.",
 )
 @click.option(
     "--drift-policy",
     type=click.Choice(["metadata", "quick", "full"], case_sensitive=False),
-    default="quick",
-    show_default=True,
-    help="How aggressively refresh scans should rehash unchanged files.",
+    default=None,
+    help="Override profile policy for unchanged files.",
 )
-@click.option("--no-dedup", "skip_dedup", is_flag=True,
-              help="Skip dedup (dedup executes by default)")
+@click.option(
+    "--dedup/--no-dedup",
+    "dedup",
+    default=None,
+    help="Override profile dedup behavior. --no-dedup skips duplicate analysis and link execution.",
+)
+@click.option(
+    "--payload-upgrade-missing/--no-payload-upgrade-missing",
+    default=None,
+    help="Override profile SHA256 backfill during final payload sync.",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Show subprocess output on console")
 @click.option("--debug", is_flag=True, help="Show config resolution and raw detail (implies --verbose)")
 @click.option(
@@ -2166,14 +2201,15 @@ def auto_cmd(limit, do_apply, do_refresh, workers, from_alias, to_alias, verbose
 @click.option("--seeding-root", default=None, hidden=True)
 @click.option("--pool-payload-root", default=None, hidden=True)
 @click.option("--catalog", default=None, help="Override config catalog path")
-def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debug,
+def refresh_cmd(profile, workers, scan_hash_mode, drift_policy, dedup, payload_upgrade_missing, verbose, debug,
                 payload_source, rt_session_dir,
                 active_device, dest_device, active_root, dest_root,
                 stash_device, pool_device, seeding_root, pool_payload_root,
                 catalog):
-    """Scan all managed roots, upgrade SHA256, run dedup, then sync torrent-backed payloads.
+    """Scan managed roots and sync torrent-backed payload evidence.
 
-    Dedup executes by default. Use --no-dedup to skip it.
+    The freshness profile is intended for client repair tooling: metadata-based
+    scans, no dedup work, and payload sync without broad SHA256 backfill.
     """
     from rehome.config import load_config, parse_managed_roots
     from rehome.auto import run_refresh
@@ -2199,9 +2235,11 @@ def refresh_cmd(workers, scan_hash_mode, drift_policy, skip_dedup, verbose, debu
         active_device=active_alias,
         dest_device=dest_alias,
         workers=workers,
-        scan_hash_mode=scan_hash_mode.lower(),
-        drift_policy=drift_policy.lower(),
-        skip_dedup=skip_dedup,
+        profile=str(profile).lower(),
+        scan_hash_mode=scan_hash_mode.lower() if scan_hash_mode else None,
+        drift_policy=drift_policy.lower() if drift_policy else None,
+        skip_dedup=(None if dedup is None else not dedup),
+        payload_upgrade_missing=payload_upgrade_missing,
         managed_roots=managed,
         verbose=verbose,
         debug=debug,

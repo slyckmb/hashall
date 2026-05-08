@@ -1,6 +1,1062 @@
 # Operational Run State
 
-Last updated: 2026-04-18
+Last updated: 2026-05-07
+
+## 2026-05-06 Critical Context Compliance Gate
+
+Live mutation is frozen until this branch corrects the `/data/media` /
+`/stash/media` alias evidence drift and the operator approves a resumed lane.
+
+Wedged P0 task:
+
+1. Identify repo-critical context and setup docs that every agent must read.
+2. Put the mandatory read order and compliance ACK in `AGENTS.md`.
+3. Make `docs/README.md` point agents at the same context gate.
+4. Treat the Phase 3 residue interpretation below as superseded until it is
+   rewritten with alias-aware counts.
+5. Before any further qB/RT pilot, patch and test the affected tooling so
+   `/data/media` and `/stash/media` are canonicalized/deduped before ownership,
+   copy-count, anchor, or cleanup decisions.
+
+Required compliance ACK for future agents:
+
+```text
+HASHALL_CONTEXT_ACK docs=SESSION,RUN-STATE,README,SYSTEM,PLAN,AGENT-PLAYBOOK status=OK
+```
+
+Non-negotiable invariant:
+
+- `/data/media` and `/stash/media` are equivalent mount aliases for the same
+  `stash/media` filesystem. They are not separate evidence streams and must not
+  be counted as independent copies.
+
+## 2026-05-06 Alias-Hardened Drift Cleanup Restart
+
+Repo hardening completed on this branch:
+
+- `a186af1 docs(agents): require hashall context gate`
+- `ff1bee5 fix(client-drift): honor media mount aliases`
+- `900e96b fix(client-drift): allow bounded filesystem anchor fallback`
+
+Verification:
+
+- `python3 scripts/check_doc_links.py` -> `BROKEN_LINKS=0`
+- `python3 -m py_compile src/hashall/client_drift.py tests/test_client_drift.py`
+- `pytest -q tests/test_client_drift.py` -> `30 passed`
+- read-only alias-aware `client-drift audit` against silo qB/RT caches
+
+Corrected read-only drift baseline:
+
+- qB rows: `5202`
+- RT rows: `5202`
+- common hashes: `5202`
+- qB-only: `0`
+- RT-only: `0`
+- alias-aware same-hash path drift: `12`
+- bounded filesystem anchor scan: `--anchor-scan-max-files 200000`
+- desired placement:
+  - stash: `8`
+  - pool: `4`
+- proposed high-confidence one-client repoints:
+  - `4f454ed3bdf830f0` Alien Resurrection: desired stash, qB on pool,
+    RT on stash -> proposed `repoint_qb_to_rt_path`
+  - `97343f6005da2ed8` Cinderella: desired pool, qB on pool, RT on stash
+    -> proposed `repoint_rt_to_qb_path`
+- manual-review rows:
+  - `7` stash-desired rows where both clients are already on stash but at
+    different same-placement paths; these need canonical tree/shape selection,
+    not blind repoint.
+  - `3` pool-desired rows where both clients are still on stash; these need
+    rehome/donor planning before any client repoint.
+
+Current blockers removed:
+
+- `/data/media` and `/stash/media` are now deduped as mount aliases for path
+  alignment, placement classification, catalog alias lookup, and filesystem
+  anchor scanning.
+- Missing catalog payload rows no longer block selected bounded filesystem
+  proof when the filesystem scan completes and gives definite anchor evidence.
+
+Remaining blockers:
+
+- Catalog still misses the 12 drift payload paths, even after alias expansion.
+  This is a catalog coverage/freshness issue, not proof that the payloads are
+  absent.
+- The 10 manual-review rows require per-hash tree-shape or rehome analysis.
+- Live mutation remains frozen until the operator reviews this corrected plan.
+
+Started drift cleanup plan:
+
+1. Phase D1: produce dry-run-only precheck manifests for the two high-confidence
+   one-client repoint candidates (`4f454...`, `97343...`).
+2. Phase D2: for the `7` stash/stash rows, build a canonical tree-choice table:
+   qB save/content, RT directory/content, device/inode identity, file counts,
+   ARR anchor paths, and preferred canonical root. Do not mutate.
+3. Phase D3: for the `3` pool-desired stash/stash rows (`29e2...`, `2fb25...`,
+   `a5a2...`), build a rehome-before-repoint plan using the shared
+   donor/acquisition + attach/repoint constructor. Do not use direct qB
+   `setLocation`.
+4. Phase D4: investigate catalog coverage for these 12 paths with targeted
+   read-only payload/catalog checks before refreshing broad roots.
+5. Phase D5: after human review, apply at most one live repoint pilot, then
+   re-run alias-aware `client-drift audit` and qB/RT postchecks before widening.
+
+## 2026-05-07 Phase 0 + Phase 1 Drift Prechecks
+
+Phase 0 was rerun read-only from the `cr/hashall-20260505-112759-codex`
+worktree.
+
+Baseline:
+
+- worktree branch: `cr/hashall-20260505-112759-codex`
+- `/data/media` and `/stash/media` both mount source `stash/media`
+- `/data/media` and `/stash/media` have identical root device/inode:
+  `dev=46 ino=34`
+- `/data/media/torrents/seeding` and `/stash/media/torrents/seeding` have
+  identical device/inode: `dev=46 ino=139963`
+- capacity:
+  - `/pool/data`: `3.6T` available
+  - `/pool/media`: `3.6T` available
+  - `/data/media` / `/stash/media`: `11T` available
+- silo qB cache:
+  - rows: `5202`
+  - source: `daemon_live`
+  - consecutive failures: `0`
+- silo RT cache:
+  - rows: `5203`
+  - source: `daemon_live`
+  - consecutive failures: `0`
+- live legacy counts:
+  - qB `cross-seed-link`: `0`
+  - RT `cross-seed-link`: `0`
+  - qB `orphaned_data`: `0`
+  - RT `orphaned_data`: `0`
+  - qB `/pool/data`: `0`
+  - RT `/pool/data`: `0`
+- qB `stoppedDL`: `5`, still treated as waiting-for-seed-peers:
+  - `245f2bce6afaf96b` Dexter S02
+  - `e36553b12dc118d8` Dexter S07
+  - `127c38342cfedaf4` River Monsters S07
+  - `5caca88d29e64de4` The Diary of a Teenage Girl
+  - `96d896ca35f42d93` Transformers Rise of the Beasts
+- `scripts/pilot-normalization.sh --list`: no candidates matched current
+  filters
+
+Current alias-aware drift:
+
+- qB rows: `5202`
+- RT rows: `5203`
+- common hashes: `5202`
+- qB-only: `0`
+- RT-only: `1`
+- path drift: `12`
+- total drift rows: `13`
+- new RT-only row:
+  - `9430a705e6ffddf9` Avatar Fire and Ash 2025
+  - RT state: `stalledUP`
+  - RT path: `/data/media/torrents/seeding/ReelFLiX (API)/Avatar.Fire.and.Ash.2025.1080p.AMZN.WEB-DL.DDP5.1.Atmos.H.264-BYNDR.mkv`
+  - action: `manual_review`
+  - blocker: `no_policy_says_rt_only_should_be_mirrored_or_removed`
+
+Phase 1 precheck note:
+
+- Broad bounded `client-drift audit --anchor-scan-max-files 200000` did not
+  complete in a useful time window on 2026-05-07 and was stopped read-only.
+- Hash-scoped bounded runs for `4f454...` and `97343...` also hit the timeout
+  and produced empty temp output. Do not rely on those timed-out runs as
+  evidence.
+- Direct read-only filesystem checks were used for the two D1 candidates:
+  `stat`, `findmnt`, and samefile scans under ARR library roots.
+
+Phase 1 dry-run/precheck manifests:
+
+### D1-A: `97343f6005da2ed8` Cinderella
+
+- name: `Cinderella.2021.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR.mkv`
+- current qB save path:
+  `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)`
+- current qB content path:
+  `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)/Cinderella.2021.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR.mkv`
+- current RT save path:
+  `/data/media/torrents/seeding/cross-seed/DigitalCore (API)`
+- current RT content path:
+  `/data/media/torrents/seeding/cross-seed/DigitalCore (API)/Cinderella.2021.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR.mkv`
+- qB file identity:
+  - exists: yes
+  - filesystem: `pool/media`
+  - `dev=53 ino=43 nlink=7`
+  - size: `25697127361`
+- RT/stash file identity:
+  - exists: yes
+  - filesystem: `stash/media`
+  - `dev=46 ino=71096 nlink=2`
+  - size: `25697127361`
+- direct ARR samefile scan for qB pool file:
+  - no ARR library match printed before scan completion
+- policy interpretation:
+  - no ARR hardlink anchor found for selected qB pool file
+  - pool remains the likely correct placement
+- dry-run command executed:
+
+  ```bash
+  python3 -m hashall.cli rt repoint \
+    --hash 97343f6005da2ed8139cca3f88abd0bf0b5632ec \
+    --target-directory "/pool/media/torrents/seeding/cross-seed/DigitalCore (API)"
+  ```
+
+- dry-run result:
+  - command rendered target and `apply: False`
+  - no RT mutation performed
+- proposed next live pilot, only after human approval:
+  - apply the same RT repoint with `--apply`
+  - postcheck qB path/state, RT path/state, content existence, and alias-aware
+    drift count
+- rollback target if pilot misbehaves:
+  `/data/media/torrents/seeding/cross-seed/DigitalCore (API)`
+
+### D1-B: `4f454ed3bdf830f0` Alien Resurrection
+
+- name:
+  `Alien.Resurrection.1997.Extended.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-EPSiLON.mkv`
+- current qB save path:
+  `/pool/media/torrents/seeding/cross-seed/FearNoPeer`
+- current qB content path:
+  `/pool/media/torrents/seeding/cross-seed/FearNoPeer/Alien.Resurrection.1997.Extended.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-EPSiLON.mkv`
+- current RT save path:
+  `/data/media/torrents/seeding/cross-seed/FearNoPeer`
+- current RT content path:
+  `/data/media/torrents/seeding/cross-seed/FearNoPeer/Alien.Resurrection.1997.Extended.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-EPSiLON.mkv`
+- qB file identity:
+  - exists: yes
+  - filesystem: `pool/media`
+  - `dev=53 ino=143 nlink=5`
+  - size: `30860411814`
+- RT/stash file identity:
+  - exists: yes
+  - filesystem: `stash/media`
+  - `dev=46 ino=69079 nlink=16`
+  - size: `30860411814`
+- direct ARR samefile scan for RT/stash file found:
+  `/data/media/movies/Alien Resurrection (1997) {tmdb-8078}/Alien Resurrection (1997) {tmdb-8078} {edition-Extended} [Remux-1080p][DTS-HD MA 5.1][AVC]-EPSiLON.mkv`
+- policy interpretation:
+  - ARR hardlink anchor exists on stash
+  - stash is the policy-correct placement
+  - qB currently points at pool
+- blocker:
+  - there is no dedicated dry-run/apply wrapper for same-hash
+    `repoint_qb_to_rt_path`; `client-drift apply` only executes
+    `mirror_rt_to_qb`
+  - do not live-run raw qB `setLocation` for this lane until a wrapper or
+    explicit operator command exists
+- proposed follow-up:
+  - add a dry-run qB save-path repoint wrapper for one selected same-hash drift
+    row, or manually approve a one-off qB `setLocation` procedure with rollback
+    notes
+
+Follow-up needed before Phase 2:
+
+- Treat `97343...` as the only currently executable one-hash live pilot from
+  D1, because it has an existing `rt repoint` dry-run command.
+- Treat `4f454...` as an evidence-confirmed stash-placement issue, but blocked
+  on qB repoint tooling/human decision.
+- Investigate why bounded `client-drift` filesystem scans are now too slow for
+  broad or hash-scoped Phase 1 use; likely follow-up is to cache/reuse the ARR
+  inode index or add a selected single-file anchor check path.
+
+Detailed Phase 2 plan:
+
+1. Human selects whether to apply `97343...` as the one live pilot.
+2. Immediately before apply:
+   - rerun qB/RT cache freshness checks
+   - rerun selected `client-drift audit --hash 97343... --anchor-scan-max-files 0`
+   - restat qB and RT content paths
+   - confirm no active qB/RT mutation workflow is running
+3. Dry-run again:
+
+   ```bash
+   python3 -m hashall.cli rt repoint \
+     --hash 97343f6005da2ed8139cca3f88abd0bf0b5632ec \
+     --target-directory "/pool/media/torrents/seeding/cross-seed/DigitalCore (API)"
+   ```
+
+4. If still clean and approved, apply:
+
+   ```bash
+   python3 -m hashall.cli rt repoint \
+     --hash 97343f6005da2ed8139cca3f88abd0bf0b5632ec \
+     --target-directory "/pool/media/torrents/seeding/cross-seed/DigitalCore (API)" \
+     --apply
+   ```
+
+5. Postcheck:
+   - live RT directory equals the pool target or normalizes to it
+   - RT state remains complete/seed-ready
+   - qB state remains `stoppedUP`/complete
+   - alias-aware path drift drops from `12` to `11`
+   - no new qB-only or RT-only rows except preexisting `9430...`
+6. Stop for human inspection before any second live pilot.
+7. If failure occurs, repoint RT back to:
+   `/data/media/torrents/seeding/cross-seed/DigitalCore (API)` and rerun the
+   same postchecks.
+
+Detailed Phase 3 plan:
+
+1. Build a read-only table for the `7` stash-desired stash/stash rows:
+   - hash/name
+   - qB save/content path
+   - RT save/content path
+   - qB and RT file count/size
+   - device/inode identity for representative files
+   - ARR samefile anchor path(s)
+   - qB tags including `~noHL`, rehome tags, and mirror tags
+   - recommended canonical tree
+2. Classify each row:
+   - align qB to RT
+   - align RT to qB
+   - leave both as acceptable sibling trees
+   - needs rehome/donor work before any client repoint
+3. Do not mutate during Phase 3.
+4. Produce exact Phase 3 output as a review table and a per-hash proposed
+   command only where a safe wrapper exists.
+5. If Phase 3 finds qB-on-pool but ARR-anchor-on-stash contradictions like
+   `4f454...`, prioritize tooling to dry-run qB save-path repair before any
+   raw qB API action.
+
+## 2026-05-07 Phase 2 Execution + Alien Hitchhiker Review
+
+Phase 2 executed the single approved Cinderella RT repoint pilot:
+
+- hash: `97343f6005da2ed8139cca3f88abd0bf0b5632ec`
+- target RT directory:
+  `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)`
+- dry-run result: clean, `apply: False`
+- apply result:
+  - the CLI process returned an rTorrent XMLRPC read timeout after `20s`
+  - live RT later answered with the new `/pool` directory using a `60s` read
+    timeout
+  - no rollback was run because live RT state confirmed the intended mutation
+- postcheck:
+  - qB remained complete at the `/pool` save path
+  - live RT `d.directory` now equals the `/pool` target
+  - selected alias-aware `client-drift audit --hash 97343...` reports
+    `drift_total=0`
+  - full alias-aware audit now reports:
+    - qB rows: `5203`
+    - RT rows: `5203`
+    - common hashes: `5203`
+    - qB-only: `0`
+    - RT-only: `0`
+    - path drift: `11`
+    - drift total: `11`
+    - action counts: `manual_review=11`
+- caution:
+  - the RT shared cache row for this hash may show `directory=null` while live
+    RT and session-backed drift audit know the true directory; for this lane,
+    trust direct live RT postcheck over a bare cache row.
+
+Alien Resurrection `4f454ed3bdf830f0` follow-up findings:
+
+- The item is not just a simple same-hash save-path drift row.
+- Catalog payload `13555` is a `/pool` N->1 hitchhiker group:
+  - `9` catalog hashes share the same pool payload root
+  - `4f454...` is one of those hashes
+  - qB for `4f454...` points at the pool copy
+- The same title also has stash payload `16307`:
+  - `46bba44c...` and `e4a7ee7a...` point at the stash copy
+  - the stash copy is hardlinked to the ARR movie library
+- Live RT for `4f454...` points at the stash copy, and the RT/stash file is
+  samefile with:
+  `/data/media/movies/Alien Resurrection (1997) {tmdb-8078}/Alien Resurrection (1997) {tmdb-8078} {edition-Extended} [Remux-1080p][DTS-HD MA 5.1][AVC]-EPSiLON.mkv`
+- A selected bounded `client-drift audit --hash 4f454... --anchor-scan-max-files 200000`
+  correctly selects `repoint_qb_to_rt_path` with desired placement `stash`.
+- That selected drift action is not enough by itself, because blindly repointing
+  qB to the current RT save path would leave `4f454...` sharing the existing
+  stash payload tree instead of giving it a canonical unique payload view.
+- A selected dry-run of existing `payload hitchhiker-split` logic for payload
+  `13555` would:
+  - keep lexicographic primary `0645960180051110...` at the original pool root
+  - create `_rehome-unique/<hash16>/` hardlink views for the other `8` hashes
+  - place `4f454...` under `/pool/media/torrents/seeding/_rehome-unique/4f454ed3bdf830f0`
+- That existing split plan is not safe to execute for `4f454...` without
+  hardening, because it is not placement-aware and does not choose the stash ARR
+  anchor as the source/target for an ARR-hardlinked item.
+
+Required follow-up Phase 2B: selected hitchhiker split hardening before live Alien work.
+
+1. Add or harden a read-only selected hitchhiker planner with `--hash` and/or
+   `--payload-id`; do not require ad hoc Python to inspect one group.
+2. For each selected hash, emit live qB path, live RT path, catalog payload
+   group(s), file device/inode/nlink, ARR samefile anchors, `~noHL` tag, and
+   target collision checks for `_rehome-unique`.
+3. Replace the current lexicographic-primary assumption with an explicit
+   primary/secondary decision:
+   - prefer the ARR-anchored stash tree for hashes that must remain hardlinked
+     to ARR media
+   - prefer pool only when filesystem proof shows no ARR hardlink anchor
+   - require a human-selected primary if multiple equivalent client owners
+     remain plausible
+4. Make dry-run detect and report existing target directories/files, empty
+   stubs, non-empty collisions, missing client rows, and stale catalog-only
+   hashes such as `ea7ce999...`.
+5. Add a selected apply path only after dry-run proves:
+   - one hash
+   - one source tree
+   - one destination tree
+   - same-device hardlink creation where required
+   - qB and RT both repointed to the same unique payload save path
+   - rollback path and pre/post snapshots are recorded
+6. Do not run existing `payload hitchhiker-split --execute` broadly for Alien.
+   It processes all safe groups by size/limit and has no selected hash/payload
+   guard.
+
+Proposed Phase 3 after 2B:
+
+1. Use the selected planner on `4f454...` and its sibling Alien payloads.
+2. Produce a human review table that chooses one of:
+   - create a stash unique hardlink view for `4f454...` and repoint qB to it
+   - leave `4f454...` on the shared stash payload temporarily and only align qB
+     after an explicit acceptance of the shared tree
+   - split the whole Alien family into per-hash views in controlled batches
+3. Run only dry-run/simulation until the operator approves the exact selected
+   Alien hash, source tree, target tree, and rollback path.
+
+## 2026-05-07 Phase 2B Hitchhiker Guard Hardening
+
+Phase 2B converted the old broad hitchhiker split lane into a selected-safe,
+fail-closed lane:
+
+- `payload hitchhiker-audit` now accepts `--hash` and `--payload-id`.
+- `payload hitchhiker-split` now accepts `--hash` and `--payload-id`.
+- `payload hitchhiker-split --execute` now refuses to run without one of those
+  selectors.
+- Selected split dry-runs now report unsafe selected groups instead of returning
+  an empty result.
+- Selected split execute now exits nonzero if the selected group is blocked or
+  any action fails.
+- Hitchhiker audit now marks groups `blocked` when:
+  - a catalog hash is absent from both qB and RT
+  - qB and RT paths drift for the same hash
+  - a client state is unsafe for blind split
+- Split planning now reports:
+  - missing source roots
+  - existing empty target stubs
+  - existing non-empty target dirs
+  - existing target content
+  - source/target device mismatch
+
+Alien `4f454ed3bdf830f0` now fails closed:
+
+```bash
+python3 -m hashall.cli payload hitchhiker-audit --payload-id 13555 --json-output
+```
+
+reports payload `13555` as `blocked` because:
+
+- `4f454...` has qB/RT path drift:
+  qB on `/pool/media/torrents/seeding/cross-seed/FearNoPeer`, RT on
+  `/data/media/torrents/seeding/cross-seed/FearNoPeer`
+- `ea7ce999...` is a stale catalog row absent from both qB and RT
+
+```bash
+python3 -m hashall.cli payload hitchhiker-split --execute --payload-id 13555 --json-output
+```
+
+now exits `1` without mutation and reports:
+
+- `success=false`
+- `error="group not safe to split: status=blocked"`
+
+Simulation/code-walk loop results:
+
+1. First loop found current broad split was unsafe for selected Alien work.
+2. First patch added selectors, stale-client blocking, qB/RT path-drift
+   blocking, and target/source dry-run evidence.
+3. Second loop found selected blocked dry-runs returned an empty result.
+4. Second patch made selected dry-runs report blocked groups explicitly.
+5. Third loop found selected blocked `--execute` could still exit `0`.
+6. Third patch made selected failed execute return nonzero.
+7. Final loop found no further 2B logic issue in:
+   - selected Alien dry-run
+   - selected Alien blocked execute
+   - broad execute guard
+   - target-stub and target-content collision tests
+
+Verification:
+
+- `pytest -q tests/test_hitchhiker.py tests/test_client_drift.py tests/test_save_path_inference.py`
+  -> `62 passed`
+- `python3 -m py_compile src/hashall/hitchhiker.py src/hashall/hitchhiker_split.py src/hashall/cli.py tests/test_hitchhiker.py`
+  -> passed
+
+Remaining next step:
+
+- Build the actual Alien repair planner after this hardening: it should choose a
+  stash unique payload view for ARR-anchored hashes only after a selected
+  read-only evidence table confirms exact source tree, target tree, collision
+  state, and rollback path.
+
+## 2026-05-06 Phase 0 Baseline
+
+Read-only baseline from the `cr/hashall-20260505-112759-codex` worktree:
+
+- `~/.hashall/refresh.lock` was stale metadata only (`pid=3969561`, process not running) and was removed; `hashall rehome refresh-status` now reports `idle`.
+- qB cache source of truth is the silo-owned cache:
+  - `~/.cache/silo-qb/torrents-info.json`
+  - `~/.cache/silo-qb/torrents-info.meta.json`
+  - latest observed cache: `5200` items, qB `v5.1.4`, `consecutive_failures=0`
+- RT cache source of truth is the silo-owned cache:
+  - `~/.cache/silo-rt/torrents.json`
+  - `~/.cache/silo-rt/torrents.meta.json`
+  - latest observed cache: `5202` items, `consecutive_failures=0`
+- Live cache counts now show the path-normalization live rows are clear:
+  - qB `cross-seed-link`: `0`
+  - RT `cross-seed-link`: `0`
+  - qB `orphaned_data`: `0`
+  - RT `orphaned_data`: `0`
+  - qB paths under `/pool/data`: `0`
+  - RT paths under `/pool/data`: `0`
+- `scripts/pilot-normalization.sh --list` found no current safe normalization candidates.
+- Capacity is no longer the immediate migration blocker:
+  - `/pool/data`: about `3.6T` available
+  - `/pool/media`: about `3.6T` available
+- The five current qB `stoppedDL` rows are treated as waiting-for-seed-peers, not as the active repair lane:
+  - `245f2bce6afaf96b0a48ad216366c4281fdd864f`
+  - `e36553b12dc118d8c52575a1d6711532882ae1c3`
+  - `127c38342cfedaf4016b8079be13c5f7883b9cfe`
+  - `5caca88d29e64de495a47b53a466f7cadcb3ce02`
+  - `96d896ca35f42d93e4a4bdee92e8ac90adc34b54`
+- Non-blocking cache-daemon hygiene item:
+  - `~/.cache/silo-qb/daemon.pid` points at a live silo daemon.
+  - `torrents-info.meta.json` still reported an older non-running `daemon_pid`.
+  - The cache itself is fresh, so do not restart the shared daemon while active leases exist; handle this in the silo/cache hygiene lane.
+
+Interpretation:
+- Treat older notes that cite live `cross-seed-link`, live `orphaned_data`, `/pool/data` qB/RT rows, or zero-capacity blockers as historical unless a new live read contradicts this baseline.
+- Next best work lane is code/doc/cache cleanup, not another live path-normalization pilot.
+
+## 2026-05-06 Phase 2B Save-Path Drift Policy
+
+`client-drift audit` now watches same-hash qB/RT save-path drift as a first-class drift side:
+
+- read-only live audit against silo caches:
+  - qB rows: `5202`
+  - RT rows: `5202`
+  - common hashes: `5202`
+  - qB-only: `0`
+  - RT-only: `0`
+  - same-hash path drift: `13`
+- default audit behavior is fail-closed:
+  - anchor scanning is disabled by default (`anchor_scan_max_files=0`)
+  - drift rows are reported as `manual_review` until a selected dry-run/pilot policy enables bounded ARR hardlink-anchor evidence
+- placement rule carried into tooling:
+  - ARR library hardlink anchor present -> stash/data is the correct placement
+  - no ARR library hardlink anchor found -> pool is the correct placement
+  - incomplete or disabled anchor evidence -> manual review, no automatic side selection
+  - qB `~noHL` from qbit_manage is advisory no-hardlink evidence, not proof; always confirm catalog/filesystem hardlink state before destructive moves, repoints, or cleanup
+
+## 2026-05-06 Phase 2C Selected Drift Pilot Interface
+
+`client-drift audit` now supports selected path-drift pilots:
+
+- `--hash <prefix>` restricts report construction before path-drift anchor checks run.
+- `--anchor-scan-max-files <N>` enables bounded ARR hardlink-anchor scanning for selected dry-run/pilot rows only.
+- path-drift rows now include proposed target fields when policy evidence is complete:
+  - `proposed_source_client`
+  - `proposed_qb_save_path`
+  - `proposed_rt_content_path`
+  - `proposed_rt_repoint_target`
+  - `proposed_rt_directory` compatibility alias only; do not use for new mutation tooling
+
+Read-only selected live pilot:
+
+```bash
+python3 -m hashall.cli client-drift audit \
+  --qb-cache-file ~/.cache/silo-qb/torrents-info.json \
+  --rt-cache-file ~/.cache/silo-rt/torrents.json \
+  --side path_drift \
+  --hash 2d9004 \
+  --anchor-scan-max-files 1000 \
+  --limit 5 \
+  --json-output
+```
+
+Result:
+
+- selected rows: `1`
+- hash: `2d9004e9af6618c192d965c8950189955326b3e2`
+- qB side: pool
+- RT side: stash/data
+- anchor scan: incomplete (`library_scan_truncated=true`, `library_files_checked=1001`)
+- action: `manual_review`
+
+Interpretation:
+
+- Phase 2C is safe for selected dry-run triage and target reporting.
+- Phase 2D should replace or supplement filesystem anchor scans with catalog-backed hardlink-anchor evidence before any live repoint pilot.
+
+## 2026-05-06 Phase 2D Catalog-Backed Anchor Evidence
+
+`client-drift audit` now accepts an optional read-only catalog:
+
+```bash
+python3 -m hashall.cli client-drift audit \
+  --qb-cache-file ~/.cache/silo-qb/torrents-info.json \
+  --rt-cache-file ~/.cache/silo-rt/torrents.json \
+  --side path_drift \
+  --hash 2d9004 \
+  --catalog ~/.hashall/catalog.db \
+  --anchor-scan-max-files 0 \
+  --limit 5 \
+  --json-output
+```
+
+Catalog behavior:
+
+- reads SQLite in `mode=ro`
+- checks both legacy `files` and device tables shaped as `files_<id>`
+- skips incompatible file tables that do not expose both `path` and `inode`
+- treats matching payload inode(s) with ARR-library sibling paths as `has_arr_anchor=true`
+- treats catalog payload rows without ARR-library siblings as `has_arr_anchor=false`
+- falls back to the selected filesystem scan path only when catalog evidence is unavailable
+
+Read-only selected live result for `2d9004`:
+
+- selected rows: `1`
+- action: `manual_review`
+- blockers:
+  - `catalog_payload_paths_missing`
+  - `arr_anchor_scan_disabled`
+  - `hardlink_anchor_evidence_required_for_placement`
+
+Interpretation:
+
+- Phase 2D is working, but this selected live hash is not yet catalog-proven because its qB/RT payload paths were not found in the current catalog.
+- Phase 2E is needed before live repoint pilots: refresh or path-alias the catalog evidence for the 13 path-drift rows, then rerun selected catalog-backed audits until each row is either policy-proven or explicitly blocked.
+
+## 2026-05-06 Phase 2E Plan Update: `~noHL` Evidence
+
+Additional evidence to carry into 2E/B/C:
+
+- qbit_manage may tag qB items with `~noHL` when it did not find ARR hardlinks.
+- Treat `~noHL` as advisory evidence toward pool placement only.
+- Never use `~noHL` alone for destructive actions:
+  - no deletion
+  - no live qB/RT repoint
+  - no stash/pool cleanup
+- Required confirmation before any destructive decision remains:
+  - catalog inode evidence proving ARR hardlink anchors or their absence, or
+  - selected bounded filesystem verification of the real paths, plus human review
+
+Updated 2E execution target:
+
+- produce a read-only evidence table for the 13 path-drift rows with:
+  - qB/RT placement kind
+  - qB `~noHL` presence
+  - catalog anchor source/status/blockers
+  - selected filesystem fallback status only when explicitly bounded
+  - final classification: `policy_proven_stash`, `policy_proven_pool`, or `blocked_needs_evidence`
+
+2E read-only execution result:
+
+- command shape:
+  - `client-drift audit --side path_drift --catalog ~/.hashall/catalog.db --anchor-scan-max-files 0 --json-output`
+- qB rows: `5202`
+- RT rows: `5202`
+- same-hash path drift rows: `13`
+- policy-proven stash: `0`
+- policy-proven pool: `0`
+- blocked needs evidence: `13`
+- qB `~noHL` advisory rows: `4`
+- common blocker set:
+  - `catalog_payload_paths_missing`
+  - `arr_anchor_scan_disabled`
+  - `hardlink_anchor_evidence_required_for_placement`
+
+2E interpretation:
+
+- `~noHL` is now visible in the evidence report, but it did not unlock any row by itself.
+- Current catalog coverage is insufficient for these 13 drift payload paths.
+- Next follow-up should be 2F: produce a read-only catalog coverage/remap plan for the 13 qB/RT payload paths, then refresh/rescan only the missing roots or teach catalog lookup the safe `/data`/`/stash` alias mapping needed to find existing rows.
+
+## 2026-05-06 Phase 2F Coverage + Filesystem Anchor Check
+
+2F read-only coverage result:
+
+- compatible catalog tables considered: `18`
+- direct/alias catalog payload hits for the 13 drift rows: `0`
+- all 13 candidate qB/RT paths exist on disk
+- selected filesystem inode comparison scanned ARR library roots read-only:
+  - ARR files scanned: `146604`
+  - ARR-anchored rows: `8`
+  - no ARR-anchor found: `5`
+  - qB `~noHL` advisory rows: `4`
+
+Policy classification from actual filesystem state:
+
+- `policy_proven_stash`:
+  - `1a06655541134463` Top Gun
+  - `20555f704e0ae477` Bottle Shock
+  - `2a4e075ecf0962ba` V for Vendetta
+  - `4052607092357bfe` Twisters
+  - `4f454ed3bdf830f0` Alien Resurrection
+  - `5c86280a99d10071` Spider-Man Into the Spider-Verse
+  - `c7845e03fe21e7fa` Twin Peaks S01
+  - `e2a7eab3a5be76f7` Here 2024
+- `policy_proven_pool_by_fs_no_arr_anchor`:
+  - `29e2b889867a8fbb` Vigen Guroian (`~noHL`)
+  - `2d9004e9af6618c1` West Wing S07
+  - `2fb25fdf2ef20ae5` Novitiate (`~noHL`)
+  - `97343f6005da2ed8` Cinderella
+  - `a5a2b78798009b38` Wilding (`~noHL`)
+
+Code follow-up completed during 2F:
+
+- catalog anchor lookup now considers `files_fs_*` tables as well as legacy `files` and numeric `files_<id>` tables.
+
+Edge case to keep out of the repoint lane:
+
+- Some items may not be hardlinked into ARR libraries but arguably should be.
+- Detect that by comparing torrent payload identity/name/path against ARR library metadata or import history, not by drift repair alone.
+- Handling should be a separate `missing_arr_anchor_candidate` audit lane:
+  - read-only match candidate to ARR item
+  - verify bytes/path compatibility
+  - decide whether to create/rebuild ARR hardlinks
+  - only then revisit stash-vs-pool placement
+
+## 2026-05-06 Phase 2G Dry-Run Repoint Plan
+
+2G produced a read-only dry-run plan from the 2F filesystem-proven placement classes.
+
+Artifact:
+
+- `/tmp/hashall-20260505-112759-codex-2g-dryrun-repoint-plan.json`
+
+Summary:
+
+- rows planned: `13`
+- mutates live state: `false`
+- requires human review: `true`
+- action buckets:
+  - `dry_run_repoint_qb_to_rt_stash`: `1`
+  - `dry_run_repoint_rt_to_qb_pool`: `2`
+  - `dry_run_same_placement_canonical_choice_needed`: `7`
+  - `blocked_rehome_to_pool_before_repoint`: `3`
+
+Straightforward repoint-only candidates:
+
+- `4f454ed3bdf830f0` Alien Resurrection
+  - desired placement: stash
+  - qB currently points at pool
+  - RT already points at stash/data
+  - dry-run action: repoint qB to RT stash save root
+- `2d9004e9af6618c1` West Wing S07
+  - desired placement: pool
+  - qB already points at pool
+  - RT points at stash/data
+  - dry-run action: repoint RT to qB pool content path
+- `97343f6005da2ed8` Cinderella
+  - desired placement: pool
+  - qB already points at pool
+  - RT points at stash/data
+  - dry-run action: repoint RT to qB pool content path
+
+Same-placement canonical-choice blockers:
+
+- `1a06655541134463` Top Gun
+- `20555f704e0ae477` Bottle Shock
+- `2a4e075ecf0962ba` V for Vendetta
+- `4052607092357bfe` Twisters
+- `5c86280a99d10071` Spider-Man Into the Spider-Verse
+- `c7845e03fe21e7fa` Twin Peaks S01
+- `e2a7eab3a5be76f7` Here 2024
+
+These are policy-proven stash rows, but both qB and RT already point somewhere under stash/data. Do not repoint until choosing the canonical tree shape/root for each row.
+
+Rehome-before-repoint blockers:
+
+- `29e2b889867a8fbb` Vigen Guroian (`~noHL`)
+- `2fb25fdf2ef20ae5` Novitiate (`~noHL`)
+- `a5a2b78798009b38` Wilding (`~noHL`)
+
+These are policy-proven pool candidates, but neither client currently points at pool. They need a pool rehome/materialization plan before qB/RT repoint.
+
+2G interpretation:
+
+- Do not apply all 13 as a single drift-repoint batch.
+- The first live pilot candidate should be one of the three straightforward repoint-only rows, after human inspection of the exact target paths.
+- Phase 2H, if needed, should turn the three straightforward dry-run candidates into explicit one-hash pilot commands with pre/post checks and rollback notes.
+
+## 2026-05-06 Phase 2H One-Hash Pilot Command Plan
+
+2H selected pilot candidate:
+
+- hash: `2d9004e9af6618c192d965c8950189955326b3e2`
+- name: `The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- policy result: pool-proven by selected filesystem no-ARR-anchor evidence
+- current qB path: `/pool/media/torrents/seeding/cross-seed/aither`
+- current qB content: `/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- current RT path: `/data/media/torrents/seeding/cross-seed/2d9004e9af6618c192d965c8950189955326b3e2/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+
+Dry-run command executed:
+
+```bash
+python3 -m hashall.cli rt repoint \
+  --hash 2d9004e9af6618c192d965c8950189955326b3e2 \
+  --target-directory /pool/media/torrents/seeding/cross-seed/aither
+```
+
+Dry-run result:
+
+- command is non-mutating without `--apply`
+- `apply: False`
+- no normalization surprise when targeting the qB save root directly
+
+Apply command if human approves:
+
+```bash
+python3 -m hashall.cli rt repoint \
+  --hash 2d9004e9af6618c192d965c8950189955326b3e2 \
+  --target-directory /pool/media/torrents/seeding/cross-seed/aither \
+  --apply
+```
+
+Required prechecks before apply:
+
+- qB cache still shows:
+  - `save_path=/pool/media/torrents/seeding/cross-seed/aither`
+  - `content_path=/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+  - `state=stoppedUP`
+  - `progress=1`
+- RT cache still shows the old stash/data path and healthy complete state.
+- both qB target save/content paths still exist.
+- selected no-ARR-anchor evidence is still valid.
+
+Expected postchecks after apply:
+
+- refresh or wait for the RT cache update before declaring success.
+- `client-drift audit --side path_drift --hash 2d9004e9` should clear or change to aligned.
+- qB remains complete/seed-ready.
+- RT remains complete/seed-ready.
+
+Rollback note:
+
+- if the RT repoint misbehaves, repoint RT back to:
+  - `/data/media/torrents/seeding/cross-seed/2d9004e9af6618c192d965c8950189955326b3e2/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+
+Decision point:
+
+- human approval is required before running the `--apply` command.
+- 2I is only needed if we want this exact pilot packaged into a reusable guarded script/manifest instead of running the existing `rt repoint` command manually.
+
+## 2026-05-06 Phase B One-Hash Live RT Repoint Pilot
+
+Phase B applied the Phase 2H pilot for:
+
+- hash: `2d9004e9af6618c192d965c8950189955326b3e2`
+- name: `The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- policy result: pool-proven by selected filesystem no-ARR-anchor evidence
+- action: repointed RT from the stale stash/data path to the qB pool save root
+
+Applied command:
+
+```bash
+python3 -m hashall.cli rt repoint \
+  --hash 2d9004e9af6618c192d965c8950189955326b3e2 \
+  --target-directory /pool/media/torrents/seeding/cross-seed/aither \
+  --apply
+```
+
+Apply result:
+
+- completed RT actions: `d.stop`, `d.close`, `d.directory.set`, `d.save_full_session`, `session.save`, `d.open`, `d.start`
+- live RT postcheck directory: `/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- live RT postcheck complete: `1`
+- qB postcheck remains complete at:
+  - save path: `/pool/media/torrents/seeding/cross-seed/aither`
+  - content path: `/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+  - state: `stoppedUP`
+  - progress: `1.0`
+- selected drift audit now reports `path_drift=0` and `drift_total=0` for `--hash 2d9004e9`
+
+Residual notes:
+
+- the old stash/data content directory still exists and should be handled by a later read-only residue/ownership audit, not deleted from this pilot.
+- 2I was skipped by request; no reusable pilot wrapper was added.
+
+Next recommended lanes:
+
+- Phase C: read-only residue audit for the old stash/data path and related cleanup candidates.
+- Phase D: continue path-drift repair with another one-hash pilot only after Phase C confirms no unexpected ownership/residue issue from this pilot.
+
+## 2026-05-06 Phase C Read-Only Residue Audit
+
+Phase C audited the old stash/data tree left behind by the Phase B pilot:
+
+- old tree: `/data/media/torrents/seeding/cross-seed/2d9004e9af6618c192d965c8950189955326b3e2/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- current pool tree: `/pool/media/torrents/seeding/cross-seed/aither/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+
+Read-only findings:
+
+- old tree exists and contains `22` files / `75,287,462,464` bytes
+- current pool tree exists and contains `22` files / `75,287,462,464` bytes
+- old and pool trees are on different devices and do not share inodes
+- old file link counts range from `9` to `10`
+- pool file link counts range from `5` to `6`
+- focused ARR-library same-inode check found `0` matches for the old tree
+- catalog `payload orphan-audit` scoped to the old `2d9004...` prefix reports:
+  - `true_orphans=0`
+  - `alias_artifacts=0`
+  - `scoped_unmanaged_payloads=0`
+- catalog lookup found:
+  - `0` payload rows under the old tree
+  - `0` scanned file rows under the old tree in compatible `files*` tables
+  - torrent instance `2d9004e9af6618c192d965c8950189955326b3e2` points to payload `16738` at the pool save path
+- selected client-drift audit still reports `path_drift=0` for `--hash 2d9004e9`
+
+Interpretation:
+
+- the old stash/data tree is not qB-owned, not RT-owned, not catalog-payload-owned, and not ARR-hardlink-anchored by the focused check.
+- it is a duplicate-looking cross-device residue candidate, not a deletion-approved path.
+- because the old files have high non-ARR link counts, cleanup needs one more targeted ownership pass that maps the sibling hardlinks before any destructive action.
+
+Phase C stopped before deletion, as intended.
+
+Recommended C-2:
+
+- map same-inode siblings for the old tree inside torrent seeding roots only, excluding ARR roots already checked
+- identify whether those links are other cross-seed aliases, historical hash directories, or unmanaged residues
+- produce an exact reviewed cleanup set if every old-tree inode has non-client, non-ARR sibling coverage
+- do not delete directly from the report
+
+Recommended D:
+
+- after C-2 or human acceptance of the residue risk, continue path-drift repair with the next simple one-hash pilot.
+- recommended candidate: `97343f6005da2ed8` if fresh prechecks still show it as pool-proven, complete, and repoint-only.
+
+Recommended E:
+
+- build a reusable read-only residue/ownership audit around this evidence pattern so future path-drift pilots automatically emit:
+  - qB owner
+  - RT owner
+  - catalog payload owner
+  - catalog file rows
+  - ARR same-inode anchors
+  - torrent-root same-inode siblings
+  - deletion eligibility status, always defaulting to blocked until explicitly reviewed
+
+## 2026-05-06 Phase 1 Evidence Safety Hardening
+
+Deep branch review found two evidence semantics that needed hardening before more live path-drift pilots:
+
+- catalog hardlink-anchor detection matched on `inode` without requiring filesystem identity in aggregate tables
+- catalog "no ARR anchor found" was treated as proof of pool placement, even though absence from catalog is not the same as absence on disk
+
+Phase 1 code changes:
+
+- catalog positive ARR-anchor evidence now requires:
+  - a same-table per-filesystem catalog table such as `files_fs_*` / `files_<id>`, or
+  - an aggregate `files` table with `fs_uuid` or `device_id`
+- aggregate catalog tables without filesystem identity now block with `catalog_table_lacks_filesystem_identity:<table>`
+- matching in aggregate tables now uses the filesystem identity plus inode, not inode alone
+- catalog negative evidence now blocks with `catalog_negative_anchor_requires_filesystem_confirmation`
+- catalog-only negative evidence no longer selects pool or emits a repoint action
+
+Verification:
+
+- `pytest -q tests/test_client_drift.py tests/test_qbittorrent.py` -> `49 passed`
+- `python3 -m py_compile src/hashall/client_drift.py src/hashall/cli.py src/hashall/qbittorrent.py scripts/pause_mirror_seeders.py` -> passed
+- read-only live `client-drift audit --side path_drift --catalog ~/.hashall/catalog.db --anchor-scan-max-files 0 --json-output` now reports:
+  - qB rows: `5202`
+  - RT rows: `5202`
+  - path drift: `12`
+  - action counts: `manual_review=12`
+
+Interpretation:
+
+- The branch is safer for the stated cleanup goal: catalog positive evidence can still help when identity is sound, but catalog absence cannot drive placement by itself.
+- The next live pilot must use actual bounded filesystem confirmation or a future catalog freshness/coverage proof before selecting the side to keep.
+
+## 2026-05-06 Phase 2 Pilot Contract Hardening
+
+Phase 2 hardened path-drift report fields so dry-run/pilot consumers do not confuse RT content paths with the safe `d.directory.set` target.
+
+Code changes:
+
+- path-drift placement rows now include:
+  - `proposed_rt_content_path`
+  - `proposed_rt_repoint_target`
+- `proposed_rt_directory` remains for compatibility, but new code and operator docs should prefer `proposed_rt_repoint_target` for `rt repoint --target-directory`
+- single-file RT rows now emit the parent directory as `proposed_rt_repoint_target`
+- multi-file RT rows now emit the containing save root as `proposed_rt_repoint_target`
+- CLI human output now labels the safer value as `rt_repoint=...`
+
+Verification:
+
+- `pytest -q tests/test_client_drift.py tests/test_qbittorrent.py` -> `50 passed`
+- `python3 -m py_compile src/hashall/client_drift.py src/hashall/cli.py src/hashall/qbittorrent.py scripts/pause_mirror_seeders.py` -> passed
+- `python3 scripts/check_doc_links.py` -> `BROKEN_LINKS=0`
+- selected read-only `97343f...` path-drift audit with bounded filesystem scan reports:
+  - action: `repoint_rt_to_qb_path`
+  - blockers: `[]`
+  - `proposed_rt_content_path=/pool/media/torrents/seeding/cross-seed/DigitalCore (API)/Cinderella.2021.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR.mkv`
+  - `proposed_rt_repoint_target=/pool/media/torrents/seeding/cross-seed/DigitalCore (API)`
+
+Interpretation:
+
+- Phase 2 fixes the most important pilot-contract ambiguity for the next single-file live candidate.
+- Phase 2B should update the remaining docs/tests to describe `proposed_rt_directory` as a compatibility alias only; new live pilot docs and automation must use `proposed_rt_repoint_target`.
+
+## 2026-05-06 Phase 2B Compatibility Cleanup
+
+Phase 2B retained `proposed_rt_directory` for older JSON consumers but demoted it from the operator contract.
+
+Rules going forward:
+
+- use `proposed_rt_repoint_target` as the only report field safe to pass to `rt repoint --target-directory`
+- use `proposed_rt_content_path` for inspection and post-apply content existence checks
+- treat `proposed_rt_directory` as a compatibility alias for older report readers, not as a mutation target
+
+2B did not remove the alias because this branch still has humans and docs consuming historic JSON examples. Removing it should wait until all report consumers are updated.
+
+## 2026-05-06 Phase 3 Residue Sibling-Link Map
+
+Phase 3 ran a read-only sibling-link map for the old `2d9004...` stash/data tree left by the Phase B RT repoint:
+
+- audited old tree:
+  - `/data/media/torrents/seeding/cross-seed/2d9004e9af6618c192d965c8950189955326b3e2/The.West.Wing.S07.1080p.AMZN.WEB-DL.DD+2.0.H.264-AJP69`
+- old tree exists with `22` files and `22` distinct inodes
+- same-inode matches found:
+  - `406` torrent-seeding path hits
+  - `0` ARR-library hits
+  - root split: `203` under `/data/media/torrents/seeding`, `203` under `/stash/media/torrents/seeding`
+- distinct sibling directories found: `20`
+  - the data and stash views appear as paired aliases for the same underlying inode set
+  - `18` directories have the full `22` files
+  - `2` historical `.bad.20260227-145228.59baef61a4bb` directories have only `5` linked files
+- live qB cache still has `5` West Wing S07 torrent rows:
+  - `2d9004e9af6618c192d965c8950189955326b3e2` now on pool
+  - `f18b8cd0ac223d4a68d546de35ac3350c9d69ba9` on stash/data
+  - `8bf2aec2609247feefcfbec26e38ecabefeb1358` on stash/data
+  - `59baef61a4bb0b26ae4ce780ade53be4849f1f43` on stash/data
+  - `b6131c833d24013b4fd3841a8df90792167bc4d1` on stash/data
+- live RT cache also has the same `5` West Wing S07 hashes in healthy `stalledUP` state.
+
+Interpretation:
+
+- The old `2d9004...` data tree is not a simple unowned deletion candidate.
+- It is part of a larger hardlinked torrent sibling group with multiple live qB/RT siblings still on stash/data.
+- There are still historical `cross-seed-link` `.bad...` partial directories linked into the group; they are cleanup candidates only after client ownership and alias-path handling are explicit.
+- No deletion was performed.
+
+Recommended follow-up 3B:
+
+- build a per-hash sibling-group ownership table for these `5` West Wing hashes:
+  - qB save/content path
+  - RT directory/content path
+  - policy placement
+  - whether each sibling should remain on stash/data or move to pool
+  - whether the `.bad...` partial paths are unowned residue
+- only after that table is reviewed should cleanup remove any linked directory entries.
 
 ## Big-Picture Seed Folder Cleanup TODO
 
@@ -11,9 +1067,12 @@ Keep this list as the high-level operator target while working through the detai
 3. Repair the remaining broken live torrents.
 4. Drain all torrent payloads out of `/pool/data`.
 5. Enforce stash-vs-pool placement using the hardlink-anchor rule.
+   - pool is correct when no sibling media file is hardlinked into ARR media libraries
+   - stash/data is correct when any sibling media file is hardlinked into ARR media libraries
 6. Remove steady-state duplicates between stash and pool.
 7. De-hitchhike legacy N->1 payload trees into unique per-hash trees.
 8. Keep qB and RT aligned after every live change.
+   - same-hash qB/RT save-path drift is an active watch/fix class, not just membership drift
 9. Clean stale residue and empty legacy paths after each wave.
 10. Update code/docs/scripts in `hashall` and `~/dev` that still assume old paths.
 11. Finish the repair / verification contract in tooling.
@@ -39,6 +1098,8 @@ Settled operator decisions:
 - if any file in a payload has a hardlink into `/stash/media` libraries, keep the whole sibling payload group on stash
 - otherwise, rehome the whole sibling payload group to pool
 - `/pool/data` is not a final torrent-payload home and should drain to zero torrent payloads
+- same-hash qB/RT save-path drift must be audited after cleanup waves; select the corrected side from the stash-vs-pool hardlink-anchor policy, not from client preference alone
+- default drift audits should find save-path drift quickly and fail closed on placement; enable bounded hardlink-anchor scans only for selected dry-run/pilot rows or replace them with catalog-backed lookups
 
 Execution policy:
 - no blind bulk loops
