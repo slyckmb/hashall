@@ -3732,6 +3732,22 @@ def client_drift_nested_folder_repair_cmd(hash_val, do_apply, qb_url, rt_rpc_url
         click.echo(format_nested_folder_repair_report(None, None, dry_run=dry_run))
         raise SystemExit(1)
 
+    if dry_run:
+        click.echo(format_nested_folder_repair_report(info, None, dry_run=True))
+        # Show layout verification so user can see current disk state before applying
+        from hashall.torrent_verify import verify_layout, format_layout_result
+        from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
+        from hashall.nested_folder_repair import _api_to_fs
+        from pathlib import Path as _Path
+        h_upper = info.hash.upper()
+        torrent_path = DEFAULT_RT_SESSION_DIR / f"{h_upper}.torrent"
+        if torrent_path.exists():
+            base_dir = _Path(_api_to_fs(info.save_path_api.rstrip("/")))
+            layout_result = verify_layout(torrent_path, base_dir)
+            click.echo("")
+            click.echo(format_layout_result(layout_result))
+        return
+
     result = execute_nested_folder_repair(
         info,
         dry_run=dry_run,

@@ -1764,6 +1764,42 @@ def build_path_drift_rank_report(
     }
 
 
+def _layout_verify_badge(torrent_hash: str, qb_save_path: str) -> tuple[str, str] | None:
+    """
+    Run verify_layout for one hash and return a (text, style) badge for Rich display.
+    Returns None if the .torrent file is not found (skip silently).
+    """
+    try:
+        from pathlib import Path as _Path
+        from .torrent_verify import verify_layout
+        from .rtorrent import DEFAULT_RT_SESSION_DIR
+        from .nested_folder_repair import _api_to_fs
+
+        h_upper = str(torrent_hash).upper()
+        torrent_path = DEFAULT_RT_SESSION_DIR / f"{h_upper}.torrent"
+        if not torrent_path.exists():
+            return None
+
+        save_path_api = str(qb_save_path or "").rstrip("/")
+        if not save_path_api:
+            return None
+        base_dir = _Path(_api_to_fs(save_path_api))
+
+        result = verify_layout(torrent_path, base_dir)
+
+        if result.success:
+            return ("layout: ok", "green")
+        parts = []
+        if result.files_wrong_depth:
+            parts.append(f"{result.files_wrong_depth} wrong-depth")
+        if result.files_missing:
+            parts.append(f"{result.files_missing} missing")
+        detail = ", ".join(parts)
+        return (f"layout: FAIL ({detail})", "bold red")
+    except Exception:
+        return None
+
+
 def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool = False) -> str:
     if json_output:
         return json.dumps(report, indent=2)
@@ -1885,6 +1921,14 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
             console.print(Text.assemble(
                 ("    rt  ", "dim bold"), (rt_path, "cyan"),
             ))
+
+            # ── Layout verification badge
+            badge = _layout_verify_badge(
+                str(item.get("hash") or ""),
+                qb_path if qb_path != "-" else "",
+            )
+            if badge:
+                console.print(Text.assemble(("    layout  ", "dim bold"), (badge[0], badge[1])))
 
             # ── Sibling payload roots with metadata
             if display_siblings:
