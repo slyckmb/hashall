@@ -1039,23 +1039,54 @@ def _resolve_tracker(tracker_url: str, registry: dict[str, dict]) -> dict[str, s
     return result
 
 
+def _pool_seeding_category(root_path: str, pool_roots: tuple[str, ...]) -> str:
+    """Return the first path component after the pool root (e.g. 'torrentleech', 'cross-seed')."""
+    for pool_root in pool_roots:
+        if root_path.startswith(pool_root):
+            rel = root_path[len(pool_root):].lstrip("/")
+            return rel.split("/")[0] if rel else ""
+    return ""
+
+
 def _find_pool_sibling_path(
     sibling_payloads: list[dict[str, Any]],
     policy: "ClientDriftPolicy",
     self_payload_id: int | None = None,
+    torrent_tracker_keys: set[str] | None = None,
+    all_tracker_keys: set[str] | None = None,
 ) -> tuple[str, str] | None:
     """
     Scan sibling_payloads for content already on pool storage.
     Returns (qb_save_path, sibling_root_path) for the best candidate, or None.
-    Prefers non-_rehome-unique canonical paths; among equals prefers directory roots over file roots.
+
+    Tracker alignment: if a pool sibling sits under a seeding category that is a known
+    tracker key (e.g. /pool/.../torrentleech/...) and that tracker does NOT match the
+    current torrent's tracker, the candidate is excluded.  This prevents cross-tracker
+    path mis-assignment (e.g. pointing a seedpool torrent to a torrentleech directory).
+
+    Remaining candidates sorted by: tracker_match > tracker_neutral; canonical before
+    _rehome-unique; directory roots before file roots.
     """
-    candidates: list[tuple[str, str, bool, bool]] = []
+    candidates: list[tuple[str, str, bool, bool, int]] = []
+    pool_roots = policy.pool_roots
+
     for sib in sibling_payloads:
         if self_payload_id is not None and int(sib.get("payload_id") or 0) == self_payload_id:
             continue
         root = str(sib.get("root_path") or "")
         if not root or _placement_kind(root, policy) != "pool":
             continue
+
+        # Tracker alignment check
+        category = _pool_seeding_category(root, pool_roots)
+        if all_tracker_keys and category in all_tracker_keys:
+            # Category is a known tracker-specific directory
+            if torrent_tracker_keys and category not in torrent_tracker_keys:
+                continue  # Wrong tracker — exclude
+            tracker_score = 0  # tracker-matching canonical dir
+        else:
+            tracker_score = 1  # tracker-neutral (cross-seed, _rehome-unique, etc.)
+
         p = Path(root)
         try:
             if p.is_file():
@@ -1067,12 +1098,12 @@ def _find_pool_sibling_path(
         except OSError:
             continue
         is_canonical = "_rehome-unique" not in root
-        candidates.append((save_path, root, is_dir, is_canonical))
+        candidates.append((save_path, root, is_dir, is_canonical, tracker_score))
 
     if not candidates:
         return None
-    # canonical first, then directory roots before file roots
-    candidates.sort(key=lambda c: (not c[3], not c[2]))
+    # Sort: tracker match first, then canonical, then directory roots before file roots
+    candidates.sort(key=lambda c: (c[4], not c[3], not c[2]))
     best = candidates[0]
     return best[0], best[1]
 
@@ -1590,6 +1621,8 @@ def build_path_drift_rank_report(
     catalog_path: Path | None = DEFAULT_CATALOG_PATH,
 ) -> dict[str, Any]:
     active_policy = policy or default_policy()
+    tracker_registry = _load_tracker_registry()
+    all_tracker_keys: set[str] = set(tracker_registry.keys())
     report = build_client_drift_report(
         qb_cache_file=qb_cache_file,
         rt_cache_file=rt_cache_file,
@@ -1647,10 +1680,13 @@ def build_path_drift_rank_report(
         # exists there (in sibling payloads). Convert from manual_review/hard to an
         # actionable repoint_both_to_pool proposal.
         if "no_client_on_required_pool_placement" in item["blockers"]:
+            torrent_tracker_keys = {k for k in [item["qb_tracker_key"], item["rt_tracker_key"]] if k}
             pool_cand = _find_pool_sibling_path(
                 catalog.get("sibling_payloads") or [],
                 active_policy,
                 self_payload_id=int(catalog.get("payload_id") or 0) or None,
+                torrent_tracker_keys=torrent_tracker_keys,
+                all_tracker_keys=all_tracker_keys,
             )
             if pool_cand:
                 pool_save_path, pool_root = pool_cand
