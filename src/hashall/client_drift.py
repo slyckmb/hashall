@@ -932,10 +932,18 @@ def _placement_kind(path: str, policy: ClientDriftPolicy) -> str:
 def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
     if not content_path:
         return ""
-    if rt_row.is_multi_file and rt_row.name and Path(content_path).name == rt_row.name:
-        return str(Path(content_path).parent)
+    p = Path(content_path)
     if rt_row.is_multi_file is False:
-        return str(Path(content_path).parent)
+        return str(p.parent)
+    if rt_row.is_multi_file and rt_row.name:
+        if p.name == rt_row.name:
+            return str(p.parent)
+        # content_path is a file inside the torrent folder.
+        # Walk backwards to find the torrent folder component and return its parent.
+        parts = list(p.parts)
+        for i in range(len(parts) - 1, -1, -1):
+            if parts[i] == rt_row.name:
+                return str(Path(*parts[:i])) if i > 0 else str(Path(parts[0]))
     return normalize_rt_target_directory(content_path, None)
 
 
