@@ -3388,7 +3388,7 @@ def client_drift_audit_cmd(
             break
 
     print(f"   {_rt_qb_style('Path drift:', fg='bright_black')} "
-          f"{_rt_qb_style(str(drift_total), fg='bold')}  "
+          f"{_rt_qb_style(str(drift_total), bold=True)}  "
           f"{_rt_qb_style('easy=', fg='dim')}{_rt_qb_style(str(easy_count), fg='green')}  "
           f"{_rt_qb_style('medium=', fg='dim')}{_rt_qb_style(str(medium_count), fg='yellow')}  "
           f"{_rt_qb_style('hard=', fg='dim')}{_rt_qb_style(str(hard_count), fg='red')}")
