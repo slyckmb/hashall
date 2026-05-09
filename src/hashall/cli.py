@@ -3177,7 +3177,7 @@ def _apply_client_drift_path_rows(
     qbit=None,
 ) -> list[dict]:
     events: list[dict] = []
-    if do_apply and action == "repoint_qb_to_rt_path" and qbit is None:
+    if do_apply and action in ("repoint_qb_to_rt_path", "repoint_both_to_pool") and qbit is None:
         from hashall.qbittorrent import get_qbittorrent_client
 
         qbit = get_qbittorrent_client()
@@ -3237,6 +3237,33 @@ def _apply_client_drift_path_rows(
                 ok = qbit.set_location(torrent_hash, target)
                 event["status"] = "ok" if ok else "error"
                 event["save_path"] = target
+                event["error"] = "" if ok else str(qbit.last_error or "qbit_set_location_failed")
+                if ok:
+                    _rt_qb_progress("starting qB recheck to verify files at new location")
+                    event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
+        elif action == "repoint_both_to_pool":
+            if qbit is None:
+                raise click.ClickException("qB client not initialized")
+            from hashall.rtorrent import rt_apply_directory_repoint
+
+            target = str(placement.get("proposed_qb_save_path") or "").strip()
+            if not target:
+                event["error"] = "missing_proposed_qb_save_path"
+            elif not Path(target).exists():
+                event["error"] = f"proposed_target_missing:{target}"
+            else:
+                _rt_qb_progress("repointing RT to pool path")
+                rt_completed = rt_apply_directory_repoint(
+                    torrent_hash,
+                    target,
+                    rpc_url=rt_rpc_url,
+                    restart=True,
+                )
+                _rt_qb_progress("setting qB save path to pool path")
+                ok = qbit.set_location(torrent_hash, target)
+                event["status"] = "ok" if ok else "error"
+                event["save_path"] = target
+                event["rt_calls"] = rt_completed
                 event["error"] = "" if ok else str(qbit.last_error or "qbit_set_location_failed")
                 if ok:
                     _rt_qb_progress("starting qB recheck to verify files at new location")
@@ -3497,7 +3524,7 @@ def client_drift_rank_cmd(
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
 @click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
 @click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
-@click.option("--action", type=click.Choice(["mirror_rt_to_qb", "repoint_rt_to_qb_path", "repoint_qb_to_rt_path"]), default="mirror_rt_to_qb", show_default=True, help="Action class to apply.")
+@click.option("--action", type=click.Choice(["mirror_rt_to_qb", "repoint_rt_to_qb_path", "repoint_qb_to_rt_path", "repoint_both_to_pool"]), default="mirror_rt_to_qb", show_default=True, help="Action class to apply.")
 @click.option("--hash", "hash_filters", multiple=True, help="Restrict apply to specific torrent hash(es). Prefixes are accepted.")
 @click.option("--anchor-scan-max-files", type=int, default=None, help="Override policy anchor scan limit for selected path-drift pilots. Default uses policy.")
 @click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), help="Optional read-only catalog DB for hardlink-anchor evidence.")

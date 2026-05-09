@@ -14,6 +14,7 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
         client-drift-rank \
         client-drift-rt-to-qb-dry client-drift-rt-to-qb-apply \
         client-drift-qb-to-rt-dry client-drift-qb-to-rt-apply \
+        client-drift-both-to-pool-dry client-drift-both-to-pool-apply \
         rt-repoint-dry rt-repoint-apply \
         cross-seed-normalize-dry cross-seed-normalize-apply \
         hitchhiker-audit hitchhiker-plan hitchhiker-split-dry hitchhiker-split-apply \
@@ -53,6 +54,8 @@ help:
 	@echo "  make client-drift-rt-to-qb-apply HASH=<hash> — apply RT repoint to qB path"
 	@echo "  make client-drift-qb-to-rt-dry HASH=<hash> — dry-run qB savepath change to RT path"
 	@echo "  make client-drift-qb-to-rt-apply HASH=<hash> — apply qB savepath change to RT path"
+	@echo "  make client-drift-both-to-pool-dry HASH=<hash> — dry-run repoint both qB+RT to pool sibling path"
+	@echo "  make client-drift-both-to-pool-apply HASH=<hash> — apply repoint both qB+RT to pool sibling path"
 	@echo ""
 	@echo "  make hitchhiker-audit          — find N→1 payload groups and split safety"
 	@echo "  make hitchhiker-plan HASH=<hash>|PAYLOAD_ID=<id> — selected de-hitchhiker evidence"
@@ -142,6 +145,12 @@ client-drift-qb-to-rt-dry:
 
 client-drift-qb-to-rt-apply:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_qb_to_rt_path --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-5} --journal "$${JOURNAL:-out/client-drift/path-drift-qb-to-rt.jsonl}" --apply
+
+client-drift-both-to-pool-dry:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_both_to_pool --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-0} --journal "$${JOURNAL:-out/client-drift/path-drift-both-to-pool.jsonl}"
+
+client-drift-both-to-pool-apply:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_both_to_pool --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-5} --journal "$${JOURNAL:-out/client-drift/path-drift-both-to-pool.jsonl}" --apply
 
 rt-repoint-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}"
