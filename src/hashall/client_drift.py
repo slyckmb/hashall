@@ -1642,7 +1642,7 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
 
     use_color = sys.stdout.isatty()
     buf = StringIO()
-    console = Console(file=buf, highlight=False, markup=False, force_terminal=use_color, width=120)
+    console = Console(file=buf, highlight=False, markup=False, force_terminal=use_color, width=220)
 
     # Color palette
     LEVEL_STYLE = {"easy": "bold green", "medium": "bold yellow", "hard": "bold red"}
