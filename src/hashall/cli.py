@@ -2949,7 +2949,8 @@ def _select_client_drift_path_rows(
     hash_filters: tuple[str, ...] | list[str] = (),
     limit: int = 0,
     journal_path: Path | None = None,
-) -> tuple[list[dict], int, int]:
+    do_apply: bool = True,
+) -> tuple[list[dict], int, int, frozenset[str]]:
     rows = _filtered_client_drift_rows(report, side="path_drift", action=action, limit=0)
     hash_prefixes = [str(item or "").strip().lower() for item in hash_filters if str(item or "").strip()]
     if hash_prefixes:
@@ -2958,10 +2959,14 @@ def _select_client_drift_path_rows(
             if any(str(row.get("hash") or "").lower().startswith(prefix) for prefix in hash_prefixes)
         ]
     completed = _read_client_drift_journal(journal_path, action=action) if journal_path else set()
-    selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
+    # Dry-run bypasses the journal so operators can always inspect proposed actions.
+    if do_apply:
+        selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
+    else:
+        selected = list(rows)
     if limit > 0:
         selected = selected[:limit]
-    return selected, len(rows), len(completed)
+    return selected, len(rows), len(completed), frozenset(completed)
 
 
 def _apply_client_drift_mirror_rows(
@@ -3080,7 +3085,7 @@ def _apply_client_drift_mirror_rows(
     return events
 
 
-def _print_client_drift_path_candidate(row: dict, *, index: int | None = None) -> None:
+def _print_client_drift_path_candidate(row: dict, *, index: int | None = None, already_done: bool = False) -> None:
     placement = row.get("placement") or {}
     rt_row = row.get("rt") or {}
     hash_prefix = str(row.get("hash") or "")[:16]
@@ -3092,11 +3097,13 @@ def _print_client_drift_path_candidate(row: dict, *, index: int | None = None) -
     blockers = row.get("blockers") or []
 
     # Title line: hash, action, name
+    done_badge = _rt_qb_style(" [journal:done]", fg="bright_black") if already_done else ""
     print(
         f"{_rt_qb_style(prefix, fg='bright_black')}"
         f"{_rt_qb_style(hash_prefix, fg='cyan', bold=True)} "
         f"{_rt_qb_style(action, fg='magenta')} "
         f"{_rt_qb_style(name, fg='bright_white', bold=True)}"
+        f"{done_badge}"
     )
 
     # Status line: action details, ARR status, noHL, file count
@@ -3175,6 +3182,7 @@ def _apply_client_drift_path_rows(
     recheck_after_add: bool = False,
     rt_rpc_url: str = DEFAULT_RT_RPC_URL,
     qbit=None,
+    completed_hashes: frozenset[str] = frozenset(),
 ) -> list[dict]:
     events: list[dict] = []
     if do_apply and action in ("repoint_qb_to_rt_path", "repoint_both_to_pool") and qbit is None:
@@ -3183,8 +3191,9 @@ def _apply_client_drift_path_rows(
         qbit = get_qbittorrent_client()
 
     for index, row in enumerate(rows, start=1):
-        _print_client_drift_path_candidate(row, index=index)
         torrent_hash = str(row.get("hash") or "").strip().lower()
+        already_done = torrent_hash in completed_hashes
+        _print_client_drift_path_candidate(row, index=index, already_done=already_done)
         blockers = list(row.get("blockers") or [])
         placement = row.get("placement") or {}
         if blockers:
@@ -3571,6 +3580,7 @@ def client_drift_apply_cmd(
         catalog_path=catalog_path,
     )
     journal = Path(journal_path).expanduser()
+    completed_hashes: frozenset[str] = frozenset()
     if action == "mirror_rt_to_qb":
         selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
             report,
@@ -3579,12 +3589,13 @@ def client_drift_apply_cmd(
             journal_path=journal,
         )
     else:
-        selected, candidate_count, completed_count = _select_client_drift_path_rows(
+        selected, candidate_count, completed_count, completed_hashes = _select_client_drift_path_rows(
             report,
             action=action,
             hash_filters=hash_filters,
             limit=limit,
             journal_path=journal,
+            do_apply=do_apply,
         )
 
     print("🛠️  client drift apply")
@@ -3621,6 +3632,7 @@ def client_drift_apply_cmd(
             sleep_row=sleep_row,
             recheck_after_add=recheck_after_add,
             rt_rpc_url=rt_rpc_url,
+            completed_hashes=completed_hashes,
         )
 
 
