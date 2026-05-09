@@ -1013,7 +1013,7 @@ def _resolve_tracker(tracker_url: str, registry: dict[str, dict]) -> dict[str, s
                     pass
             if not matched:
                 pattern = info.get("url_pattern", "").lower()
-                if pattern and pattern in url_lower:
+                if pattern and any(p.strip() in url_lower for p in pattern.split("|") if p.strip()):
                     matched = True
             if matched:
                 result.update({
@@ -1037,6 +1037,44 @@ def _resolve_tracker(tracker_url: str, registry: dict[str, dict]) -> dict[str, s
     except Exception:
         pass
     return result
+
+
+def _find_pool_sibling_path(
+    sibling_payloads: list[dict[str, Any]],
+    policy: "ClientDriftPolicy",
+    self_payload_id: int | None = None,
+) -> tuple[str, str] | None:
+    """
+    Scan sibling_payloads for content already on pool storage.
+    Returns (qb_save_path, sibling_root_path) for the best candidate, or None.
+    Prefers non-_rehome-unique canonical paths; among equals prefers directory roots over file roots.
+    """
+    candidates: list[tuple[str, str, bool, bool]] = []
+    for sib in sibling_payloads:
+        if self_payload_id is not None and int(sib.get("payload_id") or 0) == self_payload_id:
+            continue
+        root = str(sib.get("root_path") or "")
+        if not root or _placement_kind(root, policy) != "pool":
+            continue
+        p = Path(root)
+        try:
+            if p.is_file():
+                save_path, is_dir = str(p.parent), False
+            elif p.is_dir():
+                save_path, is_dir = root, True
+            else:
+                continue  # path does not exist on disk
+        except OSError:
+            continue
+        is_canonical = "_rehome-unique" not in root
+        candidates.append((save_path, root, is_dir, is_canonical))
+
+    if not candidates:
+        return None
+    # canonical first, then directory roots before file roots
+    candidates.sort(key=lambda c: (not c[3], not c[2]))
+    best = candidates[0]
+    return best[0], best[1]
 
 
 def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
@@ -1569,39 +1607,65 @@ def build_path_drift_rank_report(
         anchor = placement.get("anchor_scan") or {}
         catalog = catalog_by_hash.get(torrent_hash, {})
         difficulty, difficulty_reasons = _difficulty_for_path_drift(row, catalog)
-        items.append(
-            {
-                "hash": torrent_hash,
-                "name": row.get("name") or "",
-                "difficulty": difficulty,
-                "difficulty_reasons": difficulty_reasons,
-                "action": row.get("action") or "",
-                "desired_root": placement.get("desired") or "",
-                "arr_status": _arr_status_from_anchor(anchor),
-                "arr_anchor_source": anchor.get("source") or "",
-                "arr_anchor_paths": anchor.get("anchor_paths") or [],
-                "qb_nohl": bool(placement.get("qb_has_nohl_tag")),
-                "qb_root_kind": placement.get("qb_kind") or "",
-                "rt_root_kind": placement.get("rt_kind") or "",
-                "qb_save_path": placement.get("qb_save_path") or "",
-                "qb_content_path": placement.get("qb_content_path") or "",
-                "rt_save_path": placement.get("rt_save_path") or "",
-                "rt_target_qb_save_path": placement.get("rt_target_qb_save_path") or "",
-                "rt_content_path": placement.get("rt_content_path") or "",
-                "file_count": int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0),
-                "blockers": row.get("blockers") or [],
-                "tags": (row.get("qb") or {}).get("tags") or "",
-                "qb_tracker_url": placement.get("qb_tracker_url") or "",
-                "qb_tracker_key": placement.get("qb_tracker_key") or "",
-                "qb_tracker_display": placement.get("qb_tracker_display") or "",
-                "qb_prowlarr_name": placement.get("qb_prowlarr_name") or "",
-                "rt_tracker_url": placement.get("rt_tracker_url") or "",
-                "rt_tracker_key": placement.get("rt_tracker_key") or "",
-                "rt_tracker_display": placement.get("rt_tracker_display") or "",
-                "rt_prowlarr_name": placement.get("rt_prowlarr_name") or "",
-                "catalog": catalog,
-            }
-        )
+        item: dict[str, Any] = {
+            "hash": torrent_hash,
+            "name": row.get("name") or "",
+            "difficulty": difficulty,
+            "difficulty_reasons": difficulty_reasons,
+            "action": row.get("action") or "",
+            "desired_root": placement.get("desired") or "",
+            "arr_status": _arr_status_from_anchor(anchor),
+            "arr_anchor_source": anchor.get("source") or "",
+            "arr_anchor_paths": anchor.get("anchor_paths") or [],
+            "qb_nohl": bool(placement.get("qb_has_nohl_tag")),
+            "qb_root_kind": placement.get("qb_kind") or "",
+            "rt_root_kind": placement.get("rt_kind") or "",
+            "qb_save_path": placement.get("qb_save_path") or "",
+            "qb_content_path": placement.get("qb_content_path") or "",
+            "rt_save_path": placement.get("rt_save_path") or "",
+            "rt_target_qb_save_path": placement.get("rt_target_qb_save_path") or "",
+            "rt_content_path": placement.get("rt_content_path") or "",
+            "file_count": int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0),
+            "blockers": list(row.get("blockers") or []),
+            "tags": (row.get("qb") or {}).get("tags") or "",
+            "placement_reasons": list(row.get("reasons") or []),
+            "proposed_qb_save_path": "",
+            "proposed_rt_directory": "",
+            "pool_sibling_root": "",
+            "qb_tracker_url": placement.get("qb_tracker_url") or "",
+            "qb_tracker_key": placement.get("qb_tracker_key") or "",
+            "qb_tracker_display": placement.get("qb_tracker_display") or "",
+            "qb_prowlarr_name": placement.get("qb_prowlarr_name") or "",
+            "rt_tracker_url": placement.get("rt_tracker_url") or "",
+            "rt_tracker_key": placement.get("rt_tracker_key") or "",
+            "rt_tracker_display": placement.get("rt_tracker_display") or "",
+            "rt_prowlarr_name": placement.get("rt_prowlarr_name") or "",
+            "catalog": catalog,
+        }
+
+        # Detect dual-repoint opportunity: neither client is on pool but content already
+        # exists there (in sibling payloads). Convert from manual_review/hard to an
+        # actionable repoint_both_to_pool proposal.
+        if "no_client_on_required_pool_placement" in item["blockers"]:
+            pool_cand = _find_pool_sibling_path(
+                catalog.get("sibling_payloads") or [],
+                active_policy,
+                self_payload_id=int(catalog.get("payload_id") or 0) or None,
+            )
+            if pool_cand:
+                pool_save_path, pool_root = pool_cand
+                item["blockers"] = [b for b in item["blockers"] if b != "no_client_on_required_pool_placement"]
+                item["action"] = "repoint_both_to_pool"
+                item["proposed_qb_save_path"] = pool_save_path
+                item["proposed_rt_directory"] = pool_save_path
+                item["pool_sibling_root"] = pool_root
+                if not item["blockers"]:
+                    item["difficulty"] = "medium"
+                    item["difficulty_reasons"] = list(item.get("difficulty_reasons") or []) + [
+                        "pool_sibling_exists:dual_repoint"
+                    ]
+
+        items.append(item)
 
     order = {"easy": 0, "medium": 1, "hard": 2}
     items.sort(
@@ -1649,6 +1713,7 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
     ACTION_STYLE = {
         "repoint_qb_to_rt_path": "green",
         "repoint_rt_to_qb_path": "cyan",
+        "repoint_both_to_pool": "bold cyan",
         "mirror_rt_to_qb": "cyan",
         "manual_review": "yellow",
     }
@@ -1751,23 +1816,52 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
                 ("    rt  ", "dim bold"), (rt_path, "cyan"),
             ))
 
-            # ── Sibling payload roots
+            # ── Sibling payload roots (all, no truncation)
             if sibling_roots:
                 console.print(Text.assemble(
                     ("    siblings=", "dim"), (str(len(sibling_roots)), "yellow"),
                 ))
-                for root in sibling_roots[:3]:
+                for root in sibling_roots:
                     console.print(Text("      • " + root, style="dim"))
 
-            # ── Blockers (red, prominent)
+            # ── Proposed paths for dual-repoint actions
+            proposed_qb = item.get("proposed_qb_save_path") or ""
+            proposed_rt = item.get("proposed_rt_directory") or ""
+            if proposed_qb and item.get("action") == "repoint_both_to_pool":
+                console.print(Text.assemble(
+                    ("    → both  ", "bold cyan"), (proposed_qb, "cyan"),
+                ))
+            elif proposed_qb:
+                console.print(Text.assemble(
+                    ("    → qb    ", "dim bold"), (proposed_qb, "cyan"),
+                ))
+            elif proposed_rt:
+                console.print(Text.assemble(
+                    ("    → rt    ", "dim bold"), (proposed_rt, "cyan"),
+                ))
+
+            # ── Blockers + context / reasons
+            _BOILERPLATE = frozenset({
+                "present_in_both_clients", "same_hash_path_drift", "rt_qb_path_not_aligned",
+            })
+            placement_reasons = [r for r in (item.get("placement_reasons") or []) if r not in _BOILERPLATE]
+            difficulty_reasons = item.get("difficulty_reasons") or []
+
             if blockers:
                 for b in blockers:
                     console.print(Text("    ✖ " + b, style="bold red"))
+                # Surface diagnosis hints even when blocked
+                for dr in difficulty_reasons:
+                    if "needs_" in dr or "rehome" in dr:
+                        console.print(Text("    ↳ " + dr, style="dim"))
             else:
-                difficulty_reasons = item.get("difficulty_reasons") or []
-                auto_reasons = [r for r in difficulty_reasons if r.startswith("tool_selected")]
-                if auto_reasons:
-                    console.print(Text("    ✔ " + auto_reasons[0], style="green"))
+                auto_reasons = [r for r in difficulty_reasons if r.startswith("tool_selected") or r.startswith("pool_sibling")]
+                for ar in auto_reasons:
+                    console.print(Text("    ✔ " + ar, style="green"))
+
+            # Always show placement WHY-reasons so operator can verify the decision
+            for r in placement_reasons:
+                console.print(Text("    ✔ " + r, style="dim green"))
 
             console.print()
 
