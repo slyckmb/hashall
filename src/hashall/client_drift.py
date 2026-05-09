@@ -1500,19 +1500,50 @@ def build_path_drift_rank_report(
 def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool = False) -> str:
     if json_output:
         return json.dumps(report, indent=2)
+
+    import sys
+    from rich.console import Console
+    from rich.text import Text
+    from rich.rule import Rule
+    from io import StringIO
+
+    use_color = sys.stdout.isatty()
+    buf = StringIO()
+    console = Console(file=buf, highlight=False, markup=False, force_terminal=use_color, width=120)
+
+    # Color palette
+    LEVEL_STYLE = {"easy": "bold green", "medium": "bold yellow", "hard": "bold red"}
+    ACTION_STYLE = {
+        "repoint_qb_to_rt_path": "green",
+        "repoint_rt_to_qb_path": "cyan",
+        "mirror_rt_to_qb": "cyan",
+        "manual_review": "yellow",
+    }
+    ARR_STYLE = {"linked_to_arr": "green", "not_linked_to_arr": "dim", None: "dim"}
+
     summary = report.get("summary") or {}
-    lines = [
-        "Path Drift Repair Ranking",
-        (
-            f"  total={summary.get('path_drift', 0)} "
-            f"easy={summary.get('easy', 0)} medium={summary.get('medium', 0)} hard={summary.get('hard', 0)} "
-            f"anchor_scan_max_files={summary.get('anchor_scan_max_files', 0)}"
-        ),
-        "",
-    ]
+    n_easy = summary.get("easy", 0)
+    n_med = summary.get("medium", 0)
+    n_hard = summary.get("hard", 0)
+    n_total = summary.get("path_drift", 0)
+
+    console.print(Rule("Path Drift Repair Ranking", style="bold"))
+    console.print(
+        Text.assemble(
+            ("  total=", "dim"), (str(n_total), "bold"),
+            ("  easy=", "dim"), (str(n_easy), "bold green"),
+            ("  medium=", "dim"), (str(n_med), "bold yellow"),
+            ("  hard=", "dim"), (str(n_hard), "bold red"),
+        )
+    )
+    console.print()
+
     for level in ("easy", "medium", "hard"):
         items = (report.get("groups") or {}).get(level) or []
-        lines.append(f"{level.upper()}: {len(items)}")
+        level_style = LEVEL_STYLE[level]
+        console.print(Text(f"{level.upper()}: {len(items)}", style=level_style))
+        console.print()
+
         for item in items:
             catalog = item.get("catalog") or {}
             sibling_payloads = catalog.get("sibling_payloads") or []
@@ -1521,32 +1552,69 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
                 for sib in sibling_payloads
                 if int(sib.get("payload_id") or 0) != int(catalog.get("payload_id") or 0)
             ]
-            lines.append(f"  {str(item.get('hash') or '')[:16]}  {item.get('name')}")
-            lines.append(
-                f"    desired={item.get('desired_root') or '-'} arr={item.get('arr_status')} "
-                f"noHL={'yes' if item.get('qb_nohl') else 'no'} files={item.get('file_count')}"
-            )
-            lines.append(
-                f"    qb={item.get('qb_root_kind') or '-'}:{item.get('qb_save_path')}"
-            )
-            lines.append(
-                f"    rt={item.get('rt_root_kind') or '-'}:{item.get('rt_target_qb_save_path') or item.get('rt_save_path')}"
-            )
-            if catalog:
-                lines.append(
-                    f"    catalog_payload={catalog.get('payload_id') or '-'} "
-                    f"payload_torrents={catalog.get('payload_torrent_count') or 0} "
-                    f"root={catalog.get('root_path') or '-'}"
-                )
+            h = str(item.get("hash") or "")[:16]
+            name = str(item.get("name") or "")
+            action = str(item.get("action") or "manual_review")
+            blockers = item.get("blockers") or []
+            arr_status = item.get("arr_status")
+            nohl = item.get("qb_nohl")
+            desired = item.get("desired_root") or "-"
+            qb_path = item.get("qb_save_path") or "-"
+            rt_path = item.get("rt_target_qb_save_path") or item.get("rt_save_path") or "-"
+            file_count = item.get("file_count") or 0
+
+            # ── Title line
+            console.print(Text.assemble(
+                ("  ", ""),
+                (h, "dim"),
+                ("  ", ""),
+                (name, "bold"),
+            ))
+
+            # ── Action / status line
+            action_label = action.replace("_", " ")
+            action_s = ACTION_STYLE.get(action, "yellow")
+            arr_s = ARR_STYLE.get(arr_status, "dim")
+            nohl_text = Text.assemble(("~noHL", "yellow bold")) if nohl else Text("", style="")
+            console.print(Text.assemble(
+                ("    action=", "dim"),
+                (action_label, action_s),
+                ("  desired=", "dim"), (desired, ""),
+                ("  arr=", "dim"), (str(arr_status or "-"), arr_s),
+                ("  files=", "dim"), (str(file_count), ""),
+                ("  ", ""), nohl_text,
+            ))
+
+            # ── Paths
+            console.print(Text.assemble(
+                ("    qb  ", "dim bold"), (qb_path, "cyan"),
+            ))
+            console.print(Text.assemble(
+                ("    rt  ", "dim bold"), (rt_path, "cyan"),
+            ))
+
+            # ── Sibling payload roots
             if sibling_roots:
-                lines.append(f"    sibling_payload_roots={len(sibling_roots)}")
+                console.print(Text.assemble(
+                    ("    siblings=", "dim"), (str(len(sibling_roots)), "yellow"),
+                ))
                 for root in sibling_roots[:3]:
-                    lines.append(f"      - {root}")
-            reasons = ",".join(item.get("difficulty_reasons") or [])
-            blockers = ",".join(item.get("blockers") or [])
-            if reasons:
-                lines.append(f"    rank_reasons={reasons}")
+                    console.print(Text("      • " + root, style="dim"))
+
+            # ── Blockers (red, prominent)
             if blockers:
-                lines.append(f"    blockers={blockers}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
+                for b in blockers:
+                    console.print(Text("    ✖ " + b, style="bold red"))
+            else:
+                difficulty_reasons = item.get("difficulty_reasons") or []
+                auto_reasons = [r for r in difficulty_reasons if r.startswith("tool_selected")]
+                if auto_reasons:
+                    console.print(Text("    ✔ " + auto_reasons[0], style="green"))
+
+            console.print()
+
+        if not items:
+            console.print(Text("  (none)", style="dim"))
+            console.print()
+
+    return buf.getvalue().rstrip()
