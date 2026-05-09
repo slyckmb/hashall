@@ -20,7 +20,7 @@ from typing import Optional
 
 from .qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
 from .rt_cache import load_rt_cache_snapshot
-from .rtorrent import rt_apply_directory_repoint, DEFAULT_RT_RPC_URL
+from .rtorrent import rt_apply_directory_repoint, rt_recheck_torrent, DEFAULT_RT_RPC_URL
 from .save_path_repair import _move_tree
 
 # API→FS path aliases (QB and RT report /data/media, host FS uses /stash/media)
@@ -229,6 +229,12 @@ def execute_nested_folder_repair(
                     )
                     result.rt_repointed = True
                     result.notes.append(f"RT repointed → {rt_new_dir}")
+                    # Trigger RT hash check to verify content at new location
+                    try:
+                        rt_recheck_torrent(info.hash_val, rpc_url=rpc_url)
+                        result.notes.append("RT recheck triggered")
+                    except Exception as e:
+                        result.notes.append(f"RT recheck failed: {e}")
                 else:
                     result.notes.append("RT: hash not in cache, skipping repoint")
             except Exception as e:
