@@ -15,6 +15,7 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
         client-drift-rt-to-qb-dry client-drift-rt-to-qb-apply \
         client-drift-qb-to-rt-dry client-drift-qb-to-rt-apply \
         client-drift-both-to-pool-dry client-drift-both-to-pool-apply \
+        client-drift-nested-repair-dry client-drift-nested-repair-apply \
         rt-repoint-dry rt-repoint-apply \
         cross-seed-normalize-dry cross-seed-normalize-apply \
         hitchhiker-audit hitchhiker-plan hitchhiker-split-dry hitchhiker-split-apply \
@@ -56,6 +57,8 @@ help:
 	@echo "  make client-drift-qb-to-rt-apply HASH=<hash> — apply qB savepath change to RT path"
 	@echo "  make client-drift-both-to-pool-dry HASH=<hash> — dry-run repoint both qB+RT to pool sibling path"
 	@echo "  make client-drift-both-to-pool-apply HASH=<hash> — apply repoint both qB+RT to pool sibling path"
+	@echo "  make client-drift-nested-repair-dry HASH=<hash> — dry-run move doubly-nested content to canonical path"
+	@echo "  make client-drift-nested-repair-apply HASH=<hash> — apply doubly-nested content repair + repoint clients"
 	@echo ""
 	@echo "  make hitchhiker-audit          — find N→1 payload groups and split safety"
 	@echo "  make hitchhiker-plan HASH=<hash>|PAYLOAD_ID=<id> — selected de-hitchhiker evidence"
@@ -151,6 +154,12 @@ client-drift-both-to-pool-dry:
 
 client-drift-both-to-pool-apply:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_both_to_pool --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-5} --journal "$${JOURNAL:-out/client-drift/path-drift-both-to-pool.jsonl}" --apply
+
+client-drift-nested-repair-dry:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift nested-folder-repair "$${HASH}"
+
+client-drift-nested-repair-apply:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift nested-folder-repair "$${HASH}" --apply
 
 rt-repoint-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}"

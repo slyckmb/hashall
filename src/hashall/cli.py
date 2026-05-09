@@ -3703,6 +3703,46 @@ def _load_queue_entries(queue_dir: Path, *, min_age_s: float, now: float) -> tup
     return ready, waiting
 
 
+@client_drift.command("nested-folder-repair")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--apply", "do_apply", is_flag=True, default=False, help="Execute the repair (default is dry-run).")
+@click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")
+@click.option("--rt-rpc-url", default="http://127.0.0.1:18000/", show_default=True, help="rTorrent XMLRPC URL.")
+def client_drift_nested_folder_repair_cmd(hash_val, do_apply, qb_url, rt_rpc_url):
+    """Repair doubly-nested torrent content: move files to canonical location and repoint both clients.
+
+    Detects when QB content_path is a directory that itself contains a same-named subdirectory
+    (e.g. movies/TorrentName/TorrentName/file.mkv) and moves the content up to the correct depth.
+    Triggers QB recheck and RT repoint after the move.
+    """
+    from hashall.nested_folder_repair import (
+        detect_nested_folder,
+        execute_nested_folder_repair,
+        format_nested_folder_repair_report,
+    )
+    from hashall.qbittorrent import QBittorrentClient
+    from hashall.rtorrent import DEFAULT_RT_RPC_URL
+
+    dry_run = not do_apply
+
+    qb_client = QBittorrentClient(base_url=qb_url)
+    info = detect_nested_folder(hash_val, qb_client=qb_client)
+
+    if info is None:
+        click.echo(format_nested_folder_repair_report(None, None, dry_run=dry_run))
+        raise SystemExit(1)
+
+    result = execute_nested_folder_repair(
+        info,
+        dry_run=dry_run,
+        qb_client=qb_client,
+        rpc_url=rt_rpc_url,
+    )
+    click.echo(format_nested_folder_repair_report(info, result, dry_run=dry_run))
+    if not result.success:
+        raise SystemExit(1)
+
+
 @cli.group("rt-qb-mirror")
 def rt_qb_mirror():
     """Mirror complete RT additions into qB as stopped torrents."""
