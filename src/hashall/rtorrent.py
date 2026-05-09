@@ -80,6 +80,23 @@ def rt_path_aligned(
             candidates.add(str(path.parent))
         except Exception:
             candidates.add(text)
+
+    # For deeply-nested content (e.g. canonically triply-nested torrents),
+    # add all ancestors between content_path and save_path so RT's directory
+    # (which is save_path/info_name) is recognised as aligned.
+    try:
+        sp = str(canonicalize_path(Path(str(qb_save_path or "").strip())))
+        cp_path = canonicalize_path(Path(str(qb_content_path or "").strip()))
+        ancestor = cp_path.parent
+        while True:
+            a_str = str(ancestor)
+            if a_str == sp or not a_str.startswith(sp + "/"):
+                break
+            candidates.add(a_str)
+            ancestor = ancestor.parent
+    except Exception:
+        pass
+
     return rt_dir in candidates
 
 
