@@ -20,7 +20,7 @@ from typing import Optional
 
 from .qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
 from .rt_cache import load_rt_cache_snapshot
-from .rtorrent import rt_apply_directory_repoint, rt_recheck_torrent, DEFAULT_RT_RPC_URL
+from .rtorrent import rt_apply_directory_repoint, load_rt_torrent_meta, DEFAULT_RT_RPC_URL, DEFAULT_RT_SESSION_DIR
 from .save_path_repair import _move_tree
 
 # API→FS path aliases (QB and RT report /data/media, host FS uses /stash/media)
@@ -138,7 +138,32 @@ def detect_nested_folder(
     if not inner.is_dir():
         return None
 
+    # Cross-check torrent file: if the torrent itself defines files inside info_name/,
+    # the nesting is canonical (uploader packed it that way) — not a bug, do not repair.
+    torrent_meta = load_rt_torrent_meta(DEFAULT_RT_SESSION_DIR, qb_torrent.hash)
+    if torrent_meta is not None and torrent_meta.is_multi_file:
+        # Parse file paths from the .torrent to see if info_name appears as a path component
+        try:
+            from .bencode import bencode_decode
+            torrent_file = DEFAULT_RT_SESSION_DIR / f"{qb_torrent.hash.upper()}.torrent"
+            raw = torrent_file.read_bytes()
+            doc = bencode_decode(raw)
+            info = doc.get(b"info", {})
+            files = info.get(b"files", [])
+            for fentry in files:
+                path_parts = [
+                    p.decode("utf-8", errors="replace") if isinstance(p, bytes) else str(p)
+                    for p in (fentry.get(b"path") or [])
+                ]
+                if torrent_name in path_parts:
+                    # The torrent defines torrent_name as a path component inside the root —
+                    # this is intentional nesting, not a filesystem accident
+                    return None
+        except Exception:
+            pass
+
     file_count = _count_files(inner)
+    is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file
 
     return NestedFolderInfo(
         hash_val=qb_torrent.hash.lower(),
@@ -149,7 +174,7 @@ def detect_nested_folder(
         content_path_fs=content_path_fs,
         nested_dir_fs=str(inner),
         file_count=file_count,
-        is_single_file=file_count == 1,
+        is_single_file=is_single_file,
     )
 
 
@@ -185,14 +210,15 @@ def execute_nested_folder_repair(
 
     try:
         if info.is_single_file:
-            # Move file(s) from doubly-nested dir directly into save_path
+            # Single-file: move file(s) directly into save_path; RT gets save_path_api
             target = save_path
             rt_new_dir = info.save_path_api.rstrip("/")
             result.notes.append(f"single-file repair: {nested} → {target}")
         else:
-            # Move files from inner dir up one level into the torrent root (outer)
+            # Multi-file: move files one level up into the torrent root (outer dir);
+            # RT gets save_path_api so it auto-appends info_name to find the torrent root
             target = outer
-            rt_new_dir = outer_api
+            rt_new_dir = info.save_path_api.rstrip("/")
             result.notes.append(f"multi-file repair: {nested}/* → {target}")
 
         result.files_moved = _move_tree(nested, target, dry_run=dry_run)
@@ -208,14 +234,7 @@ def execute_nested_folder_repair(
                 shutil.rmtree(str(outer))
                 result.notes.append(f"removed: {outer}")
 
-            # QB recheck — save_path is unchanged; recheck finds content at corrected location
-            try:
-                qb_client.recheck_torrent(info.hash_val)
-                result.notes.append("QB recheck triggered")
-            except Exception as e:
-                result.notes.append(f"QB recheck failed: {e}")
-
-            # RT repoint
+            # RT repoint — restart=True stops/sets/saves/opens/starts; no separate recheck needed
             try:
                 snapshot = load_rt_cache_snapshot() or {}
                 rows = snapshot.get("rows") or []
@@ -229,16 +248,19 @@ def execute_nested_folder_repair(
                     )
                     result.rt_repointed = True
                     result.notes.append(f"RT repointed → {rt_new_dir}")
-                    # Trigger RT hash check to verify content at new location
-                    try:
-                        rt_recheck_torrent(info.hash_val, rpc_url=rpc_url)
-                        result.notes.append("RT recheck triggered")
-                    except Exception as e:
-                        result.notes.append(f"RT recheck failed: {e}")
                 else:
                     result.notes.append("RT: hash not in cache, skipping repoint")
             except Exception as e:
                 result.notes.append(f"RT repoint failed: {e}")
+
+            # QB: set_location (even to same path) + recheck so QB re-evaluates content
+            try:
+                qb_client.set_location(info.hash_val, info.save_path_api.rstrip("/"))
+                result.notes.append(f"QB set_location → {info.save_path_api.rstrip('/')}")
+                qb_client.recheck_torrent(info.hash_val)
+                result.notes.append("QB recheck triggered")
+            except Exception as e:
+                result.notes.append(f"QB set_location/recheck failed: {e}")
 
         result.success = True
         result.notes.append(
