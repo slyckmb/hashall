@@ -2735,11 +2735,11 @@ def _rt_qb_color_enabled() -> bool:
     return bool(getattr(sys.stdout, "isatty", lambda: False)())
 
 
-def _rt_qb_style(text: object, *, fg: str | None = None, bold: bool = False) -> str:
+def _rt_qb_style(text: object, *, fg: str | None = None, bold: bool = False, dim: bool = False) -> str:
     value = str(text)
     if not _rt_qb_color_enabled():
         return value
-    return click.style(value, fg=fg, bold=bold)
+    return click.style(value, fg=fg, bold=bold, dim=dim)
 
 
 def _rt_qb_bool(value: bool) -> str:
@@ -3372,26 +3372,18 @@ def client_drift_audit_cmd(
     print(f"   {_rt_qb_style('QB-only:', fg='bright_black')} {summary['qb_only']:5d}  "
           f"{_rt_qb_style('RT-only:', fg='bright_black')} {summary['rt_only']:5d}")
 
-    # Drift summary with colors
+    # Drift summary — confidence breakdown from path_drift rows
     drift_total = summary.get('path_drift', 0)
-    easy_count = action_counts.get('easy', 0) if 'easy' in str(action_counts) else 0
-    medium_count = action_counts.get('medium', 0) if 'medium' in str(action_counts) else 0
-    hard_count = action_counts.get('hard', 0) if 'hard' in str(action_counts) else 0
-    # Try to extract from nested action_counts by side
-    for action_name, count in action_counts.items():
-        if isinstance(count, int):
-            continue  # This is a direct count
-        if isinstance(count, dict):
-            easy_count = count.get('easy', 0)
-            medium_count = count.get('medium', 0)
-            hard_count = count.get('hard', 0)
-            break
+    drift_rows = [r for r in rows if r.get('side') == 'path_drift']
+    high_count = sum(1 for r in drift_rows if r.get('confidence') == 'high')
+    medium_count = sum(1 for r in drift_rows if r.get('confidence') == 'medium')
+    low_count = sum(1 for r in drift_rows if r.get('confidence') == 'low')
 
     print(f"   {_rt_qb_style('Path drift:', fg='bright_black')} "
           f"{_rt_qb_style(str(drift_total), bold=True)}  "
-          f"{_rt_qb_style('easy=', fg='dim')}{_rt_qb_style(str(easy_count), fg='green')}  "
-          f"{_rt_qb_style('medium=', fg='dim')}{_rt_qb_style(str(medium_count), fg='yellow')}  "
-          f"{_rt_qb_style('hard=', fg='dim')}{_rt_qb_style(str(hard_count), fg='red')}")
+          f"{_rt_qb_style('high=', dim=True)}{_rt_qb_style(str(high_count), fg='green')}  "
+          f"{_rt_qb_style('medium=', dim=True)}{_rt_qb_style(str(medium_count), fg='yellow')}  "
+          f"{_rt_qb_style('low=', dim=True)}{_rt_qb_style(str(low_count), fg='red')}")
 
     if output:
         print(f"   output: {Path(output).expanduser()}")
@@ -3413,19 +3405,19 @@ def client_drift_audit_cmd(
         confidence = row['confidence']
 
         print(f"   {_rt_qb_style(h, fg='cyan')}  {_rt_qb_style(action.replace('_', ' '), fg='magenta')}  "
-              f"{_rt_qb_style(confidence, fg='dim')}  {name}")
+              f"{_rt_qb_style(confidence, dim=True)}  {name}")
 
         if side_value == "path_drift":
             placement = row.get("placement") or {}
             desired = placement.get('desired') or '-'
             nohl = "yes" if placement.get('qb_has_nohl_tag') else "no"
-            arr_status = 'linked' if placement.get('anchor_scan', {}).get('has_arr_anchor') else 'not_linked'
-            arr_color = 'green' if placement.get('anchor_scan', {}).get('has_arr_anchor') else 'dim'
+            has_arr_anchor = bool(placement.get('anchor_scan', {}).get('has_arr_anchor'))
+            arr_status = 'linked' if has_arr_anchor else 'not_linked'
 
             print(f"      {_rt_qb_style('desired=', fg='bright_black')}{desired}  "
                   f"{_rt_qb_style('noHL=', fg='bright_black')}{nohl}  "
                   f"{_rt_qb_style('arr=', fg='bright_black')}"
-                  f"{_rt_qb_style(arr_status, fg=arr_color)}")
+                  f"{_rt_qb_style(arr_status, fg='green' if has_arr_anchor else None, dim=not has_arr_anchor)}")
 
             print(f"      {_rt_qb_style('qb', fg='bright_black')}  {placement.get('qb_kind') or '-'}: {placement.get('qb_save_path') or ''}")
             print(f"      {_rt_qb_style('rt', fg='bright_black')}  {placement.get('rt_kind') or '-'}: {placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}")
@@ -3443,7 +3435,7 @@ def client_drift_audit_cmd(
         # Blockers (red, prominent)
         if blockers:
             blocker_str = ", ".join(blockers)
-            print(f"      {_rt_qb_style('✖ ', fg='red')}{_rt_qb_style(blocker_str, fg='dim red')}")
+            print(f"      {_rt_qb_style('✖ ', fg='red')}{_rt_qb_style(blocker_str, fg='red', dim=True)}")
 
         # Reasons (key decision factors)
         key_reasons = [r for r in reasons if not r.startswith("present_in_both") and not r.startswith("same_hash") and not r.startswith("rt_qb_path")]
