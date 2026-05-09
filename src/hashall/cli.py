@@ -3082,29 +3082,41 @@ def _apply_client_drift_mirror_rows(
 
 def _print_client_drift_path_candidate(row: dict, *, index: int | None = None) -> None:
     placement = row.get("placement") or {}
+    rt_row = row.get("rt") or {}
     hash_prefix = str(row.get("hash") or "")[:16]
     name = str(row.get("name") or "")
     prefix = f"{index:>3}. " if index is not None else "   "
     action = str(row.get("action") or "")
+    confidence = str(row.get("confidence") or "")
+    reasons = row.get("reasons") or []
+    blockers = row.get("blockers") or []
+
+    # Title line: hash, action, name
     print(
         f"{_rt_qb_style(prefix, fg='bright_black')}"
         f"{_rt_qb_style(hash_prefix, fg='cyan', bold=True)} "
         f"{_rt_qb_style(action, fg='magenta')} "
         f"{_rt_qb_style(name, fg='bright_white', bold=True)}"
     )
-    print(
-        "     "
-        f"{_rt_qb_style('desired:', fg='bright_black')} {placement.get('desired') or '-'} "
-        f"{_rt_qb_style('source:', fg='bright_black')} {placement.get('proposed_source_client') or '-'}"
-    )
-    print(
-        "     "
-        f"{_rt_qb_style('qb:', fg='bright_black')} {placement.get('qb_save_path') or ''}"
-    )
-    print(
-        "     "
-        f"{_rt_qb_style('rt:', fg='bright_black')} {placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}"
-    )
+
+    # Status line: action details, ARR status, noHL, file count
+    anchor = placement.get("anchor_scan") or {}
+    arr_status = "linked_to_arr" if anchor.get("has_arr_anchor") is True else ("not_linked_to_arr" if anchor.get("has_arr_anchor") is False else "unknown")
+    arr_color = {"linked_to_arr": "green", "not_linked_to_arr": "dim", "unknown": "dim"}.get(arr_status, "dim")
+    nohl = placement.get("qb_has_nohl_tag")
+    file_count = int(rt_row.get("expected_file_count") or 0)
+
+    status_parts = [
+        f"{_rt_qb_style('action=', fg='bright_black')}{_rt_qb_style(action.replace('_', ' '), fg='magenta')}",
+        f"{_rt_qb_style('desired=', fg='bright_black')}{placement.get('desired') or '-'}",
+        f"{_rt_qb_style('arr=', fg='bright_black')}{_rt_qb_style(arr_status, fg=arr_color)}",
+        f"{_rt_qb_style('files=', fg='bright_black')}{file_count}",
+    ]
+    if nohl:
+        status_parts.append(_rt_qb_style("~noHL", fg="yellow", bold=True))
+    print("     " + "  ".join(status_parts))
+
+    # Tracker info
     def _fmt_tracker(key: str, prowlarr: str, url: str) -> str:
         parts = []
         if key:
@@ -3130,17 +3142,27 @@ def _print_client_drift_path_candidate(row: dict, *, index: int | None = None) -
         print("     " + _rt_qb_style("qb tracker: ", fg="bright_black") + qb_tracker_str)
     if rt_tracker_str:
         print("     " + _rt_qb_style("rt tracker: ", fg="bright_black") + rt_tracker_str)
+
+    # Paths
+    print("     " + _rt_qb_style("qb  ", fg="bright_black") + (placement.get("qb_save_path") or ""))
+    print("     " + _rt_qb_style("rt  ", fg="bright_black") + (placement.get("rt_target_qb_save_path") or placement.get("rt_save_path") or ""))
+
+    # Proposed changes
     if placement.get("proposed_qb_save_path"):
-        print(
-            "     "
-            f"{_rt_qb_style('set qB:', fg='bright_black')} {placement.get('proposed_qb_save_path')}"
-        )
+        print("     " + _rt_qb_style("set qB: ", fg="bright_black") + placement.get("proposed_qb_save_path"))
     if placement.get("proposed_rt_repoint_target") or placement.get("proposed_rt_directory"):
-        print(
-            "     "
-            f"{_rt_qb_style('set RT:', fg='bright_black')} "
-            f"{placement.get('proposed_rt_repoint_target') or placement.get('proposed_rt_directory')}"
-        )
+        target = placement.get("proposed_rt_repoint_target") or placement.get("proposed_rt_directory")
+        print("     " + _rt_qb_style("set RT: ", fg="bright_black") + target)
+
+    # Reasons (key decision factors) with checkmark
+    for reason in reasons[:5]:
+        if reason.startswith("present_in_both") or reason.startswith("same_hash") or reason.startswith("rt_qb_path"):
+            continue  # Skip boilerplate reasons
+        print("     " + _rt_qb_style("✔ ", fg="green") + reason)
+
+    # Blockers (if any) with X mark
+    for blocker in blockers:
+        print("     " + _rt_qb_style("✖ ", fg="red") + _rt_qb_style(blocker, fg="bold red"))
 
 
 def _apply_client_drift_path_rows(
