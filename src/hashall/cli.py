@@ -3419,12 +3419,13 @@ def client_drift_audit_cmd(
             placement = row.get("placement") or {}
             desired = placement.get('desired') or '-'
             nohl = "yes" if placement.get('qb_has_nohl_tag') else "no"
+            arr_status = 'linked' if placement.get('anchor_scan', {}).get('has_arr_anchor') else 'not_linked'
+            arr_color = 'green' if placement.get('anchor_scan', {}).get('has_arr_anchor') else 'dim'
 
             print(f"      {_rt_qb_style('desired=', fg='bright_black')}{desired}  "
                   f"{_rt_qb_style('noHL=', fg='bright_black')}{nohl}  "
                   f"{_rt_qb_style('arr=', fg='bright_black')}"
-                  f"{_rt_qb_style('linked' if placement.get('anchor_scan', {}).get('has_arr_anchor') else 'not_linked', "
-                  f"fg='green' if placement.get('anchor_scan', {}).get('has_arr_anchor') else 'dim')}")
+                  f"{_rt_qb_style(arr_status, fg=arr_color)}")
 
             print(f"      {_rt_qb_style('qb', fg='bright_black')}  {placement.get('qb_kind') or '-'}: {placement.get('qb_save_path') or ''}")
             print(f"      {_rt_qb_style('rt', fg='bright_black')}  {placement.get('rt_kind') or '-'}: {placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}")
