@@ -16,6 +16,7 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
         client-drift-qb-to-rt-dry client-drift-qb-to-rt-apply \
         client-drift-both-to-pool-dry client-drift-both-to-pool-apply \
         client-drift-nested-repair-dry client-drift-nested-repair-apply \
+        client-drift-verify-pieces \
         rt-repoint-dry rt-repoint-apply \
         cross-seed-normalize-dry cross-seed-normalize-apply \
         hitchhiker-audit hitchhiker-plan hitchhiker-split-dry hitchhiker-split-apply \
@@ -59,6 +60,7 @@ help:
 	@echo "  make client-drift-both-to-pool-apply HASH=<hash> — apply repoint both qB+RT to pool sibling path"
 	@echo "  make client-drift-nested-repair-dry HASH=<hash> — dry-run move doubly-nested content to canonical path"
 	@echo "  make client-drift-nested-repair-apply HASH=<hash> — apply doubly-nested content repair + repoint clients"
+	@echo "  make client-drift-verify-pieces HASH=<hash> — verify piece hashes from .torrent against data on disk"
 	@echo ""
 	@echo "  make hitchhiker-audit          — find N→1 payload groups and split safety"
 	@echo "  make hitchhiker-plan HASH=<hash>|PAYLOAD_ID=<id> — selected de-hitchhiker evidence"
@@ -160,6 +162,9 @@ client-drift-nested-repair-dry:
 
 client-drift-nested-repair-apply:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift nested-folder-repair "$${HASH}" --apply
+
+client-drift-verify-pieces:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift verify-pieces "$${HASH}"
 
 rt-repoint-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}"

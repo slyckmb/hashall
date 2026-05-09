@@ -3743,6 +3743,89 @@ def client_drift_nested_folder_repair_cmd(hash_val, do_apply, qb_url, rt_rpc_url
         raise SystemExit(1)
 
 
+@client_drift.command("verify-pieces")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")
+@click.option("--base-dir", "base_dir_override", type=click.Path(file_okay=False), default=None, help="Override base directory (default: QB save_path converted to FS path).")
+@click.option("--torrent-file", "torrent_file_override", type=click.Path(exists=True, dir_okay=False), default=None, help="Override .torrent file path (default: RT session dir).")
+def client_drift_verify_pieces_cmd(hash_val, qb_url, base_dir_override, torrent_file_override):
+    """Verify torrent piece hashes from .torrent file against data on disk.
+
+    Reads piece SHA1 hashes directly from the .torrent bencode metadata and
+    checks them against the actual bytes on disk — independent of QB or RT rechecks.
+    """
+    import sys
+    from pathlib import Path as _Path
+    from hashall.torrent_verify import verify_torrent_pieces, format_verify_result
+    from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
+    from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
+    from hashall.nested_folder_repair import _api_to_fs
+
+    prefix = str(hash_val).strip().lower()
+    qb_client = QBittorrentClient(base_url=qb_url)
+
+    # Resolve QB torrent to get save_path and full hash
+    qb_torrent = None
+    try:
+        cached = get_torrents_from_cache(max_age_s=600, cache_path=DEFAULT_QB_CACHE_FILE)
+        if cached is not None:
+            for r in cached:
+                t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                if t and t.hash and t.hash.lower().startswith(prefix):
+                    qb_torrent = t
+                    break
+        if qb_torrent is None:
+            live = qb_client.get_torrents_by_hashes([hash_val]) or {}
+            for h, t in live.items():
+                if h.lower().startswith(prefix):
+                    qb_torrent = t
+                    break
+    except Exception as e:
+        raise click.ClickException(f"QB lookup failed: {e}")
+
+    if qb_torrent is None:
+        raise click.ClickException(f"hash not found in QB: {hash_val}")
+
+    full_hash = qb_torrent.hash.upper()
+
+    # Resolve .torrent file
+    if torrent_file_override:
+        torrent_path = _Path(torrent_file_override)
+    else:
+        torrent_path = DEFAULT_RT_SESSION_DIR / f"{full_hash}.torrent"
+        if not torrent_path.exists():
+            torrent_path = DEFAULT_RT_SESSION_DIR / f"{full_hash.lower()}.torrent"
+    if not torrent_path.exists():
+        raise click.ClickException(f".torrent not found: {torrent_path}")
+
+    # Resolve base_dir (save_path on host FS)
+    if base_dir_override:
+        base_dir = _Path(base_dir_override)
+    else:
+        save_path_api = (qb_torrent.save_path or "").rstrip("/")
+        base_dir = _Path(_api_to_fs(save_path_api))
+
+    click.echo(f"Verifying: {qb_torrent.name}")
+    click.echo(f"  hash:        {full_hash.lower()[:16]}")
+    click.echo(f"  torrent:     {torrent_path}")
+    click.echo(f"  base_dir:    {base_dir}")
+
+    def _progress(idx: int, total: int) -> None:
+        pct = idx / total * 100
+        sys.stderr.write(f"\r  checking pieces: {idx}/{total} ({pct:.0f}%)  ")
+        sys.stderr.flush()
+
+    try:
+        result = verify_torrent_pieces(torrent_path, base_dir, progress_cb=_progress)
+    except Exception as e:
+        raise click.ClickException(f"verification failed: {e}")
+
+    sys.stderr.write("\n")
+    click.echo(format_verify_result(result))
+    if not result.success:
+        raise SystemExit(1)
+
+
 @cli.group("rt-qb-mirror")
 def rt_qb_mirror():
     """Mirror complete RT additions into qB as stopped torrents."""
