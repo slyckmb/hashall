@@ -15,6 +15,7 @@ from hashall.pathing import canonicalize_path, remap_to_mount_alias
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE
 from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, normalize_rt_target_directory, resolve_rt_session_files, rt_path_aligned
+from hashall.save_path_inference import ARR_CATEGORY_FINAL_MAP
 
 
 HEALTHY_QB_STATES = {"uploading", "stalledUP", "stoppedUP", "pausedUP"}
@@ -929,6 +930,21 @@ def _placement_kind(path: str, policy: ClientDriftPolicy) -> str:
     return "other"
 
 
+# Seeding subdirs that ARR sets after import (radarr→movies, sonarr→tv, etc.)
+_ARR_SEEDING_DIRS: frozenset[str] = frozenset(ARR_CATEGORY_FINAL_MAP.values())
+
+
+def _is_arr_seeding_path(path: str) -> bool:
+    """Return True if path's immediate seeding subdir is an ARR post-import category."""
+    if not path:
+        return False
+    parts = Path(path).parts
+    for i, part in enumerate(parts):
+        if part == "seeding" and i + 1 < len(parts):
+            return parts[i + 1] in _ARR_SEEDING_DIRS
+    return False
+
+
 def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
     if not content_path:
         return ""
@@ -1066,7 +1082,33 @@ def _classify_common_path_drift(
                 if not qb_row.path_exists:
                     blockers.append("selected_qb_target_missing")
             else:
-                blockers.append("both_clients_on_required_placement_but_paths_differ")
+                # Both share the same inode as the ARR anchor (same physical file,
+                # different directory names). Use ARR post-import seeding dir as
+                # the tiebreaker: the path whose immediate seeding subdir is an ARR
+                # category (movies/, tv/, music/, ebooks/, audiobooks/) is canonical —
+                # that's where ATM placed it after import.
+                rt_in_arr_dir = _is_arr_seeding_path(rt_row.content_path or rt_row.save_path)
+                qb_in_arr_dir = _is_arr_seeding_path(qb_row.content_path or qb_row.save_path)
+                if rt_in_arr_dir and not qb_in_arr_dir:
+                    action = "repoint_qb_to_rt_path"
+                    reasons.append(f"rt_on_required_{desired_placement}_placement")
+                    reasons.append("rt_path_in_arr_seeding_dir")
+                    placement["proposed_source_client"] = "rt"
+                    placement["proposed_qb_save_path"] = rt_row.target_qb_save_path or rt_row.save_path
+                    if not rt_row.path_exists:
+                        blockers.append("selected_rt_target_missing")
+                elif qb_in_arr_dir and not rt_in_arr_dir:
+                    action = "repoint_rt_to_qb_path"
+                    reasons.append(f"qb_on_required_{desired_placement}_placement")
+                    reasons.append("qb_path_in_arr_seeding_dir")
+                    placement["proposed_source_client"] = "qb"
+                    placement["proposed_rt_directory"] = qb_row.content_path
+                    placement["proposed_rt_content_path"] = qb_row.content_path
+                    placement["proposed_rt_repoint_target"] = _rt_repoint_target_for_content_path(qb_row.content_path, rt_row)
+                    if not qb_row.path_exists:
+                        blockers.append("selected_qb_target_missing")
+                else:
+                    blockers.append("both_clients_on_required_placement_but_paths_differ")
         else:
             blockers.append(f"no_client_on_required_{desired_placement}_placement")
 
