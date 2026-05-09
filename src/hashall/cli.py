@@ -3356,52 +3356,101 @@ def client_drift_audit_cmd(
 
     summary = payload["summary"]
     print("🧭 client drift audit")
+
+    # Colored summary
+    action_counts = summary.get("action_counts") or {}
     print(f"   policy_mode: {summary['policy_mode']}")
     print(f"   hash_filters: {len(summary.get('hash_filters') or [])}")
     if summary.get("catalog_path"):
         print(f"   catalog: {summary['catalog_path']}")
     print(f"   anchor_scan_max_files: {summary.get('anchor_scan_max_files', 0)}")
-    print(f"   qb_total: {summary['qb_total']}")
-    print(f"   rt_total: {summary['rt_total']}")
-    print(f"   common: {summary['common']}")
-    print(f"   qb_only: {summary['qb_only']}")
-    print(f"   rt_only: {summary['rt_only']}")
-    print(f"   path_drift: {summary.get('path_drift', 0)}")
-    print(f"   action_counts: {summary['action_counts']}")
+
+    # Inventory
+    print(f"   {_rt_qb_style('QBit:', fg='bright_black')} {summary['qb_total']:5d}  "
+          f"{_rt_qb_style('RTorrent:', fg='bright_black')} {summary['rt_total']:5d}  "
+          f"{_rt_qb_style('Common:', fg='bright_black')} {summary['common']:5d}")
+    print(f"   {_rt_qb_style('QB-only:', fg='bright_black')} {summary['qb_only']:5d}  "
+          f"{_rt_qb_style('RT-only:', fg='bright_black')} {summary['rt_only']:5d}")
+
+    # Drift summary with colors
+    drift_total = summary.get('path_drift', 0)
+    easy_count = action_counts.get('easy', 0) if 'easy' in str(action_counts) else 0
+    medium_count = action_counts.get('medium', 0) if 'medium' in str(action_counts) else 0
+    hard_count = action_counts.get('hard', 0) if 'hard' in str(action_counts) else 0
+    # Try to extract from nested action_counts by side
+    for action_name, count in action_counts.items():
+        if isinstance(count, int):
+            continue  # This is a direct count
+        if isinstance(count, dict):
+            easy_count = count.get('easy', 0)
+            medium_count = count.get('medium', 0)
+            hard_count = count.get('hard', 0)
+            break
+
+    print(f"   {_rt_qb_style('Path drift:', fg='bright_black')} "
+          f"{_rt_qb_style(str(drift_total), fg='bold')}  "
+          f"{_rt_qb_style('easy=', fg='dim')}{_rt_qb_style(str(easy_count), fg='green')}  "
+          f"{_rt_qb_style('medium=', fg='dim')}{_rt_qb_style(str(medium_count), fg='yellow')}  "
+          f"{_rt_qb_style('hard=', fg='dim')}{_rt_qb_style(str(hard_count), fg='red')}")
+
     if output:
         print(f"   output: {Path(output).expanduser()}")
+
+    # Rows grouped by side and action
+    if rows:
+        print()
     for row in rows:
         side_value = row.get("side")
         client_row = row.get("rt") if side_value == "rt_only" else row.get("qb")
         client_row = client_row or {}
-        blockers = ",".join(row.get("blockers") or [])
-        reason = ",".join(row.get("reasons") or [])
-        print(
-            f"   {row['side']:7s} {row['action']:28s} {row['confidence']:6s} "
-            f"{row['hash'][:16]} {row.get('name') or ''}"
-        )
+        blockers = row.get("blockers") or []
+        reasons = row.get("reasons") or []
+
+        # Header line with hash, action, name
+        h = row['hash'][:16]
+        name = row.get('name') or ''
+        action = row['action']
+        confidence = row['confidence']
+
+        print(f"   {_rt_qb_style(h, fg='cyan')}  {_rt_qb_style(action.replace('_', ' '), fg='magenta')}  "
+              f"{_rt_qb_style(confidence, fg='dim')}  {name}")
+
         if side_value == "path_drift":
             placement = row.get("placement") or {}
-            print(
-                "      "
-                f"desired={placement.get('desired') or '-'} "
-                f"noHL={'yes' if placement.get('qb_has_nohl_tag') else 'no'} "
-                f"qb={placement.get('qb_kind') or '-'}:{placement.get('qb_save_path') or ''} "
-                f"rt={placement.get('rt_kind') or '-'}:{placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}"
-            )
+            desired = placement.get('desired') or '-'
+            nohl = "yes" if placement.get('qb_has_nohl_tag') else "no"
+
+            print(f"      {_rt_qb_style('desired=', fg='bright_black')}{desired}  "
+                  f"{_rt_qb_style('noHL=', fg='bright_black')}{nohl}  "
+                  f"{_rt_qb_style('arr=', fg='bright_black')}"
+                  f"{_rt_qb_style('linked' if placement.get('anchor_scan', {}).get('has_arr_anchor') else 'not_linked', "
+                  f"fg='green' if placement.get('anchor_scan', {}).get('has_arr_anchor') else 'dim')}")
+
+            print(f"      {_rt_qb_style('qb', fg='bright_black')}  {placement.get('qb_kind') or '-'}: {placement.get('qb_save_path') or ''}")
+            print(f"      {_rt_qb_style('rt', fg='bright_black')}  {placement.get('rt_kind') or '-'}: {placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}")
+
             if placement.get("proposed_source_client"):
-                print(
-                    "      "
-                    f"proposed_source={placement.get('proposed_source_client')} "
-                    f"qb_save={placement.get('proposed_qb_save_path') or '-'} "
-                    f"rt_repoint={placement.get('proposed_rt_repoint_target') or placement.get('proposed_rt_directory') or '-'}"
-                )
+                print(f"      {_rt_qb_style('→ proposed', fg='green')}  source={placement.get('proposed_source_client')}  "
+                      f"qb_save={placement.get('proposed_qb_save_path') or '-'}")
         else:
-            print(f"      state={client_row.get('state') or ''} category={client_row.get('category') or ''} path={client_row.get('content_path') or client_row.get('save_path') or ''}")
+            print(f"      state={client_row.get('state') or ''} "
+                  f"category={client_row.get('category') or ''}")
+            path = client_row.get('content_path') or client_row.get('save_path') or ''
+            if path:
+                print(f"      {path}")
+
+        # Blockers (red, prominent)
         if blockers:
-            print(f"      blockers={blockers}")
-        if reason:
-            print(f"      reasons={reason}")
+            blocker_str = ", ".join(blockers)
+            print(f"      {_rt_qb_style('✖ ', fg='red')}{_rt_qb_style(blocker_str, fg='dim red')}")
+
+        # Reasons (key decision factors)
+        key_reasons = [r for r in reasons if not r.startswith("present_in_both") and not r.startswith("same_hash") and not r.startswith("rt_qb_path")]
+        if key_reasons:
+            reason_str = ", ".join(key_reasons[:3])
+            print(f"      {_rt_qb_style('✔ ', fg='green')}{reason_str}")
+
+        print()
 
 
 @client_drift.command("rank")
