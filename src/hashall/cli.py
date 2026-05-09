@@ -3238,8 +3238,8 @@ def _apply_client_drift_path_rows(
                 event["status"] = "ok" if ok else "error"
                 event["save_path"] = target
                 event["error"] = "" if ok else str(qbit.last_error or "qbit_set_location_failed")
-                if ok and recheck_after_add:
-                    _rt_qb_progress("starting qB recheck")
+                if ok:
+                    _rt_qb_progress("starting qB recheck to verify files at new location")
                     event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
         else:
             event["error"] = f"unsupported_path_drift_action:{action}"
