@@ -2951,8 +2951,14 @@ def _select_client_drift_path_rows(
     journal_path: Path | None = None,
     do_apply: bool = True,
 ) -> tuple[list[dict], int, int, frozenset[str]]:
-    rows = _filtered_client_drift_rows(report, side="path_drift", action=action, limit=0)
     hash_prefixes = [str(item or "").strip().lower() for item in hash_filters if str(item or "").strip()]
+    # For apply: filter strictly by action. For dry-run with explicit hashes: show
+    # any path_drift row for those hashes regardless of action so operators can
+    # inspect the current state even if the action doesn't match the make target used.
+    if do_apply or not hash_prefixes:
+        rows = _filtered_client_drift_rows(report, side="path_drift", action=action, limit=0)
+    else:
+        rows = _filtered_client_drift_rows(report, side="path_drift", action=None, limit=0)
     if hash_prefixes:
         rows = [
             row for row in rows
