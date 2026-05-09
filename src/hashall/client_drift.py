@@ -1108,6 +1108,18 @@ def _find_pool_sibling_path(
     return best[0], best[1]
 
 
+def _detect_nested_folder(root_path: str, item_name: str, file_count: int) -> bool:
+    """True when a single-file torrent's sibling root ends in the torrent name (errant nested folder)."""
+    if not root_path or not item_name:
+        return False
+    dir_name = Path(root_path).name
+    item_stem = Path(item_name).stem
+    if file_count == 1:
+        return dir_name == item_name or dir_name == item_stem
+    # Multi-file: nested only when the last two path components both equal the torrent name
+    return dir_name == item_name and Path(root_path).parent.name == item_name
+
+
 def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
     if not content_path:
         return ""
@@ -1518,6 +1530,27 @@ def _catalog_context_for_hashes(catalog_path: Path | None, torrent_hashes: Itera
                 payload_ids,
             ).fetchall()
             torrent_counts = {int(row["payload_id"] or 0): int(row["torrent_count"] or 0) for row in count_rows}
+        all_sibling_payload_ids = sorted({
+            int(row["payload_id"] or 0)
+            for rows_list in by_payload_hash.values()
+            for row in rows_list
+            if row["payload_id"]
+        })
+        hashes_by_payload_id: dict[int, list[str]] = {}
+        if all_sibling_payload_ids:
+            sib_id_placeholders = ",".join("?" for _ in all_sibling_payload_ids)
+            hash_rows = conn.execute(
+                f"""
+                SELECT lower(torrent_hash) AS torrent_hash, payload_id
+                FROM torrent_instances
+                WHERE payload_id IN ({sib_id_placeholders})
+                ORDER BY payload_id
+                """,
+                all_sibling_payload_ids,
+            ).fetchall()
+            for hr in hash_rows:
+                pid = int(hr["payload_id"] or 0)
+                hashes_by_payload_id.setdefault(pid, []).append(str(hr["torrent_hash"] or ""))
         for row in rows:
             payload_hash = str(row["payload_hash"] or "")
             sibling_payloads = [
@@ -1529,6 +1562,7 @@ def _catalog_context_for_hashes(catalog_path: Path | None, torrent_hashes: Itera
                     "file_count": int(sib["file_count"] or 0),
                     "total_bytes": int(sib["total_bytes"] or 0),
                     "torrent_count": int(sib["torrent_count"] or 0),
+                    "hashes": hashes_by_payload_id.get(int(sib["payload_id"] or 0), []),
                 }
                 for sib in by_payload_hash.get(payload_hash, [])
             ]
@@ -1781,10 +1815,10 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
         for item in items:
             catalog = item.get("catalog") or {}
             sibling_payloads = catalog.get("sibling_payloads") or []
-            sibling_roots = [
-                str(sib.get("root_path") or "")
-                for sib in sibling_payloads
-                if int(sib.get("payload_id") or 0) != int(catalog.get("payload_id") or 0)
+            self_payload_id = int(catalog.get("payload_id") or 0)
+            display_siblings = [
+                sib for sib in sibling_payloads
+                if int(sib.get("payload_id") or 0) != self_payload_id
             ]
             h = str(item.get("hash") or "")[:16]
             name = str(item.get("name") or "")
@@ -1852,13 +1886,57 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
                 ("    rt  ", "dim bold"), (rt_path, "cyan"),
             ))
 
-            # ── Sibling payload roots (all, no truncation)
-            if sibling_roots:
+            # ── Sibling payload roots with metadata
+            if display_siblings:
+                baseline_file_count = int(catalog.get("file_count") or 0)
+                baseline_bytes = int(catalog.get("total_bytes") or 0)
+                item_name_str = str(item.get("name") or "")
                 console.print(Text.assemble(
-                    ("    siblings=", "dim"), (str(len(sibling_roots)), "yellow"),
+                    ("    siblings=", "dim"), (str(len(display_siblings)), "yellow"),
                 ))
-                for root in sibling_roots:
+                for sib in display_siblings:
+                    root = str(sib.get("root_path") or "")
+                    sib_status = str(sib.get("status") or "")
+                    sib_hashes = sib.get("hashes") or []
+                    sib_file_count = int(sib.get("file_count") or 0)
+                    sib_bytes = int(sib.get("total_bytes") or 0)
+                    nested = _detect_nested_folder(root, item_name_str, sib_file_count)
+
+                    status_style = "green" if sib_status == "active" else ("yellow" if sib_status == "orphan" else "dim")
+                    hash_strs = " ".join(h[:16] for h in sib_hashes) if sib_hashes else "no-hashes"
+
+                    if baseline_file_count and sib_file_count:
+                        fc_delta = sib_file_count - baseline_file_count
+                        if fc_delta == 0:
+                            match_text, match_style = "match", "dim green"
+                        else:
+                            match_text = f"{'+' if fc_delta > 0 else ''}{fc_delta}f"
+                            match_style = "yellow"
+                    else:
+                        match_text, match_style = "?", "dim"
+
+                    if baseline_bytes and sib_bytes:
+                        b_delta = sib_bytes - baseline_bytes
+                        if abs(b_delta) < 1024 * 1024:
+                            size_text = ""
+                        else:
+                            sign = "+" if b_delta > 0 else ""
+                            size_text = f" {sign}{b_delta // (1024 * 1024)}MB"
+                    else:
+                        size_text = ""
+
                     console.print(Text("      • " + root, style="dim"))
+                    meta: list[tuple[str, str]] = [("        ↳ ", "dim")]
+                    meta.append((sib_status or "unknown", status_style))
+                    meta.append((" · ", "dim"))
+                    meta.append((hash_strs, "dim"))
+                    meta.append((" · ", "dim"))
+                    meta.append((match_text, match_style))
+                    if size_text:
+                        meta.append((size_text, "dim"))
+                    if nested:
+                        meta.append((" ⚠ nested-folder", "yellow"))
+                    console.print(Text.assemble(*meta))
 
             # ── Proposed paths for dual-repoint actions
             proposed_qb = item.get("proposed_qb_save_path") or ""
