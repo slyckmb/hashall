@@ -939,10 +939,11 @@ def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrent
         if p.name == rt_row.name:
             return str(p.parent)
         # content_path is a file inside the torrent folder.
-        # Walk backwards to find the torrent folder component and return its parent.
+        # Find the first (outermost) path component matching the torrent name and
+        # return its parent — that is where RT should set its save directory.
         parts = list(p.parts)
-        for i in range(len(parts) - 1, -1, -1):
-            if parts[i] == rt_row.name:
+        for i, part in enumerate(parts):
+            if part == rt_row.name:
                 return str(Path(*parts[:i])) if i > 0 else str(Path(parts[0]))
     return normalize_rt_target_directory(content_path, None)
 
