@@ -3105,6 +3105,31 @@ def _print_client_drift_path_candidate(row: dict, *, index: int | None = None) -
         "     "
         f"{_rt_qb_style('rt:', fg='bright_black')} {placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}"
     )
+    def _fmt_tracker(key: str, prowlarr: str, url: str) -> str:
+        parts = []
+        if key:
+            label = key
+            if prowlarr and prowlarr.lower() != key.lower():
+                label = f"{key} ({prowlarr})"
+            parts.append(label)
+        if url and "://" in url:
+            parts.append(url)
+        return "  ".join(parts)
+
+    qb_tracker_str = _fmt_tracker(
+        placement.get("qb_tracker_key") or "",
+        placement.get("qb_prowlarr_name") or placement.get("qb_tracker_display") or "",
+        placement.get("qb_tracker_url") or "",
+    )
+    rt_tracker_str = _fmt_tracker(
+        placement.get("rt_tracker_key") or "",
+        placement.get("rt_prowlarr_name") or placement.get("rt_tracker_display") or "",
+        placement.get("rt_tracker_url") or "",
+    )
+    if qb_tracker_str:
+        print("     " + _rt_qb_style("qb tracker: ", fg="bright_black") + qb_tracker_str)
+    if rt_tracker_str:
+        print("     " + _rt_qb_style("rt tracker: ", fg="bright_black") + rt_tracker_str)
     if placement.get("proposed_qb_save_path"):
         print(
             "     "

@@ -945,6 +945,100 @@ def _is_arr_seeding_path(path: str) -> bool:
     return False
 
 
+_TRACKER_REGISTRY_SEARCH_PATHS: tuple[str, ...] = (
+    os.environ.get("HASHALL_TRACKER_REGISTRY", ""),
+    os.environ.get("TRACKER_REGISTRY", ""),
+    "/home/michael/dev/tools/traktor/config/tracker-registry.yml",
+    "/home/michael/dev/work/glider/glider-docker/tracker-ctl/config/tracker-registry.yml",
+    "/mnt/config/docker/tracker-ctl/config/tracker-registry.yml",
+)
+
+
+def _load_tracker_registry() -> dict[str, dict]:
+    """
+    Load tracker-registry.yml and return {tracker_key: {display_name, prowlarr_name, base_url, url_pattern}}.
+    Returns empty dict if registry not found or unreadable.
+    """
+    for raw_path in _TRACKER_REGISTRY_SEARCH_PATHS:
+        if not raw_path:
+            continue
+        p = Path(raw_path)
+        if not p.exists():
+            continue
+        try:
+            import yaml  # PyYAML — available as transitive dep; lazy import to avoid hard coupling
+            raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+            result: dict[str, dict] = {}
+            for key, entry in (raw.get("trackers") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                prowlarr = entry.get("prowlarr") or {}
+                qbitmanage = entry.get("qbitmanage") or {}
+                result[str(key)] = {
+                    "display_name": str(entry.get("display_name") or ""),
+                    "prowlarr_name": str(prowlarr.get("indexer_name") or ""),
+                    "base_url": str(prowlarr.get("base_url") or ""),
+                    "url_pattern": str(qbitmanage.get("tracker_url_pattern") or ""),
+                }
+            return result
+        except Exception:
+            return {}
+    return {}
+
+
+def _resolve_tracker(tracker_url: str, registry: dict[str, dict]) -> dict[str, str]:
+    """
+    Resolve a tracker announce URL to registry identity.
+    Returns {url, key, display_name, prowlarr_name}.
+    Matches against prowlarr.base_url hostname first, then qbitmanage.tracker_url_pattern.
+    Falls back to heuristic hostname extraction when registry has no match.
+    """
+    url_clean = str(tracker_url or "").strip()
+    result = {"url": url_clean, "key": "", "display_name": "", "prowlarr_name": ""}
+    if not url_clean:
+        return result
+
+    if registry:
+        url_lower = url_clean.lower()
+        for tracker_key, info in registry.items():
+            matched = False
+            base_url = info.get("base_url", "").lower().rstrip("/")
+            if base_url:
+                try:
+                    from urllib.parse import urlparse as _up
+                    base_host = _up(base_url).hostname or ""
+                    if base_host and base_host in url_lower:
+                        matched = True
+                except Exception:
+                    pass
+            if not matched:
+                pattern = info.get("url_pattern", "").lower()
+                if pattern and pattern in url_lower:
+                    matched = True
+            if matched:
+                result.update({
+                    "key": tracker_key,
+                    "display_name": info.get("display_name", ""),
+                    "prowlarr_name": info.get("prowlarr_name", ""),
+                })
+                return result
+
+    # Fallback: heuristic hostname extraction
+    try:
+        from urllib.parse import urlparse as _up
+        host = _up(url_clean).hostname or url_clean.lower()
+        parts = host.split(".")
+        _SKIP = {"tracker", "announce", "t", "bt", "www", "torrent"}
+        while len(parts) > 1 and parts[0] in _SKIP:
+            parts = parts[1:]
+        if len(parts) > 1:
+            parts = parts[:-1]
+        result["key"] = parts[0].lower() if parts else host.lower()
+    except Exception:
+        pass
+    return result
+
+
 def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
     if not content_path:
         return ""
@@ -986,7 +1080,6 @@ def _classify_common_path_drift(
     anchor = anchor_scanner.scan_paths(
         path for path in (qb_row.content_path, rt_row.content_path) if path
     )
-    blockers.extend(anchor.blockers)
     qb_has_nohl_tag = _has_tag(qb_row.tags, NO_HARDLINK_TAG)
     if qb_has_nohl_tag:
         reasons.append("qb_nohl_tag_present_advisory")
@@ -994,11 +1087,22 @@ def _classify_common_path_drift(
     if anchor.has_arr_anchor is True:
         desired_placement = "stash"
         reasons.append("arr_library_hardlink_anchor_present")
+        blockers.extend(anchor.blockers)
     elif anchor.has_arr_anchor is False:
         desired_placement = "pool"
         reasons.append("no_arr_library_hardlink_anchor_found")
+        blockers.extend(anchor.blockers)
     else:
-        blockers.append("hardlink_anchor_evidence_required_for_placement")
+        # Anchor scan inconclusive — infer stash placement from ARR seeding dir if unambiguous.
+        # Only propagate anchor blockers when we cannot resolve placement by other means.
+        rt_in_arr_dir = _is_arr_seeding_path(rt_row.content_path or rt_row.save_path)
+        qb_in_arr_dir = _is_arr_seeding_path(qb_row.content_path or qb_row.save_path)
+        if rt_in_arr_dir != qb_in_arr_dir:
+            desired_placement = "stash"
+            reasons.append("arr_seeding_dir_implies_stash_placement")
+        else:
+            blockers.extend(anchor.blockers)
+            blockers.append("hardlink_anchor_evidence_required_for_placement")
 
     qb_kind = _placement_kind(qb_row.save_path or qb_row.content_path, policy)
     rt_kind = _placement_kind(rt_row.target_qb_save_path or rt_row.save_path or rt_row.content_path, policy)
@@ -1012,6 +1116,14 @@ def _classify_common_path_drift(
         "rt_target_qb_save_path": rt_row.target_qb_save_path,
         "rt_content_path": rt_row.content_path,
         "qb_has_nohl_tag": qb_has_nohl_tag,
+        "qb_tracker_url": "",
+        "qb_tracker_key": "",
+        "qb_tracker_display": "",
+        "qb_prowlarr_name": "",
+        "rt_tracker_url": "",
+        "rt_tracker_key": "",
+        "rt_tracker_display": "",
+        "rt_prowlarr_name": "",
         "proposed_qb_save_path": "",
         "proposed_rt_directory": "",
         "proposed_rt_content_path": "",
@@ -1143,6 +1255,7 @@ def build_client_drift_report(
     now = time.time()
     drift_rows: list[dict[str, Any]] = []
     anchor_scanner = _PlacementAnchorScanner(active_policy, catalog_path=catalog_path)
+    tracker_registry = _load_tracker_registry()
 
     for torrent_hash in sorted(common):
         if not _selected_hash(torrent_hash):
@@ -1163,6 +1276,18 @@ def build_client_drift_report(
             active_policy,
             anchor_scanner,
         )
+        qb_ti = _resolve_tracker(qb_row.tracker, tracker_registry)
+        rt_ti = _resolve_tracker(rt_row.tracker, tracker_registry)
+        placement.update({
+            "qb_tracker_url": qb_ti["url"],
+            "qb_tracker_key": qb_ti["key"],
+            "qb_tracker_display": qb_ti["display_name"],
+            "qb_prowlarr_name": qb_ti["prowlarr_name"],
+            "rt_tracker_url": rt_ti["url"],
+            "rt_tracker_key": rt_ti["key"],
+            "rt_tracker_display": rt_ti["display_name"],
+            "rt_prowlarr_name": rt_ti["prowlarr_name"],
+        })
         drift_rows.append(
             {
                 "hash": torrent_hash,
@@ -1466,6 +1591,14 @@ def build_path_drift_rank_report(
                 "file_count": int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0),
                 "blockers": row.get("blockers") or [],
                 "tags": (row.get("qb") or {}).get("tags") or "",
+                "qb_tracker_url": placement.get("qb_tracker_url") or "",
+                "qb_tracker_key": placement.get("qb_tracker_key") or "",
+                "qb_tracker_display": placement.get("qb_tracker_display") or "",
+                "qb_prowlarr_name": placement.get("qb_prowlarr_name") or "",
+                "rt_tracker_url": placement.get("rt_tracker_url") or "",
+                "rt_tracker_key": placement.get("rt_tracker_key") or "",
+                "rt_tracker_display": placement.get("rt_tracker_display") or "",
+                "rt_prowlarr_name": placement.get("rt_prowlarr_name") or "",
                 "catalog": catalog,
             }
         )
@@ -1562,6 +1695,10 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
             qb_path = item.get("qb_save_path") or "-"
             rt_path = item.get("rt_target_qb_save_path") or item.get("rt_save_path") or "-"
             file_count = item.get("file_count") or 0
+            qb_tracker_key = item.get("qb_tracker_key") or ""
+            qb_prowlarr = item.get("qb_prowlarr_name") or item.get("qb_tracker_display") or ""
+            rt_tracker_key = item.get("rt_tracker_key") or ""
+            rt_prowlarr = item.get("rt_prowlarr_name") or item.get("rt_tracker_display") or ""
 
             # ── Title line
             console.print(Text.assemble(
@@ -1584,6 +1721,27 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
                 ("  files=", "dim"), (str(file_count), ""),
                 ("  ", ""), nohl_text,
             ))
+
+            # ── Tracker: key + Prowlarr name
+            if qb_tracker_key or rt_tracker_key:
+                def _tracker_cell(key: str, prowlarr: str) -> list[tuple[str, str]]:
+                    if not key:
+                        return []
+                    parts: list[tuple[str, str]] = [(key, "magenta")]
+                    if prowlarr and prowlarr.lower() != key.lower():
+                        parts += [(" (", "dim"), (prowlarr, "dim magenta"), (")", "dim")]
+                    return parts
+
+                tracker_parts: list[tuple[str, str]] = [("    tracker  ", "dim bold")]
+                qb_cell = _tracker_cell(qb_tracker_key, qb_prowlarr)
+                rt_cell = _tracker_cell(rt_tracker_key, rt_prowlarr)
+                if qb_cell:
+                    tracker_parts += [("qb=", "dim")] + qb_cell
+                if rt_cell:
+                    if qb_cell:
+                        tracker_parts.append(("  ", ""))
+                    tracker_parts += [("rt=", "dim")] + rt_cell
+                console.print(Text.assemble(*tracker_parts))
 
             # ── Paths
             console.print(Text.assemble(
