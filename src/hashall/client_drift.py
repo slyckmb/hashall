@@ -1016,7 +1016,48 @@ def _classify_common_path_drift(
             if not rt_row.path_exists:
                 blockers.append("selected_rt_target_missing")
         elif qb_matches and rt_matches:
-            blockers.append("both_clients_on_required_placement_but_paths_differ")
+            # Both sides are on the correct storage class but at different paths.
+            # Use inode comparison against the ARR anchor to pick canonical side.
+            anchor_inodes: set[int] = set()
+            for ap in anchor.anchor_paths:
+                try:
+                    anchor_inodes.add(os.stat(ap).st_ino)
+                except OSError:
+                    pass
+            qb_inode: int | None = None
+            rt_inode: int | None = None
+            if qb_row.content_path:
+                try:
+                    qb_inode = os.stat(qb_row.content_path).st_ino
+                except OSError:
+                    pass
+            if rt_row.content_path:
+                try:
+                    rt_inode = os.stat(rt_row.content_path).st_ino
+                except OSError:
+                    pass
+            rt_is_anchor = bool(anchor_inodes and rt_inode and rt_inode in anchor_inodes)
+            qb_is_anchor = bool(anchor_inodes and qb_inode and qb_inode in anchor_inodes)
+            if rt_is_anchor and not qb_is_anchor:
+                action = "repoint_qb_to_rt_path"
+                reasons.append(f"rt_on_required_{desired_placement}_placement")
+                reasons.append("rt_inode_matches_arr_anchor")
+                placement["proposed_source_client"] = "rt"
+                placement["proposed_qb_save_path"] = rt_row.target_qb_save_path or rt_row.save_path
+                if not rt_row.path_exists:
+                    blockers.append("selected_rt_target_missing")
+            elif qb_is_anchor and not rt_is_anchor:
+                action = "repoint_rt_to_qb_path"
+                reasons.append(f"qb_on_required_{desired_placement}_placement")
+                reasons.append("qb_inode_matches_arr_anchor")
+                placement["proposed_source_client"] = "qb"
+                placement["proposed_rt_directory"] = qb_row.content_path
+                placement["proposed_rt_content_path"] = qb_row.content_path
+                placement["proposed_rt_repoint_target"] = _rt_repoint_target_for_content_path(qb_row.content_path, rt_row)
+                if not qb_row.path_exists:
+                    blockers.append("selected_qb_target_missing")
+            else:
+                blockers.append("both_clients_on_required_placement_but_paths_differ")
         else:
             blockers.append(f"no_client_on_required_{desired_placement}_placement")
 
