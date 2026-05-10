@@ -138,29 +138,7 @@ def detect_nested_folder(
     if not inner.is_dir():
         return None
 
-    # Cross-check torrent file: if the torrent itself defines files inside info_name/,
-    # the nesting is canonical (uploader packed it that way) — not a bug, do not repair.
     torrent_meta = load_rt_torrent_meta(DEFAULT_RT_SESSION_DIR, qb_torrent.hash)
-    if torrent_meta is not None and torrent_meta.is_multi_file:
-        # Parse file paths from the .torrent to see if info_name appears as a path component
-        try:
-            from .bencode import bencode_decode
-            torrent_file = DEFAULT_RT_SESSION_DIR / f"{qb_torrent.hash.upper()}.torrent"
-            raw = torrent_file.read_bytes()
-            doc = bencode_decode(raw)
-            info = doc.get(b"info", {})
-            files = info.get(b"files", [])
-            for fentry in files:
-                path_parts = [
-                    p.decode("utf-8", errors="replace") if isinstance(p, bytes) else str(p)
-                    for p in (fentry.get(b"path") or [])
-                ]
-                if torrent_name in path_parts:
-                    # The torrent defines torrent_name as a path component inside the root —
-                    # this is intentional nesting, not a filesystem accident
-                    return None
-        except Exception:
-            pass
 
     file_count = _count_files(inner)
     is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file

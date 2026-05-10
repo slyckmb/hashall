@@ -3739,7 +3739,7 @@ def client_drift_nested_folder_repair_cmd(hash_val, do_apply, qb_url, rt_rpc_url
         from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
         from hashall.nested_folder_repair import _api_to_fs
         from pathlib import Path as _Path
-        h_upper = info.hash.upper()
+        h_upper = info.hash_val.upper()
         torrent_path = DEFAULT_RT_SESSION_DIR / f"{h_upper}.torrent"
         if torrent_path.exists():
             base_dir = _Path(_api_to_fs(info.save_path_api.rstrip("/")))
