@@ -3730,7 +3730,7 @@ def client_drift_nested_folder_repair_cmd(hash_val, do_apply, qb_url, rt_rpc_url
 
     if info is None:
         click.echo(format_nested_folder_repair_report(None, None, dry_run=dry_run))
-        raise SystemExit(1)
+        return
 
     if dry_run:
         click.echo(format_nested_folder_repair_report(info, None, dry_run=True))
