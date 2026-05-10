@@ -3176,7 +3176,7 @@ def _print_client_drift_path_candidate(row: dict, *, index: int | None = None, a
 
     # Blockers (if any) with X mark
     for blocker in blockers:
-        print("     " + _rt_qb_style("✖ ", fg="red") + _rt_qb_style(blocker, fg="bold red"))
+        print("     " + _rt_qb_style("✖ ", fg="red") + _rt_qb_style(blocker, fg="red", bold=True))
 
 
 def _apply_client_drift_path_rows(
