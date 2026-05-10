@@ -3115,14 +3115,15 @@ def _print_client_drift_path_candidate(row: dict, *, index: int | None = None, a
     # Status line: action details, ARR status, noHL, file count
     anchor = placement.get("anchor_scan") or {}
     arr_status = "linked_to_arr" if anchor.get("has_arr_anchor") is True else ("not_linked_to_arr" if anchor.get("has_arr_anchor") is False else "unknown")
-    arr_color = {"linked_to_arr": "green", "not_linked_to_arr": "dim", "unknown": "dim"}.get(arr_status, "dim")
+    _arr_style = {"linked_to_arr": {"fg": "green"}, "not_linked_to_arr": {"dim": True}, "unknown": {"dim": True}}
+    arr_style = _arr_style.get(arr_status, {"dim": True})
     nohl = placement.get("qb_has_nohl_tag")
     file_count = int(rt_row.get("expected_file_count") or 0)
 
     status_parts = [
         f"{_rt_qb_style('action=', fg='bright_black')}{_rt_qb_style(action.replace('_', ' '), fg='magenta')}",
         f"{_rt_qb_style('desired=', fg='bright_black')}{placement.get('desired') or '-'}",
-        f"{_rt_qb_style('arr=', fg='bright_black')}{_rt_qb_style(arr_status, fg=arr_color)}",
+        f"{_rt_qb_style('arr=', fg='bright_black')}{_rt_qb_style(arr_status, **arr_style)}",
         f"{_rt_qb_style('files=', fg='bright_black')}{file_count}",
     ]
     if nohl:
