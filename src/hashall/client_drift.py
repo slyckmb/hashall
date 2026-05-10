@@ -1432,6 +1432,37 @@ def build_client_drift_report(
             }
         )
 
+    # Dual-repoint upgrade: resolve no_client_on_required_pool_placement → repoint_both_to_pool
+    # when the catalog contains a pool-resident sibling. Must run before summary counts.
+    if catalog_path is not None:
+        _pool_blocker = "no_client_on_required_pool_placement"
+        needs_upgrade = [r for r in drift_rows if _pool_blocker in (r.get("blockers") or [])]
+        if needs_upgrade:
+            all_tracker_keys: set[str] = set(tracker_registry.keys())
+            catalog_by_hash = _catalog_context_for_hashes(
+                catalog_path, (r["hash"] for r in needs_upgrade)
+            )
+            for row in needs_upgrade:
+                cat = catalog_by_hash.get(row["hash"], {})
+                p = row["placement"]
+                torrent_tracker_keys = {
+                    k for k in [p.get("qb_tracker_key"), p.get("rt_tracker_key")] if k
+                }
+                pool_cand = _find_pool_sibling_path(
+                    cat.get("sibling_payloads") or [],
+                    active_policy,
+                    self_payload_id=int(cat.get("payload_id") or 0) or None,
+                    torrent_tracker_keys=torrent_tracker_keys,
+                    all_tracker_keys=all_tracker_keys,
+                )
+                if pool_cand:
+                    pool_save_path, pool_root = pool_cand
+                    row["blockers"] = [b for b in row["blockers"] if b != _pool_blocker]
+                    row["action"] = "repoint_both_to_pool"
+                    p["proposed_qb_save_path"] = pool_save_path
+                    p["proposed_rt_directory"] = pool_save_path
+                    p["pool_sibling_root"] = pool_root
+
     action_counts = Counter(str(row["action"]) for row in drift_rows)
     side_counts = Counter(str(row["side"]) for row in drift_rows)
     summary = {
@@ -1706,9 +1737,9 @@ def build_path_drift_rank_report(
             "blockers": list(row.get("blockers") or []),
             "tags": (row.get("qb") or {}).get("tags") or "",
             "placement_reasons": list(row.get("reasons") or []),
-            "proposed_qb_save_path": "",
-            "proposed_rt_directory": "",
-            "pool_sibling_root": "",
+            "proposed_qb_save_path": placement.get("proposed_qb_save_path") or "",
+            "proposed_rt_directory": placement.get("proposed_rt_directory") or "",
+            "pool_sibling_root": placement.get("pool_sibling_root") or "",
             "qb_tracker_url": placement.get("qb_tracker_url") or "",
             "qb_tracker_key": placement.get("qb_tracker_key") or "",
             "qb_tracker_display": placement.get("qb_tracker_display") or "",
@@ -1720,9 +1751,10 @@ def build_path_drift_rank_report(
             "catalog": catalog,
         }
 
-        # Detect dual-repoint opportunity: neither client is on pool but content already
-        # exists there (in sibling payloads). Convert from manual_review/hard to an
-        # actionable repoint_both_to_pool proposal.
+        # Dual-repoint: the base report resolves no_client_on_required_pool_placement →
+        # repoint_both_to_pool when catalog is available.  The rank item already picks up
+        # proposed_qb_save_path / pool_sibling_root from placement above.  Upgrade
+        # difficulty here; fall back to resolving if the base report had no catalog context.
         if "no_client_on_required_pool_placement" in item["blockers"]:
             torrent_tracker_keys = {k for k in [item["qb_tracker_key"], item["rt_tracker_key"]] if k}
             pool_cand = _find_pool_sibling_path(
@@ -1739,11 +1771,11 @@ def build_path_drift_rank_report(
                 item["proposed_qb_save_path"] = pool_save_path
                 item["proposed_rt_directory"] = pool_save_path
                 item["pool_sibling_root"] = pool_root
-                if not item["blockers"]:
-                    item["difficulty"] = "medium"
-                    item["difficulty_reasons"] = list(item.get("difficulty_reasons") or []) + [
-                        "pool_sibling_exists:dual_repoint"
-                    ]
+        if item.get("action") == "repoint_both_to_pool" and item.get("pool_sibling_root") and not item["blockers"]:
+            item["difficulty"] = "medium"
+            item["difficulty_reasons"] = list(item.get("difficulty_reasons") or []) + [
+                "pool_sibling_exists:dual_repoint"
+            ]
 
         items.append(item)
 
