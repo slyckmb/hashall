@@ -1109,15 +1109,25 @@ def _find_pool_sibling_path(
 
 
 def _detect_nested_folder(root_path: str, item_name: str, file_count: int) -> bool:
-    """True when a single-file torrent's sibling root ends in the torrent name (errant nested folder)."""
+    """True when a sibling catalog root is a directory named after the torrent (errant nested folder).
+
+    Only flags real directories that exist on disk. Using item_stem (not item_name) avoids
+    false positives when root_path is a flat single file whose filename == item_name.
+    """
     if not root_path or not item_name:
         return False
-    dir_name = Path(root_path).name
+    rp = Path(root_path)
+    if not rp.is_dir():
+        return False
+    dir_name = rp.name
     item_stem = Path(item_name).stem
     if file_count == 1:
-        return dir_name == item_name or dir_name == item_stem
+        # A nested single-file lives inside a directory named after the torrent stem.
+        # Never compare against item_name: when root_path IS the file, dir_name==item_name
+        # but that is a flat (correct) placement, not nesting.
+        return dir_name == item_stem
     # Multi-file: nested only when the last two path components both equal the torrent name
-    return dir_name == item_name and Path(root_path).parent.name == item_name
+    return dir_name == item_name and rp.parent.name == item_name
 
 
 def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
