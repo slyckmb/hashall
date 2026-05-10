@@ -16,6 +16,7 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
         client-drift-qb-to-rt-dry client-drift-qb-to-rt-apply \
         client-drift-both-to-pool-dry client-drift-both-to-pool-apply \
         client-drift-nested-repair-dry client-drift-nested-repair-apply \
+        client-drift-nested-folder-scan \
         client-drift-verify-layout client-drift-verify-pieces \
         rt-repoint-dry rt-repoint-apply \
         cross-seed-normalize-dry cross-seed-normalize-apply \
@@ -60,6 +61,7 @@ help:
 	@echo "  make client-drift-both-to-pool-apply HASH=<hash> — apply repoint both qB+RT to pool sibling path"
 	@echo "  make client-drift-nested-repair-dry HASH=<hash> — dry-run move doubly-nested content to canonical path"
 	@echo "  make client-drift-nested-repair-apply HASH=<hash> — apply doubly-nested content repair + repoint clients"
+	@echo "  make client-drift-nested-folder-scan — scan all QB+RT caches for doubly-nested layouts (either or both clients)"
 	@echo "  make client-drift-verify-layout HASH=<hash> — verify folder depth/layout against .torrent expected paths"
 	@echo "  make client-drift-verify-pieces HASH=<hash> — verify piece hashes from .torrent against data on disk"
 	@echo ""
@@ -163,6 +165,9 @@ client-drift-nested-repair-dry:
 
 client-drift-nested-repair-apply:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift nested-folder-repair "$${HASH}" --apply
+
+client-drift-nested-folder-scan:
+	@$(HASHALL_CLI) client-drift nested-folder-scan $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}"); true
 
 client-drift-verify-layout:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift verify-layout "$${HASH}"

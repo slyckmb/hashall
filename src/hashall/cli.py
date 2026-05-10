@@ -3759,6 +3759,32 @@ def client_drift_nested_folder_repair_cmd(hash_val, do_apply, qb_url, rt_rpc_url
         raise SystemExit(1)
 
 
+@client_drift.command("nested-folder-scan")
+@click.option("--limit", default=0, show_default=True, help="Max hits to return (0=unlimited).")
+@click.option("--qb-cache-max-age", "qb_cache_max_age_s", default=300, show_default=True,
+              help="Max QB cache age in seconds.")
+def client_drift_nested_folder_scan_cmd(limit, qb_cache_max_age_s):
+    """Scan QB+RT caches for doubly-nested torrent layouts in either or both clients.
+
+    Iterates every hash in the QB and RT caches and runs independent detection
+    on each: QB detection via save_path/name/name on disk; RT detection via
+    d.directory structure. Reports hits grouped by both / qb_only / rt_only.
+    """
+    import sys
+    from hashall.nested_folder_repair import scan_nested_folders, format_nested_folder_scan_report
+
+    hits, total_scanned = scan_nested_folders(
+        qb_cache_max_age_s=qb_cache_max_age_s,
+        limit=limit,
+    )
+
+    use_color = sys.stdout.isatty()
+    click.echo(format_nested_folder_scan_report(hits, scanned=total_scanned, use_color=use_color), nl=False)
+
+    if hits:
+        raise SystemExit(1)
+
+
 @client_drift.command("verify-layout")
 @click.argument("hash_val", metavar="HASH")
 @click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")
