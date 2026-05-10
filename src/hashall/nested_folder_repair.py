@@ -135,25 +135,51 @@ def detect_nested_folder(
 
     # Inner dir: outer / torrent_name  (the doubly-nested dir containing actual files)
     inner = outer / torrent_name
-    if not inner.is_dir():
-        return None
-
     torrent_meta = load_rt_torrent_meta(DEFAULT_RT_SESSION_DIR, qb_torrent.hash)
 
-    file_count = _count_files(inner)
-    is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file
+    if inner.is_dir():
+        # Case 1: QB save_path is correct (e.g. movies/); files are at save_path/name/name/
+        file_count = _count_files(inner)
+        is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file
+        return NestedFolderInfo(
+            hash_val=qb_torrent.hash.lower(),
+            torrent_name=torrent_name,
+            save_path_api=save_path_api,
+            save_path_fs=save_path_fs,
+            content_path_api=content_path_api,
+            content_path_fs=content_path_fs,
+            nested_dir_fs=str(inner),
+            file_count=file_count,
+            is_single_file=is_single_file,
+        )
 
-    return NestedFolderInfo(
-        hash_val=qb_torrent.hash.lower(),
-        torrent_name=torrent_name,
-        save_path_api=save_path_api,
-        save_path_fs=save_path_fs,
-        content_path_api=content_path_api,
-        content_path_fs=content_path_fs,
-        nested_dir_fs=str(inner),
-        file_count=file_count,
-        is_single_file=is_single_file,
-    )
+    # Case 2: QB save_path itself ends with /torrent_name one or more times
+    # (e.g. movies/TN/ or movies/TN/TN/ instead of movies/).
+    # Strip all trailing name components to get the corrected save_path.
+    if Path(save_path_fs).name == torrent_name:
+        corrected_save_path_fs = save_path_fs
+        while Path(corrected_save_path_fs).name == torrent_name:
+            corrected_save_path_fs = str(Path(corrected_save_path_fs).parent)
+        corrected_save_path_api = _fs_to_api(corrected_save_path_fs).rstrip("/") + "/"
+        # nested_dir_fs is save_path_fs/name (one more level down from the wrong save_path)
+        nested_dir_for_case2 = Path(save_path_fs) / torrent_name
+        if not nested_dir_for_case2.is_dir():
+            return None
+        file_count = _count_files(nested_dir_for_case2)
+        is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file
+        return NestedFolderInfo(
+            hash_val=qb_torrent.hash.lower(),
+            torrent_name=torrent_name,
+            save_path_api=corrected_save_path_api,
+            save_path_fs=corrected_save_path_fs,
+            content_path_api=content_path_api,
+            content_path_fs=content_path_fs,
+            nested_dir_fs=str(nested_dir_for_case2),
+            file_count=file_count,
+            is_single_file=is_single_file,
+        )
+
+    return None
 
 
 def execute_nested_folder_repair(
@@ -202,10 +228,18 @@ def execute_nested_folder_repair(
         result.files_moved = _move_tree(nested, target, dry_run=dry_run)
 
         if not dry_run:
-            # Remove now-empty inner (nested) dir
+            # Remove now-empty inner (nested) dir, then any empty intermediate dirs up to outer
             if nested.exists() and not list(nested.iterdir()):
                 shutil.rmtree(str(nested))
                 result.notes.append(f"removed: {nested}")
+            ancestor = nested.parent
+            while ancestor != outer and str(ancestor).startswith(str(outer)):
+                if ancestor.exists() and not list(ancestor.iterdir()):
+                    shutil.rmtree(str(ancestor))
+                    result.notes.append(f"removed: {ancestor}")
+                    ancestor = ancestor.parent
+                else:
+                    break
 
             # Single-file: also remove the outer dir (save_path/torrent_name) — now empty wrapper
             if info.is_single_file and outer.exists() and not list(outer.iterdir()):

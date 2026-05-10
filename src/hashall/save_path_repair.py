@@ -111,8 +111,13 @@ def _move_tree(src: Path, dst_parent: Path, *, dry_run: bool) -> int:
             if not dry_run:
                 dst_file.parent.mkdir(parents=True, exist_ok=True)
                 if dst_file.exists():
-                    raise FileExistsError(f"target already exists: {dst_file}")
-                shutil.move(str(item), str(dst_file))
+                    if dst_file.stat().st_ino == item.stat().st_ino:
+                        # Same inode (hardlink): file already at target, just remove source link
+                        item.unlink()
+                    else:
+                        raise FileExistsError(f"target already exists: {dst_file}")
+                else:
+                    shutil.move(str(item), str(dst_file))
             count += 1
 
     return count
