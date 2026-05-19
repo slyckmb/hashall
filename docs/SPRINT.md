@@ -19,8 +19,8 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 2 | Twin Peaks: qB repointed to RT path (onlyencodes→darkpeers) | ✅ done |
 | 3 | **Doc review**: full repo doc audit — gaps, conflicts, consolidation | ✅ done |
 | 4 | **Code vs doc**: cross-check all code against docs; plan fixes | ✅ done |
-| 5 | **Test gate**: multi-phase walkthrough + dry-runs; pilot all tools; fix errors | 🔄 awaiting sign-off |
-| 6 | Novitiate: pool rehome + client repoint | ⏳ pending |
+| 5 | **Test gate**: multi-phase walkthrough + dry-runs; pilot all tools; fix errors | ✅ done |
+| 6 | Novitiate: pool rehome + client repoint | ✅ done |
 | 7 | Top Gun Maverick IMAX: policy decision + action (RT-only) | ⏳ pending |
 | 8 | Code fixes: db-lock on concurrent sync, orphan GC limit | ⏳ pending |
 | 9 | Refresh: run catalog refresh, verify clean audit | ⏳ pending |
@@ -130,7 +130,7 @@ against REQUIREMENTS.md.
 - **Integration:** `hashall hitchhiker audit` — if any Type A groups exist in the live catalog,
   they will now appear in the report. Baseline run in Slice 5 Phase 2 dry-run battery.
 
-## Slice 5 — Test Gate (awaiting operator sign-off)
+## Slice 5 — Test Gate (done)
 
 **Phase 1 — Code walkthrough: COMPLETE, no issues**
 - `repoint_both_to_pool` apply path: correctly fails-safe if pool target doesn't exist (cli.py:3268)
@@ -158,22 +158,31 @@ against REQUIREMENTS.md.
 **Gate criteria:** All three phases complete with no outstanding errors. Any fixes from
 phases 1–2 committed before phase 3 begins. **Operator sign-off required before proceeding to slice 6.**
 
-## Remaining Queue (slices 6–7)
-
-**Slice 6 — Novitiate (`2fb25fdf2ef20ae5`):** both clients on stash, desired=pool, noHL, no ARR.
-- rsync stash→pool canonical path (26 GB), payload sync, both-to-pool apply, verify
+## Remaining Queue (slice 7)
 
 **Slice 7 — Top Gun Maverick IMAX (`f3d70ba48ecbc51b`):** RT-only stalledUP, not in qB.
 - Run evidence scan; decide: mirror to qB / leave RT-only / remove from RT
 
-## Evidence Baseline (2026-05-19, post-slice-0)
+## Evidence Baseline (2026-05-19, post-slice-6)
 
 - qB: 4817 rows, daemon_live
 - RT: 4818 rows, daemon_live
 - Catalog last scan: 2026-05-10 (9 days — refresh needed in slice 9)
-- Payload sync: 2026-05-19 ✅ (was 2026-03-21 — 59-day gap now closed)
-- Drift: 1 (was 11 on May 8; slices 1–2 resolved 2 cases)
-- RT-only: 1 (unchanged — Top Gun Maverick, slice 7)
+- Payload sync: 2026-05-19 ✅
+- **Drift: 0** (was 1 after slices 1–2; slice 6 resolved Novitiate)
+- RT-only: 1 (Top Gun Maverick, slice 7)
+
+## Slice 6 — Novitiate (done)
+
+- rsync 25 GB stash→pool (ioniced, cross-filesystem, exit 0)
+- mv `cross-seed/seedpool/` → `cross-seed/seedpool (API)/` (canonical tracker name)
+- RT repointed via `hashall rt repoint --apply` to `seedpool (API)/Novitiate.../`
+- qB repointed via `set_location` → `seedpool (API)/` (parent); recheck triggered; 100% stoppedUP
+- Drift audit post-state: **0 path drift items**
+- Lessons: `set_location` triggers a physical move (not just repoint); always set `save_path` to
+  PARENT of torrent top-level folder (not the folder itself). `_find_pool_sibling_path` requires
+  `payload_hash` in catalog — newly rsync'd paths without a qB torrent don't get payload_hash until
+  after payload sync post-repoint. Workaround: direct `rt repoint` + qB `set_location` bypass.
 
 ## Done This Sprint
 
