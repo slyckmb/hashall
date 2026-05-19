@@ -1,7 +1,7 @@
 # Seed Data Management System - Requirements & Implementation
 
-**Version:** 1.2 (Living Document)
-**Last Updated:** 2026-04-18
+**Version:** 1.4 (Living Document)
+**Last Updated:** 2026-05-19
 **Status:** Active Development - Core features implemented, canonical torrent-tree normalization planning active
 
 ---
@@ -23,7 +23,7 @@ This document serves as the single source of truth for:
 1. [System Overview](#1-system-overview)
 2. [Storage Architecture](#2-storage-architecture) — §2.1 topology, §2.5 seeding domain, §2.6 seed-root contract
 3. [Application Stack](#3-application-stack)
-4. [Core Requirements](#4-core-requirements) — §4.1 residency rules (incl. `~noHL` advisory), §4.3 external consumer detection
+4. [Core Requirements](#4-core-requirements) — §4.1 residency rules (incl. `~noHL` advisory), §4.3 external consumer detection, §4.4 canonical path spec
 5. [Data Movement (Rehoming)](#5-data-movement-rehoming) — §5.1 demotion (staged cleanup, preexisting target), §5.3 payload groups (partial reconcile, ATM)
 6. [Deduplication](#6-deduplication) — §6.3 view building (hitchhiker invariant, cross-device donor prohibition)
 7. [Catalog System (hashall)](#7-catalog-system-hashall) — §7.3 scanning (drift policy modes)
@@ -364,6 +364,10 @@ A sibling payload group is **eligible to move to `/pool`** if:
 - No hardlinks exist in external consumer paths
 - Typically identified by `~noHL` tag from qbit_manage
 
+**Threshold:** A single hardlink from any payload file to any media library path is sufficient to mandate stash placement for the entire sibling group. There is no majority threshold. The human rationale: if any content is in the media library (Plex/Jellyfin/Audiobookshelf), all cross-seed copies of that content cost zero additional space via hardlinks and should stay on stash. Once the media library copy is deleted, all seeding copies lose their consumer justification and become candidates for pool migration or deletion.
+
+**qbit_manage `~noHL` alignment:** The `~noHL` logic in qbit_manage works the same way — it tags an item when it finds no hardlinks at all from the torrent's files into media library paths. The hashall external consumer check mirrors this logic. Use `~noHL` as a pre-filter for pool candidates, but always re-verify at plan time with a current filesystem scan.
+
 **Important: `~noHL` is advisory only.** The tag reflects qbit_manage's scan at a specific point in time. A `*arr` import between the qbit_manage scan and a rehome plan execution can create a new external hardlink. The authoritative external consumer check is always the plan-time scan of current catalog/filesystem state. The `~noHL` tag is a pre-filter that narrows candidates; it does not bypass the external consumer check.
 
 #### 4.1.2 Manual-Review Stop Conditions
@@ -495,6 +499,77 @@ Result: BLOCKED (cannot demote because external consumer exists)
 ```
 
 **Automated Detection:** qbit_manage's `~noHL` tag is an advisory pre-filter. See §4.1.1 for the authoritative check requirement.
+
+---
+
+### 4.4 Canonical Seeding Path Specification
+
+#### 4.4.1 Payload Uniqueness
+
+**Definition:** A payload is the folder/path/filename tree structure required to support one torrent item. Each item must have its own unique path tree. This enables safe deletion of any item's data without affecting any other item.
+
+**Hardlink sharing:** When two payloads consist of files that are bit-for-bit identical on the same filesystem, those files SHOULD share an inode (hardlink) to save space. The path trees remain distinct — uniqueness is at the directory/path level, not at the inode level.
+
+**Implication for cross-seeds:** A cross-seeded item is a distinct torrent instance with its own canonical path tree. Its files will normally be hardlinked to the original-torrent payload files (same inode, different paths). This is correct and expected. The path tree uniqueness is what permits safe per-item deletion.
+
+#### 4.4.2 Canonical Path Formula
+
+Every seeding item has one and only one canonical path, derived from how it was added to the system:
+
+```
+<seeding-root>/<category>/<item-payload-name>
+```
+
+Where `<seeding-root>` is the stash or pool seeding root (see §2.5), and `<category>` is determined by item origin (see §4.4.3).
+
+**Single-file torrents:** `<seeding-root>/<category>/<filename>`  
+**Multi-file torrents:** `<seeding-root>/<category>/<release-dir>/`
+
+#### 4.4.3 Category Rules (by origin)
+
+The category encodes how an item entered the system. Category assignment is permanent and identifies the item's origin path. The rules, in priority order:
+
+| Origin | Canonical category | Example |
+|---|---|---|
+| ARR pre-import (awaiting import) | `<arr-app>/` | `sonarr/`, `radarr/` |
+| ARR post-import (moved by ATM) | `<media-type>/` | `tv/`, `movies/`, `books/`, `music/` |
+| cross-seed injection | `cross-seed/<prowlarr-tracker-name>/` | `cross-seed/darkpeers/` |
+| qbit_manage tracker assignment | `<tracker-name>/` | `FearNoPeer/`, `myanonamouse/` |
+
+**Historical note:** This category system grew organically:
+1. ARR apps used their own app name as the qB category (sonarr, radarr, etc.) to trigger import
+2. After import, ARRs changed the category to the media type (tv, movies, etc.) — ATM moved the payload
+3. qbit_manage was added and assigned tracker-key categories to uncategorized items, causing a move from `<seeding-root>/<item>` → `<seeding-root>/<tracker-name>/<item>`
+4. cross-seed was integrated and assigned `cross-seed` as the category with explicit per-tracker save paths, resulting in `<seeding-root>/cross-seed/<prowlarr-tracker-name>/<item>`
+
+Many items currently have non-canonical paths due to early hashall/rehome code bugs that damaged path structure across thousands of items. Normalization to canonical paths is the long-term goal.
+
+#### 4.4.4 Tracker Key as Category Key
+
+The authoritative source for tracker identity and canonical category key is the **traktor tracker registry** (`tracker-registry.yml`). This YAML file is the single source of truth that ties together:
+- The tracker key (YAML top-level key, e.g. `darkpeers`) — used as the category subdirectory
+- The tracker URL pattern — for announce URL → key resolution
+- The Prowlarr display name and indexer ID
+- The qBittorrent save path (`<seeding-root>/<tracker-key>/`)
+- The qbit_manage category and tags
+- The rTorrent label and save path
+
+**Rule:** The tracker key from the registry is the canonical category for tracker-specific items. For cross-seed items, the category path is `cross-seed/<tracker-key>/`.
+
+When a torrent's announce URL and the path's tracker subdirectory disagree, resolve via the registry: match the announce URL against `tracker_url_pattern` to find the authoritative key. The mismatched path is a legacy accident requiring repair.
+
+**Registry locations (searched in order):**
+1. `$HASHALL_TRACKER_REGISTRY` env var
+2. `$TRACKER_REGISTRY` env var
+3. `/home/michael/dev/tools/traktor/config/tracker-registry.yml`
+4. `/home/michael/dev/work/glider/glider-docker/tracker-ctl/config/tracker-registry.yml`
+
+#### 4.4.5 Path Uniqueness Requirement
+
+No two distinct torrent items may share the same canonical path root. When a path collision exists:
+- Two items have been incorrectly merged or one has been displaced
+- The system must create a unique path for each (e.g., using `_rehome-unique/<hash>/` as a temporary holder)
+- `_rehome-unique/<hash>/` is a staging state, not a permanent canonical path
 
 ---
 
@@ -986,11 +1061,17 @@ Libtorrent verification (`checking_files`) that shows no progress for longer tha
 
 ### 8.4 qBittorrent Integration
 
-**Client authority during the RT transition:**
-- RT is the operational authority for live path truth and repair intent
-- qB remains online as a silent mirror because its metadata is still valuable during the transition
-- when a live torrent path changes, any corresponding RT and qB entries must be kept aligned
-- do not treat a qB-only path change as success if RT still points elsewhere
+**Client roles (permanent architecture):**
+- **RT (rTorrent) is the active seeder.** RT is the operational authority for live seeding, path truth, and repair intent. RT's path is treated as canonical in all path-dispute tiebreakers.
+- **qB (qBittorrent) is permanently deprecated — kept on life support.** qB is not active and will not be made active again unless there is a deliberate decision to revert. qB items are kept paused/stopped. qB is retained solely because its tag, category, and path metadata remains useful as a cross-reference during the rehome cleanup. The long-term plan is to complete the RT migration and shut qB down. All new repair work targets RT as the canonical state; qB is adjusted to match RT, not the reverse.
+
+**Path synchronization rule (§4.4 and §8.4):**
+- qB and RT must mirror each other item-for-item, path-for-path.
+- When qB and RT paths differ for the same hash:
+  1. If only one client is on the correct placement tier (stash vs pool), repoint the other to match the correct-tier client.
+  2. If both clients are on the correct placement tier but at different paths, **RT's path is canonical — repoint qB to match RT.** Do not treat this as a manual-review blocker unless there is evidence that RT's path is itself incorrect (non-canonical, missing, or structurally wrong).
+  3. RT's path is deemed incorrect only if: it does not follow §4.4.3 category rules, the path does not physically exist, or there is a documented reason to prefer qB's path.
+- A path change is not complete until both clients agree. Do not treat a qB-only or RT-only path change as success.
 
 **Authentication:**
 - Environment variables: `QBITTORRENT_URL`, `QBITTORRENT_USER`, `QBITTORRENT_PASS`
@@ -1244,6 +1325,10 @@ The system must be:
 
 **View (Torrent View):** A torrent-specific payload tree composed from a canonical donor payload, normally via hardlinks. Multiple views can preserve distinct qB item layout semantics while reusing the same physical bytes with zero additional disk usage. Each view must have a unique root per payload hash (no hitchhikers).
 
+**Tracker Key:** The short identifier for a tracker as defined in the traktor tracker registry (`tracker-registry.yml`). This is the YAML top-level key (e.g. `darkpeers`, `fearnopeer`, `abtorrents`). It is the authoritative identifier used for: qB category names, seeding path subdirectories, qbit_manage tags, and rTorrent labels. Resolve announce URLs to tracker keys via the `tracker_url_pattern` field in the registry. See §4.4.4.
+
+**Canonical Path:** The one correct on-disk path for a torrent item, derived from: `<seeding-root>/<category>/<item-payload-name>`. Category is determined by item origin (see §4.4.3). A torrent's current path is non-canonical if it does not match this formula — such paths are legacy artifacts requiring repair. See §4.4.
+
 ---
 
 ## 11. Implementation Status
@@ -1360,6 +1445,19 @@ The system is successful if:
 ---
 
 ## Document History
+
+**Version 1.4 (2026-05-19):**
+- §4.1.1: Added hardlink threshold rationale (any single hardlink mandates stash; qbit_manage ~noHL alignment)
+- §4.4.4: Replaced "Prowlarr tracker name" with traktor tracker registry key as authoritative source; documented registry structure and search path
+- §8.4: Updated qB role from "transitional mirror" to "permanently deprecated, kept on life support"; clarified RT-only repair direction
+- §10: Added Tracker Key and Canonical Path terminology entries
+
+**Version 1.3 (2026-05-19):**
+- Added §4.4: Canonical Seeding Path Specification — payload uniqueness definition, path formula, category rules by origin, historical category evolution, path uniqueness requirement
+- Updated §8.4: made RT active-seeder / qB passive-mirror roles explicit; added path-dispute tiebreaker rule (RT wins when both on correct tier)
+
+**Version 1.2 (2026-04-18):**
+- (prior entry, content unchanged)
 
 **Version 1.1 (2026-03-18):**
 - Corrected pool topology: added `pool-data`/`pool-media` ZFS dataset distinction and active dataset migration

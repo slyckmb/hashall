@@ -1311,7 +1311,19 @@ def _classify_common_path_drift(
                     if not qb_row.path_exists:
                         blockers.append("selected_qb_target_missing")
                 else:
-                    blockers.append("both_clients_on_required_placement_but_paths_differ")
+                    # Both clients share the ARR anchor inode AND neither is in an
+                    # ARR seeding dir (e.g. both are cross-seed tracker dirs).
+                    # Policy (§8.4): RT is the active seeder and path authority.
+                    # Repoint qB to match RT unless RT's path is provably invalid.
+                    if rt_row.path_exists and rt_row.content_path:
+                        action = "repoint_qb_to_rt_path"
+                        reasons.append(f"rt_on_required_{desired_placement}_placement")
+                        reasons.append("rt_authoritative_path_wins")
+                        placement["proposed_source_client"] = "rt"
+                        placement["proposed_qb_save_path"] = rt_row.target_qb_save_path or rt_row.save_path
+                    else:
+                        blockers.append("both_clients_on_required_placement_but_paths_differ")
+                        blockers.append("rt_path_missing_cannot_apply_authority_rule")
         else:
             blockers.append(f"no_client_on_required_{desired_placement}_placement")
 

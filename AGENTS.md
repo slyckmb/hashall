@@ -59,6 +59,16 @@ safely, stop and report the gap instead of proceeding.
 - qB/RT placement policy is evidence-based:
   ARR-library hardlink anchor present means stash placement; no verified ARR
   hardlink anchor means pool placement; qB `~noHL` is advisory only.
+- **RT is the active seeder and path authority. qB is the passive backup mirror (paused/stopped).**
+  When qB and RT paths differ for the same hash and both are on the correct placement tier,
+  RT's path is canonical — repoint qB to match RT. See §4.4 and §8.4 of REQUIREMENTS.md.
+  Exception: if RT's path is provably non-canonical (wrong category, missing, or structurally wrong),
+  escalate for human review rather than auto-repointing.
+- **Canonical path formula:** `<seeding-root>/<category>/<item-payload-name>`
+  Category is determined by item origin (see §4.4.3 of REQUIREMENTS.md):
+  - ARR-managed post-import: `<media-type>/` (tv/, movies/, books/, music/)
+  - cross-seed: `cross-seed/<prowlarr-tracker-name>/`
+  - qbit_manage tracker assignment: `<tracker-name>/`
 - Always confirm actual filesystem/catalog state before destructive decisions.
 - One mutating qB/RT workflow at a time. Dry-run, tiny pilot, post-check, and
   human inspection gates are required before widening.
