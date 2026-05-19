@@ -17,7 +17,7 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
         client-drift-both-to-pool-dry client-drift-both-to-pool-apply \
         client-drift-nested-repair-dry client-drift-nested-repair-apply \
         client-drift-nested-folder-scan \
-        client-drift-verify-layout client-drift-verify-pieces \
+        client-drift-verify-layout client-drift-verify-layout-scan client-drift-verify-pieces \
         rt-repoint-dry rt-repoint-apply \
         cross-seed-normalize-dry cross-seed-normalize-apply \
         hitchhiker-audit hitchhiker-plan hitchhiker-split-dry hitchhiker-split-apply \
@@ -63,6 +63,7 @@ help:
 	@echo "  make client-drift-nested-repair-apply HASH=<hash> — apply doubly-nested content repair + repoint clients"
 	@echo "  make client-drift-nested-folder-scan — scan all QB+RT caches for doubly-nested layouts (either or both clients)"
 	@echo "  make client-drift-verify-layout HASH=<hash> — verify folder depth/layout against .torrent expected paths"
+	@echo "  make client-drift-verify-layout-scan — scan all torrents for layout depth mismatches (add ZERO=1 to filter 0% only)"
 	@echo "  make client-drift-verify-pieces HASH=<hash> — verify piece hashes from .torrent against data on disk"
 	@echo ""
 	@echo "  make hitchhiker-audit          — find N→1 payload groups and split safety"
@@ -171,6 +172,9 @@ client-drift-nested-folder-scan:
 
 client-drift-verify-layout:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift verify-layout "$${HASH}"
+
+client-drift-verify-layout-scan:
+	@$(HASHALL_CLI) client-drift verify-layout-scan $$([ -n "$${ZERO:-}" ] && echo "--zero-progress-only") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
 
 client-drift-verify-pieces:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift verify-pieces "$${HASH}"

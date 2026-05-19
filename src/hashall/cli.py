@@ -3851,6 +3851,100 @@ def client_drift_verify_layout_cmd(hash_val, qb_url, base_dir_override, torrent_
         raise SystemExit(1)
 
 
+@client_drift.command("verify-layout-scan")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True)
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True)
+@click.option("--rt-session-dir", default=str(DEFAULT_RT_SESSION_DIR), show_default=True)
+@click.option("--zero-progress-only", is_flag=True, default=False, help="Only report hashes where both clients show 0% progress.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Max hashes to scan (0=all).")
+def client_drift_verify_layout_scan_cmd(qb_cache_file, rt_cache_file, rt_session_dir, zero_progress_only, limit):
+    """Scan all torrents with .torrent files for layout depth mismatches.
+
+    Checks each torrent's on-disk files against the expected paths from its
+    .torrent bencode. Reports hashes where files are at the wrong depth or
+    missing — these are candidates for manual review or correction.
+
+    Use --zero-progress-only to focus on torrents where both clients show 0%
+    (likely victims of incorrect nested-folder-repair from before v0.8.47).
+    """
+    from pathlib import Path as _Path
+    from hashall.client_drift import load_qb_cache_rows, load_rt_cache_rows, default_policy
+    from hashall.torrent_verify import verify_layout
+    from hashall.nested_folder_repair import _api_to_fs
+
+    policy = default_policy()
+    qb_rows = load_qb_cache_rows(_Path(qb_cache_file).expanduser())
+    rt_rows = load_rt_cache_rows(_Path(rt_cache_file).expanduser(), session_dir=_Path(rt_session_dir).expanduser(), policy=policy)
+    session_dir = _Path(rt_session_dir).expanduser()
+
+    # Build hash list from RT (since RT has the .torrent files)
+    hashes = sorted(rt_rows.keys())
+    if limit > 0:
+        hashes = hashes[:limit]
+
+    hits = []
+    skipped_no_torrent = 0
+    skipped_no_path = 0
+
+    for torrent_hash in hashes:
+        rt_row = rt_rows[torrent_hash]
+        qb_row = qb_rows.get(torrent_hash)
+
+        if zero_progress_only:
+            qb_progress = float((qb_row.progress if qb_row else 0) or 0)
+            rt_progress = float(rt_row.progress or 0)
+            if qb_progress > 0 or rt_progress > 0:
+                continue
+
+        torrent_path = session_dir / f"{torrent_hash.upper()}.torrent"
+        if not torrent_path.exists():
+            skipped_no_torrent += 1
+            continue
+
+        # Determine base_dir: prefer QB save_path, fall back to RT save_path parent
+        if qb_row and qb_row.save_path:
+            base_dir = _Path(_api_to_fs(qb_row.save_path.rstrip("/")))
+        elif rt_row.save_path:
+            # RT save_path for multi-file = info_name dir; parent = actual save_path
+            rt_sp = _Path(rt_row.save_path)
+            base_dir = rt_sp.parent if rt_row.is_multi_file else rt_sp
+        else:
+            skipped_no_path += 1
+            continue
+
+        try:
+            result = verify_layout(torrent_path, base_dir)
+        except Exception:
+            continue
+
+        if result.files_wrong_depth > 0 or result.files_missing > 0:
+            hits.append({
+                "hash": torrent_hash[:16],
+                "name": rt_row.name or (qb_row.name if qb_row else ""),
+                "ok": result.files_ok,
+                "wrong_depth": result.files_wrong_depth,
+                "missing": result.files_missing,
+                "base_dir": str(base_dir),
+                "qb_progress": float((qb_row.progress if qb_row else 0) or 0),
+                "rt_progress": float(rt_row.progress or 0),
+            })
+
+    total_scanned = len(hashes) - skipped_no_torrent - skipped_no_path
+    print(f"verify-layout-scan: scanned={total_scanned}  hits={len(hits)}  skipped(no .torrent)={skipped_no_torrent}  skipped(no path)={skipped_no_path}")
+    if not hits:
+        print("  (no layout mismatches found)")
+        return
+
+    print(f"\n{'HASH':<18} {'OK':>4} {'BAD':>4} {'MISS':>4}  {'QB%':>5}  {'RT%':>5}  NAME")
+    print("-" * 100)
+    for h in sorted(hits, key=lambda x: (-x["wrong_depth"] - x["missing"], x["name"])):
+        print(
+            f"{h['hash']:<18} {h['ok']:>4} {h['wrong_depth']:>4} {h['missing']:>4}"
+            f"  {h['qb_progress']*100:>5.1f}  {h['rt_progress']*100:>5.1f}  {h['name']}"
+        )
+        print(f"{'':18} base: {h['base_dir']}")
+
+
 @client_drift.command("verify-pieces")
 @click.argument("hash_val", metavar="HASH")
 @click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")

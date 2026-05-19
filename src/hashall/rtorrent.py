@@ -260,6 +260,9 @@ def _xmlrpc_scalar_text(xml: str) -> str:
     match = re.search(r"<string>(.*?)</string>", xml, re.DOTALL)
     if match:
         return html.unescape(match.group(1))
+    match = re.search(r"<(?:i4|i8|int)>(\d+)</(?:i4|i8|int)>", xml)
+    if match:
+        return match.group(1)
     match = re.search(r"<value>\s*([^<]+?)\s*</value>", xml, re.DOTALL)
     if match:
         return html.unescape(match.group(1))

@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from .qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
 from .rt_cache import load_rt_cache_snapshot
-from .rtorrent import rt_apply_directory_repoint, load_rt_torrent_meta, DEFAULT_RT_RPC_URL, DEFAULT_RT_SESSION_DIR
+from .rtorrent import rt_apply_directory_repoint, rt_xmlrpc_call, load_rt_torrent_meta, DEFAULT_RT_RPC_URL, DEFAULT_RT_SESSION_DIR
 from .save_path_repair import _move_tree
 
 # API→FS path aliases (QB and RT report /data/media, host FS uses /stash/media)
@@ -216,6 +216,11 @@ def _detect_rt_nesting(
             return True, str(inner)
         # Case B: RT points to the doubly-nested dir as "torrent root"
         if directory.name == info_name and directory.parent.name == info_name and directory.is_dir():
+            if torrent_path and torrent_path.exists():
+                from .torrent_verify import verify_layout
+                # save_path is two levels up: directory = save_path/TN/TN
+                if verify_layout(torrent_path, directory.parent.parent).success:
+                    return False, None
             return True, str(directory)
     else:
         inner = directory / info_name / info_name
@@ -504,7 +509,7 @@ def execute_nested_folder_repair(
                 shutil.rmtree(str(outer))
                 result.notes.append(f"removed: {outer}")
 
-            # RT repoint — restart=True stops/sets/saves/opens/starts; no separate recheck needed
+            # RT repoint — restart=True stops/sets/saves/opens/starts; then force hash check
             try:
                 snapshot = load_rt_cache_snapshot() or {}
                 rows = snapshot.get("rows") or []
@@ -518,6 +523,11 @@ def execute_nested_folder_repair(
                     )
                     result.rt_repointed = True
                     result.notes.append(f"RT repointed → {rt_new_dir}")
+                    try:
+                        rt_xmlrpc_call("d.check_hash", info.hash_val, rpc_url=rpc_url)
+                        result.notes.append("RT check_hash triggered")
+                    except Exception as ce:
+                        result.notes.append(f"RT check_hash failed: {ce}")
                 else:
                     result.notes.append("RT: hash not in cache, skipping repoint")
             except Exception as e:
