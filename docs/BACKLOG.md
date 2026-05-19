@@ -71,8 +71,21 @@ After pool migration solid, move `~noHL` payloads from `/data/media/torrents/see
   files to `/stash/media/orphaned_data/` holding area before any deletion.
   Use: `HASHALL_ORPHAN_GC_MAX_PRUNE_COUNT=3000 HASHALL_ORPHAN_GC_MAX_PRUNE_FRACTION=0.5`
 
+## Code Review Gate — config.py stale default (P2 prerequisite)
+
+`src/rehome/config.py` DEFAULTS has `"default_dest_root": "/pool/data/seeds"`. This is wrong:
+- `/pool/data/seeds` is a cross-seed `dataDir` scan path, **not** a rehome destination (see REQUIREMENTS.md §2.1)
+- The active pool seeding root is `/pool/media/torrents/seeding` per `seed-root-state.json`
+- If a user runs rehome without a `~/.hashall/rehome.toml` override, MOVE targets land at the wrong location
+
+**Fix required before any live MOVE pilot:**
+1. `src/rehome/config.py`: remove `/pool/data/seeds` as `default_dest_root`; replace with logic that reads the active seeding root from `seed-root-state.json` at runtime (or require explicit operator configuration with no silent fallback)
+2. Audit all other source files that reference `/pool/data/seeds` as a seeding root or MOVE target and correct them
+3. `src/rehome/seed_state.py`: remove `/pool/data/seeds` from the fallback known-roots list unless it is explicitly registered as a legacy migration source in the active `seed-root-state.json`
+
 ## Active Risks
 
 - `MOVE` is refactored but unproven live; pilot validation is the stop gate.
+- `config.py default_dest_root` is stale (`/pool/data/seeds`); live MOVE without toml override would target wrong pool location (see Code Review Gate above).
 - Cleanup source path/provenance can drift to legacy `/pool/data/seeds/...` aliases.
 - Large batch operations can hide qB/API transient failures; inspect after every run.

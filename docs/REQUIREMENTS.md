@@ -1,6 +1,6 @@
 # Seed Data Management System - Requirements & Implementation
 
-**Version:** 1.4 (Living Document)
+**Version:** 1.5 (Living Document)
 **Last Updated:** 2026-05-19
 **Status:** Active Development - Core features implemented, canonical torrent-tree normalization planning active
 
@@ -110,6 +110,9 @@ The system is actively migrating seeding content from `pool-data` (`/pool/data/m
 - `pool-media` is the canonical target for new placements
 - The published seeding-root contract (`~/.hashall/seed-root-state.json`) reflects which datasets are active/legacy at any point in time
 - All planning and apply tooling must be dataset-aware; "pool" is not a single target
+
+**`/pool/data/seeds` — cross-seed scan source, not a rehome destination:**
+`/pool/data/seeds` is a cross-seed `dataDir` path (where cross-seed scans for matchable content — see §3.2). It is **not** a seeding root and **not** a valid rehome MOVE target. The canonical rehome destination is always the active pool seeding root from `seed-root-state.json` (currently `/pool/media/torrents/seeding`). Any tooling that defaults to `/pool/data/seeds` as a `dest_root` is using a stale default and must be corrected to read from `seed-root-state.json` at runtime.
 
 **Stable Device Identity:**
 ZFS filesystem UUIDs (`fs_uuid`) are stable across reboots; Linux `device_id` values are not. All long-term catalog identity uses `fs_uuid`. Device aliases (e.g., `stash`, `pool-data`, `pool-media`) are registered in the `devices` table and used in CLI parameters instead of raw device IDs.
@@ -408,7 +411,18 @@ The system must stop for manual review instead of auto-deciding when:
 
 ### 4.2.1 Sibling Payload Group
 
-For placement and stash-vs-pool residency decisions, hashall uses a broader **sibling payload group** concept than exact `payload_hash` equality:
+**Two overlapping concepts — used for different decisions:**
+
+| Concept | Definition | Used for |
+|---|---|---|
+| **Exact-hash siblings** | Torrents sharing the same `payload_hash` (same `payload_id` in catalog) | Catalog identity, REUSE planning, payload-group moves (§5.3) |
+| **Broader inode-sharing group** | Different `payload_id` entries whose files share inodes on the same filesystem (e.g., seedpool cross-seed + darkpeers cross-seed of the same movie) | Stash-vs-pool residency decisions, external consumer detection, hardlink-construction optimization on rehome |
+
+**Key rule:** Exact-hash siblings move together as a unit (§5.3). Members of the broader inode-sharing group that have *different* `payload_hash` values are handled independently — each goes through its own drift audit and rehome plan. The hardlink-construction optimization (§5.1.2) connects them: after the first member is byte-copied to pool, subsequent members can be hardlinked rather than copied.
+
+**Placement unit for residency:** The broader inode-sharing group is the placement unit for stash-vs-pool decisions. If *any* file in *any* member of the inode-sharing group has an external consumer hardlink (§4.3), the entire group must remain on stash — even members that individually show no external consumer. The external consumer check is applied per-file across all inode-sharing paths, not just per-torrent.
+
+For placement and stash-vs-pool residency decisions, hashall uses the broader **sibling payload group** concept:
 - non-duplicate payloads that mostly share inodes on the same filesystem
 - or would share inodes if rehomed onto the same filesystem
 
@@ -417,7 +431,7 @@ This broader sibling-group concept is the placement unit for:
 - rehoming non-anchored groups to pool
 - surfacing manual-review conflicts when sibling-group evidence is mixed
 
-### 4.2.1 Broader Content Inventory Requirement
+### 4.2.2 Broader Content Inventory Requirement
 
 **Intent:** The system should also be able to reason over scanned non-qB folder trees so operators can:
 - find duplicate folder trees
@@ -525,6 +539,19 @@ Where `<seeding-root>` is the stash or pool seeding root (see §2.5), and `<cate
 **Single-file torrents:** `<seeding-root>/<category>/<filename>`  
 **Multi-file torrents:** `<seeding-root>/<category>/<release-dir>/`
 
+**Seeding root selection rule:**
+The seeding root in the canonical path is determined by the item's residency class (§4.1.1):
+- Items with a stash hardlink anchor (external consumer exists) → stash seeding root (`/stash/media/torrents/seeding`)
+- Pool-eligible items (no external consumer, confirmed by plan-time scan) → active pool seeding root from `seed-root-state.json` (currently `/pool/media/torrents/seeding`)
+
+**Path preservation on rehome:**
+The seeding-root-relative path (`<category>/<item-payload-name>`) is identical on stash and pool — only the root prefix changes. When demoting stash→pool or promoting pool→stash, the relative path is preserved verbatim:
+```
+stash: /stash/media/torrents/seeding/cross-seed/seedpool/Movie.2024/
+pool:  /pool/media/torrents/seeding/cross-seed/seedpool/Movie.2024/
+```
+Any tool computing a rehome target path must derive it by substituting the seeding root, not by using the payload name alone.
+
 #### 4.4.3 Category Rules (by origin)
 
 The category encodes how an item entered the system. Category assignment is permanent and identifies the item's origin path. The rules, in priority order:
@@ -627,6 +654,44 @@ Source cleanup after a successful MOVE is **deferred by default** and runs as a 
 
 **Safety:** Demotion is BLOCKED if external consumers exist. No silent breakage of media library links.
 
+#### 5.1.1 Cross-Filesystem Copy Requirement
+
+Stash (`/stash/media`) and pool (`/pool/media`) are **separate ZFS pools with different `fs_uuid` and `device_id` values**. Hardlinks cannot span ZFS pool boundaries.
+
+**Consequence:** Every stash→pool MOVE is a full byte-level copy (rsync), not a hardlink or rename. This is true even when the content already has hardlinks to other stash paths — those hardlinks remain on stash; the pool copy creates new independent inodes. The stash source is removed only after:
+1. The pool copy is verified (file count + total bytes match)
+2. All affected torrent clients have been confirmed seeding from the pool path
+
+Until both conditions are met, the stash copy is the active seeding source and must not be deleted.
+
+**Tools:** `rehome` uses `rsync -a --no-whole-file --inplace` (or equivalent) for the copy step. Any tool computing rehome targets must account for this cross-filesystem constraint and must never attempt `os.link()` or `os.rename()` across pool boundaries.
+
+#### 5.1.2 Payload Group Rehome — Primary Mover and Hardlink Construction
+
+When rehoming a broader inode-sharing group (§4.2.1) to pool, only **one member** needs to be byte-copied. After that copy is on pool, its inodes are available for hardlink construction — all remaining members of the group get their own canonical pool path trees built via hardlinks to the first mover's pool inodes. This reduces the byte transfer cost to O(1) per inode-sharing group regardless of how many torrent instances share that content.
+
+**Primary mover selection rule** (evaluated in priority order — first match wins):
+
+| Priority | Condition | Rationale |
+|---|---|---|
+| 1 | A member already has verified content on the target device | Zero bytes to copy — hardlink all others from it immediately |
+| 2 | `status = complete` (all files SHA256-verified in catalog) | Unverified content must not serve as the authoritative pool copy |
+| 3 | ARR media-type category (`movies/`, `tv/`, `books/`, `music/`) | Post-ARR-import path is the content origin; cross-seeds were derived from it |
+| 4 | Cross-seed at canonical tracker path (`cross-seed/<tracker-key>/<name>/`) | Canonical path beats hash-named or legacy path |
+| 5 | Largest `torrent_instances` count for that `payload_id` | Most-used payload is the most established donor |
+| 6 | Smallest `payload_id` (oldest in catalog) | Final tie-break: earliest record is the most stable |
+
+**Disqualifiers** (must not be selected as primary mover unless it is the only candidate):
+- `status = incomplete` — partial hash coverage; content may not be fully verified
+- Path is not under any registered seeding domain root — not a known-good location
+- Path is at a `_rehome-unique/<hash>/` staging location on the source device
+
+**Hardlink construction phase:**
+After the primary mover's content exists on pool, each remaining member of the inode-sharing group receives its own canonical pool path tree (per §4.4.2 formula). Every file in that tree is hardlinked to the corresponding file in the primary mover's pool path. No additional byte transfer occurs. The pool then has one physical copy of the data, with multiple canonical path trees hardlinked to it — matching the same inode-sharing structure that existed on stash.
+
+**Pool path model (target state):**
+Each torrent in the inode-sharing group has its own unique canonical pool path tree. Files are shared via hardlinks across those trees (same inode, different directory entries). The legacy "REUSE" model (multiple torrents pointing to the same directory path) is an artifact of earlier rehome runs and is not the target state. `_rehome-unique/<hash>/` is a temporary staging path used during construction, not a permanent canonical path.
+
 ### 5.2 Promotion (pool → stash, reuse-only)
 
 **Purpose:** Move payloads back from pool to stash when needed
@@ -668,12 +733,12 @@ Does identical payload exist on stash?
 
 ### 5.3 Payload-Group Management
 
-**Definition:** A payload-group is the set of sibling torrents that share a payload_hash.
+**Definition:** A payload-group is the set of sibling torrents that share a `payload_hash` (same `payload_id` in the catalog). This is the **exact-hash sibling** concept from §4.2.1 — not the broader inode-sharing group.
 
-**Rehoming Principle:** All siblings in a payload-group are rehomed together as a unit when possible.
+**Rehoming Principle:** All exact-hash siblings in a payload-group are rehomed together as a unit. Members of the broader inode-sharing group that have *different* `payload_hash` values are separate payload-groups and are planned and executed independently (though the hardlink-construction optimization in §5.1.2 connects their execution).
 
-**Why?**
-- Prevents split scenarios (some siblings on stash, others on pool)
+**Why move exact-hash siblings together?**
+- Prevents split scenarios where some exact siblings are on stash and others on pool at the same logical path
 - Single source of truth for payload location
 - Simplifies reasoning about system state
 
@@ -1445,6 +1510,14 @@ The system is successful if:
 ---
 
 ## Document History
+
+**Version 1.5 (2026-05-19):**
+- §2.1: Added explicit note distinguishing `/pool/data/seeds` (cross-seed scan dataDir, not a rehome destination) from `/pool/media/torrents/seeding` (active pool seeding root); flagged stale `default_dest_root` defaults
+- §4.2.1: Fixed duplicate §4.2.1 section numbering (renamed "Broader Content Inventory Requirement" to §4.2.2); added concept-clarification table distinguishing exact-hash siblings (catalog identity unit) from broader inode-sharing group (placement unit); added key rule that broader-group members with different `payload_hash` are handled independently
+- §4.4.2: Added seeding root selection rule (pool-eligible → pool root, stash-anchored → stash root); added path-preservation-on-rehome clause (seeding-relative path preserved verbatim across roots)
+- §5.1.1 (new): Documented cross-filesystem byte-copy requirement — stash→pool MOVE is always rsync, never hardlink or rename; stash source not removed until pool copy verified and clients confirmed seeding
+- §5.1.2 (new): Documented primary mover selection rule for inode-sharing group rehome (6-priority ordered rule + disqualifiers); documented hardlink construction phase; clarified target pool path model (unique canonical trees per torrent, hardlinked — not shared-directory REUSE)
+- §5.3: Clarified payload-group definition as exact-hash siblings only; distinguished from broader inode-sharing group; noted that different-`payload_hash` members are planned independently but linked by §5.1.2 hardlink optimization
 
 **Version 1.4 (2026-05-19):**
 - §4.1.1: Added hardlink threshold rationale (any single hardlink mandates stash; qbit_manage ~noHL alignment)
