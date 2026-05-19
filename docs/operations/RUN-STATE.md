@@ -1,6 +1,81 @@
 # Operational Run State
 
-Last updated: 2026-05-08
+Last updated: 2026-05-19
+
+## 2026-05-19 Housekeeping + Fresh Audit Snapshot
+
+Slice 0 executed. System is healthy. Drift is down to 3 cases with clear actions.
+
+### What changed since May 8
+
+- Drift reduced: 11 → 3 (resolved on other branches/sessions)
+- RT-only reduced: 7 → 1
+- Stale refresh.lock (PID 3050448, dead) cleared
+- Payload sync from RT completed: 4818 torrents, 4753 complete payloads
+  (was last synced 2026-03-21 — 59-day gap now closed)
+- ARR anchor scan now resolves correctly post-sync (was blocked pre-sync)
+- Orphan GC: 2482 candidates still blocked at 1000 limit (known backlog item)
+
+### Live Evidence Baseline (2026-05-19)
+
+- qB: 4817 rows, daemon_live, fetched 2026-05-19T14:34Z
+- RT: 4818 rows, daemon_live, fetched 2026-05-19T14:34Z
+- Catalog last scan: 2026-05-10 17:21 (9 days old — refresh recommended)
+- Payload sync: 2026-05-19 (just completed)
+- Drift: 3 rows — 1 high, 0 medium, 2 low
+- RT-only: 1 row
+
+### Current Drift Queue (3 cases, post-sync diagnosis)
+
+**HIGH — actionable, clear proposed fix:**
+- `4f454ed3bdf830f0` Alien.Resurrection.1997 (Extended REMUX)
+  - qB on pool: `/pool/media/torrents/seeding/cross-seed/FearNoPeer`
+  - RT on stash: `/data/media/torrents/seeding/cross-seed/FearNoPeer`
+  - desired=stash, arr=linked ✔ anchor confirmed
+  - action: **repoint qB to RT path** (`make client-drift-qb-to-rt-dry HASH=4f454ed3bdf830f0`)
+  - next: dry-run → inspect → apply
+
+**LOW — manual review, both on stash, paths differ:**
+- `c7845e03fe21e7fa` Twin.Peaks.S01 (1080p AMZN WEB-DL)
+  - qB stash: `/data/media/torrents/seeding/cross-seed/onlyencodes`
+  - RT stash: `/data/media/torrents/seeding/cross-seed/darkpeers`
+  - desired=stash, arr=linked ✔ anchor confirmed
+  - action: pick canonical cross-seed tracker path, repoint the other client
+  - next: `make client-drift-selected HASH=c7845e03fe21e7fa ANCHOR_SCAN=200000`
+
+**LOW — manual review, needs pool placement:**
+- `2fb25fdf2ef20ae5` Novitiate.2017 (BluRay REMUX)
+  - qB stash (hash-named dir): `/data/media/torrents/seeding/cross-seed/2fb25fdf2ef20ae5...`
+  - RT stash: `/data/media/torrents/seeding/cross-seed/other`
+  - desired=pool (arr=not_linked, noHL=yes)
+  - action: needs rehome to pool before client repoint
+  - next: `make client-drift-selected HASH=2fb25fdf2ef20ae5 ANCHOR_SCAN=200000`
+
+### RT-Only Row (1 case, policy decision needed)
+
+- `f3d70ba48ecbc51b` Top.Gun.Maverick.2022.IMAX (1080p AMZN WEB-DL)
+  - RT path: `/data/media/torrents/seeding/YUSCENE (API)/Top.Gun.Maverick...`
+  - RT state: `stalledUP`, category: `cross-seed`
+  - qB: missing
+  - blocker: `no_policy_says_rt_only_should_be_mirrored_or_removed`
+  - options: add to qB, leave RT-only intentionally, or remove from RT
+
+### Recommended Next Steps (Slice 1)
+
+1. **Alien Resurrection** — dry-run `make client-drift-qb-to-rt-dry HASH=4f454ed3bdf830f0`, inspect, apply
+2. **Twin Peaks** — run selected evidence, pick canonical path, repoint
+3. **Top Gun Maverick** — operator policy decision, then act
+4. **Novitiate** — needs pool rehome plan; handle last or separately
+
+### Known Code Issues Found This Slice
+
+- `hashall payload sync` crashed with `database is locked` when two concurrent
+  invocations collided — should handle gracefully with a retry or clearer error
+- Orphan GC blocked at 1000 limit with 2482 candidates — env var override needed
+  to process at scale; or raise/configure the default limit
+- `--verbose` flag missing from `hashall payload sync` — minor UX gap
+
+---
 
 ## 2026-05-08 Repair Project Handoff Snapshot
 
