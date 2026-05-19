@@ -22,7 +22,7 @@ DEFAULTS: dict = {
     "active_root": "/stash/media",
     "content_root": "/stash/media",
     "default_dest_device": "pool",
-    "default_dest_root": "/pool/data/seeds",
+    "default_dest_root": "/pool/media/torrents/seeding",
     "catalog": "~/.hashall/catalog.db",
     "managed_roots": [],
 }

@@ -280,9 +280,8 @@ class DemotionPlanner:
 
         source_path = canonicalize_path(Path(source_root_path))
 
-        # Backward compatibility: if stash mapping root is unavailable, keep legacy behavior.
         if self.stash_seeding_root is None:
-            return str((base_root / source_path.name).resolve()), None
+            return None, "stash_seeding_root is required for canonical path construction (§4.4.2)"
 
         rel = to_relpath(source_path, self.stash_seeding_root)
         if rel is None:
