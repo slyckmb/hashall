@@ -86,10 +86,10 @@ def query_type_a_groups(db_path: Optional[str] = None) -> list[HitchhikerGroup]:
         rows = conn.execute("""
             SELECT p.payload_id, p.root_path, p.file_count, p.total_bytes, ti.torrent_hash
             FROM payloads p
-            JOIN torrent_instances ti ON ti.payload_id = p.payload_id
+            LEFT JOIN torrent_instances ti ON ti.payload_id = p.payload_id
             WHERE p.root_path IN (
                 SELECT root_path FROM payloads
-                GROUP BY root_path HAVING COUNT(*) > 1
+                GROUP BY root_path HAVING COUNT(DISTINCT payload_id) > 1
             )
             ORDER BY p.root_path, p.payload_id, ti.torrent_hash
         """).fetchall()
@@ -110,7 +110,8 @@ def query_type_a_groups(db_path: Optional[str] = None) -> list[HitchhikerGroup]:
             }
         if row["payload_id"] not in by_root[key]["payload_ids"]:
             by_root[key]["payload_ids"].append(row["payload_id"])
-        by_root[key]["hashes"].append(row["torrent_hash"])
+        if row["torrent_hash"] is not None:
+            by_root[key]["hashes"].append(row["torrent_hash"])
 
     groups: list[HitchhikerGroup] = []
     for root_path, data in by_root.items():
