@@ -1,6 +1,6 @@
 # Seed Data Management System - Requirements & Implementation
 
-**Version:** 1.5 (Living Document)
+**Version:** 1.6 (Living Document)
 **Last Updated:** 2026-05-19
 **Status:** Active Development - Core features implemented, canonical torrent-tree normalization planning active
 
@@ -560,8 +560,10 @@ The category encodes how an item entered the system. Category assignment is perm
 |---|---|---|
 | ARR pre-import (awaiting import) | `<arr-app>/` | `sonarr/`, `radarr/` |
 | ARR post-import (moved by ATM) | `<media-type>/` | `tv/`, `movies/`, `books/`, `music/` |
-| cross-seed injection | `cross-seed/<prowlarr-tracker-name>/` | `cross-seed/darkpeers/` |
+| cross-seed injection | `cross-seed/<prowlarr-tracker-name>/` | `cross-seed/darkpeers/`, `cross-seed/Darkpeers (API)/` |
 | qbit_manage tracker assignment | `<tracker-name>/` | `FearNoPeer/`, `myanonamouse/` |
+
+**Prowlarr display name is acceptable for cross-seed items.** cross-seed uses the Prowlarr indexer display name as the save-path subdirectory and continues to do so for new injections. Both the short registry key (`darkpeers`) and the Prowlarr display name (`Darkpeers (API)`) are canonical for cross-seed items. Do not rename existing items to the short-key form — cross-seed would re-create the display-name path on the next injection cycle. The registry key remains the authoritative identity for URL-to-tracker resolution and reporting; it is not required as the on-disk directory name.
 
 **Historical note:** This category system grew organically:
 1. ARR apps used their own app name as the qB category (sonarr, radarr, etc.) to trigger import
@@ -833,6 +835,15 @@ A **hitchhiker** is when two or more torrents with different payload content sha
 **Requirement:** Newly constructed migrations, rehome plans, and view builds must always produce **per-hash unique target roots** — one directory tree per `payload_hash`. For cases where a natural target path would collide (e.g., two different payloads that would both want the same directory name), the system must route into `_rehome-unique/<payload_hash>/` subdirectories to preserve uniqueness.
 
 Existing legacy hitchhiker groups may persist until explicitly de-hitchhiked. Do not create new hitchhiker targets even as a workaround.
+
+**Two hitchhiker types — different root causes, different remediation:**
+
+| Type | Description | Detection | Remediation |
+|---|---|---|---|
+| **Type A — content-level** | Multiple distinct `payload_hash` values share one physical directory; files from different torrents are co-mingled on disk | Inode-overlap analysis across different `payload_id` values | Split into unique per-hash trees using hardlinks; highest risk, requires content verification |
+| **Type B — path-level** | Multiple `torrent_instances` share one `payload_id` but their `save_path` values point to a non-canonical parent (correct content, wrong path) | `hitchhiker.py` audit (2+ `torrent_instances` per `payload_id`) | Path normalization only — no data movement, just client repoint to canonical path |
+
+Type B is the common case from early rehome sessions. Type A is rarer and higher risk. The current `hitchhiker.py` detects Type B only.
 
 **Legacy Hitchhiker Remediation Requirement:**
 
@@ -1510,6 +1521,11 @@ The system is successful if:
 ---
 
 ## Document History
+
+**Version 1.6 (2026-05-19):**
+- §4.4.3: Clarified that Prowlarr display-name dirs (e.g. `Darkpeers (API)/`) are canonical for cross-seed items alongside short registry-key form; do not rename — cross-seed re-creates them on injection
+- §6.3: Added Type A vs Type B hitchhiker taxonomy (content-level vs path-level; different detection and remediation); noted `hitchhiker.py` detects Type B only
+- (BACKLOG) Canonical Tree Normalization: replaced thin placeholder with full taxonomy of non-canonical path classes 1–5 (counts, causes, remediation), class 6 acceptance note, safe remediation order, structural rename deferred list
 
 **Version 1.5 (2026-05-19):**
 - §2.1: Added explicit note distinguishing `/pool/data/seeds` (cross-seed scan dataDir, not a rehome destination) from `/pool/media/torrents/seeding` (active pool seeding root); flagged stale `default_dest_root` defaults

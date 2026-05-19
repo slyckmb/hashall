@@ -55,13 +55,39 @@ After pool migration solid, move `~noHL` payloads from `/data/media/torrents/see
 - First proving group: `Alien Romulus` (14 siblings, 7 marked `~noHL`)
 - Reuse donor-acquisition + shared attach architecture.
 
-## Canonical Tree Normalization (deferred)
+## Canonical Tree Normalization
 
-- `cross-seed-link` → `cross-seed`
-- `orphaned_data` → `orphans`
-- Do path normalization first, then compare/rebuild inventory, then drain `/pool/data`.
-- Treat `*/media/torrents/orphans` as canonical orphan location.
-- Do not rename until both clients agree on policy-correct path.
+Non-canonical paths created by early rehome sessions. All items are seeding correctly but paths
+do not match the canonical formula (§4.4.2). Target state: every torrent at
+`<seeding-root>/<category>/<item-payload-name>`. Prowlarr display-name dirs (e.g.
+`Darkpeers (API)/`) are **acceptable and must not be renamed** — cross-seed still injects
+there; see §4.4.3.
+
+**Baseline snapshot (2026-05-19, stash + pool-media payloads):**
+
+| Class | Count | Path pattern | Cause | Remediation |
+|---|---|---|---|---|
+| 1 | 10 | `cross-seed/<40-hex-hash>/` | qB torrent hash used as tracker dir during early injection | Repoint client to canonical `cross-seed/<tracker-key>/` path; hardlink content if needed |
+| 2 | 7 | `cross-seed/other/` | RT used `"other"` as tracker placeholder when announce URL was unresolved | Resolve tracker from announce URL → repoint to canonical tracker path |
+| 3 | 14 | `cross-seed/_movie/`, `cross-seed/_<name>/` | Early rehome used underscore-prefixed pseudo-categories | Repoint to canonical tracker or media-type path |
+| 4 | 12 | `_rehome-unique/<hash>/` on stash or pool | Temporary staging path never promoted to canonical | Promote to canonical path (content already at correct location); repoint clients |
+| 5 | 47 | `_qb-unique-repair/`, `_qb-finish/` | qB repair staging paths never cleaned up after repair completed | Verify torrent healthy, move to canonical path, repoint clients |
+
+Total non-canonical: ~90 payloads (out of ~5200). Class 6 (Prowlarr display names) is acceptable — do not touch.
+
+**Safe remediation order** (later classes depend on earlier ones being stable):
+1. **Class 4** (`_rehome-unique/`) — no data movement, pure repoint; lowest risk
+2. **Class 2** (`cross-seed/other/`) — resolve tracker first via announce URL, then repoint
+3. **Class 1** (`cross-seed/<hash>/`) — same: resolve tracker, then repoint
+4. **Class 3** (`cross-seed/_<prefix>/`) — resolve intended category, then repoint
+5. **Class 5** (`_qb-unique-repair/`, `_qb-finish/`) — verify torrent healthy first, then repoint
+6. **Type A de-hitchhike** (multiple payload_hash sharing one dir) — highest risk; content-level split required; do last
+
+**Other deferred structural renames** (directory-level, not per-torrent):
+- `cross-seed-link/` → `cross-seed/` (legacy dir name; scan only)
+- `orphaned_data/` → `orphans/` at `*/media/torrents/orphans`
+- Drain `/pool/data` legacy seeding content to `/pool/media` (ongoing migration)
+- Do not rename any directory until both clients agree on the policy-correct target path.
 
 ## Deferred Follow-Up
 
