@@ -18,7 +18,7 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 1 | Alien Resurrection: qB repointed to RT path (pool→stash) | ✅ done |
 | 2 | Twin Peaks: qB repointed to RT path (onlyencodes→darkpeers) | ✅ done |
 | 3 | **Doc review**: full repo doc audit — gaps, conflicts, consolidation | ✅ done |
-| 4 | **Code vs doc**: cross-check all code against docs; plan fixes | 🔄 in progress |
+| 4 | **Code vs doc**: cross-check all code against docs; plan fixes | ✅ done |
 | 5 | **Test gate**: multi-phase walkthrough + dry-runs; pilot all tools; fix errors | ⏳ pending |
 | 6 | Novitiate: pool rehome + client repoint | ⏳ pending |
 | 7 | Top Gun Maverick IMAX: policy decision + action (RT-only) | ⏳ pending |
@@ -39,7 +39,7 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 **Gate met:** No known conflicts or gaps. No consolidation opportunities identified beyond
 what was executed.
 
-## Slice 4 — Code vs Doc Cross-Check (in progress)
+## Slice 4 — Code vs Doc Cross-Check (done)
 
 **Scope:** All modules under `src/hashall/` and `src/rehome/`. Compare implementation
 against REQUIREMENTS.md.
@@ -97,8 +97,38 @@ against REQUIREMENTS.md.
   is actually missing (line 1325) — this is the correct escalation path. Alias-aware path
   comparison uses `remap_to_mount_alias`. No action needed.
 
-**Gate criteria:** Every identified code gap has a spec reference and a proposed fix. List
-reviewed and prioritised by operator before slice 5.
+**Gate met:** All 4 issues fixed (commit ead9b06). 36 targeted tests pass.
+
+### Test Plan for Slice 4 Fixes
+
+#### Fix 1 — `config.py default_dest_root`
+- **Unit:** `pytest tests/ -k config` — no existing direct test; the value flows into
+  `DemotionPlanner` via `load_config()`. Covered indirectly by planner tests.
+- **Manual check:** `python -c "from rehome.config import DEFAULTS; print(DEFAULTS['default_dest_root'])"`
+  → must print `/pool/media/torrents/seeding`.
+- **Integration:** In Slice 5 dry-run battery, verify `hashall rehome auto --from stash --to pool --limit 1 --dryrun`
+  targets `/pool/media/torrents/seeding`, not `/pool/data/seeds`.
+
+#### Fix 2 — `planner.py` fail-closed when `stash_seeding_root` is None
+- **Unit:** No existing direct test for this path. Add in Slice 5 Phase 1 walkthrough:
+  instantiate `DemotionPlanner` without `stash_seeding_root`; call `_compute_pool_move_target`;
+  assert `(None, error_string)` returned. (Manual test above already confirms this.)
+- **Integration:** If `~/.hashall/rehome.toml` is missing `active_root`, planner must fail
+  with a clear error rather than producing a basename-only path. Verify in dry-run.
+
+#### Fix 3 — `seed_state.py` `/pool/data/seeds` removed from legacy mirror_roots
+- **Unit:** `test_rehome_seed_state.py::test_build_seed_root_state_surfaces_active_target_and_legacy_mirrors`
+  — assertion updated and passing. Confirms `/pool/data/seeds` absent from `mirror_roots`
+  when managed_roots contains `/pool/data`.
+- **Integration:** After Slice 9 refresh, inspect `~/.hashall/seed-root-state.json`; confirm
+  `/pool/data/seeds` is absent from `mirror_roots`.
+
+#### Fix 4 — `hitchhiker.py` Type A detection
+- **Unit:** Existing `test_hitchhiker.py` (12 tests) covers Type B. No Type A test exists.
+  In Slice 5 Phase 1: add a test with two payloads sharing the same `root_path` and confirm
+  `query_type_a_groups` returns a group with `status=TYPE_A`.
+- **Integration:** `hashall hitchhiker audit` — if any Type A groups exist in the live catalog,
+  they will now appear in the report. Baseline run in Slice 5 Phase 2 dry-run battery.
 
 ## Slice 5 — Test Gate (pending)
 
