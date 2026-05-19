@@ -121,7 +121,7 @@ hashall link execute 1 --dry-run
 hashall link execute 1
 ```
 
-See `docs/tooling/CLI-OPERATIONS.md` for the canonical workflow.
+See `docs/RUNBOOK.md` for the canonical workflow.
 
 ### 5. View Device Statistics
 
@@ -171,12 +171,11 @@ For qB workflows, the goal is not “one physical copy per torrent.” The goal 
 ### Core Documentation
 - **[Docs Index](docs/README.md)** - Canonical doc map for CLI agents
 - **[Requirements](docs/REQUIREMENTS.md)** - Product, safety, and operating constraints
-- **[System Architecture](docs/architecture/SYSTEM.md)** - Unified catalog and operational lanes
-- **[CLI Operations](docs/tooling/CLI-OPERATIONS.md)** - Core command workflows
-- **[Rehome Runbook](docs/tooling/REHOME-RUNBOOK.md)** - Rehome safety and apply flow
+- **[Architecture](docs/ARCHITECTURE.md)** - Unified catalog and operational lanes
+- **[Runbook](docs/RUNBOOK.md)** - Core CLI workflows, rehome safety and apply flow
 - **[Run State](docs/operations/RUN-STATE.md)** - Current live operations status
-- **[Agent Playbook](docs/project/AGENT-PLAYBOOK.md)** - Agent read order and execution rules
-- **[Project Plan](docs/project/PLAN.md)** - Active roadmap and backlog
+- **[Sprint](docs/SPRINT.md)** - Current sprint focus and active repair queue
+- **[Backlog](docs/BACKLOG.md)** - Ranked priorities and deferred work
 
 ### Guides
 - Legacy doc names remain as compatibility stubs that point to canonical docs.
@@ -302,7 +301,7 @@ See `benchmarks/` for detailed results and analysis.
 - **Canonical paths** - Symlinks resolved to avoid double-scanning
 - **Direct SQL** - No JSON intermediates, fast queries
 
-See `docs/architecture/SYSTEM.md` for the canonical architecture overview.
+See `docs/ARCHITECTURE.md` for the canonical architecture overview.
 
 ---
 
@@ -318,7 +317,7 @@ hashall export old.db --root /pool --out /tmp/pool.json
 hashall import /tmp/pool.json --device /pool
 ```
 
-See `docs/tooling/REHOME-RUNBOOK.md` for the canonical migration/runbook flow.
+See `docs/RUNBOOK.md` for the canonical migration/runbook flow.
 
 ---
 
@@ -354,7 +353,7 @@ See `docs/tooling/REHOME-RUNBOOK.md` for the canonical migration/runbook flow.
 ## 🤝 Contributing
 
 Contributions welcome! Please:
-1. Read `docs/architecture/SYSTEM.md` to understand the unified catalog model
+1. Read `docs/ARCHITECTURE.md` to understand the unified catalog model
 2. Check existing issues or create a new one
 3. Submit PRs with tests and documentation
 

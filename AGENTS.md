@@ -23,25 +23,23 @@ repo context. Do not rely on memory, branch names, or raw path strings.
 Required read order:
 
 1. `SESSION.md` when present.
-2. `docs/operations/RUN-STATE.md` for current live state, stop/freeze notes, and
-   superseded evidence.
-3. `docs/README.md` for the canonical active-doc set.
-4. `docs/architecture/SYSTEM.md` for storage, identity, and pathing invariants.
-5. `docs/project/PLAN.md` for current goals and backlog priorities.
-6. `docs/project/AGENT-PLAYBOOK.md` for agent workflow and verification rules.
+2. `docs/SPRINT.md` for the current sprint goal and active repair queue.
+3. `docs/operations/RUN-STATE.md` for live evidence baseline and stop/freeze notes.
+4. `docs/ARCHITECTURE.md` for storage, identity, and pathing invariants.
+5. `docs/REQUIREMENTS.md` for product and safety requirements.
+6. `docs/BACKLOG.md` for ranked backlog priorities beyond the current sprint.
 
 Conditional required docs:
 
-- Read `docs/tooling/CLI-OPERATIONS.md` before running or changing CLI workflows.
-- Read `docs/tooling/REHOME-RUNBOOK.md` before rehome, move, cleanup, or deletion work.
+- Read `docs/RUNBOOK.md` before running CLI workflows, rehome, move, cleanup, or deletion work.
 - Read `docs/operations/RT-QB-DRIFT-HANDOFF.md` before qB/RT drift, cache, or client-sync work.
-- Read `docs/NEXT-AGENT-PROMPT.md` when recovering from compacted or unclear context.
+- Read `docs/RECOVERY.md` when recovering from compacted or unclear context.
 
 After reading the required context, explicitly acknowledge compliance to the user
 before proceeding:
 
 ```text
-HASHALL_CONTEXT_ACK docs=SESSION,RUN-STATE,README,SYSTEM,PLAN,AGENT-PLAYBOOK status=OK
+HASHALL_CONTEXT_ACK docs=SESSION,SPRINT,RUN-STATE,ARCHITECTURE,REQUIREMENTS status=OK
 ```
 
 If any required file is missing, stale, contradictory, or too large to inspect

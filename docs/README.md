@@ -1,51 +1,51 @@
 # Hashall Docs Index
 
-Purpose: minimal, canonical documentation set for CLI agents.
+Purpose: minimal, canonical documentation set for CLI agents and developers.
 
 ## Agent Start Gate
 
 Every agent must read `AGENTS.md` first and emit the required
 `HASHALL_CONTEXT_ACK` before analysis, edits, or live operations.
 
-Critical setup facts:
+Critical invariants:
 
 - `/data/media` and `/stash/media` are equivalent mount aliases for the same
   `stash/media` filesystem. Do not count them as separate copies.
-- Path-sensitive work must use canonical path/device identity, not raw string
-  path comparisons.
-- `docs/operations/RUN-STATE.md` is the current live-state source of truth; old
-  sections and archived docs are historical unless the current run state says
-  otherwise.
-- Live qB/RT mutation requires dry-run, tiny pilot, post-check, and human
-  inspection gates.
+- Path-sensitive work must use canonical path/device identity, not raw string comparisons.
+- `docs/operations/RUN-STATE.md` is the live-state source of truth; archived docs are historical.
+- Live qB/RT mutation requires dry-run, tiny pilot, post-check, and human inspection gates.
 
-## Canonical (required)
+## Canonical Docs (required read order)
 
-1. `docs/REQUIREMENTS.md` - Product and safety requirements.
-2. `docs/architecture/SYSTEM.md` - Architecture and data model.
-3. `docs/tooling/CLI-OPERATIONS.md` - Core CLI usage and command workflows.
-4. `docs/tooling/REHOME-RUNBOOK.md` - Rehome safety and operational runbook.
-5. `docs/operations/RUN-STATE.md` - Current living operational state and next actions.
-6. `docs/project/AGENT-PLAYBOOK.md` - Agent read order, rules, test strategy.
-7. `docs/project/PLAN.md` - Active roadmap and backlog.
-8. `docs/project/KNOWN-TEST-FAILURES.md` - Pre-existing test failures: root causes and fix plans.
-9. `README.md` - Project overview and onboarding.
+| # | File | Purpose |
+|---|---|---|
+| 1 | `SESSION.md` | Live session goal + step (chatrap-managed) |
+| 2 | `docs/SPRINT.md` | Current sprint focus, active repair queue, done-this-sprint |
+| 3 | `docs/operations/RUN-STATE.md` | Live evidence baseline, freshness snapshot |
+| 4 | `docs/ARCHITECTURE.md` | Storage model, pathing invariants, data components |
+| 5 | `docs/REQUIREMENTS.md` | Product and safety requirements (full) |
+| 6 | `docs/BACKLOG.md` | Ranked backlog priorities beyond the sprint |
 
-## Active Continuity Docs
+## Reference Docs (read when relevant)
 
-- `docs/handoff.md` - Compact-safe current handoff summary.
-- `docs/next-agent.md` - Compact-safe recovery checklist.
-- `docs/NEXT-AGENT-PROMPT.md` - Prompt-safe compact recovery summary.
-- `docs/CROSS-REPO-QB-HELPER-INSTRUCTIONS.md` - Cross-repo instruction set for agents that should consume hashall qB helper/cache tooling.
-- `docs/ops-log.md` - Rolling operational log when recent context matters.
+| File | When to read |
+|---|---|
+| `docs/RUNBOOK.md` | Before any CLI workflow, rehome, move, cleanup, or deletion |
+| `docs/operations/RT-QB-DRIFT-HANDOFF.md` | Before qB/RT drift, cache, or client-sync work |
+| `docs/RECOVERY.md` | When recovering from compacted or unclear context |
+| `docs/project/KNOWN-TEST-FAILURES.md` | Pre-existing test failures, root causes, fix plans |
+| `docs/CROSS-REPO-QB-HELPER-INSTRUCTIONS.md` | Cross-repo instruction set for qB helper/cache tooling |
+| `docs/ops-log.md` | Rolling operational log when recent context matters |
 
 ## Hygiene
 
 Validate active-doc links with:
 
-`python3 scripts/check_doc_links.py`
+```bash
+python3 scripts/check_doc_links.py
+```
 
 ## Archive
 
 Historical and superseded docs live in `docs/archive/`.
-Active-tree duplicates should be archived rather than left behind as compatibility stubs.
+Active-tree duplicates should be archived rather than left as stubs.
