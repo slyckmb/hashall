@@ -19,7 +19,7 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 2 | Twin Peaks: qB repointed to RT path (onlyencodes→darkpeers) | ✅ done |
 | 3 | **Doc review**: full repo doc audit — gaps, conflicts, consolidation | ✅ done |
 | 4 | **Code vs doc**: cross-check all code against docs; plan fixes | ✅ done |
-| 5 | **Test gate**: multi-phase walkthrough + dry-runs; pilot all tools; fix errors | ⏳ pending |
+| 5 | **Test gate**: multi-phase walkthrough + dry-runs; pilot all tools; fix errors | 🔄 awaiting sign-off |
 | 6 | Novitiate: pool rehome + client repoint | ⏳ pending |
 | 7 | Top Gun Maverick IMAX: policy decision + action (RT-only) | ⏳ pending |
 | 8 | Code fixes: db-lock on concurrent sync, orphan GC limit | ⏳ pending |
@@ -130,29 +130,33 @@ against REQUIREMENTS.md.
 - **Integration:** `hashall hitchhiker audit` — if any Type A groups exist in the live catalog,
   they will now appear in the report. Baseline run in Slice 5 Phase 2 dry-run battery.
 
-## Slice 5 — Test Gate (pending)
+## Slice 5 — Test Gate (awaiting operator sign-off)
 
-**Scope:** All hashall and rehome CLI tools that will be used in slices 6–9.
-Three phases, loop each until clean:
+**Phase 1 — Code walkthrough: COMPLETE, no issues**
+- `repoint_both_to_pool` apply path: correctly fails-safe if pool target doesn't exist (cli.py:3268)
+- No logic errors found in client-drift apply, payload sync, or catalog refresh flows
 
-**Phase 1 — In-memory code walkthrough:**
-- Trace control flow for each planned operation (client-drift dry-run, payload sync,
-  catalog refresh, both-to-pool apply)
-- Identify logic errors, missing guards, wrong path construction
-- Fix any errors found; loop until walkthrough produces no new issues
+**Phase 2 — Dry-run battery: COMPLETE, 2 bugs caught and fixed**
+- `client-drift-audit ANCHOR_SCAN=0`: Novitiate blocked (`catalog_payload_paths_missing`) — expected
+- `client-drift-audit ANCHOR_SCAN=200000`: Novitiate shows `desired=pool, no_client_on_required_pool_placement` — expected, no pool sibling yet
+- `client-drift-both-to-pool-dry HASH=2fb25fdf2ef20ae5 ANCHOR_SCAN=200000`: correctly blocked — `no_client_on_required_pool_placement`
+- `hitchhiker-audit`: **caught 2 bugs** in Type A detection (COUNT(*) → COUNT(DISTINCT), INNER JOIN → LEFT JOIN); both fixed (faf537f); 54 genuine Type A groups now surfaced
+- rsync dry-run stash→pool: clean — 1 file, 26.1 GB, no deletions
 
-**Phase 2 — Dry-run battery:**
-- Run every make target relevant to slices 6–9 in dry-run mode
-- Capture and review all output; flag unexpected warnings, wrong paths, or blocked actions
-- Fix errors found; loop until all dry-runs produce expected output
-
-**Phase 3 — Pilot validation:**
-- For each tool class, run a constrained live pilot on the lowest-risk candidate
-- Verify output, catalog state, and client state after each pilot
-- Fix errors found; loop until pilot passes; do not widen scope until gate is clean
+**Phase 3 — Pilot readiness: READY, awaiting operator sign-off**
+- Canonical pool target: `/pool/media/torrents/seeding/cross-seed/seedpool/Novitiate.2017.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR/`
+  - Does not yet exist (correct — rsync hasn't run)
+  - Pool space: 3.6 TB free (ample for 25 GB file)
+  - Source: inode 69036, 5 hardlinks, both qB and RT paths point to same physical file
+- Pilot sequence (Slice 6 = Phase 3 pilot):
+  1. `rsync -aHAX --partial` stash→pool (cross-filesystem copy, 25 GB)
+  2. `hashall payload sync`
+  3. `client-drift-both-to-pool-dry HASH=2fb25fdf2ef20ae5 ANCHOR_SCAN=200000` — verify target found
+  4. `client-drift-both-to-pool-apply HASH=2fb25fdf2ef20ae5 ANCHOR_SCAN=200000` — repoint RT+qB
+  5. Post-check: verify RT and qB state, confirm pool seeding
 
 **Gate criteria:** All three phases complete with no outstanding errors. Any fixes from
-phases 1–2 committed before phase 3 begins. Operator sign-off before proceeding to slice 6.
+phases 1–2 committed before phase 3 begins. **Operator sign-off required before proceeding to slice 6.**
 
 ## Remaining Queue (slices 6–7)
 
