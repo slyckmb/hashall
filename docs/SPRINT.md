@@ -17,53 +17,85 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 0 | Housekeeping: clear lock, payload sync, fresh audit | ✅ done |
 | 1 | Alien Resurrection: qB repointed to RT path (pool→stash) | ✅ done |
 | 2 | Twin Peaks: qB repointed to RT path (onlyencodes→darkpeers) | ✅ done |
-| 3 | **Doc review**: full repo doc audit — gaps, conflicts, consolidation | 🔄 in progress |
-| 4 | **Code vs doc**: cross-check all code against docs; plan fixes | ⏳ pending |
+| 3 | **Doc review**: full repo doc audit — gaps, conflicts, consolidation | ✅ done |
+| 4 | **Code vs doc**: cross-check all code against docs; plan fixes | 🔄 in progress |
 | 5 | **Test gate**: multi-phase walkthrough + dry-runs; pilot all tools; fix errors | ⏳ pending |
 | 6 | Novitiate: pool rehome + client repoint | ⏳ pending |
 | 7 | Top Gun Maverick IMAX: policy decision + action (RT-only) | ⏳ pending |
 | 8 | Code fixes: db-lock on concurrent sync, orphan GC limit | ⏳ pending |
 | 9 | Refresh: run catalog refresh, verify clean audit | ⏳ pending |
 
-## Slice 3 — Doc Review (in progress)
+## Slice 3 — Doc Review (done)
 
-**Scope:** All files under `docs/`, `AGENTS.md`, `CLAUDE.md`, `BACKLOG.md`, `SPRINT.md`.
-Check for: internal contradictions, stale content, missing coverage, duplicate sections,
-consolidation opportunities.
+**Completed:**
+- REQUIREMENTS.md v1.4–v1.6: RT-authoritative tiebreaker, canonical path spec §4.4, rehome
+  mechanics, Prowlarr display names, §6.3 Type A/B hitchhiker taxonomy
+- BACKLOG.md: Code Review Gate for stale `config.py default_dest_root`; Canonical Tree
+  Normalization full taxonomy classes 1–5
+- ARCHITECTURE.md: date updated, stale `tooling/*` refs replaced, RT path authority added
+- REQUIREMENTS.md: 5x stale `docs/tooling/REHOME-RUNBOOK.md` / `CLI-OPERATIONS.md` refs fixed
+- RUNBOOK.md: RT Path Authority Tiebreaker section added
 
-**Completed this session:**
-- REQUIREMENTS.md v1.4: RT-authoritative tiebreaker; §4.4 canonical path spec (commit b21da72)
-- REQUIREMENTS.md v1.5: rehome mechanics — §5.1.1 cross-filesystem copy rule, §5.1.2 primary
-  mover selection spec, §4.2.1 exact-hash vs inode-sharing clarification, §4.4.2 seeding root
-  selection + path preservation (commit 1047217)
-- REQUIREMENTS.md v1.6: Prowlarr display names canonical; §6.3 Type A/B hitchhiker taxonomy;
-  BACKLOG Canonical Tree Normalization full taxonomy classes 1–5 (commit c2f0d1d)
-- BACKLOG.md: Code Review Gate for stale `config.py default_dest_root`
+**Gate met:** No known conflicts or gaps. No consolidation opportunities identified beyond
+what was executed.
 
-**Remaining doc review work:**
-- Full pass of all remaining docs (RUNBOOK.md, ARCHITECTURE.md, AGENTS.md, any others)
-  for gaps not yet addressed
-- Identify consolidation/simplification opportunities
-- Propose and execute any further fixes; commit
-
-**Gate criteria:** No known conflicts or gaps in docs. Consolidation options presented and
-decided. All doc commits landed.
-
-## Slice 4 — Code vs Doc Cross-Check (pending)
+## Slice 4 — Code vs Doc Cross-Check (in progress)
 
 **Scope:** All modules under `src/hashall/` and `src/rehome/`. Compare implementation
-against REQUIREMENTS.md. Focus areas:
-- `src/rehome/config.py`: stale `default_dest_root` (documented in BACKLOG Code Review Gate)
-- `src/rehome/planner.py`: basename-only fallback when `stash_seeding_root` is None (violates
-  canonical path formula §4.4.2)
-- `src/rehome/executor.py`: rsync flags, source cleanup sequencing, cross-filesystem guard
-- `src/hashall/client_drift.py`: pool sibling selection, RT-authoritative tiebreaker, alias handling
-- `src/hashall/hitchhiker.py`: Type A detection gap (currently detects Type B only)
-- `src/rehome/seed_state.py`: `/pool/data/seeds` in fallback known-roots list
+against REQUIREMENTS.md.
 
-**Output:** Ordered list of code issues with severity (blocking/non-blocking), reference to
-spec section violated, proposed fix for each. No code changes in this slice — issues logged
-only.
+**Findings — ordered by severity:**
+
+### Issue 1 — BLOCKING: `config.py` stale `default_dest_root`
+- **File:** `src/rehome/config.py:25`
+- **Code:** `"default_dest_root": "/pool/data/seeds"`
+- **Spec:** §4.4 — canonical pool seeding root is `/pool/media/torrents/seeding`
+- **Risk:** If operator's `~/.hashall/rehome.toml` doesn't override this, all rehome plans
+  default to the legacy `/pool/data/seeds` root, producing non-canonical paths.
+- **Proposed fix:** Change default to `"/pool/media/torrents/seeding"`.
+
+### Issue 2 — BLOCKING: `planner.py` basename-only fallback (non-canonical path)
+- **File:** `src/rehome/planner.py:284–285`
+- **Code:** `return str((base_root / source_path.name).resolve()), None`
+- **Spec:** §4.4.2 — canonical path must be `<seeding-root>/<category>/<item-payload-name>`.
+  Basename-only fallback drops the category segment entirely, producing
+  `<seeding-root>/<item-payload-name>` instead.
+- **Risk:** Activates when `stash_seeding_root` is None in the Planner. Creates wrong
+  target paths without alerting the operator.
+- **Proposed fix:** Fail closed — return `(None, "stash_seeding_root is required for
+  canonical path construction")` instead of silently returning the basename path.
+
+### Issue 3 — NON-BLOCKING: `seed_state.py` includes legacy `/pool/data/seeds` in mirror_roots
+- **File:** `src/rehome/seed_state.py:88–91` (`_legacy_seed_roots_for_managed_path`)
+- **Code:** `/pool/data/seeds` appended when managed path is `/pool/data`
+- **Spec:** §4.4 — `/pool/data/seeds` is a deprecated/legacy root. Including it in
+  `mirror_roots` may confuse seed-root-state consumers (e.g. traktor).
+- **Risk:** Low — this is a legacy compatibility branch, only activated if `/pool/data` is
+  in `managed_roots`. But it can mislead tooling that uses `mirror_roots` to enumerate
+  active seeding paths.
+- **Proposed fix:** Remove the `/pool/data/seeds` line; keep only `/pool/data/media/torrents/seeding`.
+
+### Issue 4 — NON-BLOCKING: `hitchhiker.py` does not detect Type A hitchhikers
+- **File:** `src/hashall/hitchhiker.py:55–68`
+- **Spec:** §6.3 — Type A = different items with different files cataloged under the same
+  payload root_path (catalog collision); Type B = different hashes sharing same physical files.
+- **Code:** Only queries `payload_id IN (... HAVING COUNT(*) > 1)` — detects Type B (same
+  payload_id, multiple torrent_instances). Type A would appear as two separate payload rows
+  with the same `root_path`, not a shared `payload_id`.
+- **Risk:** Type A groups silently pass audit; hitchhiker report gives false-clean signal.
+- **Proposed fix:** Add a second query: payloads with identical `root_path` but different
+  `payload_id` and at least one torrent_instance each. Report them separately as `TYPE_A`.
+
+### Issue 5 — NO ISSUE: `executor.py` — rsync flags and cross-filesystem guard
+- `-aHAX` flags are correct (archive + hardlinks + ACLs + xattrs). Cross-filesystem guard
+  uses `st_dev` comparison with conservative fail-closed fallback. Source cleanup is deferred
+  per §8.3. No action needed.
+
+### Issue 6 — NO ISSUE: `client_drift.py` — RT-authoritative tiebreaker and alias handling
+- `rt_authoritative_path_wins` reason implemented at line 1321. The old broad blocker
+  `both_clients_on_required_placement_but_paths_differ` is now only emitted when RT path
+  is actually missing (line 1325) — this is the correct escalation path. Alias-aware path
+  comparison uses `remap_to_mount_alias`. No action needed.
 
 **Gate criteria:** Every identified code gap has a spec reference and a proposed fix. List
 reviewed and prioritised by operator before slice 5.
