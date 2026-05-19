@@ -998,7 +998,7 @@ Choose `--scan-hash-mode fast --drift-policy metadata` for routine rescans. Choo
 
 **Sync Process:** Connects to qBittorrent, maps torrents to payloads, and updates the catalog.
 
-**CLI usage:** See `docs/tooling/CLI-OPERATIONS.md` (payload commands).
+**CLI usage:** See `docs/RUNBOOK.md` (payload commands).
 
 ---
 
@@ -1034,11 +1034,11 @@ Choose `--scan-hash-mode fast --drift-policy metadata` for routine rescans. Choo
 
 **Architecture:** Plan → Review → Apply workflow with mandatory dry-run before force-apply.
 
-**Detailed Usage:** See `docs/tooling/REHOME-RUNBOOK.md`
+**Detailed Usage:** See `docs/RUNBOOK.md`
 
 ### 8.2 Planning Phase
 
-**Command:** `rehome plan` (details in `docs/tooling/REHOME-RUNBOOK.md`)
+**Command:** `rehome plan` (details in `docs/RUNBOOK.md`)
 
 **Modes:** single-torrent, batch by payload hash, batch by tag.
 
@@ -1074,13 +1074,13 @@ Choose `--scan-hash-mode fast --drift-policy metadata` for routine rescans. Choo
 Payloads with `payload_hash = NULL` (full SHA256 not yet computed for all files) are **not eligible for REUSE planning** — sibling matching requires a complete hash. These payloads must have `hashall sha256-backfill` run first. MOVE planning for NULL-hash payloads is allowed only when relying on file-count and byte-count verification alone (lower confidence).
 
 **Catalog Freshness Requirement:**
-Plans must be generated from a current catalog state. **Always run `hashall refresh` (or `hashall scan` + `hashall payload sync`) immediately before generating a plan.** A stale catalog may show payloads at incorrect locations, miss recently-created external consumers, or produce incorrect sibling lists. The REHOME-RUNBOOK makes this a hard operational requirement.
+Plans must be generated from a current catalog state. **Always run `hashall refresh` (or `hashall scan` + `hashall payload sync`) immediately before generating a plan.** A stale catalog may show payloads at incorrect locations, miss recently-created external consumers, or produce incorrect sibling lists. The RUNBOOK makes this a hard operational requirement.
 
 **Output:** Plan JSON file — written to `~/.logs/hashall/reports/rehome-runs/plans/<plan>.json`
 
 ### 8.3 Application Phase
 
-**Command:** `rehome apply <plan_file>` (details in `docs/tooling/REHOME-RUNBOOK.md`)
+**Command:** `rehome apply <plan_file>` (details in `docs/RUNBOOK.md`)
 
 **Modes:**
 - `--dryrun`: Preview actions without making changes
@@ -1133,7 +1133,7 @@ Libtorrent verification (`checking_files`) that shows no progress for longer tha
 - For MOVE plans, source cleanup remains staged (not committed) on any failure
 - Cleanup is never performed on apply failure
 
-**Usage examples:** See `docs/tooling/REHOME-RUNBOOK.md`.
+**Usage examples:** See `docs/RUNBOOK.md`.
 
 ### 8.4 qBittorrent Integration
 

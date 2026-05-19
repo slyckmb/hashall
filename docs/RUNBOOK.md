@@ -123,6 +123,10 @@ Write/mutation endpoints stay direct for freshness.
 - Source cleanup only after relocated content is validated.
 - Manual-action tags remain until follow-up completes.
 
+### RT Path Authority Tiebreaker
+
+When qB and RT report different paths for the same hash and both clients are on the correct placement tier, RT's path is canonical — repoint qB to match RT (offline fastresume patch). Exception: if RT's path is provably non-canonical (wrong category, missing, structurally wrong), escalate for human review. See §8.4 of REQUIREMENTS.md.
+
 ### Preferred Mutation Order
 
 `copy/verify → qB stop → offline fastresume patch → qB start → observe`

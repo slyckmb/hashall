@@ -1,6 +1,6 @@
 # Hashall System Architecture (Canonical)
 
-Last updated: 2026-02-28
+Last updated: 2026-05-19
 Status: canonical
 
 ## Purpose
@@ -16,6 +16,7 @@ Hashall is a unified file-catalog and payload-identity system for safe deduplica
 - Rehome uses this catalog to move or reuse payloads safely.
 - For qB workflows, the key invariant is a unique per-item payload tree, not a unique physical byte copy.
 - Those per-item trees should normally be instantiated from donor bytes via hardlinks when filesystem boundaries allow it.
+- RT is the active seeder and path authority. qB is the passive backup mirror (paused/stopped). When paths differ and both clients are on the correct placement tier, RT's path wins; repoint qB to match. See §4.4 and §8.4 of REQUIREMENTS.md.
 
 ## Storage and Pathing Model
 
@@ -58,8 +59,7 @@ Legacy standalone schema file is archived at `docs/archive/legacy/schema.sql`.
 
 ## Related Canonical Docs
 
-- `docs/REQUIREMENTS.md`
-- `docs/tooling/CLI-OPERATIONS.md`
-- `docs/tooling/REHOME-RUNBOOK.md`
-- `docs/operations/RUN-STATE.md`
-- `docs/project/AGENT-PLAYBOOK.md`
+- `docs/REQUIREMENTS.md` — product and safety requirements (canonical path spec in §4.4; RT/qB role split in §8.4)
+- `docs/RUNBOOK.md` — CLI reference, rehome workflow, mutation order
+- `docs/AGENTS.md` — agent entry point, critical invariants, context gate
+- `docs/operations/RUN-STATE.md` — live evidence baseline and stop/freeze notes
