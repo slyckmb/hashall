@@ -77,3 +77,22 @@ safely, stop and report the gap instead of proceeding.
 
 If live observations conflict with these invariants, freeze mutation, record the
 conflict in `SESSION.md`, and ask for human review.
+
+## External Repo Dependencies
+
+The hashall repo depends on several external repos/tools. Agents must know where to
+find them before touching tracker names, category slugs, docker configs, qB/RT caches,
+or management scripts.
+
+| Resource | Path | Purpose |
+|---|---|---|
+| **silo** | `/home/michael/dev/tools/silo/` | Owns the shared qB+RT cache daemons. hashall reads `~/.cache/silo-qb/torrents-info.json` and `~/.cache/silo-rt/torrents.json` by default. See docs/CROSS-REPO-QB-HELPER-INSTRUCTIONS.md. |
+| traktor registry | `/home/michael/dev/tools/traktor/config/tracker-registry.yml` (preferred) or `/home/michael/dev/work/glider/glider-docker/tracker-ctl/config/tracker-registry.yml` | Authoritative tracker key → URL, Prowlarr name, qB category, RT label |
+| rt-tracker-manual-report.py | `~/dev/sys/docker/gluetun_qbit/rtorrent_vpn/bin/rt-tracker-manual-report.py` | trk_warn report + action script; edits go in sys/docker repo, NOT hashall worktree |
+| qbm config | `~/dev/sys/docker/qbit_manage/config.yml` | qB category → path mappings; uses `!ENV` YAML tags so PyYAML `safe_load` returns `{}` |
+| cross-seed config | `~/dev/work/glider/glider-docker/cross-seed/config.js` | linkDirs, linkCategory, dataDirs |
+| sys/docker repo | `~/dev/sys/docker/` | RT container config, systemd units, mirror scripts; separate git repo from hashall |
+
+**Critical:** Before assigning a tracker name as a qB category, save-path segment, or SYSTEM_TAG,
+look up the `tracker_url_pattern` in the traktor registry to get the authoritative `tracker_key`.
+Do not guess from strings in paths, qB tags, or RT announce URLs.

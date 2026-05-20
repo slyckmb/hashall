@@ -593,7 +593,61 @@ When a torrent's announce URL and the path's tracker subdirectory disagree, reso
 3. `/home/michael/dev/tools/traktor/config/tracker-registry.yml`
 4. `/home/michael/dev/work/glider/glider-docker/tracker-ctl/config/tracker-registry.yml`
 
-#### 4.4.5 Path Uniqueness Requirement
+#### 4.4.5 Path Inference from qB Metadata
+
+When the canonical path for a torrent cannot be determined from its current filesystem
+path alone (e.g., items in `_rehome-unique/<hash>/` staging dirs, or items whose
+current path is ambiguous), the inference falls back to qBittorrent metadata:
+
+**Inference precedence (high to low):**
+
+1. **qB category** — If the torrent has an explicit qB category (not `Uncategorized`),
+   determine the leaf subdirectory from:
+   - ARR pre-import categories (`sonarr`, `radarr`, `lidarr`, `readarr`, `speakarr`) →
+     mapped to final media type via `ARR_CATEGORY_FINAL_MAP` (`tv/`, `movies/`, `music/`,
+     `ebooks/`, `audiobooks/`) marked as `transient` reliability
+   - `cross-seed` category → resolve tracker from current save path first (see §4.4.4),
+     then fall back to qB tags (see step 2)
+   - qbit_manage category → use the leaf subdirectory from qbm config paths
+   - Other explicit categories → use category name as the leaf subdirectory
+
+2. **qB tags (cross-seed fallback)** — For cross-seed items where the save path does
+   not contain a recognizable tracker directory, qB tags are the fallback. Tags that
+   are system-internal (not tracker names) are filtered out:
+
+   *System tags* (never tracker names):
+   - `private`, `cross-seed` — built-in qB/system tags
+   - `~noHL` — qbit_manage no-hardlink advisory tag
+   - `~rt-mirrored`, `~share_limit_*` — qbit_manage control tags
+   - `other`, `public` — qbit_manage public-bucket placeholders
+   - `rehome*` — rehome operation tracking tags
+   - Any tag starting with `~` — qbit_manage and hashall control tags
+
+   After filtering, remaining tags are candidate tracker names. If multiple remain,
+   prefer tags that match known qbit_manage categories; otherwise take the first in
+   alphabetical order.
+
+3. **Device placement from `~noHL`** — The `~noHL` tag determines the seeding root:
+   - Tag present → pool root (`/pool/media/torrents/seeding`)
+   - Tag absent → stash root (`/data/media/torrents/seeding`)
+
+**Tracker alias resolution:**
+Do not treat known tracker aliases as system tags. For example, `speed` is a domain
+alias of `speedcd` (confirmed in the traktor registry). When a torrent has both `speed`
+and `speedcd` tags, resolve via the registry before the alphabetical fallback, not by
+suppressing `speed` as a system tag.
+
+*Note:* The current `save_path_inference.py` pragmatically adds `speed` to SYSTEM_TAGS
+as a stopgap until registry-backed alias resolution is implemented (see BACKLOG.md Gap 5).
+This is a known gap — the code comment documents the discrepancy. No other tracker
+aliases should be added to SYSTEM_TAGS without confirming they are not in the registry.
+
+**Staging directories (never tracker names):**
+Directories named `_rehome-unique`, `_qb-finish`, `_qb-unique-repair`, `_qb-repair-v2`
+are staging areas, not tracker names. The inference must skip these when extracting the
+tracker name from a save path.
+
+#### 4.4.6 Path Uniqueness Requirement
 
 No two distinct torrent items may share the same canonical path root. When a path collision exists:
 - Two items have been incorrectly merged or one has been displaced

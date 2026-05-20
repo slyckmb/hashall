@@ -1,9 +1,124 @@
 # Backlog (Ranked Priorities)
 
-Last updated: 2026-05-19
+Last updated: 2026-05-20
 Status: canonical
 
 Extracted from PLAN.md. For current-sprint work see `docs/SPRINT.md`.
+
+---
+
+## Agent Safety / Doc Gaps
+
+Gaps discovered during the 2026-05-20 session when an agent ran `save-path-repair --execute`
+without adequate context, causing 91 stoppedDL items (recovered via fastresume backup).
+These tasks must be completed before any agent runs mutating path-repair operations again.
+
+### Gap 1 — [DOC] Add save-path-repair section to RUNBOOK.md (BLOCKING for slice 12)
+
+`hashall payload save-path-repair` has no RUNBOOK entry. An agent reading the runbook
+before running the tool finds nothing. Required content:
+
+- **Purpose:** scans `_rehome-unique/<hash>/` dirs, infers canonical save path via
+  `save_path_inference.py`, moves files, patches qB fastresume, repoints RT.
+- **Dry-run first:** always run `hashall payload save-path-repair --dry-run` and inspect
+  every item before `--execute`. Never run `--execute` on cached/stale dry-run output.
+- **Known bug — fastresume patched for 0-moved-files items:** `audit_repair_candidates()`
+  matches a `<hash-prefix>/` dir to the first qB torrent whose info_hash starts with that prefix.
+  If `files_moved == 0` AND the matched qB torrent's data is not under `_rehome-unique/`,
+  fastresume is incorrectly patched to a non-existent canonical path → `missingFiles` on restart.
+  Guard: skip fastresume patch if `files_moved == 0` and qB `save_path` does not contain
+  `_rehome-unique`.
+- **Known bug — `_resolve_full_hash()` prefix mismatch:** scans `_rehome-unique/<hash>/` where
+  `<hash>` is 16–40 chars. Expands short hashes via `startswith` prefix match against ALL qB
+  torrents. If the prefix matches more than one torrent, the wrong item gets patched.
+  Guard: confirm prefix matches exactly one hash; abort if ambiguous.
+- **`_scan_rehome_unique_hashes()` only finds top-level `_rehome-unique/`:** Does NOT find
+  nested `_rehome-unique/` dirs like `cross-seed/hawke-uno/_rehome-unique/`. These must be
+  handled manually.
+- **Recovery procedure:** stop qB; restore `.bak-repair` fastresumes from
+  `/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup/`; restart qB; verify.
+- **File:** `src/hashall/save_path_repair.py`
+
+### Gap 2 — [DOC] Add external repo dependency map to AGENTS.md (BLOCKING for all agent work)
+
+Agents need to know about external repos before touching tracker names, category slugs,
+sys/docker configs, or qB management scripts. No single place lists these. Add to AGENTS.md:
+
+| Resource | Path | Purpose |
+|---|---|---|
+| traktor registry | `/home/michael/dev/tools/traktor/config/tracker-registry.yml` (preferred) or `/home/michael/dev/work/glider/glider-docker/tracker-ctl/config/tracker-registry.yml` | Authoritative tracker key → URL, Prowlarr name, qB category, RT label |
+| rt-tracker-manual-report.py | `~/dev/sys/docker/gluetun_qbit/rtorrent_vpn/bin/rt-tracker-manual-report.py` | trk_warn report + action script; edits go in sys/docker repo, NOT hashall worktree |
+| qbm config | `~/dev/sys/docker/qbit_manage/config.yml` | qB category → path mappings; uses `!ENV` YAML tags so PyYAML `safe_load` returns `{}` |
+| cross-seed config | `~/dev/work/glider/glider-docker/cross-seed/config.js` | linkDirs, linkCategory, dataDirs |
+| sys/docker repo | `~/dev/sys/docker/` | RT container config, systemd units, mirror scripts; separate git repo from hashall |
+
+**Critical:** Before assigning a tracker name as a qB category, save-path segment, or SYSTEM_TAG,
+look up the `tracker_url_pattern` in the traktor registry to get the authoritative `tracker_key`.
+Do not guess from strings in paths, qB tags, or RT announce URLs.
+
+### Gap 3 — [DOC] Fix SPRINT.md slice 12a description
+
+SPRINT.md says "Class 4 repairs: `_rehome-unique/<hash>/` — pure repoint, no data movement".
+This is wrong for items with actual data. Investigation found three groups:
+
+- **Group A (items with data):** data IS in `_rehome-unique/` — requires `mv` to canonical path,
+  then RT repoint + qB fastresume patch. NOT a pure repoint.
+- **Group B (empty dirs):** `_rehome-unique/<hash>/` dir exists but is empty — safe to delete,
+  then repoint clients to wherever data actually lives. No data movement.
+- **Group C (nested staging):** `cross-seed/<tracker>/._rehome-unique/<hash>/` — nested under
+  a tracker dir; not found by `_scan_rehome_unique_hashes()`.
+
+Update SPRINT.md slice 12a to reflect this reality. Before any Class 4 repair, run:
+`ls -la <seeding-root>/_rehome-unique/` and categorize each item as A/B/C.
+
+### Gap 4 — [DOC] Add canonical tree repair execution protocol to RUNBOOK.md
+
+BACKLOG.md describes the 5-class taxonomy and remediation order. RUNBOOK.md has no execution
+steps. Agents planning Class 1–5 repairs find no safe command sequence. Add:
+
+- **Required prereq for all cross-seed path repairs:** look up tracker key from
+  `tracker-registry.yml` by matching announce URL against `tracker_url_pattern` entries.
+  Never infer tracker key from path strings alone.
+- **Class 4 repair sequence:** categorize item (Group A/B/C, see Gap 3) → Group A: `mv
+  <src>/<hash-dir>/ <seeding-root>/<tracker-key>/<item-name>/`, RT repoint, qB fastresume patch;
+  Group B: delete empty dir, confirm clients already point elsewhere; Group C: manual.
+- **Class 1/2/3 repair sequence:** `python3 -c "import subprocess; ..."` to get announce URL →
+  look up tracker key in registry → `mv` dir → RT `rt repoint --apply` → qB fastresume patch
+  (NOT `set_location` — that triggers a physical move).
+- **qB repoint rule:** always patch fastresume offline (stop qB → patch → restart), NOT
+  `set_location` API. `set_location` triggers a physical data move.
+
+### Gap 5 — [CODE] save_path_inference.py SYSTEM_TAGS is hardcoded, not from registry
+
+`src/hashall/save_path_inference.py` maintains a hardcoded `SYSTEM_TAGS` frozenset of tag names
+that are NOT tracker identifiers. During the 2026-05-20 session, `speed` was added as a system
+tag without consulting the traktor registry — it may be the wrong exclusion.
+
+Fix: either (a) load non-tracker tag list from tracker-registry.yml at runtime, or (b) add a
+prominent code comment citing §4.4.4 of REQUIREMENTS.md and the registry path, so any future
+additions are checked against the registry first. Add a test that validates SYSTEM_TAGS against
+the known non-tracker tags (private, cross-seed, ~noHL, ~share_limit, etc.).
+
+### Gap 6 — [CODE] save-path-repair safety hardening (prerequisite for slice 12 execution)
+
+Two code-level safety bugs must be fixed before `save-path-repair --execute` is run again:
+
+**Bug A — fastresume patch for 0-moved-files items:**
+In `execute_repair()`, skip the fastresume patch step when `repair_action.files_moved == 0`
+AND the matched qB torrent's current `save_path` does NOT contain `_rehome-unique`.
+Currently, when a hash prefix matches a qB torrent whose data is not in `_rehome-unique/`,
+the fastresume is overwritten to point to a non-existent canonical path → `missingFiles`.
+
+**Bug B — ambiguous prefix match in `_resolve_full_hash()`:**
+When the dir name is fewer than 40 chars, `_resolve_full_hash()` matches via `startswith`.
+If multiple qB torrents share that prefix (unlikely but possible), the wrong item is picked.
+Fix: if the prefix matches more than one full hash, raise an error rather than silently
+using the first match.
+
+These bugs are in `src/hashall/save_path_repair.py`. Fix and add unit tests before running
+any live Class 4 or Class 5 repair.
+
+---
 
 ## P0 — Shared Migration Constructor
 

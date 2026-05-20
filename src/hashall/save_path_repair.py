@@ -238,23 +238,37 @@ def _resolve_full_hash(hash_val: str, qb_by_hash: dict, conn_db) -> str:
     Resolve a possibly-truncated hash (hash16) to its full 40-char hash.
     Searches qB dict by prefix, then DB by LIKE prefix.
     Returns the input unchanged if already 40 chars or not found.
+
+    Bug B guard: if prefix matches more than one full hash, raise ValueError
+    instead of silently using the first match. See BACKLOG.md Gap 6.
     """
     if len(hash_val) >= 40:
         return hash_val.lower()
     prefix = hash_val.lower()
     # Try qB dict by prefix match
-    for full_h in qb_by_hash:
-        if full_h.startswith(prefix):
-            return full_h
+    matches = sorted(full_h for full_h in qb_by_hash if full_h.startswith(prefix))
+    if len(matches) > 1:
+        raise ValueError(
+            f"ambiguous prefix {prefix}: matches {len(matches)} hashes "
+            f"({', '.join(m[:16] for m in matches[:5])})"
+        )
+    if len(matches) == 1:
+        return matches[0]
     # Try DB by LIKE
     if conn_db is not None:
         try:
-            row = conn_db.execute(
-                "SELECT torrent_hash FROM torrent_instances WHERE torrent_hash LIKE ? LIMIT 1",
+            rows = conn_db.execute(
+                "SELECT torrent_hash FROM torrent_instances WHERE torrent_hash LIKE ?",
                 [prefix + "%"],
-            ).fetchone()
-            if row:
-                return str(row[0]).lower()
+            ).fetchall()
+            if len(rows) > 1:
+                raise ValueError(
+                    f"ambiguous prefix {prefix}: {len(rows)} matches in catalog DB"
+                )
+            if len(rows) == 1:
+                return str(rows[0][0]).lower()
+        except ValueError:
+            raise
         except Exception:
             pass
     return prefix  # fallback: return as-is
@@ -421,43 +435,55 @@ def execute_repair(
         dst = Path(target_fs)  # canonical save_path dir (not its parent)
         files_moved = _move_tree(src, dst, dry_run=dry_run)
 
+        # Bug A guard: skip fastresume/RT/recheck if 0 files moved AND qB data
+        # is not in _rehome-unique (prefix matched unrelated torrent).
+        # See BACKLOG.md Gap 6.
+        qb_at_rehome = qb_torrent and "_rehome-unique" in str(qb_torrent.save_path)
+        should_apply = files_moved > 0 or qb_at_rehome
+
         if not dry_run:
-            # Stop qB, patch fastresume, start qB
-            fastresume_path = qb_client._fastresume_path(effective_hash)
-            if fastresume_path.exists():
-                _docker_stop_qb(qb_container)
-                try:
-                    from .fastresume import patch_fastresume_file
-                    patch_fastresume_file(
-                        fastresume_path,
-                        inferred.canonical_save_path,
-                        ".bak-repair",
-                    )
-                finally:
-                    _docker_start_qb(qb_container, qb_url)
-                result.notes.append(f"patched fastresume → {inferred.canonical_save_path}")
+            if not should_apply:
+                result.notes.append(
+                    f"SKIP: 0 files moved, qB save_path not in _rehome-unique"
+                    f" — fastresume/RT not modified"
+                )
             else:
-                result.notes.append(f"fastresume not found: {fastresume_path}")
+                # Stop qB, patch fastresume, start qB
+                fastresume_path = qb_client._fastresume_path(effective_hash)
+                if fastresume_path.exists():
+                    _docker_stop_qb(qb_container)
+                    try:
+                        from .fastresume import patch_fastresume_file
+                        patch_fastresume_file(
+                            fastresume_path,
+                            inferred.canonical_save_path,
+                            ".bak-repair",
+                        )
+                    finally:
+                        _docker_start_qb(qb_container, qb_url)
+                    result.notes.append(f"patched fastresume → {inferred.canonical_save_path}")
+                else:
+                    result.notes.append(f"fastresume not found: {fastresume_path}")
 
-            # Repoint RT (best-effort)
-            if rt_info:
+                # Repoint RT (best-effort)
+                if rt_info:
+                    try:
+                        rt_apply_directory_repoint(
+                            effective_hash,
+                            rt_target_dir,
+                            rpc_url=rpc_url,
+                            restart=True,
+                        )
+                        result.notes.append(f"RT repointed → {rt_target_dir}")
+                    except Exception as rt_exc:
+                        result.notes.append(f"RT repoint failed: {rt_exc}")
+
+                # Recheck torrent to confirm content at new location
                 try:
-                    rt_apply_directory_repoint(
-                        effective_hash,
-                        rt_target_dir,
-                        rpc_url=rpc_url,
-                        restart=True,
-                    )
-                    result.notes.append(f"RT repointed → {rt_target_dir}")
-                except Exception as rt_exc:
-                    result.notes.append(f"RT repoint failed: {rt_exc}")
-
-            # Recheck torrent to confirm content at new location
-            try:
-                qb_client.recheck_torrent(effective_hash)
-                result.notes.append("recheck triggered")
-            except Exception as rc_exc:
-                result.notes.append(f"recheck failed: {rc_exc}")
+                    qb_client.recheck_torrent(effective_hash)
+                    result.notes.append("recheck triggered")
+                except Exception as rc_exc:
+                    result.notes.append(f"recheck failed: {rc_exc}")
 
         result.success = True
         result.notes.append(
