@@ -127,13 +127,13 @@ rt-qb-mirror-drift:
 	@python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --sleep-row 0 --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-drift.jsonl}
 
 rt-qb-mirror-apply:
-	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --apply --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-apply.jsonl}
+	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --apply --skip-checking --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-apply.jsonl}
 
 rt-qb-mirror-pause-seeding:
 	@python3 scripts/pause_mirror_seeders.py
 
 rt-qb-mirror-queue-apply:
-	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror process-queue --queue-dir /dump/docker/gluetun_qbit/rtorrent_vpn/rt-qb-mirror-queue --apply --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-queue.jsonl}
+	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror process-queue --queue-dir /dump/docker/gluetun_qbit/rtorrent_vpn/rt-qb-mirror-queue --apply --skip-checking --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-queue.jsonl}
 
 client-drift-audit:
 	@$(HASHALL_CLI) client-drift audit --catalog "$(CATALOG)" --anchor-scan-max-files $${ANCHOR_SCAN:-0} --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")

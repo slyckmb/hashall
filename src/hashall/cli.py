@@ -4216,6 +4216,7 @@ def rt_qb_mirror_sync_cmd(
                 orphaned_hashes_to_remove.append(str(row.get("hash") or ""))
 
     orphaned_removed_count = 0
+    qbit = None
     if do_apply and orphaned_hashes_to_remove:
         if qbit is None:
             from hashall.qbittorrent import get_qbittorrent_client

@@ -1141,6 +1141,8 @@ Libtorrent verification (`checking_files`) that shows no progress for longer tha
 - **RT (rTorrent) is the active seeder.** RT is the operational authority for live seeding, path truth, and repair intent. RT's path is treated as canonical in all path-dispute tiebreakers.
 - **qB (qBittorrent) is permanently deprecated — kept on life support.** qB is not active and will not be made active again unless there is a deliberate decision to revert. qB items are kept paused/stopped. qB is retained solely because its tag, category, and path metadata remains useful as a cross-reference during the rehome cleanup. The long-term plan is to complete the RT migration and shut qB down. All new repair work targets RT as the canonical state; qB is adjusted to match RT, not the reverse.
 
+**qB MUST NEVER download.** Every qB torrent must be in `stoppedUP` (or `stoppedDL` transiently, pending recheck). Any qB torrent found in an active download state (`downloading`, `stalledDL`, `pausedDL`, `stoppedDL` after recheck) is a hard failure. Root causes: (a) torrent added without `skip_checking` during a race window when files were not yet stable → fix: always pass `--skip-checking` in sync scripts; (b) save_path mismatch → fix: audit with `make client-drift-audit`; (c) sync script crash left orphaned adds → fix: run `make rt-qb-mirror-drift` and recheck. Immediate remediation: recheck the affected hash in qB; it will resolve to `stoppedUP` once pieces verify.
+
 **Path synchronization rule (§4.4 and §8.4):**
 - qB and RT must mirror each other item-for-item, path-for-path.
 - When qB and RT paths differ for the same hash:
