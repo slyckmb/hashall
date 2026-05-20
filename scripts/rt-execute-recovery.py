@@ -12,7 +12,7 @@ For each hash in the input file:
   4. Trigger RT recheck → poll d.is_hash_checking → verify d.complete==1
 """
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 SCRIPT_NAME = "rt-execute-recovery"
 
 import argparse
@@ -82,6 +82,22 @@ def rt_poll_until_hash_done(torrent_hash: str) -> bool:
     return False
 
 
+def _rt_dir_matches_target(rt_dir: str, rt_target: str, torrent_hash: str) -> bool:
+    """True if RT's live d.directory is consistent with rt_target having been applied.
+
+    After d.open for a multi-file torrent, RT materializes d.directory as
+    rt_target/info_name — so both forms count as "already at target".
+    """
+    if not rt_dir or not rt_target:
+        return False
+    if rt_dir == rt_target:
+        return True
+    meta = load_rt_torrent_meta(RT_SESSION_DIR, torrent_hash.lower())
+    if meta and meta.is_multi_file and meta.info_name:
+        return rt_dir == rt_target.rstrip("/") + "/" + meta.info_name
+    return False
+
+
 def derive_rt_target(qb_info, torrent_hash: str) -> str:
     """Return the correct value to pass to RT d.directory.set.
 
@@ -121,6 +137,17 @@ def process_hash(qb, torrent_hash: str, dry_run: bool, idx: int, total: int) -> 
     log(f"  qB  content_path={qb_info.content_path}")
     log(f"  RT  current_dir={rt_dir}")
     log(f"  RT  planned_target={rt_target}")
+
+    # Skip check: if RT is already at the target and d.complete==1, nothing to do
+    if rt_dir == rt_target or _rt_dir_matches_target(rt_dir, rt_target, torrent_hash):
+        try:
+            xml = rt_xmlrpc_call("d.complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
+            already_complete = _xmlrpc_scalar_text(xml).strip() == "1"
+        except Exception:
+            already_complete = False
+        if already_complete:
+            log(f"  SKIP: RT already at target and d.complete=1 — already recovered")
+            return "already_recovered"
 
     if dry_run:
         log(f"  DRY-RUN: would recheck qB → verify 100% → repoint RT → recheck RT")
@@ -244,15 +271,11 @@ def main() -> None:
 
     qb = get_qbittorrent_client()
 
-    counts: dict[str, int] = {"recovered": 0, "dry_run": 0, "skip_not_found": 0, "failed": 0}
+    counts: dict[str, int] = {"recovered": 0, "already_recovered": 0, "dry_run": 0, "skip_not_found": 0, "failed": 0}
     for idx, h in enumerate(batch, 1):
         outcome = process_hash(qb, h, dry_run, idx, len(batch))
-        if outcome == "recovered":
-            counts["recovered"] += 1
-        elif outcome == "dry_run":
-            counts["dry_run"] += 1
-        elif outcome == "skip_not_found":
-            counts["skip_not_found"] += 1
+        if outcome in counts:
+            counts[outcome] += 1
         else:
             counts["failed"] += 1
 
@@ -260,6 +283,7 @@ def main() -> None:
     log(
         f"Processed: {len(batch)}"
         f"  Recovered: {counts['recovered']}"
+        f"  AlreadyOK: {counts['already_recovered']}"
         f"  Failed: {counts['failed']}"
         f"  DryRun: {counts['dry_run']}"
         f"  Skipped: {counts['skip_not_found']}"
