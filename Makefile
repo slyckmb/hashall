@@ -45,10 +45,12 @@ help:
 	@echo "  make db-refresh-verbose      — maintenance refresh with verbose output and logging"
 	@echo ""
 	@echo "  make rt-qb-mirror-drift      — show RT-only items safe to mirror into qB"
-	@echo "  make rt-qb-mirror-apply      — add safe RT-only items, recheck, monitor, re-stop"
-	@echo "  make rt-qb-mirror-apply NO_MONITOR=1 — fire-and-forget (no post-recheck stop)"
+	@echo "  make rt-qb-mirror-apply      — add safe RT-only items as stopped mirrors (skip-checking default)"
+	@echo "  make rt-qb-mirror-apply NO_MONITOR=1 — fire-and-forget (no post-add monitoring)"
+	@echo "  make rt-qb-mirror-apply FORCE=1 — re-add items journaled as done but missing from qB"
 	@echo "  make rt-qb-mirror-pause-seeding — pause any client-drift mirror items now in seeding state"
 	@echo "  make rt-qb-mirror-queue-apply — process RT-completion queue → qB (mirrors queued RT items)"
+	@echo "  make rt-qb-mirror-queue-apply FORCE=1 — same but bypass journal (re-add stale items)"
 	@echo ""
 	@echo "  make client-drift-audit        — classify qB/RT membership + path drift from caches"
 	@echo "  make client-drift-path-drift   — show only same-hash qB/RT path drift"
@@ -124,16 +126,22 @@ db-refresh-verbose:
 	python3 -m hashall refresh --profile maintenance --verbose $(REFRESH_OPTS) 2>&1 | tee ~/.logs/hashall/refresh-$$(date +%Y%m%d-%H%M%S).log
 
 rt-qb-mirror-drift:
-	@python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --sleep-row 0 --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-drift.jsonl}
+	@python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --sleep-row 0
 
 rt-qb-mirror-apply:
-	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --apply --skip-checking --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-apply.jsonl}
+	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; \
+	if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; \
+	FORCE_OPT=""; if [ "$${FORCE:-0}" = "1" ]; then FORCE_OPT="--force"; fi; \
+	python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --apply --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS $$FORCE_OPT
 
 rt-qb-mirror-pause-seeding:
 	@python3 scripts/pause_mirror_seeders.py
 
 rt-qb-mirror-queue-apply:
-	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror process-queue --queue-dir /dump/docker/gluetun_qbit/rtorrent_vpn/rt-qb-mirror-queue --apply --skip-checking --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-queue.jsonl}
+	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; \
+	if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; \
+	FORCE_OPT=""; if [ "$${FORCE:-0}" = "1" ]; then FORCE_OPT="--force"; fi; \
+	python3 -m hashall.cli rt-qb-mirror process-queue --queue-dir /dump/docker/gluetun_qbit/rtorrent_vpn/rt-qb-mirror-queue --apply --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS $$FORCE_OPT
 
 client-drift-audit:
 	@$(HASHALL_CLI) client-drift audit --catalog "$(CATALOG)" --anchor-scan-max-files $${ANCHOR_SCAN:-0} --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")

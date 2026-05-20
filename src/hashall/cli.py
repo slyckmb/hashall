@@ -2964,7 +2964,13 @@ def _select_client_drift_mirror_rows(
     hash_filters: tuple[str, ...] | list[str] = (),
     limit: int = 0,
     journal_path: Path | None = None,
-) -> tuple[list[dict], int, int]:
+    force: bool = False,
+) -> tuple[list[dict], int, int, list[str]]:
+    """Return (selected, candidate_count, completed_count, stale_journal_hashes).
+
+    stale_journal_hashes: journal-completed items that are still RT-only (removed from qB after
+    the journal recorded them). These are silently skipped unless --force is passed.
+    """
     rows = _filtered_client_drift_rows(report, side="rt_only", action="mirror_rt_to_qb", limit=0)
     hash_prefixes = [str(item or "").strip().lower() for item in hash_filters if str(item or "").strip()]
     if hash_prefixes:
@@ -2973,10 +2979,16 @@ def _select_client_drift_mirror_rows(
             if any(str(row.get("hash") or "").lower().startswith(prefix) for prefix in hash_prefixes)
         ]
     completed = _read_client_drift_journal(journal_path) if journal_path else set()
-    selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
+    row_hashes = {str(row.get("hash") or "").lower() for row in rows}
+    # Stale = completed in journal AND still RT-only (means qB lost them after add)
+    stale = sorted(h for h in completed if h in row_hashes)
+    if force:
+        selected = rows[:]
+    else:
+        selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
     if limit > 0:
         selected = selected[:limit]
-    return selected, len(rows), len(completed)
+    return selected, len(rows), len(completed), stale
 
 
 def _select_client_drift_path_rows(
@@ -3010,6 +3022,44 @@ def _select_client_drift_path_rows(
     if limit > 0:
         selected = selected[:limit]
     return selected, len(rows), len(completed), frozenset(completed)
+
+
+def _warn_stopped_dl(qbit, events: list[dict]) -> None:
+    """After apply, check for any added torrents that entered stoppedDL (qB downloading state).
+
+    stoppedDL after add with --skip-checking means qB has incomplete data and is queued to
+    download. This MUST NOT happen — qB is a passive mirror only. Emits a loud warning and
+    lists the affected hashes so the operator can pause them immediately.
+    """
+    added_hashes = [
+        str(event.get("hash") or "").lower()
+        for event in events
+        if event.get("status") == "ok" and not event.get("error")
+    ]
+    if not added_hashes:
+        return
+    downloading = []
+    for h in added_hashes:
+        try:
+            info = qbit.get_torrent_info(h)
+            if info is not None and str(getattr(info, "state", "") or "") == "stoppedDL":
+                downloading.append(h)
+        except Exception:
+            pass
+    if not downloading:
+        return
+    print(
+        _rt_qb_style(
+            f"\n  ⚠ WARNING: {len(downloading)} newly-added torrent(s) are in stoppedDL state!\n"
+            "  qB is queued to DOWNLOAD these — this MUST NOT happen (qB is a passive mirror).\n"
+            "  Pause them immediately in qB UI or via API, then investigate.\n"
+            "  Affected hashes:",
+            fg="red",
+            bold=True,
+        )
+    )
+    for h in downloading:
+        print(f"    {_rt_qb_style(h[:16], fg='red', bold=True)} {h}")
 
 
 def _apply_client_drift_mirror_rows(
@@ -3626,7 +3676,7 @@ def client_drift_apply_cmd(
     journal = Path(journal_path).expanduser()
     completed_hashes: frozenset[str] = frozenset()
     if action == "mirror_rt_to_qb":
-        selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+        selected, candidate_count, completed_count, _stale = _select_client_drift_mirror_rows(
             report,
             hash_filters=hash_filters,
             limit=limit,
@@ -3681,7 +3731,7 @@ def client_drift_apply_cmd(
 
 
 DEFAULT_RT_QB_MIRROR_QUEUE_DIR = Path.home() / ".cache" / "hashall-rt-qb-mirror" / "queue"
-DEFAULT_RT_QB_MIRROR_JOURNAL = Path("out") / "rt-qb-mirror" / "apply.jsonl"
+DEFAULT_RT_QB_MIRROR_JOURNAL = Path.home() / ".cache" / "hashall" / "rt-qb-mirror" / "apply.jsonl"
 
 
 def _mirror_hash_key(value: str) -> str:
@@ -4117,13 +4167,14 @@ def rt_qb_mirror_enqueue_cmd(torrent_hash, queue_dir, config_path, source):
 @click.option("--sleep-row", type=float, default=5.0, show_default=True)
 @click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default=str(DEFAULT_RT_QB_MIRROR_JOURNAL), show_default=True)
 @click.option("--tag", "extra_tags", multiple=True, default=("hashall-rt-qb-mirror",), help="Additional qB tag(s) for imported torrents.")
-@click.option("--skip-checking", is_flag=True, help="Ask qB to skip checking on add.")
+@click.option("--skip-checking/--no-skip-checking", default=True, show_default=True, help="Ask qB to skip piece verification on add (safe default; prevents auto-download in qB v5+).")
 @click.option(
     "--recheck-after-add/--no-recheck-after-add",
-    default=True,
+    default=False,
     show_default=True,
-    help="Trigger qB recheck after import so qB can verify the stopped mirror at its existing files.",
+    help="Trigger qB recheck after import. DANGEROUS with qB v5+: incomplete recheck auto-starts download.",
 )
+@click.option("--force", is_flag=True, help="Ignore journal and re-add all candidates (use when items were removed from qB after being journaled).")
 @click.option("--verify-timeout", type=float, default=0.0, show_default=True)
 @click.option("--verify-interval", type=float, default=5.0, show_default=True)
 @click.option("--wait-for-check", is_flag=True, help="Wait for qB recheck to reach 100%; uses --verify-timeout or 180s by default.")
@@ -4152,6 +4203,7 @@ def rt_qb_mirror_sync_cmd(
     monitor_timeout,
     monitor_interval,
     do_apply,
+    force,
 ):
     """Mirror safe RT-only rows into qB as stopped torrents."""
     disabled = _rt_qb_mirror_disabled_reason(config_path)
@@ -4166,22 +4218,38 @@ def rt_qb_mirror_sync_cmd(
         policy_mode=policy_mode,
     )
     journal = Path(journal_path).expanduser()
-    selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    selected, candidate_count, completed_count, stale_hashes = _select_client_drift_mirror_rows(
         report,
         hash_filters=hash_filters,
         limit=limit,
         journal_path=journal,
+        force=force,
     )
+    if stale_hashes and not force:
+        print(
+            _rt_qb_style(
+                f"\n  WARNING: {len(stale_hashes)} journal-completed item(s) are still RT-only — "
+                "they were added to qB but then removed.\n"
+                "  These will be SKIPPED. Re-run with --force to re-add them and update the journal.\n"
+                f"  Stale hashes: {', '.join(h[:16] for h in stale_hashes[:5])}"
+                + (" …" if len(stale_hashes) > 5 else ""),
+                fg="yellow",
+                bold=True,
+            )
+        )
     qb_only_count = report["summary"]["qb_only"]
     _print_rt_qb_summary(
         f"RT→qB mirror sync ({'APPLY' if do_apply else 'DRY RUN'})",
         [
             ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("force", "yes" if force else "no", "yellow" if force else None),
             ("policy_mode", report["summary"]["policy_mode"], "cyan"),
             ("rt_only", report["summary"]["rt_only"], "yellow" if report["summary"]["rt_only"] else "green"),
             ("qb_only", qb_only_count, "yellow" if qb_only_count else None),
             ("candidates", candidate_count, "yellow" if candidate_count else "green"),
             ("journal_completed", completed_count, None),
+            ("journal_stale", len(stale_hashes), "yellow" if stale_hashes else None),
             ("selected", len(selected), "yellow" if selected else "green"),
             ("journal", journal, None),
         ],
@@ -4269,6 +4337,8 @@ def rt_qb_mirror_sync_cmd(
             timeout_s=monitor_timeout,
             interval_s=monitor_interval,
         )
+    if do_apply and qbit is not None:
+        _warn_stopped_dl(qbit, events)
 
 
 @rt_qb_mirror.command("process-queue")
@@ -4284,12 +4354,14 @@ def rt_qb_mirror_sync_cmd(
 @click.option("--sleep-row", type=float, default=5.0, show_default=True)
 @click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default=str(DEFAULT_RT_QB_MIRROR_JOURNAL), show_default=True)
 @click.option("--tag", "extra_tags", multiple=True, default=("hashall-rt-qb-mirror",))
-@click.option("--skip-checking", is_flag=True)
+@click.option("--skip-checking/--no-skip-checking", default=True, show_default=True, help="Ask qB to skip piece verification on add (safe default; prevents auto-download in qB v5+).")
 @click.option(
     "--recheck-after-add/--no-recheck-after-add",
-    default=True,
+    default=False,
     show_default=True,
+    help="Trigger qB recheck after import. DANGEROUS with qB v5+: incomplete recheck auto-starts download.",
 )
+@click.option("--force", is_flag=True, help="Ignore journal and re-add all candidates.")
 @click.option("--verify-timeout", type=float, default=0.0, show_default=True)
 @click.option("--verify-interval", type=float, default=5.0, show_default=True)
 @click.option("--wait-for-check", is_flag=True, help="Wait for qB recheck to reach 100%; uses --verify-timeout or 180s by default.")
@@ -4319,6 +4391,7 @@ def rt_qb_mirror_process_queue_cmd(
     monitor_timeout,
     monitor_interval,
     do_apply,
+    force,
 ):
     """Process delayed RT completion queue entries."""
     disabled = _rt_qb_mirror_disabled_reason(config_path)
@@ -4339,21 +4412,36 @@ def rt_qb_mirror_process_queue_cmd(
         policy_mode=policy_mode,
     )
     journal = Path(journal_path).expanduser()
-    selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    selected, candidate_count, completed_count, stale_hashes = _select_client_drift_mirror_rows(
         report,
         hash_filters=hash_filters,
         limit=0,
         journal_path=journal,
+        force=force,
     )
+    if stale_hashes and not force:
+        print(
+            _rt_qb_style(
+                f"\n  WARNING: {len(stale_hashes)} journal-completed item(s) are still RT-only — "
+                "removed from qB after being journaled. Re-run with --force to re-add.\n"
+                f"  Stale: {', '.join(h[:16] for h in stale_hashes[:5])}"
+                + (" …" if len(stale_hashes) > 5 else ""),
+                fg="yellow",
+                bold=True,
+            )
+        )
     _print_rt_qb_summary(
         f"RT→qB mirror queue ({'APPLY' if do_apply else 'DRY RUN'})",
         [
             ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("force", "yes" if force else "no", "yellow" if force else None),
             ("queue_dir", qdir, None),
             ("ready", len(ready), "yellow" if ready else "green"),
             ("waiting", len(waiting), None),
             ("candidates", candidate_count, "yellow" if candidate_count else "green"),
             ("journal_completed", completed_count, None),
+            ("journal_stale", len(stale_hashes), "yellow" if stale_hashes else None),
             ("selected", len(selected), "yellow" if selected else "green"),
         ],
     )
@@ -4389,6 +4477,8 @@ def rt_qb_mirror_process_queue_cmd(
             timeout_s=monitor_timeout,
             interval_s=monitor_interval,
         )
+    if do_apply and qbit is not None:
+        _warn_stopped_dl(qbit, events)
     finished = {
         str(event.get("hash") or "").lower()
         for event in events
