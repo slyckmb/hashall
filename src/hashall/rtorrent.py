@@ -224,6 +224,15 @@ def rt_build_load_cmd(method: str, value: str) -> str:
     return f"{method}={rt_script_quote(value)}"
 
 
+def _xmlrpc_value_xml(arg: object) -> str:
+    """Serialize one argument as an XMLRPC <value> element (no <param> wrapper)."""
+    if isinstance(arg, bytes):
+        return f"<value><base64>{base64.b64encode(arg).decode()}</base64></value>"
+    if isinstance(arg, int):
+        return f"<value><i8>{arg}</i8></value>"
+    return f"<value><string>{_xml_escape(str(arg))}</string></value>"
+
+
 def rt_xmlrpc_call(method: str, *args: str, rpc_url: str = DEFAULT_RT_RPC_URL, timeout: int = 20) -> str:
     params_parts: list[str] = []
     for arg in args:
@@ -254,6 +263,52 @@ def rt_xmlrpc_call(method: str, *args: str, rpc_url: str = DEFAULT_RT_RPC_URL, t
         detail = match.group(1) if match else response.text
         raise RuntimeError(f"rt_xmlrpc_fault method={method} detail={detail}")
     return response.text
+
+
+def rt_xmlrpc_multicall(
+    calls: list[tuple],
+    *,
+    rpc_url: str = DEFAULT_RT_RPC_URL,
+    timeout: int = 60,
+) -> list[str]:
+    """Send multiple XMLRPC calls in one HTTP request via system.multicall.
+
+    Each element of *calls* is a tuple of (method_name, *args).
+    Returns a list of the method names that were sent (all of them on success).
+    Raises RuntimeError if the response contains any fault.
+    """
+    call_items: list[str] = []
+    method_names: list[str] = []
+    for call in calls:
+        method = call[0]
+        method_names.append(method)
+        args_xml = "".join(_xmlrpc_value_xml(a) for a in call[1:])
+        call_items.append(
+            "<value><struct>"
+            f"<member><name>methodName</name><value><string>{_xml_escape(method)}</string></value></member>"
+            f"<member><name>params</name><value><array><data>{args_xml}</data></array></value></member>"
+            "</struct></value>"
+        )
+    body = (
+        '<?xml version="1.0"?>'
+        "<methodCall><methodName>system.multicall</methodName>"
+        "<params><param><value><array><data>"
+        + "".join(call_items)
+        + "</data></array></value></param></params></methodCall>"
+    )
+    response = requests.post(
+        rpc_url,
+        data=body,
+        headers={"Content-Type": "text/xml"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    xml = response.text
+    if "<fault>" in xml:
+        match = re.search(r"<name>faultString</name><value><string>(.*?)</string>", xml, re.DOTALL)
+        detail = match.group(1) if match else xml
+        raise RuntimeError(f"rt_xmlrpc_multicall fault calls={method_names} detail={detail}")
+    return method_names
 
 
 def _xmlrpc_scalar_text(xml: str) -> str:
@@ -470,9 +525,9 @@ def rt_apply_directory_repoint(
     *,
     rpc_url: str = DEFAULT_RT_RPC_URL,
     restart: bool = True,
-    timeout: int = 20,
+    timeout: int = 60,
 ) -> list[str]:
-    calls = [
+    calls: list[tuple] = [
         ("d.stop", torrent_hash),
         ("d.close", torrent_hash),
         ("d.directory.set", torrent_hash, target_directory),
@@ -482,46 +537,38 @@ def rt_apply_directory_repoint(
     ]
     if restart:
         calls.append(("d.start", torrent_hash))
-    completed: list[str] = []
     try:
-        for method, *args in calls:
-            rt_xmlrpc_call(method, *args, rpc_url=rpc_url, timeout=timeout)
-            completed.append(method)
+        return rt_xmlrpc_multicall(calls, rpc_url=rpc_url, timeout=timeout)
     except Exception:
         if restart:
             try:
-                rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+                rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=20)
             except Exception:
                 pass
         raise
-    return completed
 
 
 def rt_recheck_torrent(
     torrent_hash: str,
     *,
     rpc_url: str = DEFAULT_RT_RPC_URL,
-    timeout: int = 20,
+    timeout: int = 60,
 ) -> list[str]:
-    calls = [
+    calls: list[tuple] = [
         ("d.stop", torrent_hash),
         ("d.close", torrent_hash),
         ("d.check_hash", torrent_hash),
         ("d.open", torrent_hash),
         ("d.start", torrent_hash),
     ]
-    completed: list[str] = []
     try:
-        for method, *args in calls:
-            rt_xmlrpc_call(method, *args, rpc_url=rpc_url, timeout=timeout)
-            completed.append(method)
+        return rt_xmlrpc_multicall(calls, rpc_url=rpc_url, timeout=timeout)
     except Exception:
         try:
-            rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+            rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=20)
         except Exception:
             pass
         raise
-    return completed
 
 
 def rt_wait_for_hash_present(
