@@ -534,9 +534,9 @@ class QBittorrentClient:
                     data={"username": self.username, "password": self.password},
                     timeout=self.request_timeout,
                 )
-                # Success: 200 with "Ok." (older qBittorrent) or 204 No Content (newer versions)
+                # Success: 200 with "Ok." or empty body (v5+), or 204 No Content
                 if response.status_code in (200, 204):
-                    if response.status_code == 200 and response.text != "Ok.":
+                    if response.status_code == 200 and response.text.strip() not in {"Ok.", ""}:
                         self.last_error = f"login failed: {response.text}"
                         self._authenticated = False
                         return False
