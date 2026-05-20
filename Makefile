@@ -261,4 +261,4 @@ trk-warn-cleanup:
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-upgrade-packs:
-	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --upgrade-season-packs --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")

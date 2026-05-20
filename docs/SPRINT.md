@@ -1,6 +1,6 @@
 # Current Sprint
 
-Last updated: 2026-05-19
+Last updated: 2026-05-20
 Status: active
 
 ## Active Goal
@@ -23,9 +23,17 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 6 | Novitiate: pool rehome + client repoint | ✅ done |
 | 7 | Top Gun Maverick IMAX: policy decision + action (RT-only) | ✅ done |
 | 8 | Code fixes: db-lock on concurrent sync, orphan GC limit | ✅ done |
-| 9 | Refresh: run catalog refresh, verify clean audit | ⏳ pending |
-| 10 | Investigate RT→qB mirror watchdog failures (recurring down) | ⏳ pending |
+| 9 | Refresh: run catalog refresh, verify clean audit | ✅ done |
+| 10 | Investigate RT→qB mirror watchdog failures (recurring down) | ✅ done |
 | 11 | Canonical tree normalization report: script + Makefile target | ⏳ pending |
+| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — pure repoint, no data movement | ⏳ pending |
+| 12b | Class 2 repairs: `cross-seed/other/` — resolve tracker → rename → repoint | ⏳ pending |
+| 12c | Class 1 repairs: `cross-seed/<hash>/` — resolve tracker → rename → repoint | ⏳ pending |
+| 12d | Class 3 repairs: `cross-seed/_<name>/` — resolve category → rename → repoint | ⏳ pending |
+| 12e | Class 5 repairs: `_qb-unique-repair/`, `_qb-finish/` — verify healthy → repoint | ⏳ pending |
+| 13a | trk_warns: 19 Kitsune season pack upgrades (Outlander/Frontline/Gold Rush) | ✅ done |
+| 13b | trk_warns: 4–5 SNL items — manual Prowlarr check + execute | ⏳ pending |
+| 14 | sys/docker commit: rt-mirror hash_done hook + sync-apply timer | ✅ done |
 
 ## Slice 3 — Doc Review (done)
 
@@ -169,14 +177,16 @@ phases 1–2 committed before phase 3 begins. **Operator sign-off required befor
 - Makefile target: `make canonical-tree-report`
 - Counts update automatically after each catalog refresh (slice 9 first)
 
-## Evidence Baseline (2026-05-20, post-slice-7)
+## Evidence Baseline (2026-05-20, post-slice-9)
 
 - qB: 4818 rows, daemon_live
 - RT: 4818 rows, daemon_live
-- Catalog last scan: 2026-05-10 (10 days — refresh needed in slice 9)
-- Payload sync: 2026-05-19 ✅
-- **Drift: 0**
-- RT-only: 0 (Top Gun Maverick mirrored to qB — stoppedUP 100%)
+- Catalog last scan: 2026-05-20 ✅ (db-refresh-fast-gated-parallel, 5m26s)
+- Payload sync: 4762 complete, 56 incomplete, 1 missing-in-catalog
+- Orphan GC candidates: 2480 (2477 aged, 2 new) — blocked (>1000 limit)
+- **Drift: 0** (path drift: 0 high/medium/low)
+- RT-only: 0
+- Hitchhiker audit: 162 groups — 54 Type A, 60 safe-to-split, 47 blocked, 1 busy
 
 ## Slice 7 — Top Gun Maverick IMAX (done)
 
@@ -204,6 +214,153 @@ phases 1–2 committed before phase 3 begins. **Operator sign-off required befor
   (explicit args override env vars); exposed as `--orphan-gc-max-prune-count` and
   `--orphan-gc-max-prune-fraction` CLI flags on `payload sync`.
 - **Usage:** `hashall payload sync --orphan-gc-max-prune-count 3000 --orphan-gc-max-prune-fraction 0.5`
+
+## Slice 9 — Catalog Refresh (done)
+
+- `make db-refresh-fast-gated-parallel` completed in 5m26s (5 roots, 4 with changes)
+- `make client-drift-audit ANCHOR_SCAN=200000`: qB=4818, RT=4818, Drift=0 ✅
+- `make hitchhiker-audit`: 162 groups — 54 Type A, 60 safe-to-split, 47 blocked, 1 busy
+- Evidence baseline updated in this file
+
+## Slice 10 — RT→qB Mirror Watchdog Investigation (done)
+
+### Root cause (confirmed via cross-seed logs)
+
+**Cross-seed RSS injections into RT bypass `event.download.finished` entirely.**
+
+The complete failure chain for `f3d70ba4` (Top Gun Maverick IMAX, 2026-05-19):
+1. `10:09:17` — cross-seed RSS found TGM on YUSCENE, matched to existing qB torrent `043c5b5c`
+2. `10:09:20` — cross-seed hardlinked files to `/data/media/torrents/seeding/YUSCENE (API)/`
+3. `10:09:21` — cross-seed injected torrent into RT via XMLRPC (`rtorrent@gluetun:8000`) — **"injected"**
+4. RT ran hash check → 100% → immediately entered seeding state
+5. **`event.download.finished` never fired** — rTorrent only fires this for torrents that actually download data; pre-seeded/linked injections skip directly to seeding
+6. `rt_qb_mirror_enqueue.sh` was never called → no queue entry for `f3d70ba4`
+7. qB never received the mirror → f3d70ba4 stuck RT-only
+8. Watchdog `check_full_drift` flagged it every 15 min from ~21:00 (first watchdog run after queue had aged); resolved only at 04:16 on 2026-05-20 when `make rt-qb-mirror-apply` was run manually
+
+**This is systematic**: every cross-seed injection into RT bypasses the finished hook. This happens for all RSS matches and search matches that land in RT.
+
+### Why the watchdog architecture makes this visible but can't self-heal
+
+Two fundamentally different check paths:
+- `check_queue_drift` → `process-queue` dry-run: only inspects items in `QUEUE_DIR`
+- `check_full_drift` → `sync` dry-run: inspects ALL RT-only items
+
+The `rt-qb-mirror-queue-apply.timer` (every 5 min) runs `process-queue --apply`. It has nothing to process for RT items that never entered the queue. Only `make rt-qb-mirror-apply` (`sync --apply`) clears them.
+
+### Secondary finding — stale queue entries
+- 4 fake-hash test entries (111..., 333..., 444..., 555...) stuck for 360+ hours — match nothing in RT or qB, print `queued_not_ready_for_mirror` but don't cause failures
+- 8 real-hash entries already mirrored to qB — same, harmless but noisy
+
+### Remediation options
+
+**Option A — Periodic `sync --apply` timer (recommended, sys repo):**
+New systemd timer `rt-qb-mirror-sync.timer` (every 1-2 hours) runs `sync --apply` as a catch-all for RT-only items that bypass the queue. Self-healing within timer interval. Files: `rt_qb_mirror_sync_apply.sh` + `.service` + `.timer` in sys repo.
+
+**Option B — rTorrent `event.download.hash_done` hook (proper fix, rt config):**
+Add a hook in `rtorrent.rc` on `event.download.hash_done` that calls `rt_qb_mirror_enqueue.sh` when `d.complete=1`. This fires after every recheck; the enqueue script is idempotent (re-enqueuing an already-mirrored item is harmless). Catches cross-seed injections at the source. Requires modifying rtorrent.rc in sys repo.
+```
+method.set_key = event.download.hash_done, mirror_enqueue_if_complete, \
+  "execute.nothrow.bg={/bin/bash,-c,/config/scripts/rt_qb_mirror_enqueue.sh $d.hash= $d.complete=}"
+```
+(enqueue script would need a `$2` complete-check guard added)
+
+**Option C — Stale queue GC (cosmetic only):**
+Remove queue files for hashes already in qB or with fake hashes. Safe, reduces noise, does NOT prevent future cross-seed gaps.
+
+### Implementation (2026-05-20)
+
+**Option B — `event.download.hash_done` hook:**
+- `rt_qb_mirror_enqueue.sh` bumped to v1.1.0: accepts optional `$2` = `d.complete=` value;
+  skips if `$2` is present and != "1"; sets `source=rt-hash-done-hook` for new queue files
+- `rtorrent.rc`: added `method.set_key = event.download.hash_done, rt_qb_mirror_hook_hash_done, ...`
+- **Requires RT container restart** to reload rtorrent.rc (`docker restart rtorrent_vpn`)
+- Script is bind-mounted live — no restart needed for the script itself
+
+**Option A — Periodic `sync --apply` timer:**
+- New script: `rt_qb_mirror_sync_apply.sh` v1.0.0 in sys/docker repo
+- New units: `/etc/systemd/system/rt-qb-mirror-sync.{service,timer}` — runs every 2h, `OnBootSec=15min`
+- Timer enabled and verified: first run clean (`selected=0`, rc=0), next fire at 08:07
+- `healthchecks.json` updated: added `RT qB mirror sync apply` entry (uuid blank — create monitor at healthchecks.io)
+
+**Healthchecks review:**
+- `RT qB mirror queue apply` (every 5 min, timeout=300) ✅ correctly configured
+- `RT qB mirror watchdog` (every 15 min, timeout=900) ✅ correctly configured
+- `RT qB mirror sync apply` (every 2h, timeout=7200) ⚠️ uuid blank — needs healthchecks.io monitor created
+
+**Pending:**
+- RT container restart to activate `hash_done` hook: `docker restart rtorrent_vpn`
+- Create healthchecks.io monitor "RT qB mirror sync apply" and add UUID to `/etc/glider-backup/healthchecks.json`
+- Commit sys/docker repo changes (currently on `main`, unstaged)
+
+## Slice 12 — Canonical Path Class Table + Repair Plan
+
+### Live counts (2026-05-20, post-slice-9 refresh)
+
+| Class | Count | Pattern | Repair action |
+|---|---|---|---|
+| 1 | 10 | `cross-seed/<40-hex-hash>/` | Identify correct tracker from hash → rename dir → RT repoint → qB set_location |
+| 2 | 6 | `cross-seed/other/` | Identify correct tracker → rename dir → RT repoint → qB set_location |
+| 3 | 30 | `cross-seed/_movie/`, `cross-seed/_<name>/` | Identify correct tracker (check RT/qB tracker URL) → rename dir → RT repoint → qB set_location |
+| 4 | 10 | `_rehome-unique/<hash>/` | Investigate each: determine canonical path from tracker label → move → RT repoint → qB set_location |
+| 5 | 49 | `_qb-unique-repair/`, `_qb-repair-v2/`, `_qb-finish/` | Investigate staging state per item: if complete, repoint to canonical path; otherwise resume repair |
+
+**Note:** counts from `torrent_instances` (both qB + RT rows). Canonical path = `<seeding-root>/<category>/<item-payload-name>` where category is the tracker name for cross-seed items or the media type (tv/, movies/) for ARR-imported items.
+
+### Repair sequence (safe order per sprint baseline)
+
+Classes 4 → 2 → 1 → 3 → 5 → Type A de-hitchhike (last)
+
+### Per-class repair commands
+
+**Class 1/2/3 (cross-seed path fixes):** For each torrent, look up tracker host from RT XMLRPC, then:
+```bash
+# 1. Rename dir on filesystem (data and stash are same fs — use mv)
+# 2. RT repoint:
+python3 -m hashall rt repoint --hash <hash> --target <new-save-path> --apply
+# 3. qB repoint (set save_path to parent dir):
+# use hashall client-drift-audit or direct qB set_location API
+```
+
+**Class 4 (_rehome-unique):** These have canonical hash names — use `hashall payload hitchhiker-plan` to check if they are hitchhikers, then split/repoint.
+
+**Class 5 (_qb-unique-repair/_qb-repair-v2/_qb-finish):** Use `make client-drift-verify-layout-scan` to assess each. Items in `_qb-finish/` are likely complete and just need repoint. Items in `_qb-repair-v2/` may still need data validation.
+
+**Next step:** Run `make canonical-tree-report` (Slice 11 builds this) to get per-item details and drive the repair loop.
+
+## Slice 13 — trk_warns: 23 Deleted Aither Torrents
+
+### What they are
+
+All 23 are individual episode files on Aither (aither.cc) that were deleted from the tracker. The uploader (Kitsune for most; None/ppkhoa for SNL) deleted the individual episodes after uploading season packs.
+
+| Group | Count | Deleted | Season pack found | Seeders |
+|---|---|---|---|---|
+| Outlander S08 (Kitsune) | 10 | E01–E05, E07–E10 | Outlander S08 1080p AMZN WEB-DL DD+ 5.1 H.264-Kitsune | 52 |
+| Frontline S2025 (Kitsune) | 7 | E07–E13 | Frontline 1983 S2025 1080p AMZN WEB-DL DD+ 2.0 H.264-Kitsune | 12 |
+| Gold Rush S16 (Kitsune) | 2 | E03–E04 | Gold Rush S16 1080p AMZN WEB-DL DD+ 2.0 H.264-Kitsune | 11 |
+| SNL S51 (None/ppkhoa) | 4 | E09, E12, E13, E16, E18 | Individual Kitsune eps found (not a season pack) | 90 |
+
+**Dry-run result:** All 23 classified as `action: candidate_upgrade_season_pack`. Prowlarr found season packs on Aither by the same group for Outlander/Frontline/Gold Rush.
+
+**⚠️ SNL caveat:** The 4–5 SNL items show `candidate_upgrade_season_pack` but Prowlarr's top result is an individual episode (E16 by Kitsune), not a season pack. The 54-hit pool may include a season pack, but visually it's ambiguous. Run the SNL items separately or verify manually before executing.
+
+### Commands
+
+```bash
+# Step 1 — dry-run already done; review output above
+make trk-warn-dry BUCKET=deleted
+
+# Step 2 — execute season pack upgrade for all 23
+# Erases individual ep RT torrents, adds season packs to RT+qB, syncs
+make trk-warn-upgrade-packs BUCKET=deleted
+
+# Optional: run SNL items separately after manual check
+make trk-warn-upgrade-packs BUCKET=deleted HASH=E9DC45E8F7  # etc.
+```
+
+`trk-warn-upgrade-packs` runs: `--cleanup --repair --prowlarr --bucket deleted`
+What it does per item: (1) erases RT torrent via `d.erase`, (2) removes from qB, (3) adds season pack torrent to RT as stopped at the canonical save path, (4) triggers qB mirror via queue.
 
 ## Slice 6 — Novitiate (done)
 
