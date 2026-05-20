@@ -25,6 +25,7 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 8 | Code fixes: db-lock on concurrent sync, orphan GC limit | ✅ done |
 | 9 | Refresh: run catalog refresh, verify clean audit | ⏳ pending |
 | 10 | Investigate RT→qB mirror watchdog failures (recurring down) | ⏳ pending |
+| 11 | Canonical tree normalization report: script + Makefile target | ⏳ pending |
 
 ## Slice 3 — Doc Review (done)
 
@@ -158,6 +159,15 @@ against REQUIREMENTS.md.
 
 **Gate criteria:** All three phases complete with no outstanding errors. Any fixes from
 phases 1–2 committed before phase 3 begins. **Operator sign-off required before proceeding to slice 6.**
+
+## Remaining Queue
+
+**Slice 11 — Canonical tree normalization report:**
+- Query catalog for non-canonical path patterns (classes 1–5 from BACKLOG.md taxonomy)
+- Output: per-class count + sample paths; class 6 (Prowlarr display names) excluded
+- Script: `scripts/canonical-tree-report.py` (or inline hashall CLI subcommand)
+- Makefile target: `make canonical-tree-report`
+- Counts update automatically after each catalog refresh (slice 9 first)
 
 ## Evidence Baseline (2026-05-20, post-slice-7)
 
