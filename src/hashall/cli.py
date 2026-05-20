@@ -872,6 +872,18 @@ def payload():
     help="Limit number of queued incomplete roots to hash-upgrade (0 means all).",
 )
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
+@click.option(
+    "--orphan-gc-max-prune-count",
+    type=int,
+    default=None,
+    help=f"Override orphan GC count limit (default: {1000}, env: HASHALL_ORPHAN_GC_MAX_PRUNE_COUNT).",
+)
+@click.option(
+    "--orphan-gc-max-prune-fraction",
+    type=float,
+    default=None,
+    help=f"Override orphan GC fraction limit (default: {0.25}, env: HASHALL_ORPHAN_GC_MAX_PRUNE_FRACTION).",
+)
 def payload_sync(
     db,
     source,
@@ -892,6 +904,8 @@ def payload_sync(
     upgrade_order,
     upgrade_root_limit,
     low_priority,
+    orphan_gc_max_prune_count,
+    orphan_gc_max_prune_fraction,
 ):
     """
     Sync torrent instances from the selected client inventory and map to payloads.
@@ -912,6 +926,23 @@ def payload_sync(
 
     if low_priority:
         _apply_low_priority()
+
+    # Advisory process lock: prevent concurrent payload sync runs from racing on DB writes.
+    # Dry-run opens read-only so it skips the lock.
+    _payload_sync_lock_fh = None
+    if not dry_run:
+        import fcntl as _fcntl
+        _payload_sync_lock_path = Path(db).parent / "payload-sync.lock"
+        _payload_sync_lock_fh = _payload_sync_lock_path.open("a+", encoding="utf-8")
+        try:
+            _fcntl.flock(_payload_sync_lock_fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                f"⚠️  Another payload sync is already running (lock: {_payload_sync_lock_path}).\n"
+                "   Waiting for it to finish..."
+            )
+            _fcntl.flock(_payload_sync_lock_fh.fileno(), _fcntl.LOCK_EX)
+            print("   Previous sync finished. Proceeding.")
 
     # Connect to database
     # In dry-run mode, open read-only and skip migrations to guarantee "no writes".
@@ -1438,7 +1469,13 @@ def payload_sync(
     if (not dry_run) and limit == 0:
         prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
         try:
-            prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
+            prune_stats = prune_orphan_payloads(
+                conn,
+                roots=prune_roots,
+                sample_limit=5,
+                max_prune_count=orphan_gc_max_prune_count,
+                max_prune_fraction=orphan_gc_max_prune_fraction,
+            )
         except Exception as exc:
             print(f"   ⚠️  orphan prune failed (non-fatal): {exc}")
             prune_stats = None

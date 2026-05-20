@@ -21,9 +21,10 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 4 | **Code vs doc**: cross-check all code against docs; plan fixes | ✅ done |
 | 5 | **Test gate**: multi-phase walkthrough + dry-runs; pilot all tools; fix errors | ✅ done |
 | 6 | Novitiate: pool rehome + client repoint | ✅ done |
-| 7 | Top Gun Maverick IMAX: policy decision + action (RT-only) | ⏳ pending |
-| 8 | Code fixes: db-lock on concurrent sync, orphan GC limit | ⏳ pending |
+| 7 | Top Gun Maverick IMAX: policy decision + action (RT-only) | ✅ done |
+| 8 | Code fixes: db-lock on concurrent sync, orphan GC limit | ✅ done |
 | 9 | Refresh: run catalog refresh, verify clean audit | ⏳ pending |
+| 10 | Investigate RT→qB mirror watchdog failures (recurring down) | ⏳ pending |
 
 ## Slice 3 — Doc Review (done)
 
@@ -158,19 +159,41 @@ against REQUIREMENTS.md.
 **Gate criteria:** All three phases complete with no outstanding errors. Any fixes from
 phases 1–2 committed before phase 3 begins. **Operator sign-off required before proceeding to slice 6.**
 
-## Remaining Queue (slice 7)
+## Evidence Baseline (2026-05-20, post-slice-7)
 
-**Slice 7 — Top Gun Maverick IMAX (`f3d70ba48ecbc51b`):** RT-only stalledUP, not in qB.
-- Run evidence scan; decide: mirror to qB / leave RT-only / remove from RT
-
-## Evidence Baseline (2026-05-19, post-slice-6)
-
-- qB: 4817 rows, daemon_live
+- qB: 4818 rows, daemon_live
 - RT: 4818 rows, daemon_live
-- Catalog last scan: 2026-05-10 (9 days — refresh needed in slice 9)
+- Catalog last scan: 2026-05-10 (10 days — refresh needed in slice 9)
 - Payload sync: 2026-05-19 ✅
-- **Drift: 0** (was 1 after slices 1–2; slice 6 resolved Novitiate)
-- RT-only: 1 (Top Gun Maverick, slice 7)
+- **Drift: 0**
+- RT-only: 0 (Top Gun Maverick mirrored to qB — stoppedUP 100%)
+
+## Slice 7 — Top Gun Maverick IMAX (done)
+
+- `f3d70ba48ecbc51b`: RT-only `stalledUP`, YUSCENE (API), 7.5 GB, inode 385, nlinks=10
+- Decision: mirror to qB (standard RT→qB policy for cross-seed items)
+- Action: `make rt-qb-mirror-apply` — added to qB as stopped, recheck completed `stoppedUP 100%`
+- RT mirror watchdog was `down` (3m) — manually triggered; watchdog resumed after
+
+## Slice 8 — Code fixes (done)
+
+### Fix 1 — `payload sync` advisory process lock
+- **File:** `src/hashall/cli.py` (`payload_sync`)
+- **Problem:** Concurrent `payload sync` runs (cron + manual, or `rehome followup` + cron) caused
+  `sqlite3.OperationalError: database is locked` — the long-running upgrade loop held a write
+  transaction that exhausted the 30s busy_timeout for other writers.
+- **Fix:** Added `fcntl.flock(LOCK_EX)` advisory lock on `<db-dir>/payload-sync.lock` at sync start.
+  If a concurrent run tries to acquire the lock it waits (blocking) rather than failing.
+  Dry-run skips the lock (opens read-only, no contention).
+
+### Fix 2 — Orphan GC count/fraction limits as CLI flags
+- **Files:** `src/hashall/payload.py` (`prune_orphan_payloads`), `src/hashall/cli.py`
+- **Problem:** With 2479 aged orphan candidates > `ORPHAN_GC_MAX_PRUNE_COUNT=1000`, the GC was
+  permanently blocked. Only workaround was env vars (`HASHALL_ORPHAN_GC_MAX_PRUNE_COUNT=3000`).
+- **Fix:** Added `max_prune_count` / `max_prune_fraction` params to `prune_orphan_payloads`
+  (explicit args override env vars); exposed as `--orphan-gc-max-prune-count` and
+  `--orphan-gc-max-prune-fraction` CLI flags on `payload sync`.
+- **Usage:** `hashall payload sync --orphan-gc-max-prune-count 3000 --orphan-gc-max-prune-fraction 0.5`
 
 ## Slice 6 — Novitiate (done)
 
