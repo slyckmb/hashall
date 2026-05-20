@@ -25,7 +25,8 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
         rehome-auto-dry rehome-auto-apply rehome-relocate-plan rehome-normalize-plan rehome-drift-audit \
         qb-missing-audit qb-missing-remediate-dry qb-missing-remediate-apply \
         payload-show payload-siblings \
-        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs trk-warn-replace-individual
+        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs trk-warn-replace-individual \
+        canonical-tree-report
 
 help:
 	@echo "Use the CLI directly:"
@@ -90,6 +91,8 @@ help:
 	@echo "  make trk-warn-cleanup        — execute cleanup: remove deleted+other (no upgrades), sync to qB"
 	@echo "  make trk-warn-upgrade-packs  — season pack upgrades: erase individual eps, add pack, sync to qB"
 	@echo "  make trk-warn-replace-individual — individual-ep replacements: erase deleted ep, add correct ep"
+	@echo ""
+	@echo "  make canonical-tree-report     — report non-canonical path classes (FULL=1 for all items)"
 	@echo ""
 	@echo "  Vars: LIMIT=N HASH=<hash> PAYLOAD_ID=<id> JSON=1 ANCHOR_SCAN=N CATALOG=<db> JOURNAL=<path> SLEEP_ROW=N"
 
@@ -266,3 +269,6 @@ trk-warn-upgrade-packs:
 
 trk-warn-replace-individual:
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --prowlarr --replace-individual --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+
+canonical-tree-report:
+	@python3 scripts/canonical-tree-report.py $(if $(FULL),--full,)
