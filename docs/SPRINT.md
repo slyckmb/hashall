@@ -33,6 +33,7 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 12e | Class 5 repairs: `_qb-unique-repair/`, `_qb-finish/` — verify healthy → repoint | ⏳ pending |
 | 13a | trk_warns: 19 Kitsune season pack upgrades (Outlander/Frontline/Gold Rush) | ✅ done |
 | 13b | trk_warns: 4–5 SNL items — manual Prowlarr check + execute | ⏳ pending |
+| 13c | **Plan:** individual-ep replacement action for deleted torrents with no season pack | ⏳ pending |
 | 14 | sys/docker commit: rt-mirror hash_done hook + sync-apply timer | ✅ done |
 
 ## Slice 3 — Doc Review (done)
@@ -361,6 +362,47 @@ make trk-warn-upgrade-packs BUCKET=deleted HASH=E9DC45E8F7  # etc.
 
 `trk-warn-upgrade-packs` runs: `--cleanup --repair --prowlarr --bucket deleted`
 What it does per item: (1) erases RT torrent via `d.erase`, (2) removes from qB, (3) adds season pack torrent to RT as stopped at the canonical save path, (4) triggers qB mirror via queue.
+
+## Slice 13c — Plan: Individual-Episode Replacement for Deleted Torrents (no season pack)
+
+### Problem
+
+When a tracker deletes individual episodes and no season pack exists, the `candidate_upgrade_season_pack`
+action fires but Prowlarr's best result is another individual ep (different uploader, same episode).
+The script's `season_upgrade` path requires a pack-level match — it has no mechanism to use a per-episode
+replacement. Affected: 5 SNL S51 items.
+
+### Proposed action class: `candidate_replace_individual`
+
+Fires when:
+- `bucket == deleted`
+- Prowlarr direct search finds no result on the same tracker (`hits=0`)
+- `season_upgrade` exists but `best_title` looks like an individual ep (not a season pack) — heuristic: no `Sxx ` without `Exx` in title, or detect via episode count in Prowlarr result
+- A per-episode Prowlarr search (by series + episode ID, e.g. `"Saturday Night Live S51E09"`) returns a hit with `best_download_url`
+
+Action:
+1. Erase the deleted RT torrent (`d.erase`) — same as current flow
+2. Remove from qB (keep files)
+3. Add the individual replacement ep torrent to RT at the same save path (not a new canonical path)
+4. Trigger qB mirror queue
+
+### Implementation plan
+
+1. **Search change:** Add a per-episode Prowlarr search function alongside the existing `season_upgrade` query. Use the episode file stem stripped to `<Series> SxxExx` (e.g. `"Saturday Night Live S51E09"`) as the search term.
+2. **Classification change:** In `classify_row()`, after `season_upgrade` is found, check if `best_title` contains an episode identifier (`E\d\d`). If so, classify as `candidate_replace_individual` instead of `candidate_upgrade_season_pack`.
+3. **Cleanup change:** In `cleanup_rows()`, add `candidate_replace_individual` to `actionable`; populate `best_download_url` from the per-episode search result; use `compute_save_path_for_replacement()` with the existing save path (no category change).
+4. **Makefile target:** `make trk-warn-replace-individual BUCKET=deleted` — new target using `--replace-individual-eps --cleanup --repair --prowlarr`.
+
+### Why this resolves SNL
+
+SNL seasons are not uploaded as packs on Aither; individual Kitsune eps are the correct replacement unit.
+The 54-hit pool (E16 by Kitsune with 92 seeders) suggests Kitsune has replacements for most SNL eps.
+A targeted `S51E09`, `S51E12`, etc. search would surface the right individual replacement for each.
+
+### Files to change
+
+- `rt-tracker-manual-report.py`: `classify_row()`, `cleanup_rows()`, add `prowlarr_search_individual_ep()`, add `--replace-individual-eps` CLI flag
+- `Makefile`: add `trk-warn-replace-individual` target
 
 ## Slice 6 — Novitiate (done)
 
