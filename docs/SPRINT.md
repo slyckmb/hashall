@@ -1,6 +1,6 @@
 # Current Sprint
 
-Last updated: 2026-05-20
+Last updated: 2026-05-26
 Status: active
 
 ## Active Goal
@@ -25,16 +25,19 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 8 | Code fixes: db-lock on concurrent sync, orphan GC limit | ✅ done |
 | 9 | Refresh: run catalog refresh, verify clean audit | ✅ done |
 | 10 | Investigate RT→qB mirror watchdog failures (recurring down) | ✅ done |
-| 11 | Canonical tree normalization report: script + Makefile target | ⏳ pending |
-| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — pure repoint, no data movement | ⏳ pending |
+| 11 | Canonical tree normalization report: script + Makefile target | ✅ done |
+| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — may require data movement + repoint (see RUNBOOK.md) | ⏳ pending |
 | 12b | Class 2 repairs: `cross-seed/other/` — resolve tracker → rename → repoint | ⏳ pending |
 | 12c | Class 1 repairs: `cross-seed/<hash>/` — resolve tracker → rename → repoint | ⏳ pending |
-| 12d | Class 3 repairs: `cross-seed/_<name>/` — resolve category → rename → repoint | ⏳ pending |
+| 12d | Class 3 repairs: `cross-seed/_<name>/` — resolve category → rename → repoint | ✅ done (0 items) |
 | 12e | Class 5 repairs: `_qb-unique-repair/`, `_qb-finish/` — verify healthy → repoint | ⏳ pending |
 | 13a | trk_warns: 19 Kitsune season pack upgrades (Outlander/Frontline/Gold Rush) | ✅ done |
-| 13b | trk_warns: 4–5 SNL items — manual Prowlarr check + execute | ⏳ pending |
-| 13c | **Plan:** individual-ep replacement action for deleted torrents with no season pack | ⏳ pending |
+| 13b | trk_warns: 4–5 SNL items — manual Prowlarr check + execute | ✅ done |
+| 13c | **Implement + execute:** individual-ep replacement (`candidate_replace_individual`) | ✅ done |
+| 13d | Verify: SNL eps hashed in RT → hook fired → qB mirror synced | ✅ done |
 | 14 | sys/docker commit: rt-mirror hash_done hook + sync-apply timer | ✅ done |
+| 15 | Fix post-13a/13b drift: qB v5 login bug + 18 orphaned eps + 9 RT-only sync | ✅ done |
+| 16 | RT execute-recovery: repair 90 RT items damaged by save-path-repair --execute | ✅ done |
 
 ## Slice 3 — Doc Review (done)
 
