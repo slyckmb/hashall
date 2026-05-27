@@ -56,6 +56,11 @@ class RepairResult:
     notes: list[str] = field(default_factory=list)
 
 
+def _staging_has_real_content(path: Path) -> bool:
+    """True if path contains any real files or symlinks (not just empty subdirectory structure)."""
+    return any(p for p in path.rglob("*") if not p.is_dir())
+
+
 def _scan_rehome_unique_hashes(
     max_age_s: int = 300,
 ) -> dict[str, str]:
@@ -422,7 +427,7 @@ def execute_repair(
     # Use save_path/directory filter (not bare prefix match): with 4800+ torrents,
     # ~80% of 16-char hash prefixes collide with unrelated hashes in qb_by_hash.
     src_early = Path(source_path_fs)
-    if src_early.is_dir() and not any(src_early.iterdir()):
+    if src_early.is_dir() and not _staging_has_real_content(src_early):
         qb_at_staging = qb_torrent is not None and "_rehome-unique" in str(
             getattr(qb_torrent, "save_path", "")
         )
@@ -479,7 +484,7 @@ def execute_repair(
         src = Path(source_path_fs)
         dst = Path(target_fs)  # canonical save_path dir (not its parent)
 
-        staging_is_empty = src.is_dir() and not any(src.iterdir())
+        staging_is_empty = src.is_dir() and not _staging_has_real_content(src)
         files_moved = _move_tree(src, dst, dry_run=dry_run)
 
         # Bug 2 guard: skip fastresume patch when staging dir was empty and qB still
@@ -590,8 +595,8 @@ def gc_empty_staging_dirs(*, dry_run: bool = True) -> tuple[int, int]:
     deleted = 0
     for hash_val, source_fs_path in sorted(rehome_hashes.items()):
         src = Path(source_fs_path)
-        if not src.is_dir() or any(src.iterdir()):
-            continue  # not empty — skip
+        if not src.is_dir() or _staging_has_real_content(src):
+            continue  # has real content — skip
         # A torrent is "live here" only if its save_path/directory actually points into
         # this _rehome-unique dir — not just any torrent whose hash shares a 16-char prefix.
         # (With 4800+ torrents, ~80% of 16-char prefixes collide with unrelated hashes.)
@@ -606,7 +611,11 @@ def gc_empty_staging_dirs(*, dry_run: bool = True) -> tuple[int, int]:
         if has_live_qb or has_live_rt:
             continue  # live client still points here — skip
         if not dry_run:
-            src.rmdir()
+            # Use rmtree for dirs with empty subdirectory structure, rmdir for truly empty
+            if any(src.iterdir()):
+                shutil.rmtree(src)
+            else:
+                src.rmdir()
         deleted += 1
 
     return deleted, len(rehome_hashes)
