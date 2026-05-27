@@ -141,7 +141,7 @@ def process_hash(qb, torrent_hash: str, dry_run: bool, idx: int, total: int) -> 
     # Skip check: if RT is already at the target and d.complete==1, nothing to do
     if rt_dir == rt_target or _rt_dir_matches_target(rt_dir, rt_target, torrent_hash):
         try:
-            xml = rt_xmlrpc_call("d.complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
+            xml = rt_xmlrpc_call("d.is_complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
             already_complete = _xmlrpc_scalar_text(xml).strip() == "1"
         except Exception:
             already_complete = False
@@ -210,7 +210,7 @@ def process_hash(qb, torrent_hash: str, dry_run: bool, idx: int, total: int) -> 
 
     # Verify RT complete
     try:
-        xml = rt_xmlrpc_call("d.complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
+        xml = rt_xmlrpc_call("d.is_complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
         rt_complete = _xmlrpc_scalar_text(xml).strip()
     except Exception as exc:
         log(f"  ERROR: RT d.complete query failed: {exc}")

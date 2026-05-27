@@ -95,7 +95,13 @@ def _scan_staging_hashes(
             continue
         for hash_dir in sorted(d.iterdir()):
             if hash_dir.is_dir():
-                staging_hashes[hash_dir.name.lower()] = str(hash_dir)
+                key = hash_dir.name.lower()
+                if key in staging_hashes:
+                    logger.warning(
+                        "save_path_repair: hash collision %r: stash/pool _rehome-unique dirs; "
+                        "overriding %s with %s", key, staging_hashes[key], str(hash_dir),
+                    )
+                staging_hashes[key] = str(hash_dir)
 
     # _qb-finish and _qb-unique-repair: stash only
     for staging_name in ("_qb-finish", "_qb-unique-repair"):
@@ -130,6 +136,16 @@ def _move_tree(src: Path, dst_parent: Path, *, dry_run: bool) -> int:
 
     dst_parent should be the canonical save_path directory (not its parent).
     """
+    if not dry_run and src.exists():
+        src_stat = src.stat()
+        dst_parent.mkdir(parents=True, exist_ok=True)
+        dst_stat = dst_parent.stat()
+        if src_stat.st_dev != dst_stat.st_dev:
+            raise RuntimeError(
+                f"cross-filesystem move rejected: src={src} dev={src_stat.st_dev} "
+                f"dst_parent={dst_parent} dev={dst_stat.st_dev}"
+            )
+
     count = 0
 
     if src.is_file():
@@ -202,24 +218,27 @@ def audit_repair_candidates(
 
     # Load catalog entries to get original save_path/category hints
     catalog_by_hash: dict = {}
-    try:
-        db = find_db_path()
-        conn = sqlite3.connect(str(db), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        query = """
-            SELECT ti.torrent_hash, ti.save_path, p.root_path
-            FROM torrent_instances ti
-            JOIN payloads p ON ti.payload_id = p.payload_id
-        """
-        for row in conn.execute(query).fetchall():
-            hash_val = row["torrent_hash"].lower()
-            catalog_by_hash[hash_val] = {
-                "save_path": row["save_path"],
-                "root_path": row["root_path"],
-            }
-        conn.close()
-    except Exception as exc:
-        logger.warning("save_path_repair: failed to load catalog: %s", exc)
+    db = find_db_path()
+    if db is not None:
+        try:
+            conn = sqlite3.connect(str(db), timeout=30.0)
+            try:
+                conn.row_factory = sqlite3.Row
+                query = """
+                    SELECT ti.torrent_hash, ti.save_path, p.root_path
+                    FROM torrent_instances ti
+                    JOIN payloads p ON ti.payload_id = p.payload_id
+                """
+                for row in conn.execute(query).fetchall():
+                    hash_val = row["torrent_hash"].lower()
+                    catalog_by_hash[hash_val] = {
+                        "save_path": row["save_path"],
+                        "root_path": row["root_path"],
+                    }
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("save_path_repair: failed to load catalog: %s", exc)
 
     # Plan repairs
     actions = []
@@ -245,10 +264,12 @@ def audit_repair_candidates(
 
         # Determine filesystem vs API paths based on device
         if inferred.device == "stash":
-            target_fs = inferred.canonical_save_path.replace("/data/media", "/stash/media")
+            canon = inferred.canonical_save_path
+            target_fs = "/stash/media" + canon[len("/data/media"):] if canon.startswith("/data/media") else canon
             fs_root, api_root = "/stash/media/torrents/seeding", "/data/media/torrents/seeding"
         else:
-            target_fs = inferred.canonical_save_path.replace("/data/media", "/pool/media")
+            canon = inferred.canonical_save_path
+            target_fs = "/pool/media" + canon[len("/data/media"):] if canon.startswith("/data/media") else canon
             fs_root, api_root = "/pool/media/torrents/seeding", "/pool/media/torrents/seeding"
 
         action = RepairAction(
@@ -306,14 +327,16 @@ def _resolve_full_hash(hash_val: str, qb_by_hash: dict, conn_db) -> str:
         except ValueError:
             raise
         except Exception:
-            pass
+            logger.warning(
+                "save_path_repair: DB lookup failed for prefix %r", prefix, exc_info=True,
+            )
     return prefix  # fallback: return as-is
 
 
 def _docker_stop_qb(container: str = DEFAULT_QB_CONTAINER) -> None:
     """Stop the qBittorrent Docker container."""
     import subprocess
-    subprocess.run(["docker", "stop", container], check=True, capture_output=True, text=True)
+    subprocess.run(["docker", "stop", container], check=True, capture_output=True, text=True, timeout=60)
 
 
 def _docker_start_qb(
@@ -510,7 +533,8 @@ def execute_repair(
 
     # Filesystem path: stash uses /stash/media/, pool uses /pool/media/ (same as API)
     if inferred.device == "stash":
-        target_fs = inferred.canonical_save_path.replace("/data/media", "/stash/media")
+        canon = inferred.canonical_save_path
+        target_fs = "/stash/media" + canon[len("/data/media"):] if canon.startswith("/data/media") else canon
     else:
         target_fs = inferred.canonical_save_path  # pool: API path == FS path
 
@@ -522,18 +546,20 @@ def execute_repair(
         dst = Path(target_fs)  # canonical save_path dir (not its parent)
 
         staging_is_empty = src.is_dir() and not _staging_has_real_content(src)
-        files_moved = _move_tree(src, dst, dry_run=dry_run)
 
         # Bug 2 guard: skip fastresume patch when staging dir was empty and qB still
         # points to a staging dir — data already moved elsewhere, destination unknown.
+        # Must check BEFORE _move_tree to avoid cross-filesystem rejection on empty dirs.
         qb_at_rehome = qb_torrent and _is_in_staging_dir(str(qb_torrent.save_path))
-        if files_moved == 0 and staging_is_empty and qb_at_rehome:
+        if staging_is_empty and qb_at_rehome:
             result.notes.append(
                 "SKIP: empty staging dir, qB still at _rehome-unique"
                 " — data already moved; needs manual investigation before fastresume patch"
             )
             result.success = True
             return result
+
+        files_moved = _move_tree(src, dst, dry_run=dry_run)
 
         should_apply = files_moved > 0 or qb_at_rehome
 

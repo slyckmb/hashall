@@ -1245,23 +1245,26 @@ def _classify_common_path_drift(
                 blockers.append("selected_rt_target_missing")
         elif qb_matches and rt_matches:
             # Both sides are on the correct storage class but at different paths.
-            # Use inode comparison against the ARR anchor to pick canonical side.
-            anchor_inodes: set[int] = set()
+            # Use inode comparison (st_dev + st_ino) against the ARR anchor to pick canonical side.
+            anchor_inodes: set[tuple[int, int]] = set()
             for ap in anchor.anchor_paths:
                 try:
-                    anchor_inodes.add(os.stat(ap).st_ino)
+                    st = os.stat(ap)
+                    anchor_inodes.add((st.st_dev, st.st_ino))
                 except OSError:
                     pass
-            qb_inode: int | None = None
-            rt_inode: int | None = None
+            qb_inode: tuple[int, int] | None = None
+            rt_inode: tuple[int, int] | None = None
             if qb_row.content_path:
                 try:
-                    qb_inode = os.stat(qb_row.content_path).st_ino
+                    st = os.stat(qb_row.content_path)
+                    qb_inode = (st.st_dev, st.st_ino)
                 except OSError:
                     pass
             if rt_row.content_path:
                 try:
-                    rt_inode = os.stat(rt_row.content_path).st_ino
+                    st = os.stat(rt_row.content_path)
+                    rt_inode = (st.st_dev, st.st_ino)
                 except OSError:
                     pass
             rt_is_anchor = bool(anchor_inodes and rt_inode and rt_inode in anchor_inodes)

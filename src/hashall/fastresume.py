@@ -101,7 +101,19 @@ def read_fastresume(path: Path) -> Dict[bytes, Any]:
     return doc
 
 
-def patch_fastresume_file(path: Path, target_save_path: str, backup_suffix: str) -> FastresumePatchResult:
+_DEFAULT_APPROVED_ROOTS = (
+    "/data/media/torrents/seeding",
+    "/pool/media/torrents/seeding",
+)
+
+
+def patch_fastresume_file(
+    path: Path,
+    target_save_path: str,
+    backup_suffix: str,
+    *,
+    approved_roots: Iterable[str] = _DEFAULT_APPROVED_ROOTS,
+) -> FastresumePatchResult:
     raw = path.read_bytes()
     doc = bencode_decode(raw)
     if not isinstance(doc, dict):
@@ -112,7 +124,7 @@ def patch_fastresume_file(path: Path, target_save_path: str, backup_suffix: str)
     old_download_path = as_text(doc.get(b"qBt-downloadPath", b"")).strip()
 
     changed = False
-    target_text = validate_qb_target_save_path(target_save_path, approved_roots=[target_save_path])
+    target_text = validate_qb_target_save_path(target_save_path, approved_roots=approved_roots)
     target_b = target_text.encode("utf-8")
     if doc.get(b"save_path") != target_b:
         doc[b"save_path"] = target_b
@@ -120,15 +132,18 @@ def patch_fastresume_file(path: Path, target_save_path: str, backup_suffix: str)
     if doc.get(b"qBt-savePath") != target_b:
         doc[b"qBt-savePath"] = target_b
         changed = True
-    if doc.get(b"qBt-downloadPath", b"") != b"":
-        doc[b"qBt-downloadPath"] = b""
+    if b"qBt-downloadPath" in doc:
+        del doc[b"qBt-downloadPath"]
         changed = True
 
     if changed:
         backup = path.with_name(path.name + backup_suffix)
         if not backup.exists():
             backup.write_bytes(raw)
-        path.write_bytes(bencode_encode(doc))
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(bencode_encode(doc))
+        import os
+        os.replace(tmp, path)
     else:
         backup = path.with_name(path.name + backup_suffix)
 

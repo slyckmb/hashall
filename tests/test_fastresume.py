@@ -23,17 +23,17 @@ def test_patch_fastresume_file_normalizes_target_and_creates_backup(tmp_path):
         )
     )
 
-    result = patch_fastresume_file(fastresume_path, "/new/path/", ".bak")
+    result = patch_fastresume_file(fastresume_path, "/data/media/torrents/seeding/new/path", ".bak")
     patched = read_fastresume(fastresume_path)
 
     assert result.changed is True
     assert result.backup_path.endswith(".bak")
     assert Path(result.backup_path).exists()
     assert result.old_save_path == "/old/path"
-    assert result.new_save_path == "/new/path"
-    assert patched[b"save_path"] == b"/new/path"
-    assert patched[b"qBt-savePath"] == b"/new/path"
-    assert patched[b"qBt-downloadPath"] == b""
+    assert result.new_save_path == "/data/media/torrents/seeding/new/path"
+    assert patched[b"save_path"] == b"/data/media/torrents/seeding/new/path"
+    assert patched[b"qBt-savePath"] == b"/data/media/torrents/seeding/new/path"
+    assert patched.get(b"qBt-downloadPath", b"") == b""
 
 
 def test_patch_fastresume_file_rejects_trailing_data(tmp_path):
@@ -43,4 +43,4 @@ def test_patch_fastresume_file_rejects_trailing_data(tmp_path):
     )
 
     with pytest.raises(ValueError):
-        patch_fastresume_file(fastresume_path, "/new/path", ".bak")
+        patch_fastresume_file(fastresume_path, "/data/media/torrents/seeding/new/path", ".bak")
