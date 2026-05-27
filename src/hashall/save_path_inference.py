@@ -325,16 +325,41 @@ def infer_canonical_save_path(
     category_norm = str(category or "").strip()
     tags_set = {t.strip() for t in (tags or "").split(",") if t.strip()}
 
-    # Determine device root based on ~noHL tag
+    notes = []
+
+    # Determine device root: ~noHL tag is authoritative; fall back to path hint.
     has_no_hardlinks = "~noHL" in tags_set
     if has_no_hardlinks:
         device_root = "/pool/media/torrents/seeding"
         device = "pool"
     else:
-        device_root = "/data/media/torrents/seeding"
-        device = "stash"
-
-    notes = []
+        # ~noHL absent — for cross-seed torrents, check path hints for pool prefix.
+        # ARR-imported content (tv/movies/etc.) always has hardlinks → always stash.
+        # cross-seed is seed-only and may land on pool before qbm applies ~noHL.
+        _category_lower = category_norm.lower()
+        _is_cross_seed = _category_lower == "cross-seed"
+        _pool_root = "/pool/media/torrents/seeding"
+        device_from_path = None
+        if _is_cross_seed:
+            for _hint in (current_save_path, current_content_path, current_rt_directory):
+                if not _hint:
+                    continue
+                _hint_norm = _hint.rstrip("/")
+                if _hint_norm == _pool_root or _hint_norm.startswith(_pool_root + "/"):
+                    _rel = _hint_norm[len(_pool_root):].lstrip("/")
+                    _first = _rel.split("/", 1)[0] if _rel else ""
+                    if _first not in _STAGING_DIRS:
+                        device_from_path = "pool"
+                        notes.append(
+                            f"device=pool inferred from path hint (no ~noHL tag): {_hint!r}"
+                        )
+                        break
+        if device_from_path == "pool":
+            device_root = _pool_root
+            device = "pool"
+        else:
+            device_root = "/data/media/torrents/seeding"
+            device = "stash"
 
     # Determine subdirectory
     subdir = ""
