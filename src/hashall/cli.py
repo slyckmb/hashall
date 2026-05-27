@@ -2469,13 +2469,14 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
 @click.option("--json-output", is_flag=True, help="Emit JSON output.")
 def payload_save_path_repair_cmd(dry_run, limit, json_output):
     """
-    Move secondary hashes from _rehome-unique/<hash16>/ to canonical save paths.
+    Move hashes from staging dirs to canonical save paths.
 
-    After hitchhiker-split, secondary hashes live in temporary _rehome-unique/
-    locations. This command moves them to their canonical seeding paths based on
-    category/tags and device (stash vs pool) placement rules.
+    Scans _rehome-unique/, _qb-finish/, and _qb-unique-repair/ staging directories
+    and moves their contents to canonical seeding paths based on category/tags and
+    device (stash vs pool) placement rules.
 
     Infers canonical paths using the catalog's original save_path as a category hint.
+    Items tagged ~issue are skipped and flagged for manual review.
 
     Run with --dry-run first (default) to preview what will happen.
     Then re-run with --execute to perform the repair.
@@ -2485,7 +2486,7 @@ def payload_save_path_repair_cmd(dry_run, limit, json_output):
     # Audit repair candidates
     actions = audit_repair_candidates()
     if not actions:
-        print("No repair candidates found (no hashes in _rehome-unique/).")
+        print("No repair candidates found (no hashes in staging dirs).")
         return
 
     if limit:
@@ -2511,11 +2512,11 @@ def payload_save_path_repair_cmd(dry_run, limit, json_output):
 )
 def payload_save_path_gc_staging_cmd(dry_run):
     """
-    Delete empty _rehome-unique/<hash16>/ staging dirs with no live qB/RT entry.
+    Delete empty staging hash dirs with no live qB/RT entry.
 
-    These are orphaned directories left over from old hitchhiker-split runs where
-    data moved out but the empty dirs were never cleaned up. Safe to delete: they
-    contain no files and no torrent client points to them.
+    Scans _rehome-unique/, _qb-finish/, and _qb-unique-repair/ for empty hash dirs
+    where no torrent client points. Safe to delete: they contain no files and no
+    client entry references them.
 
     Run with --dry-run first (default) to preview. Then --execute to delete.
     """

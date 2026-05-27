@@ -1,9 +1,13 @@
 """
-Save-path repair: move secondary hashes from _rehome-unique/<hash16>/ to canonical paths.
+Save-path repair: move hashes from staging dirs to canonical seeding paths.
 
-After hitchhiker split, secondary hashes live in _rehome-unique/<hash16>/ as temporary
-locations. This module moves them to their canonical seeding paths based on category/tags
-and stash-vs-pool placement decisions.
+Staging dirs handled:
+  _rehome-unique/<hash16>/    — hitchhiker-split secondaries (stash + pool)
+  _qb-finish/<hash40>/        — qB-finish legacy staging (stash only)
+  _qb-unique-repair/<hash40>/ — qB-unique-repair legacy staging (stash only)
+
+All hashes are moved to their canonical paths based on category/tags and
+stash-vs-pool placement decisions.
 """
 
 import logging
@@ -17,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 from .qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
 from .rt_cache import load_rt_cache_snapshot
-from .save_path_inference import infer_canonical_save_path
+from .save_path_inference import infer_canonical_save_path, _STAGING_DIRS
 from .rtorrent import rt_apply_directory_repoint, DEFAULT_RT_RPC_URL
 from .utils import find_db_path
 
@@ -61,28 +65,52 @@ def _staging_has_real_content(path: Path) -> bool:
     return any(p for p in path.rglob("*") if not p.is_dir())
 
 
-def _scan_rehome_unique_hashes(
+def _is_in_staging_dir(path_str: str) -> bool:
+    """True if path_str contains any staging directory component."""
+    return any(f"/{d}/" in path_str or path_str.endswith(f"/{d}") for d in _STAGING_DIRS)
+
+
+def _scan_staging_hashes(
     max_age_s: int = 300,
 ) -> dict[str, str]:
     """
-    Scan _rehome-unique directories and return hash → source_path_fs mapping.
-    Returns {hash_lower: fs_path_to_rehome_dir}.
+    Scan all staging directories and return hash → source_path_fs mapping.
+
+    Scanned dirs:
+      _rehome-unique/    — stash + pool  (hash16 dir names)
+      _qb-finish/        — stash only    (hash40 dir names)
+      _qb-unique-repair/ — stash only    (hash40 dir names)
+
+    Returns {hash_lower: fs_path_to_staging_hash_dir}.
     """
-    rehome_hashes: dict[str, str] = {}
+    staging_hashes: dict[str, str] = {}
 
-    # Scan both stash and pool
-    for root_base in ["/stash/media/torrents/seeding", "/pool/media/torrents/seeding"]:
-        rehome_dir = Path(root_base) / "_rehome-unique"
-        if not rehome_dir.exists():
+    stash_root = "/stash/media/torrents/seeding"
+    pool_root = "/pool/media/torrents/seeding"
+
+    # _rehome-unique: stash + pool
+    for root_base in [stash_root, pool_root]:
+        d = Path(root_base) / "_rehome-unique"
+        if not d.exists():
             continue
+        for hash_dir in sorted(d.iterdir()):
+            if hash_dir.is_dir():
+                staging_hashes[hash_dir.name.lower()] = str(hash_dir)
 
-        for hash_dir in sorted(rehome_dir.iterdir()):
-            if not hash_dir.is_dir():
-                continue
-            hash_val = hash_dir.name.lower()
-            rehome_hashes[hash_val] = str(hash_dir)
+    # _qb-finish and _qb-unique-repair: stash only
+    for staging_name in ("_qb-finish", "_qb-unique-repair"):
+        d = Path(stash_root) / staging_name
+        if not d.exists():
+            continue
+        for hash_dir in sorted(d.iterdir()):
+            if hash_dir.is_dir():
+                staging_hashes[hash_dir.name.lower()] = str(hash_dir)
 
-    return rehome_hashes
+    return staging_hashes
+
+
+# Backward-compat alias used by legacy callers (gc, audit) — remove once all callers updated.
+_scan_rehome_unique_hashes = _scan_staging_hashes
 
 
 def _api_path(path_on_fs: str, fs_root: str, api_root: str) -> str:
@@ -141,7 +169,7 @@ def audit_repair_candidates(
     """
     import sqlite3
 
-    rehome_hashes = _scan_rehome_unique_hashes(max_age_s=max_age_s)
+    rehome_hashes = _scan_staging_hashes(max_age_s=max_age_s)
     if not rehome_hashes:
         return []
 
@@ -338,11 +366,11 @@ def execute_repair(
         category="unknown",
     )
 
-    # Find the hash in _rehome-unique
-    rehome_hashes = _scan_rehome_unique_hashes()
-    source_path_fs = rehome_hashes.get(hash_val.lower())
+    # Find the hash in any staging dir
+    staging_hashes = _scan_staging_hashes()
+    source_path_fs = staging_hashes.get(hash_val.lower())
     if not source_path_fs:
-        result.error = f"hash not found in _rehome-unique: {hash_val}"
+        result.error = f"hash not found in any staging dir: {hash_val}"
         return result
 
     # Load qB state from cache (avoids live API hit)
@@ -428,10 +456,10 @@ def execute_repair(
     # ~80% of 16-char hash prefixes collide with unrelated hashes in qb_by_hash.
     src_early = Path(source_path_fs)
     if src_early.is_dir() and not _staging_has_real_content(src_early):
-        qb_at_staging = qb_torrent is not None and "_rehome-unique" in str(
-            getattr(qb_torrent, "save_path", "")
+        qb_at_staging = qb_torrent is not None and _is_in_staging_dir(
+            str(getattr(qb_torrent, "save_path", ""))
         )
-        rt_at_staging = "_rehome-unique" in str(rt_info.get("directory", ""))
+        rt_at_staging = _is_in_staging_dir(str(rt_info.get("directory", "")))
         if not qb_at_staging and not rt_at_staging:
             result.notes.append(
                 "SKIP: orphan empty staging dir — no live qB/RT entry, nothing to repair"
@@ -444,6 +472,15 @@ def execute_repair(
 
     # qb_torrent.tags is a comma-separated string (not a list)
     qb_tags = qb_torrent.tags if qb_torrent and qb_torrent.tags else ""
+
+    # Guard: ~issue tag → needs manual review before any automated repair
+    tags_set = {t.strip() for t in qb_tags.split(",") if t.strip()}
+    if "~issue" in tags_set:
+        result.notes.append(
+            "SKIP: torrent tagged ~issue — needs manual review before automated repair"
+        )
+        result.success = True
+        return result
     catalog_save_path = catalog_info.get("save_path", "")
 
     inferred = infer_canonical_save_path(
@@ -488,8 +525,8 @@ def execute_repair(
         files_moved = _move_tree(src, dst, dry_run=dry_run)
 
         # Bug 2 guard: skip fastresume patch when staging dir was empty and qB still
-        # points to _rehome-unique — data already moved elsewhere, destination unknown.
-        qb_at_rehome = qb_torrent and "_rehome-unique" in str(qb_torrent.save_path)
+        # points to a staging dir — data already moved elsewhere, destination unknown.
+        qb_at_rehome = qb_torrent and _is_in_staging_dir(str(qb_torrent.save_path))
         if files_moved == 0 and staging_is_empty and qb_at_rehome:
             result.notes.append(
                 "SKIP: empty staging dir, qB still at _rehome-unique"
@@ -562,11 +599,12 @@ def execute_repair(
 
 def gc_empty_staging_dirs(*, dry_run: bool = True) -> tuple[int, int]:
     """
-    Delete empty _rehome-unique/<hash16>/ dirs that have no live qB/RT entry.
+    Delete empty staging hash dirs (_rehome-unique/, _qb-finish/, _qb-unique-repair/)
+    that have no live qB/RT entry pointing to them.
 
     Returns (deleted_count, total_found).
     """
-    rehome_hashes = _scan_rehome_unique_hashes()
+    rehome_hashes = _scan_staging_hashes()
 
     qb_by_hash: dict = {}
     try:
@@ -601,11 +639,11 @@ def gc_empty_staging_dirs(*, dry_run: bool = True) -> tuple[int, int]:
         # this _rehome-unique dir — not just any torrent whose hash shares a 16-char prefix.
         # (With 4800+ torrents, ~80% of 16-char prefixes collide with unrelated hashes.)
         has_live_qb = any(
-            full_h.startswith(hash_val) and "_rehome-unique" in str(t.save_path)
+            full_h.startswith(hash_val) and _is_in_staging_dir(str(t.save_path))
             for full_h, t in qb_by_hash.items()
         )
         has_live_rt = any(
-            full_h.startswith(hash_val) and "_rehome-unique" in str(r.get("directory", ""))
+            full_h.startswith(hash_val) and _is_in_staging_dir(str(r.get("directory", "")))
             for full_h, r in rt_by_hash.items()
         )
         if has_live_qb or has_live_rt:

@@ -53,7 +53,10 @@ RT_CONTAINER_HOST_PATH_PREFIXES = (
 SYSTEM_TAGS = {
     "private", "cross-seed", "~noHL", "needs_rehome",
     "other", "public",  # qbm public-bucket placeholders, not tracker names
+    "_movie",           # qbm content-type bucket; sorts before tracker names alphabetically
+    "aither-like",      # qbm content-classification tag, not a tracker name
     "speed",  # Tracker alias (speed.click / SpeedCD); suppress until registry resolution exists
+    "stoppeddl_not_recoverable",  # operational status tag, not a tracker
     "rehome", "rehome_verify_ok", "rehome_cleanup_source_required",
     "rehome_from_stash", "rehome_to_pool",
 }
