@@ -2503,6 +2503,29 @@ def payload_save_path_repair_cmd(dry_run, limit, json_output):
     print(report)
 
 
+@payload.command("save-path-gc-staging")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    help="Dry-run (default) lists dirs that would be deleted. --execute deletes them.",
+)
+def payload_save_path_gc_staging_cmd(dry_run):
+    """
+    Delete empty _rehome-unique/<hash16>/ staging dirs with no live qB/RT entry.
+
+    These are orphaned directories left over from old hitchhiker-split runs where
+    data moved out but the empty dirs were never cleaned up. Safe to delete: they
+    contain no files and no torrent client points to them.
+
+    Run with --dry-run first (default) to preview. Then --execute to delete.
+    """
+    from hashall.save_path_repair import gc_empty_staging_dirs
+
+    deleted, total = gc_empty_staging_dirs(dry_run=dry_run)
+    mode = "DRY-RUN" if dry_run else "EXECUTE"
+    click.echo(f"Save-Path GC Staging [{mode}]: {total} empty dirs found, {deleted} {'would be' if dry_run else ''} deleted")
+
+
 @payload.command("save-path-recover")
 @click.option(
     "--dry-run/--execute",

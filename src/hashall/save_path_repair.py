@@ -6,11 +6,14 @@ locations. This module moves them to their canonical seeding paths based on cate
 and stash-vs-pool placement decisions.
 """
 
+import logging
 import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from .qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
 from .rt_cache import load_rt_cache_snapshot
@@ -152,8 +155,8 @@ def audit_repair_candidates(
             all_hashes = list(rehome_hashes.keys())
             live = qb_client.get_torrents_by_hashes(all_hashes) or {}
             qb_by_hash = {h.lower(): v for h, v in live.items()}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load qB cache: %s", exc)
 
     # Load RT state from cache
     rt_by_hash: dict = {}
@@ -161,8 +164,8 @@ def audit_repair_candidates(
         snapshot = load_rt_cache_snapshot() or {}
         rows = snapshot.get("rows") or []
         rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load RT cache: %s", exc)
 
     # Load catalog entries to get original save_path/category hints
     catalog_by_hash: dict = {}
@@ -182,8 +185,8 @@ def audit_repair_candidates(
                 "root_path": row["root_path"],
             }
         conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load catalog: %s", exc)
 
     # Plan repairs
     actions = []
@@ -352,8 +355,8 @@ def execute_repair(
             # Cache miss: fetch live for just this hash (expensive but correct)
             live = qb_client.get_torrents_by_hashes([hash_val]) or {}
             qb_by_hash = {h.lower(): v for h, v in live.items()}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load qB cache: %s", exc)
 
     # Load RT state from cache
     rt_by_hash: dict = {}
@@ -361,8 +364,8 @@ def execute_repair(
         snapshot = load_rt_cache_snapshot() or {}
         rows = snapshot.get("rows") or []
         rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load RT cache: %s", exc)
 
     # Open DB for catalog hints and hash resolution
     conn_db = None
@@ -398,6 +401,17 @@ def execute_repair(
     qb_torrent = qb_by_hash.get(effective_hash)
     rt_info = rt_by_hash.get(effective_hash, {})
 
+    # Bug 5 guard: orphan empty staging dirs with no live client entry → skip early,
+    # before inference so we don't produce misleading errors for dead hashes.
+    src_early = Path(source_path_fs)
+    if src_early.is_dir() and not any(src_early.iterdir()):
+        if qb_torrent is None and not rt_info:
+            result.notes.append(
+                "SKIP: orphan empty staging dir — no live qB/RT entry, nothing to repair"
+            )
+            result.success = True
+            return result
+
     qb_category = qb_torrent.category if qb_torrent else ""
     result.category = qb_category or "unknown"
 
@@ -417,28 +431,46 @@ def execute_repair(
         result.error = f"malformed canonical path: {inferred.canonical_save_path}"
         return result
 
+    # Reject ambiguous inference that resolves to a bare seeding root (no subdir)
+    _SEEDING_ROOTS = {
+        "/data/media/torrents/seeding",
+        "/stash/media/torrents/seeding",
+        "/pool/media/torrents/seeding",
+    }
+    if (
+        inferred.reliability == "ambiguous"
+        and inferred.canonical_save_path.rstrip("/") in _SEEDING_ROOTS
+    ):
+        result.error = f"ambiguous canonical path (bare seeding root): {inferred.canonical_save_path}"
+        return result
+
     # Filesystem path: stash uses /stash/media/, pool uses /pool/media/ (same as API)
     if inferred.device == "stash":
         target_fs = inferred.canonical_save_path.replace("/data/media", "/stash/media")
     else:
         target_fs = inferred.canonical_save_path  # pool: API path == FS path
 
-    # RT needs the content directory: canonical_api/torrent_name for multi-file
-    torrent_name = qb_torrent.name if qb_torrent else ""
-    if torrent_name:
-        rt_target_dir = inferred.canonical_save_path.rstrip("/") + "/" + torrent_name
-    else:
-        rt_target_dir = inferred.canonical_save_path
+    # RT d.directory.set takes the parent dir; rTorrent appends info_name itself
+    rt_target_dir = inferred.canonical_save_path
 
     try:
         src = Path(source_path_fs)
         dst = Path(target_fs)  # canonical save_path dir (not its parent)
+
+        staging_is_empty = src.is_dir() and not any(src.iterdir())
         files_moved = _move_tree(src, dst, dry_run=dry_run)
 
-        # Bug A guard: skip fastresume/RT/recheck if 0 files moved AND qB data
-        # is not in _rehome-unique (prefix matched unrelated torrent).
-        # See BACKLOG.md Gap 6.
+        # Bug 2 guard: skip fastresume patch when staging dir was empty and qB still
+        # points to _rehome-unique — data already moved elsewhere, destination unknown.
         qb_at_rehome = qb_torrent and "_rehome-unique" in str(qb_torrent.save_path)
+        if files_moved == 0 and staging_is_empty and qb_at_rehome:
+            result.notes.append(
+                "SKIP: empty staging dir, qB still at _rehome-unique"
+                " — data already moved; needs manual investigation before fastresume patch"
+            )
+            result.success = True
+            return result
+
         should_apply = files_moved > 0 or qb_at_rehome
 
         if not dry_run:
@@ -499,6 +531,55 @@ def execute_repair(
         result.notes.append("dry-run: no files moved, no qB/fastresume/RT changes made")
 
     return result
+
+
+def gc_empty_staging_dirs(*, dry_run: bool = True) -> tuple[int, int]:
+    """
+    Delete empty _rehome-unique/<hash16>/ dirs that have no live qB/RT entry.
+
+    Returns (deleted_count, total_found).
+    """
+    rehome_hashes = _scan_rehome_unique_hashes()
+
+    qb_by_hash: dict = {}
+    try:
+        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
+        qb_client = QBittorrentClient()
+        if cached_raw is not None:
+            for r in cached_raw:
+                t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                if t and t.hash:
+                    qb_by_hash[t.hash.lower()] = t
+        else:
+            all_hashes = list(rehome_hashes.keys())
+            live = qb_client.get_torrents_by_hashes(all_hashes) or {}
+            qb_by_hash = {h.lower(): v for h, v in live.items()}
+    except Exception as exc:
+        logger.warning("gc_empty_staging_dirs: failed to load qB cache: %s", exc)
+
+    rt_by_hash: dict = {}
+    try:
+        snapshot = load_rt_cache_snapshot() or {}
+        rows = snapshot.get("rows") or []
+        rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
+    except Exception as exc:
+        logger.warning("gc_empty_staging_dirs: failed to load RT cache: %s", exc)
+
+    deleted = 0
+    for hash_val, source_fs_path in sorted(rehome_hashes.items()):
+        src = Path(source_fs_path)
+        if not src.is_dir() or any(src.iterdir()):
+            continue  # not empty — skip
+        # hash_val may be 16-char prefix; qB/RT dicts use full 40-char hashes
+        has_live_qb = any(full_h.startswith(hash_val) for full_h in qb_by_hash)
+        has_live_rt = any(full_h.startswith(hash_val) for full_h in rt_by_hash)
+        if has_live_qb or has_live_rt:
+            continue  # live client still points here — skip
+        if not dry_run:
+            src.rmdir()
+        deleted += 1
+
+    return deleted, len(rehome_hashes)
 
 
 def format_repair_report(
