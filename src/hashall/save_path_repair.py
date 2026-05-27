@@ -401,11 +401,16 @@ def execute_repair(
     qb_torrent = qb_by_hash.get(effective_hash)
     rt_info = rt_by_hash.get(effective_hash, {})
 
-    # Bug 5 guard: orphan empty staging dirs with no live client entry → skip early,
-    # before inference so we don't produce misleading errors for dead hashes.
+    # Bug 5 guard: orphan empty staging dirs → skip early, before inference.
+    # Use save_path/directory filter (not bare prefix match): with 4800+ torrents,
+    # ~80% of 16-char hash prefixes collide with unrelated hashes in qb_by_hash.
     src_early = Path(source_path_fs)
     if src_early.is_dir() and not any(src_early.iterdir()):
-        if qb_torrent is None and not rt_info:
+        qb_at_staging = qb_torrent is not None and "_rehome-unique" in str(
+            getattr(qb_torrent, "save_path", "")
+        )
+        rt_at_staging = "_rehome-unique" in str(rt_info.get("directory", ""))
+        if not qb_at_staging and not rt_at_staging:
             result.notes.append(
                 "SKIP: orphan empty staging dir — no live qB/RT entry, nothing to repair"
             )
@@ -570,9 +575,17 @@ def gc_empty_staging_dirs(*, dry_run: bool = True) -> tuple[int, int]:
         src = Path(source_fs_path)
         if not src.is_dir() or any(src.iterdir()):
             continue  # not empty — skip
-        # hash_val may be 16-char prefix; qB/RT dicts use full 40-char hashes
-        has_live_qb = any(full_h.startswith(hash_val) for full_h in qb_by_hash)
-        has_live_rt = any(full_h.startswith(hash_val) for full_h in rt_by_hash)
+        # A torrent is "live here" only if its save_path/directory actually points into
+        # this _rehome-unique dir — not just any torrent whose hash shares a 16-char prefix.
+        # (With 4800+ torrents, ~80% of 16-char prefixes collide with unrelated hashes.)
+        has_live_qb = any(
+            full_h.startswith(hash_val) and "_rehome-unique" in str(t.save_path)
+            for full_h, t in qb_by_hash.items()
+        )
+        has_live_rt = any(
+            full_h.startswith(hash_val) and "_rehome-unique" in str(r.get("directory", ""))
+            for full_h, r in rt_by_hash.items()
+        )
         if has_live_qb or has_live_rt:
             continue  # live client still points here — skip
         if not dry_run:

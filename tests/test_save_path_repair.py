@@ -220,6 +220,33 @@ def test_orphan_dirs_skipped(tmp_path):
     assert any("orphan" in note for note in result.notes)
 
 
+def test_orphan_skipped_even_with_unrelated_qb_torrent(tmp_path):
+    """Empty staging dir is still SKIPped if the prefix-matched qB torrent save_path
+    does not contain _rehome-unique (false positive from hash prefix collision)."""
+    staging = tmp_path / "_rehome-unique" / HASH16
+    staging.mkdir(parents=True)
+
+    # qB torrent found by prefix but its save_path has nothing to do with _rehome-unique
+    unrelated = _make_qb_torrent(save_path="/stash/media/torrents/seeding/tv", category="tv")
+
+    with (
+        patch("hashall.save_path_repair._scan_rehome_unique_hashes", return_value={HASH16: str(staging)}),
+        patch("hashall.save_path_repair.get_torrents_from_cache", return_value=None),
+        patch.object(
+            __import__("hashall.qbittorrent", fromlist=["QBittorrentClient"]).QBittorrentClient,
+            "get_torrents_by_hashes",
+            return_value={FULL_HASH: unrelated},
+        ),
+        patch("hashall.save_path_repair.load_rt_cache_snapshot", return_value={"rows": []}),
+        patch("hashall.save_path_repair.find_db_path", side_effect=Exception("no db")),
+        patch("hashall.save_path_repair._resolve_full_hash", return_value=FULL_HASH),
+    ):
+        result = execute_repair(HASH16, dry_run=False)
+
+    assert result.success is True
+    assert any("orphan" in note for note in result.notes)
+
+
 # ---------------------------------------------------------------------------
 # Bug 5 (gc): gc_empty_staging_dirs deletes orphan dirs and skips live ones
 # ---------------------------------------------------------------------------
@@ -238,7 +265,10 @@ def test_gc_empty_staging_dirs(tmp_path):
     def fake_scan(**kwargs):
         return {orphan_hash: str(orphan_dir), live_hash: str(live_dir)}
 
-    qb_torrent = _make_qb_torrent(save_path=str(live_dir), category="tv")
+    qb_torrent = _make_qb_torrent(
+        save_path=f"/stash/media/torrents/seeding/_rehome-unique/{live_hash}",
+        category="tv",
+    )
     qb_torrent.hash = live_full
 
     with (
