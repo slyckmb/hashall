@@ -40,6 +40,8 @@ def _make_qb_torrent(save_path: str, category: str = "tv", tags: str = "") -> Ma
     t.category = category
     t.tags = tags
     t.name = "Some.Show.S01"
+    t.progress = 1.0       # completed by default
+    t.amount_left = 0
     return t
 
 
@@ -334,3 +336,81 @@ def test_group_a_happy_path(tmp_path):
     # RT target must not double the torrent name
     for note in result.notes:
         assert "Some.Show.S01/Some.Show.S01" not in note
+
+
+# ---------------------------------------------------------------------------
+# Download-state guard: incomplete torrents must be skipped
+# ---------------------------------------------------------------------------
+
+def test_downloading_torrent_skipped(tmp_path):
+    """Torrent still downloading (progress < 1.0) must be skipped — partial file must not move."""
+    staging = tmp_path / "_rehome-unique" / HASH16
+    staging.mkdir(parents=True)
+    (staging / "partial.mkv").write_text("incomplete")
+
+    qb_torrent = _make_qb_torrent(
+        save_path=f"/stash/media/torrents/seeding/_rehome-unique/{HASH16}",
+        category="movies",
+    )
+    qb_torrent.progress = 0.559  # 55.9% — still downloading
+    qb_torrent.amount_left = 2438531413
+
+    with (
+        patch("hashall.save_path_repair._scan_rehome_unique_hashes", return_value={HASH16: str(staging)}),
+        patch("hashall.save_path_repair.get_torrents_from_cache", return_value=None),
+        patch.object(
+            __import__("hashall.qbittorrent", fromlist=["QBittorrentClient"]).QBittorrentClient,
+            "get_torrents_by_hashes",
+            return_value={FULL_HASH: qb_torrent},
+        ),
+        patch("hashall.save_path_repair.load_rt_cache_snapshot", return_value={"rows": []}),
+        patch("hashall.save_path_repair.find_db_path", side_effect=Exception("no db")),
+        patch("hashall.save_path_repair._resolve_full_hash", return_value=FULL_HASH),
+    ):
+        result = execute_repair(HASH16, dry_run=False)
+
+    assert result.success is True
+    assert any("downloading" in note and "55.9%" in note for note in result.notes)
+    # The partial file must still be in the staging dir (not moved)
+    assert (staging / "partial.mkv").exists()
+
+
+def test_complete_torrent_not_skipped(tmp_path):
+    """Torrent at 100% (progress=1.0, amount_left=0) must NOT be skipped by the download guard."""
+    staging = tmp_path / "_rehome-unique" / HASH16
+    staging.mkdir(parents=True)
+    (staging / "complete.mkv").write_text("fulldata")
+
+    qb_torrent = _make_qb_torrent(
+        save_path=f"/stash/media/torrents/seeding/_rehome-unique/{HASH16}",
+        category="tv",
+    )
+    qb_torrent.progress = 1.0
+    qb_torrent.amount_left = 0
+
+    target = tmp_path / "tv"
+    inferred = InferredSavePath(
+        canonical_save_path=str(target),
+        device="pool",
+        category="tv",
+        subdir="tv",
+        reliability="reliable",
+    )
+
+    with (
+        patch("hashall.save_path_repair._scan_rehome_unique_hashes", return_value={HASH16: str(staging)}),
+        patch("hashall.save_path_repair.get_torrents_from_cache", return_value=None),
+        patch.object(
+            __import__("hashall.qbittorrent", fromlist=["QBittorrentClient"]).QBittorrentClient,
+            "get_torrents_by_hashes",
+            return_value={FULL_HASH: qb_torrent},
+        ),
+        patch("hashall.save_path_repair.load_rt_cache_snapshot", return_value={"rows": []}),
+        patch("hashall.save_path_repair.find_db_path", side_effect=Exception("no db")),
+        patch("hashall.save_path_repair.infer_canonical_save_path", return_value=inferred),
+        patch("hashall.save_path_repair._resolve_full_hash", return_value=FULL_HASH),
+    ):
+        result = execute_repair(HASH16, dry_run=True)
+
+    assert result.success is True
+    assert not any("downloading" in note for note in result.notes)

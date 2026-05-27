@@ -401,6 +401,23 @@ def execute_repair(
     qb_torrent = qb_by_hash.get(effective_hash)
     rt_info = rt_by_hash.get(effective_hash, {})
 
+    # Guard: skip torrents that are still downloading — moving a partial file to the
+    # canonical path is wrong; the data would be incomplete at the destination.
+    if qb_torrent is not None:
+        qb_progress = getattr(qb_torrent, "progress", None)
+        qb_amount_left = getattr(qb_torrent, "amount_left", None)
+        is_incomplete = (qb_progress is not None and qb_progress < 1.0) or (
+            qb_amount_left is not None and qb_amount_left > 0
+        )
+        if is_incomplete:
+            pct = f"{qb_progress * 100:.1f}%" if qb_progress is not None else "unknown%"
+            result.notes.append(
+                f"SKIP: torrent is still downloading ({pct} complete)"
+                f" — repair only applies to completed/seeding torrents"
+            )
+            result.success = True
+            return result
+
     # Bug 5 guard: orphan empty staging dirs → skip early, before inference.
     # Use save_path/directory filter (not bare prefix match): with 4800+ torrents,
     # ~80% of 16-char hash prefixes collide with unrelated hashes in qb_by_hash.

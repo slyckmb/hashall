@@ -73,7 +73,7 @@ class RecoveryAction:
     displaced_path_fs: str       # where files currently are
     canonical_path_fs: str       # where they should go (filesystem)
     canonical_path_api: str      # qB/RT API path
-    rt_directory: str            # canonical_path_api/torrent_name
+    rt_directory: str            # canonical_path_api (parent only; rTorrent appends info_name itself)
     fastresume_path: str         # path to .fastresume file
     file_count: int              # files to move
     notes: list[str] = field(default_factory=list)
@@ -210,12 +210,9 @@ def plan_recovery(
         else:
             canonical_fs = inferred.canonical_save_path
 
-        # RT directory: canonical_api/torrent_name for multi-file torrents
         torrent_name = t.name or ""
-        if torrent_name:
-            rt_directory = inferred.canonical_save_path.rstrip("/") + "/" + torrent_name
-        else:
-            rt_directory = inferred.canonical_save_path
+        # RT d.directory.set takes the parent; rTorrent appends info_name itself
+        rt_directory = inferred.canonical_save_path
 
         # Find displaced files
         displaced = _find_displaced_path(hash_val)
