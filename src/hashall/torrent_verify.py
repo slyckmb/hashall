@@ -110,9 +110,7 @@ def _piece_stream(
                 if len(buf) >= piece_length:
                     yield flush_piece()
                     buf = bytearray()
-                    missing_this_piece = []
-                    if str(fpath) not in missing_this_piece:
-                        pass  # already recorded above
+                    missing_this_piece = [str(fpath)]
             continue
 
         with fh:

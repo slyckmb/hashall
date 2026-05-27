@@ -279,4 +279,4 @@ trk-warn-replace-individual:
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --prowlarr --replace-individual --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 canonical-tree-report:
-	@python3 scripts/canonical-tree-report.py $(if $(FULL),--full,)
+	@python3 scripts/canonical-tree-report.py $(if $(FULL),--full,) --db "$(CATALOG)"
