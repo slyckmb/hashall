@@ -1,7 +1,7 @@
 # Seed Data Management System - Requirements & Implementation
 
-**Version:** 1.2 (Living Document)
-**Last Updated:** 2026-04-18
+**Version:** 1.6 (Living Document)
+**Last Updated:** 2026-05-19
 **Status:** Active Development - Core features implemented, canonical torrent-tree normalization planning active
 
 ---
@@ -23,7 +23,7 @@ This document serves as the single source of truth for:
 1. [System Overview](#1-system-overview)
 2. [Storage Architecture](#2-storage-architecture) — §2.1 topology, §2.5 seeding domain, §2.6 seed-root contract
 3. [Application Stack](#3-application-stack)
-4. [Core Requirements](#4-core-requirements) — §4.1 residency rules (incl. `~noHL` advisory), §4.3 external consumer detection
+4. [Core Requirements](#4-core-requirements) — §4.1 residency rules (incl. `~noHL` advisory), §4.3 external consumer detection, §4.4 canonical path spec
 5. [Data Movement (Rehoming)](#5-data-movement-rehoming) — §5.1 demotion (staged cleanup, preexisting target), §5.3 payload groups (partial reconcile, ATM)
 6. [Deduplication](#6-deduplication) — §6.3 view building (hitchhiker invariant, cross-device donor prohibition)
 7. [Catalog System (hashall)](#7-catalog-system-hashall) — §7.3 scanning (drift policy modes)
@@ -110,6 +110,9 @@ The system is actively migrating seeding content from `pool-data` (`/pool/data/m
 - `pool-media` is the canonical target for new placements
 - The published seeding-root contract (`~/.hashall/seed-root-state.json`) reflects which datasets are active/legacy at any point in time
 - All planning and apply tooling must be dataset-aware; "pool" is not a single target
+
+**`/pool/data/seeds` — cross-seed scan source, not a rehome destination:**
+`/pool/data/seeds` is a cross-seed `dataDir` path (where cross-seed scans for matchable content — see §3.2). It is **not** a seeding root and **not** a valid rehome MOVE target. The canonical rehome destination is always the active pool seeding root from `seed-root-state.json` (currently `/pool/media/torrents/seeding`). Any tooling that defaults to `/pool/data/seeds` as a `dest_root` is using a stale default and must be corrected to read from `seed-root-state.json` at runtime.
 
 **Stable Device Identity:**
 ZFS filesystem UUIDs (`fs_uuid`) are stable across reboots; Linux `device_id` values are not. All long-term catalog identity uses `fs_uuid`. Device aliases (e.g., `stash`, `pool-data`, `pool-media`) are registered in the `devices` table and used in CLI parameters instead of raw device IDs.
@@ -364,6 +367,10 @@ A sibling payload group is **eligible to move to `/pool`** if:
 - No hardlinks exist in external consumer paths
 - Typically identified by `~noHL` tag from qbit_manage
 
+**Threshold:** A single hardlink from any payload file to any media library path is sufficient to mandate stash placement for the entire sibling group. There is no majority threshold. The human rationale: if any content is in the media library (Plex/Jellyfin/Audiobookshelf), all cross-seed copies of that content cost zero additional space via hardlinks and should stay on stash. Once the media library copy is deleted, all seeding copies lose their consumer justification and become candidates for pool migration or deletion.
+
+**qbit_manage `~noHL` alignment:** The `~noHL` logic in qbit_manage works the same way — it tags an item when it finds no hardlinks at all from the torrent's files into media library paths. The hashall external consumer check mirrors this logic. Use `~noHL` as a pre-filter for pool candidates, but always re-verify at plan time with a current filesystem scan.
+
 **Important: `~noHL` is advisory only.** The tag reflects qbit_manage's scan at a specific point in time. A `*arr` import between the qbit_manage scan and a rehome plan execution can create a new external hardlink. The authoritative external consumer check is always the plan-time scan of current catalog/filesystem state. The `~noHL` tag is a pre-filter that narrows candidates; it does not bypass the external consumer check.
 
 #### 4.1.2 Manual-Review Stop Conditions
@@ -404,7 +411,18 @@ The system must stop for manual review instead of auto-deciding when:
 
 ### 4.2.1 Sibling Payload Group
 
-For placement and stash-vs-pool residency decisions, hashall uses a broader **sibling payload group** concept than exact `payload_hash` equality:
+**Two overlapping concepts — used for different decisions:**
+
+| Concept | Definition | Used for |
+|---|---|---|
+| **Exact-hash siblings** | Torrents sharing the same `payload_hash` (same `payload_id` in catalog) | Catalog identity, REUSE planning, payload-group moves (§5.3) |
+| **Broader inode-sharing group** | Different `payload_id` entries whose files share inodes on the same filesystem (e.g., seedpool cross-seed + darkpeers cross-seed of the same movie) | Stash-vs-pool residency decisions, external consumer detection, hardlink-construction optimization on rehome |
+
+**Key rule:** Exact-hash siblings move together as a unit (§5.3). Members of the broader inode-sharing group that have *different* `payload_hash` values are handled independently — each goes through its own drift audit and rehome plan. The hardlink-construction optimization (§5.1.2) connects them: after the first member is byte-copied to pool, subsequent members can be hardlinked rather than copied.
+
+**Placement unit for residency:** The broader inode-sharing group is the placement unit for stash-vs-pool decisions. If *any* file in *any* member of the inode-sharing group has an external consumer hardlink (§4.3), the entire group must remain on stash — even members that individually show no external consumer. The external consumer check is applied per-file across all inode-sharing paths, not just per-torrent.
+
+For placement and stash-vs-pool residency decisions, hashall uses the broader **sibling payload group** concept:
 - non-duplicate payloads that mostly share inodes on the same filesystem
 - or would share inodes if rehomed onto the same filesystem
 
@@ -413,7 +431,7 @@ This broader sibling-group concept is the placement unit for:
 - rehoming non-anchored groups to pool
 - surfacing manual-review conflicts when sibling-group evidence is mixed
 
-### 4.2.1 Broader Content Inventory Requirement
+### 4.2.2 Broader Content Inventory Requirement
 
 **Intent:** The system should also be able to reason over scanned non-qB folder trees so operators can:
 - find duplicate folder trees
@@ -498,6 +516,146 @@ Result: BLOCKED (cannot demote because external consumer exists)
 
 ---
 
+### 4.4 Canonical Seeding Path Specification
+
+#### 4.4.1 Payload Uniqueness
+
+**Definition:** A payload is the folder/path/filename tree structure required to support one torrent item. Each item must have its own unique path tree. This enables safe deletion of any item's data without affecting any other item.
+
+**Hardlink sharing:** When two payloads consist of files that are bit-for-bit identical on the same filesystem, those files SHOULD share an inode (hardlink) to save space. The path trees remain distinct — uniqueness is at the directory/path level, not at the inode level.
+
+**Implication for cross-seeds:** A cross-seeded item is a distinct torrent instance with its own canonical path tree. Its files will normally be hardlinked to the original-torrent payload files (same inode, different paths). This is correct and expected. The path tree uniqueness is what permits safe per-item deletion.
+
+#### 4.4.2 Canonical Path Formula
+
+Every seeding item has one and only one canonical path, derived from how it was added to the system:
+
+```
+<seeding-root>/<category>/<item-payload-name>
+```
+
+Where `<seeding-root>` is the stash or pool seeding root (see §2.5), and `<category>` is determined by item origin (see §4.4.3).
+
+**Single-file torrents:** `<seeding-root>/<category>/<filename>`  
+**Multi-file torrents:** `<seeding-root>/<category>/<release-dir>/`
+
+**Seeding root selection rule:**
+The seeding root in the canonical path is determined by the item's residency class (§4.1.1):
+- Items with a stash hardlink anchor (external consumer exists) → stash seeding root (`/stash/media/torrents/seeding`)
+- Pool-eligible items (no external consumer, confirmed by plan-time scan) → active pool seeding root from `seed-root-state.json` (currently `/pool/media/torrents/seeding`)
+
+**Path preservation on rehome:**
+The seeding-root-relative path (`<category>/<item-payload-name>`) is identical on stash and pool — only the root prefix changes. When demoting stash→pool or promoting pool→stash, the relative path is preserved verbatim:
+```
+stash: /stash/media/torrents/seeding/cross-seed/seedpool/Movie.2024/
+pool:  /pool/media/torrents/seeding/cross-seed/seedpool/Movie.2024/
+```
+Any tool computing a rehome target path must derive it by substituting the seeding root, not by using the payload name alone.
+
+#### 4.4.3 Category Rules (by origin)
+
+The category encodes how an item entered the system. Category assignment is permanent and identifies the item's origin path. The rules, in priority order:
+
+| Origin | Canonical category | Example |
+|---|---|---|
+| ARR pre-import (awaiting import) | `<arr-app>/` | `sonarr/`, `radarr/` |
+| ARR post-import (moved by ATM) | `<media-type>/` | `tv/`, `movies/`, `books/`, `music/` |
+| cross-seed injection | `cross-seed/<prowlarr-tracker-name>/` | `cross-seed/darkpeers/`, `cross-seed/Darkpeers (API)/` |
+| qbit_manage tracker assignment | `<tracker-name>/` | `FearNoPeer/`, `myanonamouse/` |
+
+**Prowlarr display name is acceptable for cross-seed items.** cross-seed uses the Prowlarr indexer display name as the save-path subdirectory and continues to do so for new injections. Both the short registry key (`darkpeers`) and the Prowlarr display name (`Darkpeers (API)`) are canonical for cross-seed items. Do not rename existing items to the short-key form — cross-seed would re-create the display-name path on the next injection cycle. The registry key remains the authoritative identity for URL-to-tracker resolution and reporting; it is not required as the on-disk directory name.
+
+**Historical note:** This category system grew organically:
+1. ARR apps used their own app name as the qB category (sonarr, radarr, etc.) to trigger import
+2. After import, ARRs changed the category to the media type (tv, movies, etc.) — ATM moved the payload
+3. qbit_manage was added and assigned tracker-key categories to uncategorized items, causing a move from `<seeding-root>/<item>` → `<seeding-root>/<tracker-name>/<item>`
+4. cross-seed was integrated and assigned `cross-seed` as the category with explicit per-tracker save paths, resulting in `<seeding-root>/cross-seed/<prowlarr-tracker-name>/<item>`
+
+Many items currently have non-canonical paths due to early hashall/rehome code bugs that damaged path structure across thousands of items. Normalization to canonical paths is the long-term goal.
+
+#### 4.4.4 Tracker Key as Category Key
+
+The authoritative source for tracker identity and canonical category key is the **traktor tracker registry** (`tracker-registry.yml`). This YAML file is the single source of truth that ties together:
+- The tracker key (YAML top-level key, e.g. `darkpeers`) — used as the category subdirectory
+- The tracker URL pattern — for announce URL → key resolution
+- The Prowlarr display name and indexer ID
+- The qBittorrent save path (`<seeding-root>/<tracker-key>/`)
+- The qbit_manage category and tags
+- The rTorrent label and save path
+
+**Rule:** The tracker key from the registry is the canonical category for tracker-specific items. For cross-seed items, the category path is `cross-seed/<tracker-key>/`.
+
+When a torrent's announce URL and the path's tracker subdirectory disagree, resolve via the registry: match the announce URL against `tracker_url_pattern` to find the authoritative key. The mismatched path is a legacy accident requiring repair.
+
+**Registry locations (searched in order):**
+1. `$HASHALL_TRACKER_REGISTRY` env var
+2. `$TRACKER_REGISTRY` env var
+3. `/home/michael/dev/tools/traktor/config/tracker-registry.yml`
+4. `/home/michael/dev/work/glider/glider-docker/tracker-ctl/config/tracker-registry.yml`
+
+#### 4.4.5 Path Inference from qB Metadata
+
+When the canonical path for a torrent cannot be determined from its current filesystem
+path alone (e.g., items in `_rehome-unique/<hash>/` staging dirs, or items whose
+current path is ambiguous), the inference falls back to qBittorrent metadata:
+
+**Inference precedence (high to low):**
+
+1. **qB category** — If the torrent has an explicit qB category (not `Uncategorized`),
+   determine the leaf subdirectory from:
+   - ARR pre-import categories (`sonarr`, `radarr`, `lidarr`, `readarr`, `speakarr`) →
+     mapped to final media type via `ARR_CATEGORY_FINAL_MAP` (`tv/`, `movies/`, `music/`,
+     `ebooks/`, `audiobooks/`) marked as `transient` reliability
+   - `cross-seed` category → resolve tracker from current save path first (see §4.4.4),
+     then fall back to qB tags (see step 2)
+   - qbit_manage category → use the leaf subdirectory from qbm config paths
+   - Other explicit categories → use category name as the leaf subdirectory
+
+2. **qB tags (cross-seed fallback)** — For cross-seed items where the save path does
+   not contain a recognizable tracker directory, qB tags are the fallback. Tags that
+   are system-internal (not tracker names) are filtered out:
+
+   *System tags* (never tracker names):
+   - `private`, `cross-seed` — built-in qB/system tags
+   - `~noHL` — qbit_manage no-hardlink advisory tag
+   - `~rt-mirrored`, `~share_limit_*` — qbit_manage control tags
+   - `other`, `public` — qbit_manage public-bucket placeholders
+   - `rehome*` — rehome operation tracking tags
+   - Any tag starting with `~` — qbit_manage and hashall control tags
+
+   After filtering, remaining tags are candidate tracker names. If multiple remain,
+   prefer tags that match known qbit_manage categories; otherwise take the first in
+   alphabetical order.
+
+3. **Device placement from `~noHL`** — The `~noHL` tag determines the seeding root:
+   - Tag present → pool root (`/pool/media/torrents/seeding`)
+   - Tag absent → stash root (`/data/media/torrents/seeding`)
+
+**Tracker alias resolution:**
+Do not treat known tracker aliases as system tags. For example, `speed` is a domain
+alias of `speedcd` (confirmed in the traktor registry). When a torrent has both `speed`
+and `speedcd` tags, resolve via the registry before the alphabetical fallback, not by
+suppressing `speed` as a system tag.
+
+*Note:* The current `save_path_inference.py` pragmatically adds `speed` to SYSTEM_TAGS
+as a stopgap until registry-backed alias resolution is implemented (see BACKLOG.md Gap 5).
+This is a known gap — the code comment documents the discrepancy. No other tracker
+aliases should be added to SYSTEM_TAGS without confirming they are not in the registry.
+
+**Staging directories (never tracker names):**
+Directories named `_rehome-unique`, `_qb-finish`, `_qb-unique-repair`, `_qb-repair-v2`
+are staging areas, not tracker names. The inference must skip these when extracting the
+tracker name from a save path.
+
+#### 4.4.6 Path Uniqueness Requirement
+
+No two distinct torrent items may share the same canonical path root. When a path collision exists:
+- Two items have been incorrectly merged or one has been displaced
+- The system must create a unique path for each (e.g., using `_rehome-unique/<hash>/` as a temporary holder)
+- `_rehome-unique/<hash>/` is a staging state, not a permanent canonical path
+
+---
+
 ## 5. Data Movement (Rehoming)
 
 ### 5.1 Demotion (stash → pool)
@@ -552,6 +710,44 @@ Source cleanup after a successful MOVE is **deferred by default** and runs as a 
 
 **Safety:** Demotion is BLOCKED if external consumers exist. No silent breakage of media library links.
 
+#### 5.1.1 Cross-Filesystem Copy Requirement
+
+Stash (`/stash/media`) and pool (`/pool/media`) are **separate ZFS pools with different `fs_uuid` and `device_id` values**. Hardlinks cannot span ZFS pool boundaries.
+
+**Consequence:** Every stash→pool MOVE is a full byte-level copy (rsync), not a hardlink or rename. This is true even when the content already has hardlinks to other stash paths — those hardlinks remain on stash; the pool copy creates new independent inodes. The stash source is removed only after:
+1. The pool copy is verified (file count + total bytes match)
+2. All affected torrent clients have been confirmed seeding from the pool path
+
+Until both conditions are met, the stash copy is the active seeding source and must not be deleted.
+
+**Tools:** `rehome` uses `rsync -a --no-whole-file --inplace` (or equivalent) for the copy step. Any tool computing rehome targets must account for this cross-filesystem constraint and must never attempt `os.link()` or `os.rename()` across pool boundaries.
+
+#### 5.1.2 Payload Group Rehome — Primary Mover and Hardlink Construction
+
+When rehoming a broader inode-sharing group (§4.2.1) to pool, only **one member** needs to be byte-copied. After that copy is on pool, its inodes are available for hardlink construction — all remaining members of the group get their own canonical pool path trees built via hardlinks to the first mover's pool inodes. This reduces the byte transfer cost to O(1) per inode-sharing group regardless of how many torrent instances share that content.
+
+**Primary mover selection rule** (evaluated in priority order — first match wins):
+
+| Priority | Condition | Rationale |
+|---|---|---|
+| 1 | A member already has verified content on the target device | Zero bytes to copy — hardlink all others from it immediately |
+| 2 | `status = complete` (all files SHA256-verified in catalog) | Unverified content must not serve as the authoritative pool copy |
+| 3 | ARR media-type category (`movies/`, `tv/`, `books/`, `music/`) | Post-ARR-import path is the content origin; cross-seeds were derived from it |
+| 4 | Cross-seed at canonical tracker path (`cross-seed/<tracker-key>/<name>/`) | Canonical path beats hash-named or legacy path |
+| 5 | Largest `torrent_instances` count for that `payload_id` | Most-used payload is the most established donor |
+| 6 | Smallest `payload_id` (oldest in catalog) | Final tie-break: earliest record is the most stable |
+
+**Disqualifiers** (must not be selected as primary mover unless it is the only candidate):
+- `status = incomplete` — partial hash coverage; content may not be fully verified
+- Path is not under any registered seeding domain root — not a known-good location
+- Path is at a `_rehome-unique/<hash>/` staging location on the source device
+
+**Hardlink construction phase:**
+After the primary mover's content exists on pool, each remaining member of the inode-sharing group receives its own canonical pool path tree (per §4.4.2 formula). Every file in that tree is hardlinked to the corresponding file in the primary mover's pool path. No additional byte transfer occurs. The pool then has one physical copy of the data, with multiple canonical path trees hardlinked to it — matching the same inode-sharing structure that existed on stash.
+
+**Pool path model (target state):**
+Each torrent in the inode-sharing group has its own unique canonical pool path tree. Files are shared via hardlinks across those trees (same inode, different directory entries). The legacy "REUSE" model (multiple torrents pointing to the same directory path) is an artifact of earlier rehome runs and is not the target state. `_rehome-unique/<hash>/` is a temporary staging path used during construction, not a permanent canonical path.
+
 ### 5.2 Promotion (pool → stash, reuse-only)
 
 **Purpose:** Move payloads back from pool to stash when needed
@@ -593,12 +789,12 @@ Does identical payload exist on stash?
 
 ### 5.3 Payload-Group Management
 
-**Definition:** A payload-group is the set of sibling torrents that share a payload_hash.
+**Definition:** A payload-group is the set of sibling torrents that share a `payload_hash` (same `payload_id` in the catalog). This is the **exact-hash sibling** concept from §4.2.1 — not the broader inode-sharing group.
 
-**Rehoming Principle:** All siblings in a payload-group are rehomed together as a unit when possible.
+**Rehoming Principle:** All exact-hash siblings in a payload-group are rehomed together as a unit. Members of the broader inode-sharing group that have *different* `payload_hash` values are separate payload-groups and are planned and executed independently (though the hardlink-construction optimization in §5.1.2 connects their execution).
 
-**Why?**
-- Prevents split scenarios (some siblings on stash, others on pool)
+**Why move exact-hash siblings together?**
+- Prevents split scenarios where some exact siblings are on stash and others on pool at the same logical path
 - Single source of truth for payload location
 - Simplifies reasoning about system state
 
@@ -693,6 +889,15 @@ A **hitchhiker** is when two or more torrents with different payload content sha
 **Requirement:** Newly constructed migrations, rehome plans, and view builds must always produce **per-hash unique target roots** — one directory tree per `payload_hash`. For cases where a natural target path would collide (e.g., two different payloads that would both want the same directory name), the system must route into `_rehome-unique/<payload_hash>/` subdirectories to preserve uniqueness.
 
 Existing legacy hitchhiker groups may persist until explicitly de-hitchhiked. Do not create new hitchhiker targets even as a workaround.
+
+**Two hitchhiker types — different root causes, different remediation:**
+
+| Type | Description | Detection | Remediation |
+|---|---|---|---|
+| **Type A — content-level** | Multiple distinct `payload_hash` values share one physical directory; files from different torrents are co-mingled on disk | Inode-overlap analysis across different `payload_id` values | Split into unique per-hash trees using hardlinks; highest risk, requires content verification |
+| **Type B — path-level** | Multiple `torrent_instances` share one `payload_id` but their `save_path` values point to a non-canonical parent (correct content, wrong path) | `hitchhiker.py` audit (2+ `torrent_instances` per `payload_id`) | Path normalization only — no data movement, just client repoint to canonical path |
+
+Type B is the common case from early rehome sessions. Type A is rarer and higher risk. The current `hitchhiker.py` detects Type B only.
 
 **Legacy Hitchhiker Remediation Requirement:**
 
@@ -847,7 +1052,7 @@ Choose `--scan-hash-mode fast --drift-policy metadata` for routine rescans. Choo
 
 **Sync Process:** Connects to qBittorrent, maps torrents to payloads, and updates the catalog.
 
-**CLI usage:** See `docs/tooling/CLI-OPERATIONS.md` (payload commands).
+**CLI usage:** See `docs/RUNBOOK.md` (payload commands).
 
 ---
 
@@ -883,11 +1088,11 @@ Choose `--scan-hash-mode fast --drift-policy metadata` for routine rescans. Choo
 
 **Architecture:** Plan → Review → Apply workflow with mandatory dry-run before force-apply.
 
-**Detailed Usage:** See `docs/tooling/REHOME-RUNBOOK.md`
+**Detailed Usage:** See `docs/RUNBOOK.md`
 
 ### 8.2 Planning Phase
 
-**Command:** `rehome plan` (details in `docs/tooling/REHOME-RUNBOOK.md`)
+**Command:** `rehome plan` (details in `docs/RUNBOOK.md`)
 
 **Modes:** single-torrent, batch by payload hash, batch by tag.
 
@@ -923,13 +1128,13 @@ Choose `--scan-hash-mode fast --drift-policy metadata` for routine rescans. Choo
 Payloads with `payload_hash = NULL` (full SHA256 not yet computed for all files) are **not eligible for REUSE planning** — sibling matching requires a complete hash. These payloads must have `hashall sha256-backfill` run first. MOVE planning for NULL-hash payloads is allowed only when relying on file-count and byte-count verification alone (lower confidence).
 
 **Catalog Freshness Requirement:**
-Plans must be generated from a current catalog state. **Always run `hashall refresh` (or `hashall scan` + `hashall payload sync`) immediately before generating a plan.** A stale catalog may show payloads at incorrect locations, miss recently-created external consumers, or produce incorrect sibling lists. The REHOME-RUNBOOK makes this a hard operational requirement.
+Plans must be generated from a current catalog state. **Always run `hashall refresh` (or `hashall scan` + `hashall payload sync`) immediately before generating a plan.** A stale catalog may show payloads at incorrect locations, miss recently-created external consumers, or produce incorrect sibling lists. The RUNBOOK makes this a hard operational requirement.
 
 **Output:** Plan JSON file — written to `~/.logs/hashall/reports/rehome-runs/plans/<plan>.json`
 
 ### 8.3 Application Phase
 
-**Command:** `rehome apply <plan_file>` (details in `docs/tooling/REHOME-RUNBOOK.md`)
+**Command:** `rehome apply <plan_file>` (details in `docs/RUNBOOK.md`)
 
 **Modes:**
 - `--dryrun`: Preview actions without making changes
@@ -982,15 +1187,23 @@ Libtorrent verification (`checking_files`) that shows no progress for longer tha
 - For MOVE plans, source cleanup remains staged (not committed) on any failure
 - Cleanup is never performed on apply failure
 
-**Usage examples:** See `docs/tooling/REHOME-RUNBOOK.md`.
+**Usage examples:** See `docs/RUNBOOK.md`.
 
 ### 8.4 qBittorrent Integration
 
-**Client authority during the RT transition:**
-- RT is the operational authority for live path truth and repair intent
-- qB remains online as a silent mirror because its metadata is still valuable during the transition
-- when a live torrent path changes, any corresponding RT and qB entries must be kept aligned
-- do not treat a qB-only path change as success if RT still points elsewhere
+**Client roles (permanent architecture):**
+- **RT (rTorrent) is the active seeder.** RT is the operational authority for live seeding, path truth, and repair intent. RT's path is treated as canonical in all path-dispute tiebreakers.
+- **qB (qBittorrent) is permanently deprecated — kept on life support.** qB is not active and will not be made active again unless there is a deliberate decision to revert. qB items are kept paused/stopped. qB is retained solely because its tag, category, and path metadata remains useful as a cross-reference during the rehome cleanup. The long-term plan is to complete the RT migration and shut qB down. All new repair work targets RT as the canonical state; qB is adjusted to match RT, not the reverse.
+
+**qB MUST NEVER download.** Every qB torrent must be in `stoppedUP` (or `stoppedDL` transiently, pending recheck). Any qB torrent found in an active download state (`downloading`, `stalledDL`, `pausedDL`, `stoppedDL` after recheck) is a hard failure. Root causes: (a) torrent added without `skip_checking` during a race window when files were not yet stable → fix: always pass `--skip-checking` in sync scripts; (b) save_path mismatch → fix: audit with `make client-drift-audit`; (c) sync script crash left orphaned adds → fix: run `make rt-qb-mirror-drift` and recheck. Immediate remediation: recheck the affected hash in qB; it will resolve to `stoppedUP` once pieces verify.
+
+**Path synchronization rule (§4.4 and §8.4):**
+- qB and RT must mirror each other item-for-item, path-for-path.
+- When qB and RT paths differ for the same hash:
+  1. If only one client is on the correct placement tier (stash vs pool), repoint the other to match the correct-tier client.
+  2. If both clients are on the correct placement tier but at different paths, **RT's path is canonical — repoint qB to match RT.** Do not treat this as a manual-review blocker unless there is evidence that RT's path is itself incorrect (non-canonical, missing, or structurally wrong).
+  3. RT's path is deemed incorrect only if: it does not follow §4.4.3 category rules, the path does not physically exist, or there is a documented reason to prefer qB's path.
+- A path change is not complete until both clients agree. Do not treat a qB-only or RT-only path change as success.
 
 **Authentication:**
 - Environment variables: `QBITTORRENT_URL`, `QBITTORRENT_USER`, `QBITTORRENT_PASS`
@@ -1244,6 +1457,10 @@ The system must be:
 
 **View (Torrent View):** A torrent-specific payload tree composed from a canonical donor payload, normally via hardlinks. Multiple views can preserve distinct qB item layout semantics while reusing the same physical bytes with zero additional disk usage. Each view must have a unique root per payload hash (no hitchhikers).
 
+**Tracker Key:** The short identifier for a tracker as defined in the traktor tracker registry (`tracker-registry.yml`). This is the YAML top-level key (e.g. `darkpeers`, `fearnopeer`, `abtorrents`). It is the authoritative identifier used for: qB category names, seeding path subdirectories, qbit_manage tags, and rTorrent labels. Resolve announce URLs to tracker keys via the `tracker_url_pattern` field in the registry. See §4.4.4.
+
+**Canonical Path:** The one correct on-disk path for a torrent item, derived from: `<seeding-root>/<category>/<item-payload-name>`. Category is determined by item origin (see §4.4.3). A torrent's current path is non-canonical if it does not match this formula — such paths are legacy artifacts requiring repair. See §4.4.
+
 ---
 
 ## 11. Implementation Status
@@ -1360,6 +1577,32 @@ The system is successful if:
 ---
 
 ## Document History
+
+**Version 1.6 (2026-05-19):**
+- §4.4.3: Clarified that Prowlarr display-name dirs (e.g. `Darkpeers (API)/`) are canonical for cross-seed items alongside short registry-key form; do not rename — cross-seed re-creates them on injection
+- §6.3: Added Type A vs Type B hitchhiker taxonomy (content-level vs path-level; different detection and remediation); noted `hitchhiker.py` detects Type B only
+- (BACKLOG) Canonical Tree Normalization: replaced thin placeholder with full taxonomy of non-canonical path classes 1–5 (counts, causes, remediation), class 6 acceptance note, safe remediation order, structural rename deferred list
+
+**Version 1.5 (2026-05-19):**
+- §2.1: Added explicit note distinguishing `/pool/data/seeds` (cross-seed scan dataDir, not a rehome destination) from `/pool/media/torrents/seeding` (active pool seeding root); flagged stale `default_dest_root` defaults
+- §4.2.1: Fixed duplicate §4.2.1 section numbering (renamed "Broader Content Inventory Requirement" to §4.2.2); added concept-clarification table distinguishing exact-hash siblings (catalog identity unit) from broader inode-sharing group (placement unit); added key rule that broader-group members with different `payload_hash` are handled independently
+- §4.4.2: Added seeding root selection rule (pool-eligible → pool root, stash-anchored → stash root); added path-preservation-on-rehome clause (seeding-relative path preserved verbatim across roots)
+- §5.1.1 (new): Documented cross-filesystem byte-copy requirement — stash→pool MOVE is always rsync, never hardlink or rename; stash source not removed until pool copy verified and clients confirmed seeding
+- §5.1.2 (new): Documented primary mover selection rule for inode-sharing group rehome (6-priority ordered rule + disqualifiers); documented hardlink construction phase; clarified target pool path model (unique canonical trees per torrent, hardlinked — not shared-directory REUSE)
+- §5.3: Clarified payload-group definition as exact-hash siblings only; distinguished from broader inode-sharing group; noted that different-`payload_hash` members are planned independently but linked by §5.1.2 hardlink optimization
+
+**Version 1.4 (2026-05-19):**
+- §4.1.1: Added hardlink threshold rationale (any single hardlink mandates stash; qbit_manage ~noHL alignment)
+- §4.4.4: Replaced "Prowlarr tracker name" with traktor tracker registry key as authoritative source; documented registry structure and search path
+- §8.4: Updated qB role from "transitional mirror" to "permanently deprecated, kept on life support"; clarified RT-only repair direction
+- §10: Added Tracker Key and Canonical Path terminology entries
+
+**Version 1.3 (2026-05-19):**
+- Added §4.4: Canonical Seeding Path Specification — payload uniqueness definition, path formula, category rules by origin, historical category evolution, path uniqueness requirement
+- Updated §8.4: made RT active-seeder / qB passive-mirror roles explicit; added path-dispute tiebreaker rule (RT wins when both on correct tier)
+
+**Version 1.2 (2026-04-18):**
+- (prior entry, content unchanged)
 
 **Version 1.1 (2026-03-18):**
 - Corrected pool topology: added `pool-data`/`pool-media` ZFS dataset distinction and active dataset migration

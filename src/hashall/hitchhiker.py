@@ -24,6 +24,7 @@ class HitchhikerStatus(str, Enum):
     PARTIALLY_SPLIT = "partially_split"  # some hashes already in _rehome-unique
     BUSY = "busy"                 # one or more hashes in checking/active state
     SAFE_TO_SPLIT = "safe_to_split"  # all hashes stopped, no busy, not partially split
+    TYPE_A = "type_a"             # multiple distinct payloads sharing same root_path (catalog collision)
 
 
 HEALTHY_QB_SPLIT_STATES = {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
@@ -68,6 +69,63 @@ def query_hitchhiker_groups(db_path: Optional[str] = None, limit: Optional[int] 
         return [dict(row) for row in rows]
     finally:
         conn.close()
+
+
+def query_type_a_groups(db_path: Optional[str] = None) -> list[HitchhikerGroup]:
+    """
+    Query catalog for Type A hitchhikers: distinct payload rows sharing the same root_path.
+
+    Type A = different items with different file sets cataloged under the same on-disk tree
+    root (catalog collision). Each shared root_path becomes one HitchhikerGroup with
+    status=TYPE_A; hashes are all torrent_instances across all colliding payloads.
+    """
+    db = find_db_path(db_path)
+    conn = sqlite3.connect(str(db), timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT p.payload_id, p.root_path, p.file_count, p.total_bytes, ti.torrent_hash
+            FROM payloads p
+            LEFT JOIN torrent_instances ti ON ti.payload_id = p.payload_id
+            WHERE p.root_path IN (
+                SELECT root_path FROM payloads
+                GROUP BY root_path HAVING COUNT(DISTINCT payload_id) > 1
+            )
+            ORDER BY p.root_path, p.payload_id, ti.torrent_hash
+        """).fetchall()
+    finally:
+        conn.close()
+
+    # Group by root_path
+    by_root: dict = {}
+    for row in rows:
+        key = row["root_path"]
+        if key not in by_root:
+            by_root[key] = {
+                "payload_ids": [],
+                "hashes": [],
+                "file_count": row["file_count"],
+                "total_bytes": row["total_bytes"],
+                "first_payload_id": row["payload_id"],
+            }
+        if row["payload_id"] not in by_root[key]["payload_ids"]:
+            by_root[key]["payload_ids"].append(row["payload_id"])
+        if row["torrent_hash"] is not None:
+            by_root[key]["hashes"].append(row["torrent_hash"])
+
+    groups: list[HitchhikerGroup] = []
+    for root_path, data in by_root.items():
+        notes = [f"  payload_ids sharing this root: {data['payload_ids']}"]
+        groups.append(HitchhikerGroup(
+            payload_id=data["first_payload_id"],
+            root_path=root_path,
+            file_count=data["file_count"],
+            total_bytes=data["total_bytes"],
+            hashes=data["hashes"],
+            status=HitchhikerStatus.TYPE_A,
+            notes=notes,
+        ))
+    return groups
 
 
 def audit_hitchhiker_groups(
@@ -239,6 +297,9 @@ def audit_hitchhiker_groups(
             )
         )
 
+    # Append Type A (catalog collision) groups — separate query, no client-state needed.
+    groups.extend(query_type_a_groups(db_path=db_path))
+
     return groups
 
 
@@ -272,6 +333,7 @@ def format_hitchhiker_report(groups: list[HitchhikerGroup], json_output: bool = 
         by_status.setdefault(g.status, []).append(g)
 
     for status in [
+        HitchhikerStatus.TYPE_A,
         HitchhikerStatus.BLOCKED,
         HitchhikerStatus.SAFE_TO_SPLIT,
         HitchhikerStatus.UNSPLIT,
@@ -285,6 +347,7 @@ def format_hitchhiker_report(groups: list[HitchhikerGroup], json_output: bool = 
 
     # Detail per group
     for status in [
+        HitchhikerStatus.TYPE_A,
         HitchhikerStatus.BLOCKED,
         HitchhikerStatus.SAFE_TO_SPLIT,
         HitchhikerStatus.UNSPLIT,

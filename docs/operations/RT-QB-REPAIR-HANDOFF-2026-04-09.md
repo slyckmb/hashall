@@ -1,6 +1,163 @@
 # RT/QB Repair Handoff
 
-Last updated: 2026-04-09
+Last updated: 2026-05-08
+
+## Current Status As Of 2026-05-08
+
+This document now serves as the qB/RT repair handoff for the current May 2026
+lane. Older April sections below are historical context for prior RT payload
+repair work; use `docs/operations/RUN-STATE.md` as the source of truth for the
+live queue.
+
+Current objective:
+
+- keep qB and rTorrent in sync
+- remove same-hash qB/RT save-path drift
+- keep ARR-hardlinked data on `/data/media` / `/stash/media`
+- keep non-ARR-hardlinked seeded payloads on `/pool/media`
+- minimize manual/error rows without unsafe broad mutation
+
+Non-negotiable context:
+
+- `/data/media` and `/stash/media` are the same mounted `stash/media`
+  filesystem. They must be treated as aliases, not separate copies.
+- qB `~noHL` is advisory only. Confirm actual filesystem hardlink/ARR state
+  before making destructive choices.
+- Every live mutation needs selected evidence, dry-run, human inspection, and
+  postcheck.
+
+Latest evidence reviewed:
+
+- qB cache: `~/.cache/silo-qb/torrents-info.json`
+  - fetched: `2026-05-08T23:07:42Z`
+  - rows: `5203`
+  - source: `daemon_live`
+- RT cache: `~/.cache/silo-rt/torrents.json`
+  - fetched: `2026-05-08T23:07:30Z`
+  - rows: `5210`
+  - source: `daemon_live`
+- catalog: `~/.hashall/catalog.db`
+  - target DB mtime: `2026-05-08 18:23:08 -0400`
+  - recent completed scan sessions include `/stash/media`, `/pool/media`,
+    `/pool/data`, and `/pool/media/torrents/seeding`
+- latest current-branch read-only audit:
+  - qB rows: `5203`
+  - RT rows: `5210`
+  - qB-only: `0`
+  - RT-only: `7`
+  - same-hash path drift: `11`
+  - action counts: `manual_review=18`
+
+Useful commands:
+
+```bash
+make client-drift-audit LIMIT=0
+make client-drift-path-drift LIMIT=0
+make client-drift-rank
+make client-drift-selected HASH=<hash> JSON=1
+make client-drift-rt-to-qb-dry HASH=<hash>
+make client-drift-qb-to-rt-dry HASH=<hash>
+make hitchhiker-audit HASH=<hash>
+make hitchhiker-plan HASH=<hash>
+make hitchhiker-split-dry HASH=<hash>
+```
+
+Completed / DONE:
+
+- Alias drift was corrected after the `/data/media` == `/stash/media` issue was
+  caught.
+- `client-drift` now canonicalizes mount aliases for path alignment, placement
+  classification, catalog alias lookup, and filesystem anchor scanning.
+- Same-hash drift audit/ranking exists and reports ARR status, `~noHL`, sibling
+  payloads, root location, and blockers.
+- Hitchhiker split tooling is selected-safe and fail-closed.
+- One live same-hash pilot already succeeded:
+  - `97343f6005da2ed8` Cinderella
+  - RT was repointed to the qB `/pool/media` target
+  - selected drift became `0`
+  - full same-hash drift count dropped to `11`
+
+Current same-hash path-drift queue:
+
+Easy:
+
+- `5c86280a99d10071` Spider-Man Into the Spider-Verse
+  - desired: stash
+  - ARR: linked
+  - qB: `/data/media/torrents/seeding/_qb-repair-v2/5c86280a99d1007104452b2f72d0d686e092e2f8`
+  - RT: `/data/media/torrents/seeding/cross-seed/Aither (API)`
+  - next action: selected evidence and dry-run, then human review
+
+Medium:
+
+- `20555f704e0ae477` Bottle Shock
+- `e2a7eab3a5be76f7` Here
+- `1a06655541134463` Top Gun
+- `4052607092357bfe` Twisters
+- `2a4e075ecf0962ba` V for Vendetta
+
+These are canonical tree/shape decisions where both clients are mostly already
+on the required storage class. Do not blindly repoint without choosing the
+canonical tree.
+
+Hard:
+
+- `4f454ed3bdf830f0` Alien Resurrection
+- `2fb25fdf2ef20ae5` Novitiate
+- `29e2b889867a8fbb` Vigen Guroian
+- `a5a2b78798009b38` Wilding
+- `c7845e03fe21e7fa` Twin Peaks S01
+
+Hard-row interpretation:
+
+- Alien is an N->1 hitchhiker plus pool/stash conflict. qB is on pool, RT is on
+  stash, and the stash copy has an ARR hardlink anchor. Do not raw-qB
+  `setLocation`; build a selected hitchhiker/unique-view plan first.
+- Novitiate, Vigen, and Wilding are desired-pool rows where both clients are on
+  stash. These need rehome/donor/unique-view planning before client repoint.
+- Twin Peaks is multi-file/N->1 and needs review before mutation.
+
+Current RT-only queue:
+
+- `15a56906462ad267` Ignorance is Strength.epub
+- `395b3ff95d860eb7` Saturday Night 2024 REPACK, YUSCENE
+- `5fbb9f5cfe372cbf` War is Peace.epub
+- `89465b82fca588cf` Saturday Night 2024 REPACK, OnlyEncodes
+- `daa0978ebef4cd67` Lao Tzu - Ursula K. Le Guin.epub
+- `e4132f64e2e13839` Outlander S08E09
+- `f0d2a999fb7e9daa` Freedom is Slavery.epub
+
+RT-only policy is not decided. Do not mirror, remove, or repair these until the
+operator chooses the policy.
+
+Recommended next phase:
+
+1. Start with Spider-Man:
+
+   ```bash
+   make client-drift-selected HASH=5c86280a99d10071 JSON=1
+   make client-drift-rank HASH=5c86280a99d10071
+   ```
+
+2. Collect direct filesystem proof:
+   - qB and RT content path `stat`
+   - samefile/hardlink comparison
+   - ARR samefile anchor scan
+   - qB tags and qB/RT state
+   - rollback path
+
+3. Produce a dry-run command and stop for human review.
+4. Apply at most one hash after approval.
+5. Re-run:
+
+   ```bash
+   make client-drift-audit LIMIT=0
+   make client-drift-rank
+   ```
+
+6. Only then continue to the medium stash/stash canonical tree table.
+
+## Historical April RT Payload Repair Context
 
 ## Summary
 

@@ -1,20 +1,27 @@
 """
-Save-path repair: move secondary hashes from _rehome-unique/<hash16>/ to canonical paths.
+Save-path repair: move hashes from staging dirs to canonical seeding paths.
 
-After hitchhiker split, secondary hashes live in _rehome-unique/<hash16>/ as temporary
-locations. This module moves them to their canonical seeding paths based on category/tags
-and stash-vs-pool placement decisions.
+Staging dirs handled:
+  _rehome-unique/<hash16>/    — hitchhiker-split secondaries (stash + pool)
+  _qb-finish/<hash40>/        — qB-finish legacy staging (stash only)
+  _qb-unique-repair/<hash40>/ — qB-unique-repair legacy staging (stash only)
+
+All hashes are moved to their canonical paths based on category/tags and
+stash-vs-pool placement decisions.
 """
 
+import logging
 import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 from .qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
 from .rt_cache import load_rt_cache_snapshot
-from .save_path_inference import infer_canonical_save_path
+from .save_path_inference import infer_canonical_save_path, _STAGING_DIRS
 from .rtorrent import rt_apply_directory_repoint, DEFAULT_RT_RPC_URL
 from .utils import find_db_path
 
@@ -53,28 +60,57 @@ class RepairResult:
     notes: list[str] = field(default_factory=list)
 
 
-def _scan_rehome_unique_hashes(
+def _staging_has_real_content(path: Path) -> bool:
+    """True if path contains any real files or symlinks (not just empty subdirectory structure)."""
+    return any(p for p in path.rglob("*") if not p.is_dir())
+
+
+def _is_in_staging_dir(path_str: str) -> bool:
+    """True if path_str contains any staging directory component."""
+    return any(f"/{d}/" in path_str or path_str.endswith(f"/{d}") for d in _STAGING_DIRS)
+
+
+def _scan_staging_hashes(
     max_age_s: int = 300,
 ) -> dict[str, str]:
     """
-    Scan _rehome-unique directories and return hash → source_path_fs mapping.
-    Returns {hash_lower: fs_path_to_rehome_dir}.
+    Scan all staging directories and return hash → source_path_fs mapping.
+
+    Scanned dirs:
+      _rehome-unique/    — stash + pool  (hash16 dir names)
+      _qb-finish/        — stash only    (hash40 dir names)
+      _qb-unique-repair/ — stash only    (hash40 dir names)
+
+    Returns {hash_lower: fs_path_to_staging_hash_dir}.
     """
-    rehome_hashes: dict[str, str] = {}
+    staging_hashes: dict[str, str] = {}
 
-    # Scan both stash and pool
-    for root_base in ["/stash/media/torrents/seeding", "/pool/media/torrents/seeding"]:
-        rehome_dir = Path(root_base) / "_rehome-unique"
-        if not rehome_dir.exists():
+    stash_root = "/stash/media/torrents/seeding"
+    pool_root = "/pool/media/torrents/seeding"
+
+    # _rehome-unique: stash + pool
+    for root_base in [stash_root, pool_root]:
+        d = Path(root_base) / "_rehome-unique"
+        if not d.exists():
             continue
+        for hash_dir in sorted(d.iterdir()):
+            if hash_dir.is_dir():
+                staging_hashes[hash_dir.name.lower()] = str(hash_dir)
 
-        for hash_dir in sorted(rehome_dir.iterdir()):
-            if not hash_dir.is_dir():
-                continue
-            hash_val = hash_dir.name.lower()
-            rehome_hashes[hash_val] = str(hash_dir)
+    # _qb-finish and _qb-unique-repair: stash only
+    for staging_name in ("_qb-finish", "_qb-unique-repair"):
+        d = Path(stash_root) / staging_name
+        if not d.exists():
+            continue
+        for hash_dir in sorted(d.iterdir()):
+            if hash_dir.is_dir():
+                staging_hashes[hash_dir.name.lower()] = str(hash_dir)
 
-    return rehome_hashes
+    return staging_hashes
+
+
+# Backward-compat alias used by legacy callers (gc, audit) — remove once all callers updated.
+_scan_rehome_unique_hashes = _scan_staging_hashes
 
 
 def _api_path(path_on_fs: str, fs_root: str, api_root: str) -> str:
@@ -111,8 +147,13 @@ def _move_tree(src: Path, dst_parent: Path, *, dry_run: bool) -> int:
             if not dry_run:
                 dst_file.parent.mkdir(parents=True, exist_ok=True)
                 if dst_file.exists():
-                    raise FileExistsError(f"target already exists: {dst_file}")
-                shutil.move(str(item), str(dst_file))
+                    if dst_file.stat().st_ino == item.stat().st_ino:
+                        # Same inode (hardlink): file already at target, just remove source link
+                        item.unlink()
+                    else:
+                        raise FileExistsError(f"target already exists: {dst_file}")
+                else:
+                    shutil.move(str(item), str(dst_file))
             count += 1
 
     return count
@@ -128,7 +169,7 @@ def audit_repair_candidates(
     """
     import sqlite3
 
-    rehome_hashes = _scan_rehome_unique_hashes(max_age_s=max_age_s)
+    rehome_hashes = _scan_staging_hashes(max_age_s=max_age_s)
     if not rehome_hashes:
         return []
 
@@ -147,8 +188,8 @@ def audit_repair_candidates(
             all_hashes = list(rehome_hashes.keys())
             live = qb_client.get_torrents_by_hashes(all_hashes) or {}
             qb_by_hash = {h.lower(): v for h, v in live.items()}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load qB cache: %s", exc)
 
     # Load RT state from cache
     rt_by_hash: dict = {}
@@ -156,8 +197,8 @@ def audit_repair_candidates(
         snapshot = load_rt_cache_snapshot() or {}
         rows = snapshot.get("rows") or []
         rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load RT cache: %s", exc)
 
     # Load catalog entries to get original save_path/category hints
     catalog_by_hash: dict = {}
@@ -177,8 +218,8 @@ def audit_repair_candidates(
                 "root_path": row["root_path"],
             }
         conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load catalog: %s", exc)
 
     # Plan repairs
     actions = []
@@ -233,23 +274,37 @@ def _resolve_full_hash(hash_val: str, qb_by_hash: dict, conn_db) -> str:
     Resolve a possibly-truncated hash (hash16) to its full 40-char hash.
     Searches qB dict by prefix, then DB by LIKE prefix.
     Returns the input unchanged if already 40 chars or not found.
+
+    Bug B guard: if prefix matches more than one full hash, raise ValueError
+    instead of silently using the first match. See BACKLOG.md Gap 6.
     """
     if len(hash_val) >= 40:
         return hash_val.lower()
     prefix = hash_val.lower()
     # Try qB dict by prefix match
-    for full_h in qb_by_hash:
-        if full_h.startswith(prefix):
-            return full_h
+    matches = sorted(full_h for full_h in qb_by_hash if full_h.startswith(prefix))
+    if len(matches) > 1:
+        raise ValueError(
+            f"ambiguous prefix {prefix}: matches {len(matches)} hashes "
+            f"({', '.join(m[:16] for m in matches[:5])})"
+        )
+    if len(matches) == 1:
+        return matches[0]
     # Try DB by LIKE
     if conn_db is not None:
         try:
-            row = conn_db.execute(
-                "SELECT torrent_hash FROM torrent_instances WHERE torrent_hash LIKE ? LIMIT 1",
+            rows = conn_db.execute(
+                "SELECT torrent_hash FROM torrent_instances WHERE torrent_hash LIKE ?",
                 [prefix + "%"],
-            ).fetchone()
-            if row:
-                return str(row[0]).lower()
+            ).fetchall()
+            if len(rows) > 1:
+                raise ValueError(
+                    f"ambiguous prefix {prefix}: {len(rows)} matches in catalog DB"
+                )
+            if len(rows) == 1:
+                return str(rows[0][0]).lower()
+        except ValueError:
+            raise
         except Exception:
             pass
     return prefix  # fallback: return as-is
@@ -311,11 +366,11 @@ def execute_repair(
         category="unknown",
     )
 
-    # Find the hash in _rehome-unique
-    rehome_hashes = _scan_rehome_unique_hashes()
-    source_path_fs = rehome_hashes.get(hash_val.lower())
+    # Find the hash in any staging dir
+    staging_hashes = _scan_staging_hashes()
+    source_path_fs = staging_hashes.get(hash_val.lower())
     if not source_path_fs:
-        result.error = f"hash not found in _rehome-unique: {hash_val}"
+        result.error = f"hash not found in any staging dir: {hash_val}"
         return result
 
     # Load qB state from cache (avoids live API hit)
@@ -333,8 +388,8 @@ def execute_repair(
             # Cache miss: fetch live for just this hash (expensive but correct)
             live = qb_client.get_torrents_by_hashes([hash_val]) or {}
             qb_by_hash = {h.lower(): v for h, v in live.items()}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load qB cache: %s", exc)
 
     # Load RT state from cache
     rt_by_hash: dict = {}
@@ -342,8 +397,8 @@ def execute_repair(
         snapshot = load_rt_cache_snapshot() or {}
         rows = snapshot.get("rows") or []
         rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("save_path_repair: failed to load RT cache: %s", exc)
 
     # Open DB for catalog hints and hash resolution
     conn_db = None
@@ -379,11 +434,53 @@ def execute_repair(
     qb_torrent = qb_by_hash.get(effective_hash)
     rt_info = rt_by_hash.get(effective_hash, {})
 
+    # Guard: skip torrents that are still downloading — moving a partial file to the
+    # canonical path is wrong; the data would be incomplete at the destination.
+    if qb_torrent is not None:
+        qb_progress = getattr(qb_torrent, "progress", None)
+        qb_amount_left = getattr(qb_torrent, "amount_left", None)
+        is_incomplete = (qb_progress is not None and qb_progress < 1.0) or (
+            qb_amount_left is not None and qb_amount_left > 0
+        )
+        if is_incomplete:
+            pct = f"{qb_progress * 100:.1f}%" if qb_progress is not None else "unknown%"
+            result.notes.append(
+                f"SKIP: torrent is still downloading ({pct} complete)"
+                f" — repair only applies to completed/seeding torrents"
+            )
+            result.success = True
+            return result
+
+    # Bug 5 guard: orphan empty staging dirs → skip early, before inference.
+    # Use save_path/directory filter (not bare prefix match): with 4800+ torrents,
+    # ~80% of 16-char hash prefixes collide with unrelated hashes in qb_by_hash.
+    src_early = Path(source_path_fs)
+    if src_early.is_dir() and not _staging_has_real_content(src_early):
+        qb_at_staging = qb_torrent is not None and _is_in_staging_dir(
+            str(getattr(qb_torrent, "save_path", ""))
+        )
+        rt_at_staging = _is_in_staging_dir(str(rt_info.get("directory", "")))
+        if not qb_at_staging and not rt_at_staging:
+            result.notes.append(
+                "SKIP: orphan empty staging dir — no live qB/RT entry, nothing to repair"
+            )
+            result.success = True
+            return result
+
     qb_category = qb_torrent.category if qb_torrent else ""
     result.category = qb_category or "unknown"
 
     # qb_torrent.tags is a comma-separated string (not a list)
     qb_tags = qb_torrent.tags if qb_torrent and qb_torrent.tags else ""
+
+    # Guard: ~issue tag → needs manual review before any automated repair
+    tags_set = {t.strip() for t in qb_tags.split(",") if t.strip()}
+    if "~issue" in tags_set:
+        result.notes.append(
+            "SKIP: torrent tagged ~issue — needs manual review before automated repair"
+        )
+        result.success = True
+        return result
     catalog_save_path = catalog_info.get("save_path", "")
 
     inferred = infer_canonical_save_path(
@@ -398,61 +495,91 @@ def execute_repair(
         result.error = f"malformed canonical path: {inferred.canonical_save_path}"
         return result
 
+    # Reject ambiguous inference that resolves to a bare seeding root (no subdir)
+    _SEEDING_ROOTS = {
+        "/data/media/torrents/seeding",
+        "/stash/media/torrents/seeding",
+        "/pool/media/torrents/seeding",
+    }
+    if (
+        inferred.reliability == "ambiguous"
+        and inferred.canonical_save_path.rstrip("/") in _SEEDING_ROOTS
+    ):
+        result.error = f"ambiguous canonical path (bare seeding root): {inferred.canonical_save_path}"
+        return result
+
     # Filesystem path: stash uses /stash/media/, pool uses /pool/media/ (same as API)
     if inferred.device == "stash":
         target_fs = inferred.canonical_save_path.replace("/data/media", "/stash/media")
     else:
         target_fs = inferred.canonical_save_path  # pool: API path == FS path
 
-    # RT needs the content directory: canonical_api/torrent_name for multi-file
-    torrent_name = qb_torrent.name if qb_torrent else ""
-    if torrent_name:
-        rt_target_dir = inferred.canonical_save_path.rstrip("/") + "/" + torrent_name
-    else:
-        rt_target_dir = inferred.canonical_save_path
+    # RT d.directory.set takes the parent dir; rTorrent appends info_name itself
+    rt_target_dir = inferred.canonical_save_path
 
     try:
         src = Path(source_path_fs)
         dst = Path(target_fs)  # canonical save_path dir (not its parent)
+
+        staging_is_empty = src.is_dir() and not _staging_has_real_content(src)
         files_moved = _move_tree(src, dst, dry_run=dry_run)
 
+        # Bug 2 guard: skip fastresume patch when staging dir was empty and qB still
+        # points to a staging dir — data already moved elsewhere, destination unknown.
+        qb_at_rehome = qb_torrent and _is_in_staging_dir(str(qb_torrent.save_path))
+        if files_moved == 0 and staging_is_empty and qb_at_rehome:
+            result.notes.append(
+                "SKIP: empty staging dir, qB still at _rehome-unique"
+                " — data already moved; needs manual investigation before fastresume patch"
+            )
+            result.success = True
+            return result
+
+        should_apply = files_moved > 0 or qb_at_rehome
+
         if not dry_run:
-            # Stop qB, patch fastresume, start qB
-            fastresume_path = qb_client._fastresume_path(effective_hash)
-            if fastresume_path.exists():
-                _docker_stop_qb(qb_container)
-                try:
-                    from .fastresume import patch_fastresume_file
-                    patch_fastresume_file(
-                        fastresume_path,
-                        inferred.canonical_save_path,
-                        ".bak-repair",
-                    )
-                finally:
-                    _docker_start_qb(qb_container, qb_url)
-                result.notes.append(f"patched fastresume → {inferred.canonical_save_path}")
+            if not should_apply:
+                result.notes.append(
+                    f"SKIP: 0 files moved, qB save_path not in _rehome-unique"
+                    f" — fastresume/RT not modified"
+                )
             else:
-                result.notes.append(f"fastresume not found: {fastresume_path}")
+                # Stop qB, patch fastresume, start qB
+                fastresume_path = qb_client._fastresume_path(effective_hash)
+                if fastresume_path.exists():
+                    _docker_stop_qb(qb_container)
+                    try:
+                        from .fastresume import patch_fastresume_file
+                        patch_fastresume_file(
+                            fastresume_path,
+                            inferred.canonical_save_path,
+                            ".bak-repair",
+                        )
+                    finally:
+                        _docker_start_qb(qb_container, qb_url)
+                    result.notes.append(f"patched fastresume → {inferred.canonical_save_path}")
+                else:
+                    result.notes.append(f"fastresume not found: {fastresume_path}")
 
-            # Repoint RT (best-effort)
-            if rt_info:
+                # Repoint RT (best-effort)
+                if rt_info:
+                    try:
+                        rt_apply_directory_repoint(
+                            effective_hash,
+                            rt_target_dir,
+                            rpc_url=rpc_url,
+                            restart=True,
+                        )
+                        result.notes.append(f"RT repointed → {rt_target_dir}")
+                    except Exception as rt_exc:
+                        result.notes.append(f"RT repoint failed: {rt_exc}")
+
+                # Recheck torrent to confirm content at new location
                 try:
-                    rt_apply_directory_repoint(
-                        effective_hash,
-                        rt_target_dir,
-                        rpc_url=rpc_url,
-                        restart=True,
-                    )
-                    result.notes.append(f"RT repointed → {rt_target_dir}")
-                except Exception as rt_exc:
-                    result.notes.append(f"RT repoint failed: {rt_exc}")
-
-            # Recheck torrent to confirm content at new location
-            try:
-                qb_client.recheck_torrent(effective_hash)
-                result.notes.append("recheck triggered")
-            except Exception as rc_exc:
-                result.notes.append(f"recheck failed: {rc_exc}")
+                    qb_client.recheck_torrent(effective_hash)
+                    result.notes.append("recheck triggered")
+                except Exception as rc_exc:
+                    result.notes.append(f"recheck failed: {rc_exc}")
 
         result.success = True
         result.notes.append(
@@ -468,6 +595,68 @@ def execute_repair(
         result.notes.append("dry-run: no files moved, no qB/fastresume/RT changes made")
 
     return result
+
+
+def gc_empty_staging_dirs(*, dry_run: bool = True) -> tuple[int, int]:
+    """
+    Delete empty staging hash dirs (_rehome-unique/, _qb-finish/, _qb-unique-repair/)
+    that have no live qB/RT entry pointing to them.
+
+    Returns (deleted_count, total_found).
+    """
+    rehome_hashes = _scan_staging_hashes()
+
+    qb_by_hash: dict = {}
+    try:
+        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
+        qb_client = QBittorrentClient()
+        if cached_raw is not None:
+            for r in cached_raw:
+                t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                if t and t.hash:
+                    qb_by_hash[t.hash.lower()] = t
+        else:
+            all_hashes = list(rehome_hashes.keys())
+            live = qb_client.get_torrents_by_hashes(all_hashes) or {}
+            qb_by_hash = {h.lower(): v for h, v in live.items()}
+    except Exception as exc:
+        logger.warning("gc_empty_staging_dirs: failed to load qB cache: %s", exc)
+
+    rt_by_hash: dict = {}
+    try:
+        snapshot = load_rt_cache_snapshot() or {}
+        rows = snapshot.get("rows") or []
+        rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
+    except Exception as exc:
+        logger.warning("gc_empty_staging_dirs: failed to load RT cache: %s", exc)
+
+    deleted = 0
+    for hash_val, source_fs_path in sorted(rehome_hashes.items()):
+        src = Path(source_fs_path)
+        if not src.is_dir() or _staging_has_real_content(src):
+            continue  # has real content — skip
+        # A torrent is "live here" only if its save_path/directory actually points into
+        # this _rehome-unique dir — not just any torrent whose hash shares a 16-char prefix.
+        # (With 4800+ torrents, ~80% of 16-char prefixes collide with unrelated hashes.)
+        has_live_qb = any(
+            full_h.startswith(hash_val) and _is_in_staging_dir(str(t.save_path))
+            for full_h, t in qb_by_hash.items()
+        )
+        has_live_rt = any(
+            full_h.startswith(hash_val) and _is_in_staging_dir(str(r.get("directory", "")))
+            for full_h, r in rt_by_hash.items()
+        )
+        if has_live_qb or has_live_rt:
+            continue  # live client still points here — skip
+        if not dry_run:
+            # Use rmtree for dirs with empty subdirectory structure, rmdir for truly empty
+            if any(src.iterdir()):
+                shutil.rmtree(src)
+            else:
+                src.rmdir()
+        deleted += 1
+
+    return deleted, len(rehome_hashes)
 
 
 def format_repair_report(

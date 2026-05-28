@@ -200,3 +200,66 @@ def test_detect_drift(
             f"[{scenario}] expected {expected_reason_contains!r} "
             f"in drift_reason={report.drift_reason!r}"
         )
+
+
+# ---- pool device inference from path hint (no ~noHL tag) ----
+
+
+def test_pool_device_inferred_from_catalog_save_path():
+    """No ~noHL tag but catalog save_path on pool → device should be pool."""
+    result = infer_canonical_save_path(
+        category="cross-seed",
+        tags="private,cross-seed,Aither",
+        current_save_path=f"{POOL}/cross-seed/Aither (API)",
+    )
+    assert result.device == "pool", f"expected pool, got {result.device}"
+    assert result.canonical_save_path.startswith(POOL), result.canonical_save_path
+    assert any("device=pool" in n for n in result.notes), f"expected path-hint note, got {result.notes}"
+
+
+def test_pool_device_tag_wins_over_path_hint():
+    """~noHL tag takes priority even if current_save_path is on stash."""
+    result = infer_canonical_save_path(
+        category="tv",
+        tags="private,~noHL",
+        current_save_path=f"{STASH}/tv",  # stash path, but tag says pool
+    )
+    assert result.device == "pool"
+    assert not any("device=pool inferred from path" in n for n in result.notes)
+
+
+def test_stash_stays_stash_when_save_path_is_stash():
+    """No ~noHL, save_path on stash → remains stash."""
+    result = infer_canonical_save_path(
+        category="tv",
+        tags="private",
+        current_save_path=f"{STASH}/tv",
+    )
+    assert result.device == "stash"
+    assert not any("device=pool" in n for n in result.notes)
+
+
+def test_staging_path_does_not_override_device():
+    """A pool-rooted staging dir must NOT trigger pool device hint."""
+    result = infer_canonical_save_path(
+        category="cross-seed",
+        tags="private,cross-seed,Aither",
+        current_save_path=f"{POOL}/_rehome-unique/abcd1234abcd1234",
+    )
+    # staging path → no pool hint → defaults to stash
+    assert result.device == "stash", (
+        f"staging pool path must not override device; got {result.device}, notes={result.notes}"
+    )
+    assert not any("device=pool inferred from path" in n for n in result.notes)
+
+
+def test_rt_directory_pool_hint_used_when_save_path_absent():
+    """current_rt_directory on pool used as device hint when save_path is empty."""
+    result = infer_canonical_save_path(
+        category="cross-seed",
+        tags="private,cross-seed",
+        current_save_path="",
+        current_rt_directory=f"{POOL}/Aither",
+    )
+    assert result.device == "pool"
+    assert any("device=pool" in n for n in result.notes)

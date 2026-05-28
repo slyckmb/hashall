@@ -40,7 +40,7 @@ def test_build_seed_root_state_surfaces_active_target_and_legacy_mirrors():
     assert state["cross_seed"]["link_root"] == "/pool/media/torrents/seeding/cross-seed"
     assert state["migration"]["state"] == "in_progress"
     assert "/pool/data/media/torrents/seeding" in state["migration"]["source_roots"]
-    assert "/pool/data/seeds" in state["mirror_roots"]
+    assert "/pool/data/seeds" not in state["mirror_roots"]  # legacy root removed (§4.4)
     assert "/data/media/torrents/seeding" in state["mirror_roots"]
     assert "/stash/media/torrents/seeding" in state["mirror_roots"]
     validate_seed_root_state(state)

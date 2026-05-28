@@ -85,10 +85,7 @@ def _legacy_seed_roots_for_managed_path(path: str) -> list[str]:
     path = str(path).rstrip("/")
     roots: list[str] = []
     if path == "/pool/data":
-        roots.extend([
-            "/pool/data/media/torrents/seeding",
-            "/pool/data/seeds",
-        ])
+        roots.append("/pool/data/media/torrents/seeding")
     elif path == "/pool/media":
         roots.append("/pool/media/torrents/seeding")
     elif _looks_like_seeding_root(path):

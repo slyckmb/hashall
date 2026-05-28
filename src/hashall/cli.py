@@ -872,6 +872,18 @@ def payload():
     help="Limit number of queued incomplete roots to hash-upgrade (0 means all).",
 )
 @click.option("--low-priority", is_flag=True, help="Lower CPU/IO priority (nice +15, ionice idle).")
+@click.option(
+    "--orphan-gc-max-prune-count",
+    type=int,
+    default=None,
+    help=f"Override orphan GC count limit (default: {1000}, env: HASHALL_ORPHAN_GC_MAX_PRUNE_COUNT).",
+)
+@click.option(
+    "--orphan-gc-max-prune-fraction",
+    type=float,
+    default=None,
+    help=f"Override orphan GC fraction limit (default: {0.25}, env: HASHALL_ORPHAN_GC_MAX_PRUNE_FRACTION).",
+)
 def payload_sync(
     db,
     source,
@@ -892,6 +904,8 @@ def payload_sync(
     upgrade_order,
     upgrade_root_limit,
     low_priority,
+    orphan_gc_max_prune_count,
+    orphan_gc_max_prune_fraction,
 ):
     """
     Sync torrent instances from the selected client inventory and map to payloads.
@@ -912,6 +926,23 @@ def payload_sync(
 
     if low_priority:
         _apply_low_priority()
+
+    # Advisory process lock: prevent concurrent payload sync runs from racing on DB writes.
+    # Dry-run opens read-only so it skips the lock.
+    _payload_sync_lock_fh = None
+    if not dry_run:
+        import fcntl as _fcntl
+        _payload_sync_lock_path = Path(db).parent / "payload-sync.lock"
+        _payload_sync_lock_fh = _payload_sync_lock_path.open("a+", encoding="utf-8")
+        try:
+            _fcntl.flock(_payload_sync_lock_fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                f"⚠️  Another payload sync is already running (lock: {_payload_sync_lock_path}).\n"
+                "   Waiting for it to finish..."
+            )
+            _fcntl.flock(_payload_sync_lock_fh.fileno(), _fcntl.LOCK_EX)
+            print("   Previous sync finished. Proceeding.")
 
     # Connect to database
     # In dry-run mode, open read-only and skip migrations to guarantee "no writes".
@@ -1438,7 +1469,13 @@ def payload_sync(
     if (not dry_run) and limit == 0:
         prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
         try:
-            prune_stats = prune_orphan_payloads(conn, roots=prune_roots, sample_limit=5)
+            prune_stats = prune_orphan_payloads(
+                conn,
+                roots=prune_roots,
+                sample_limit=5,
+                max_prune_count=orphan_gc_max_prune_count,
+                max_prune_fraction=orphan_gc_max_prune_fraction,
+            )
         except Exception as exc:
             print(f"   ⚠️  orphan prune failed (non-fatal): {exc}")
             prune_stats = None
@@ -2432,13 +2469,14 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
 @click.option("--json-output", is_flag=True, help="Emit JSON output.")
 def payload_save_path_repair_cmd(dry_run, limit, json_output):
     """
-    Move secondary hashes from _rehome-unique/<hash16>/ to canonical save paths.
+    Move hashes from staging dirs to canonical save paths.
 
-    After hitchhiker-split, secondary hashes live in temporary _rehome-unique/
-    locations. This command moves them to their canonical seeding paths based on
-    category/tags and device (stash vs pool) placement rules.
+    Scans _rehome-unique/, _qb-finish/, and _qb-unique-repair/ staging directories
+    and moves their contents to canonical seeding paths based on category/tags and
+    device (stash vs pool) placement rules.
 
     Infers canonical paths using the catalog's original save_path as a category hint.
+    Items tagged ~issue are skipped and flagged for manual review.
 
     Run with --dry-run first (default) to preview what will happen.
     Then re-run with --execute to perform the repair.
@@ -2448,7 +2486,7 @@ def payload_save_path_repair_cmd(dry_run, limit, json_output):
     # Audit repair candidates
     actions = audit_repair_candidates()
     if not actions:
-        print("No repair candidates found (no hashes in _rehome-unique/).")
+        print("No repair candidates found (no hashes in staging dirs).")
         return
 
     if limit:
@@ -2464,6 +2502,29 @@ def payload_save_path_repair_cmd(dry_run, limit, json_output):
 
     report = format_repair_report(results, dry_run=dry_run, json_output=json_output)
     print(report)
+
+
+@payload.command("save-path-gc-staging")
+@click.option(
+    "--dry-run/--execute",
+    default=True,
+    help="Dry-run (default) lists dirs that would be deleted. --execute deletes them.",
+)
+def payload_save_path_gc_staging_cmd(dry_run):
+    """
+    Delete empty staging hash dirs with no live qB/RT entry.
+
+    Scans _rehome-unique/, _qb-finish/, and _qb-unique-repair/ for empty hash dirs
+    where no torrent client points. Safe to delete: they contain no files and no
+    client entry references them.
+
+    Run with --dry-run first (default) to preview. Then --execute to delete.
+    """
+    from hashall.save_path_repair import gc_empty_staging_dirs
+
+    deleted, total = gc_empty_staging_dirs(dry_run=dry_run)
+    mode = "DRY-RUN" if dry_run else "EXECUTE"
+    click.echo(f"Save-Path GC Staging [{mode}]: {total} empty dirs found, {deleted} {'would be' if dry_run else ''} deleted")
 
 
 @payload.command("save-path-recover")
@@ -2735,11 +2796,11 @@ def _rt_qb_color_enabled() -> bool:
     return bool(getattr(sys.stdout, "isatty", lambda: False)())
 
 
-def _rt_qb_style(text: object, *, fg: str | None = None, bold: bool = False) -> str:
+def _rt_qb_style(text: object, *, fg: str | None = None, bold: bool = False, dim: bool = False) -> str:
     value = str(text)
     if not _rt_qb_color_enabled():
         return value
-    return click.style(value, fg=fg, bold=bold)
+    return click.style(value, fg=fg, bold=bold, dim=dim)
 
 
 def _rt_qb_bool(value: bool) -> str:
@@ -2927,7 +2988,13 @@ def _select_client_drift_mirror_rows(
     hash_filters: tuple[str, ...] | list[str] = (),
     limit: int = 0,
     journal_path: Path | None = None,
-) -> tuple[list[dict], int, int]:
+    force: bool = False,
+) -> tuple[list[dict], int, int, list[str]]:
+    """Return (selected, candidate_count, completed_count, stale_journal_hashes).
+
+    stale_journal_hashes: journal-completed items that are still RT-only (removed from qB after
+    the journal recorded them). These are silently skipped unless --force is passed.
+    """
     rows = _filtered_client_drift_rows(report, side="rt_only", action="mirror_rt_to_qb", limit=0)
     hash_prefixes = [str(item or "").strip().lower() for item in hash_filters if str(item or "").strip()]
     if hash_prefixes:
@@ -2936,10 +3003,16 @@ def _select_client_drift_mirror_rows(
             if any(str(row.get("hash") or "").lower().startswith(prefix) for prefix in hash_prefixes)
         ]
     completed = _read_client_drift_journal(journal_path) if journal_path else set()
-    selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
+    row_hashes = {str(row.get("hash") or "").lower() for row in rows}
+    # Stale = completed in journal AND still RT-only (means qB lost them after add)
+    stale = sorted(h for h in completed if h in row_hashes)
+    if force:
+        selected = rows[:]
+    else:
+        selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
     if limit > 0:
         selected = selected[:limit]
-    return selected, len(rows), len(completed)
+    return selected, len(rows), len(completed), stale
 
 
 def _select_client_drift_path_rows(
@@ -2949,19 +3022,68 @@ def _select_client_drift_path_rows(
     hash_filters: tuple[str, ...] | list[str] = (),
     limit: int = 0,
     journal_path: Path | None = None,
-) -> tuple[list[dict], int, int]:
-    rows = _filtered_client_drift_rows(report, side="path_drift", action=action, limit=0)
+    do_apply: bool = True,
+) -> tuple[list[dict], int, int, frozenset[str]]:
     hash_prefixes = [str(item or "").strip().lower() for item in hash_filters if str(item or "").strip()]
+    # For apply: filter strictly by action. For dry-run with explicit hashes: show
+    # any path_drift row for those hashes regardless of action so operators can
+    # inspect the current state even if the action doesn't match the make target used.
+    if do_apply or not hash_prefixes:
+        rows = _filtered_client_drift_rows(report, side="path_drift", action=action, limit=0)
+    else:
+        rows = _filtered_client_drift_rows(report, side="path_drift", action=None, limit=0)
     if hash_prefixes:
         rows = [
             row for row in rows
             if any(str(row.get("hash") or "").lower().startswith(prefix) for prefix in hash_prefixes)
         ]
     completed = _read_client_drift_journal(journal_path, action=action) if journal_path else set()
-    selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
+    # Dry-run bypasses the journal so operators can always inspect proposed actions.
+    if do_apply:
+        selected = [row for row in rows if str(row.get("hash") or "").lower() not in completed]
+    else:
+        selected = list(rows)
     if limit > 0:
         selected = selected[:limit]
-    return selected, len(rows), len(completed)
+    return selected, len(rows), len(completed), frozenset(completed)
+
+
+def _warn_stopped_dl(qbit, events: list[dict]) -> None:
+    """After apply, check for any added torrents that entered stoppedDL (qB downloading state).
+
+    stoppedDL after add with --skip-checking means qB has incomplete data and is queued to
+    download. This MUST NOT happen — qB is a passive mirror only. Emits a loud warning and
+    lists the affected hashes so the operator can pause them immediately.
+    """
+    added_hashes = [
+        str(event.get("hash") or "").lower()
+        for event in events
+        if event.get("status") == "ok" and not event.get("error")
+    ]
+    if not added_hashes:
+        return
+    downloading = []
+    for h in added_hashes:
+        try:
+            info = qbit.get_torrent_info(h)
+            if info is not None and str(getattr(info, "state", "") or "") == "stoppedDL":
+                downloading.append(h)
+        except Exception:
+            pass
+    if not downloading:
+        return
+    print(
+        _rt_qb_style(
+            f"\n  ⚠ WARNING: {len(downloading)} newly-added torrent(s) are in stoppedDL state!\n"
+            "  qB is queued to DOWNLOAD these — this MUST NOT happen (qB is a passive mirror).\n"
+            "  Pause them immediately in qB UI or via API, then investigate.\n"
+            "  Affected hashes:",
+            fg="red",
+            bold=True,
+        )
+    )
+    for h in downloading:
+        print(f"    {_rt_qb_style(h[:16], fg='red', bold=True)} {h}")
 
 
 def _apply_client_drift_mirror_rows(
@@ -3080,42 +3202,92 @@ def _apply_client_drift_mirror_rows(
     return events
 
 
-def _print_client_drift_path_candidate(row: dict, *, index: int | None = None) -> None:
+def _print_client_drift_path_candidate(row: dict, *, index: int | None = None, already_done: bool = False) -> None:
     placement = row.get("placement") or {}
+    rt_row = row.get("rt") or {}
     hash_prefix = str(row.get("hash") or "")[:16]
     name = str(row.get("name") or "")
     prefix = f"{index:>3}. " if index is not None else "   "
     action = str(row.get("action") or "")
+    confidence = str(row.get("confidence") or "")
+    reasons = row.get("reasons") or []
+    blockers = row.get("blockers") or []
+
+    # Title line: hash, action, name
+    done_badge = _rt_qb_style(" [journal:done]", fg="bright_black") if already_done else ""
     print(
         f"{_rt_qb_style(prefix, fg='bright_black')}"
         f"{_rt_qb_style(hash_prefix, fg='cyan', bold=True)} "
         f"{_rt_qb_style(action, fg='magenta')} "
         f"{_rt_qb_style(name, fg='bright_white', bold=True)}"
+        f"{done_badge}"
     )
-    print(
-        "     "
-        f"{_rt_qb_style('desired:', fg='bright_black')} {placement.get('desired') or '-'} "
-        f"{_rt_qb_style('source:', fg='bright_black')} {placement.get('proposed_source_client') or '-'}"
+
+    # Status line: action details, ARR status, noHL, file count
+    anchor = placement.get("anchor_scan") or {}
+    arr_status = "linked_to_arr" if anchor.get("has_arr_anchor") is True else ("not_linked_to_arr" if anchor.get("has_arr_anchor") is False else "unknown")
+    _arr_style = {"linked_to_arr": {"fg": "green"}, "not_linked_to_arr": {"dim": True}, "unknown": {"dim": True}}
+    arr_style = _arr_style.get(arr_status, {"dim": True})
+    nohl = placement.get("qb_has_nohl_tag")
+    file_count = int(rt_row.get("expected_file_count") or 0)
+
+    status_parts = [
+        f"{_rt_qb_style('action=', fg='bright_black')}{_rt_qb_style(action.replace('_', ' '), fg='magenta')}",
+        f"{_rt_qb_style('desired=', fg='bright_black')}{placement.get('desired') or '-'}",
+        f"{_rt_qb_style('arr=', fg='bright_black')}{_rt_qb_style(arr_status, **arr_style)}",
+        f"{_rt_qb_style('files=', fg='bright_black')}{file_count}",
+    ]
+    if nohl:
+        status_parts.append(_rt_qb_style("~noHL", fg="yellow", bold=True))
+    print("     " + "  ".join(status_parts))
+
+    # Tracker info
+    def _fmt_tracker(key: str, prowlarr: str, url: str) -> str:
+        parts = []
+        if key:
+            label = key
+            if prowlarr and prowlarr.lower() != key.lower():
+                label = f"{key} ({prowlarr})"
+            parts.append(label)
+        if url and "://" in url:
+            parts.append(url)
+        return "  ".join(parts)
+
+    qb_tracker_str = _fmt_tracker(
+        placement.get("qb_tracker_key") or "",
+        placement.get("qb_prowlarr_name") or placement.get("qb_tracker_display") or "",
+        placement.get("qb_tracker_url") or "",
     )
-    print(
-        "     "
-        f"{_rt_qb_style('qb:', fg='bright_black')} {placement.get('qb_save_path') or ''}"
+    rt_tracker_str = _fmt_tracker(
+        placement.get("rt_tracker_key") or "",
+        placement.get("rt_prowlarr_name") or placement.get("rt_tracker_display") or "",
+        placement.get("rt_tracker_url") or "",
     )
-    print(
-        "     "
-        f"{_rt_qb_style('rt:', fg='bright_black')} {placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}"
-    )
+    if qb_tracker_str:
+        print("     " + _rt_qb_style("qb tracker: ", fg="bright_black") + qb_tracker_str)
+    if rt_tracker_str:
+        print("     " + _rt_qb_style("rt tracker: ", fg="bright_black") + rt_tracker_str)
+
+    # Paths
+    print("     " + _rt_qb_style("qb  ", fg="bright_black") + (placement.get("qb_save_path") or ""))
+    print("     " + _rt_qb_style("rt  ", fg="bright_black") + (placement.get("rt_target_qb_save_path") or placement.get("rt_save_path") or ""))
+
+    # Proposed changes
     if placement.get("proposed_qb_save_path"):
-        print(
-            "     "
-            f"{_rt_qb_style('set qB:', fg='bright_black')} {placement.get('proposed_qb_save_path')}"
-        )
+        print("     " + _rt_qb_style("set qB: ", fg="bright_black") + placement.get("proposed_qb_save_path"))
     if placement.get("proposed_rt_repoint_target") or placement.get("proposed_rt_directory"):
-        print(
-            "     "
-            f"{_rt_qb_style('set RT:', fg='bright_black')} "
-            f"{placement.get('proposed_rt_repoint_target') or placement.get('proposed_rt_directory')}"
-        )
+        target = placement.get("proposed_rt_repoint_target") or placement.get("proposed_rt_directory")
+        print("     " + _rt_qb_style("set RT: ", fg="bright_black") + target)
+
+    # Reasons (key decision factors) with checkmark
+    for reason in reasons[:5]:
+        if reason.startswith("present_in_both") or reason.startswith("same_hash") or reason.startswith("rt_qb_path"):
+            continue  # Skip boilerplate reasons
+        print("     " + _rt_qb_style("✔ ", fg="green") + reason)
+
+    # Blockers (if any) with X mark
+    for blocker in blockers:
+        print("     " + _rt_qb_style("✖ ", fg="red") + _rt_qb_style(blocker, fg="red", bold=True))
 
 
 def _apply_client_drift_path_rows(
@@ -3128,16 +3300,18 @@ def _apply_client_drift_path_rows(
     recheck_after_add: bool = False,
     rt_rpc_url: str = DEFAULT_RT_RPC_URL,
     qbit=None,
+    completed_hashes: frozenset[str] = frozenset(),
 ) -> list[dict]:
     events: list[dict] = []
-    if do_apply and action == "repoint_qb_to_rt_path" and qbit is None:
+    if do_apply and action in ("repoint_qb_to_rt_path", "repoint_both_to_pool") and qbit is None:
         from hashall.qbittorrent import get_qbittorrent_client
 
         qbit = get_qbittorrent_client()
 
     for index, row in enumerate(rows, start=1):
-        _print_client_drift_path_candidate(row, index=index)
         torrent_hash = str(row.get("hash") or "").strip().lower()
+        already_done = torrent_hash in completed_hashes
+        _print_client_drift_path_candidate(row, index=index, already_done=already_done)
         blockers = list(row.get("blockers") or [])
         placement = row.get("placement") or {}
         if blockers:
@@ -3191,8 +3365,35 @@ def _apply_client_drift_path_rows(
                 event["status"] = "ok" if ok else "error"
                 event["save_path"] = target
                 event["error"] = "" if ok else str(qbit.last_error or "qbit_set_location_failed")
-                if ok and recheck_after_add:
-                    _rt_qb_progress("starting qB recheck")
+                if ok:
+                    _rt_qb_progress("starting qB recheck to verify files at new location")
+                    event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
+        elif action == "repoint_both_to_pool":
+            if qbit is None:
+                raise click.ClickException("qB client not initialized")
+            from hashall.rtorrent import rt_apply_directory_repoint
+
+            target = str(placement.get("proposed_qb_save_path") or "").strip()
+            if not target:
+                event["error"] = "missing_proposed_qb_save_path"
+            elif not Path(target).exists():
+                event["error"] = f"proposed_target_missing:{target}"
+            else:
+                _rt_qb_progress("repointing RT to pool path")
+                rt_completed = rt_apply_directory_repoint(
+                    torrent_hash,
+                    target,
+                    rpc_url=rt_rpc_url,
+                    restart=True,
+                )
+                _rt_qb_progress("setting qB save path to pool path")
+                ok = qbit.set_location(torrent_hash, target)
+                event["status"] = "ok" if ok else "error"
+                event["save_path"] = target
+                event["rt_calls"] = rt_completed
+                event["error"] = "" if ok else str(qbit.last_error or "qbit_set_location_failed")
+                if ok:
+                    _rt_qb_progress("starting qB recheck to verify files at new location")
                     event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
         else:
             event["error"] = f"unsupported_path_drift_action:{action}"
@@ -3309,52 +3510,94 @@ def client_drift_audit_cmd(
 
     summary = payload["summary"]
     print("🧭 client drift audit")
+
+    # Colored summary
+    action_counts = summary.get("action_counts") or {}
     print(f"   policy_mode: {summary['policy_mode']}")
     print(f"   hash_filters: {len(summary.get('hash_filters') or [])}")
     if summary.get("catalog_path"):
         print(f"   catalog: {summary['catalog_path']}")
     print(f"   anchor_scan_max_files: {summary.get('anchor_scan_max_files', 0)}")
-    print(f"   qb_total: {summary['qb_total']}")
-    print(f"   rt_total: {summary['rt_total']}")
-    print(f"   common: {summary['common']}")
-    print(f"   qb_only: {summary['qb_only']}")
-    print(f"   rt_only: {summary['rt_only']}")
-    print(f"   path_drift: {summary.get('path_drift', 0)}")
-    print(f"   action_counts: {summary['action_counts']}")
+
+    # Inventory
+    print(f"   {_rt_qb_style('QBit:', fg='bright_black')} {summary['qb_total']:5d}  "
+          f"{_rt_qb_style('RTorrent:', fg='bright_black')} {summary['rt_total']:5d}  "
+          f"{_rt_qb_style('Common:', fg='bright_black')} {summary['common']:5d}")
+    print(f"   {_rt_qb_style('QB-only:', fg='bright_black')} {summary['qb_only']:5d}  "
+          f"{_rt_qb_style('RT-only:', fg='bright_black')} {summary['rt_only']:5d}")
+
+    # Drift summary — confidence breakdown from path_drift rows
+    drift_total = summary.get('path_drift', 0)
+    drift_rows = [r for r in rows if r.get('side') == 'path_drift']
+    high_count = sum(1 for r in drift_rows if r.get('confidence') == 'high')
+    medium_count = sum(1 for r in drift_rows if r.get('confidence') == 'medium')
+    low_count = sum(1 for r in drift_rows if r.get('confidence') == 'low')
+
+    print(f"   {_rt_qb_style('Path drift:', fg='bright_black')} "
+          f"{_rt_qb_style(str(drift_total), bold=True)}  "
+          f"{_rt_qb_style('high=', dim=True)}{_rt_qb_style(str(high_count), fg='green')}  "
+          f"{_rt_qb_style('medium=', dim=True)}{_rt_qb_style(str(medium_count), fg='yellow')}  "
+          f"{_rt_qb_style('low=', dim=True)}{_rt_qb_style(str(low_count), fg='red')}")
+
     if output:
         print(f"   output: {Path(output).expanduser()}")
+
+    # Rows grouped by side and action
+    if rows:
+        print()
     for row in rows:
         side_value = row.get("side")
         client_row = row.get("rt") if side_value == "rt_only" else row.get("qb")
         client_row = client_row or {}
-        blockers = ",".join(row.get("blockers") or [])
-        reason = ",".join(row.get("reasons") or [])
-        print(
-            f"   {row['side']:7s} {row['action']:28s} {row['confidence']:6s} "
-            f"{row['hash'][:16]} {row.get('name') or ''}"
-        )
+        blockers = row.get("blockers") or []
+        reasons = row.get("reasons") or []
+
+        # Header line with hash, action, name
+        h = row['hash'][:16]
+        name = row.get('name') or ''
+        action = row['action']
+        confidence = row['confidence']
+
+        print(f"   {_rt_qb_style(h, fg='cyan')}  {_rt_qb_style(action.replace('_', ' '), fg='magenta')}  "
+              f"{_rt_qb_style(confidence, dim=True)}  {name}")
+
         if side_value == "path_drift":
             placement = row.get("placement") or {}
-            print(
-                "      "
-                f"desired={placement.get('desired') or '-'} "
-                f"noHL={'yes' if placement.get('qb_has_nohl_tag') else 'no'} "
-                f"qb={placement.get('qb_kind') or '-'}:{placement.get('qb_save_path') or ''} "
-                f"rt={placement.get('rt_kind') or '-'}:{placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}"
-            )
+            desired = placement.get('desired') or '-'
+            nohl = "yes" if placement.get('qb_has_nohl_tag') else "no"
+            has_arr_anchor = bool(placement.get('anchor_scan', {}).get('has_arr_anchor'))
+            arr_status = 'linked' if has_arr_anchor else 'not_linked'
+
+            print(f"      {_rt_qb_style('desired=', fg='bright_black')}{desired}  "
+                  f"{_rt_qb_style('noHL=', fg='bright_black')}{nohl}  "
+                  f"{_rt_qb_style('arr=', fg='bright_black')}"
+                  f"{_rt_qb_style(arr_status, fg='green' if has_arr_anchor else None, dim=not has_arr_anchor)}")
+
+            print(f"      {_rt_qb_style('qb', fg='bright_black')}  {placement.get('qb_kind') or '-'}: {placement.get('qb_save_path') or ''}")
+            print(f"      {_rt_qb_style('rt', fg='bright_black')}  {placement.get('rt_kind') or '-'}: {placement.get('rt_target_qb_save_path') or placement.get('rt_save_path') or ''}")
+
             if placement.get("proposed_source_client"):
-                print(
-                    "      "
-                    f"proposed_source={placement.get('proposed_source_client')} "
-                    f"qb_save={placement.get('proposed_qb_save_path') or '-'} "
-                    f"rt_repoint={placement.get('proposed_rt_repoint_target') or placement.get('proposed_rt_directory') or '-'}"
-                )
+                print(f"      {_rt_qb_style('→ proposed', fg='green')}  source={placement.get('proposed_source_client')}  "
+                      f"qb_save={placement.get('proposed_qb_save_path') or '-'}")
         else:
-            print(f"      state={client_row.get('state') or ''} category={client_row.get('category') or ''} path={client_row.get('content_path') or client_row.get('save_path') or ''}")
+            print(f"      state={client_row.get('state') or ''} "
+                  f"category={client_row.get('category') or ''}")
+            path = client_row.get('content_path') or client_row.get('save_path') or ''
+            if path:
+                print(f"      {path}")
+
+        # Blockers (red, prominent)
         if blockers:
-            print(f"      blockers={blockers}")
-        if reason:
-            print(f"      reasons={reason}")
+            blocker_str = ", ".join(blockers)
+            print(f"      {_rt_qb_style('✖ ', fg='red')}{_rt_qb_style(blocker_str, fg='red', dim=True)}")
+
+        # Reasons (key decision factors)
+        key_reasons = [r for r in reasons if not r.startswith("present_in_both") and not r.startswith("same_hash") and not r.startswith("rt_qb_path")]
+        if key_reasons:
+            reason_str = ", ".join(key_reasons[:3])
+            print(f"      {_rt_qb_style('✔ ', fg='green')}{reason_str}")
+
+        print()
 
 
 @client_drift.command("rank")
@@ -3408,7 +3651,7 @@ def client_drift_rank_cmd(
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
 @click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
 @click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
-@click.option("--action", type=click.Choice(["mirror_rt_to_qb", "repoint_rt_to_qb_path", "repoint_qb_to_rt_path"]), default="mirror_rt_to_qb", show_default=True, help="Action class to apply.")
+@click.option("--action", type=click.Choice(["mirror_rt_to_qb", "repoint_rt_to_qb_path", "repoint_qb_to_rt_path", "repoint_both_to_pool"]), default="mirror_rt_to_qb", show_default=True, help="Action class to apply.")
 @click.option("--hash", "hash_filters", multiple=True, help="Restrict apply to specific torrent hash(es). Prefixes are accepted.")
 @click.option("--anchor-scan-max-files", type=int, default=None, help="Override policy anchor scan limit for selected path-drift pilots. Default uses policy.")
 @click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), help="Optional read-only catalog DB for hardlink-anchor evidence.")
@@ -3455,20 +3698,22 @@ def client_drift_apply_cmd(
         catalog_path=catalog_path,
     )
     journal = Path(journal_path).expanduser()
+    completed_hashes: frozenset[str] = frozenset()
     if action == "mirror_rt_to_qb":
-        selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+        selected, candidate_count, completed_count, _stale = _select_client_drift_mirror_rows(
             report,
             hash_filters=hash_filters,
             limit=limit,
             journal_path=journal,
         )
     else:
-        selected, candidate_count, completed_count = _select_client_drift_path_rows(
+        selected, candidate_count, completed_count, completed_hashes = _select_client_drift_path_rows(
             report,
             action=action,
             hash_filters=hash_filters,
             limit=limit,
             journal_path=journal,
+            do_apply=do_apply,
         )
 
     print("🛠️  client drift apply")
@@ -3505,11 +3750,12 @@ def client_drift_apply_cmd(
             sleep_row=sleep_row,
             recheck_after_add=recheck_after_add,
             rt_rpc_url=rt_rpc_url,
+            completed_hashes=completed_hashes,
         )
 
 
 DEFAULT_RT_QB_MIRROR_QUEUE_DIR = Path.home() / ".cache" / "hashall-rt-qb-mirror" / "queue"
-DEFAULT_RT_QB_MIRROR_JOURNAL = Path("out") / "rt-qb-mirror" / "apply.jsonl"
+DEFAULT_RT_QB_MIRROR_JOURNAL = Path.home() / ".cache" / "hashall" / "rt-qb-mirror" / "apply.jsonl"
 
 
 def _mirror_hash_key(value: str) -> str:
@@ -3569,6 +3815,330 @@ def _load_queue_entries(queue_dir: Path, *, min_age_s: float, now: float) -> tup
     return ready, waiting
 
 
+@client_drift.command("nested-folder-repair")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--apply", "do_apply", is_flag=True, default=False, help="Execute the repair (default is dry-run).")
+@click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")
+@click.option("--rt-rpc-url", default="http://127.0.0.1:18000/", show_default=True, help="rTorrent XMLRPC URL.")
+def client_drift_nested_folder_repair_cmd(hash_val, do_apply, qb_url, rt_rpc_url):
+    """Repair doubly-nested torrent content: move files to canonical location and repoint both clients.
+
+    Detects when QB content_path is a directory that itself contains a same-named subdirectory
+    (e.g. movies/TorrentName/TorrentName/file.mkv) and moves the content up to the correct depth.
+    Triggers QB recheck and RT repoint after the move.
+    """
+    from hashall.nested_folder_repair import (
+        detect_nested_folder,
+        execute_nested_folder_repair,
+        format_nested_folder_repair_report,
+    )
+    from hashall.qbittorrent import QBittorrentClient
+    from hashall.rtorrent import DEFAULT_RT_RPC_URL
+
+    dry_run = not do_apply
+
+    qb_client = QBittorrentClient(base_url=qb_url)
+    info = detect_nested_folder(hash_val, qb_client=qb_client)
+
+    if info is None:
+        click.echo(format_nested_folder_repair_report(None, None, dry_run=dry_run))
+        return
+
+    if dry_run:
+        click.echo(format_nested_folder_repair_report(info, None, dry_run=True))
+        # Show layout verification so user can see current disk state before applying
+        from hashall.torrent_verify import verify_layout, format_layout_result
+        from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
+        from hashall.nested_folder_repair import _api_to_fs
+        from pathlib import Path as _Path
+        h_upper = info.hash_val.upper()
+        torrent_path = DEFAULT_RT_SESSION_DIR / f"{h_upper}.torrent"
+        if torrent_path.exists():
+            base_dir = _Path(_api_to_fs(info.save_path_api.rstrip("/")))
+            layout_result = verify_layout(torrent_path, base_dir)
+            click.echo("")
+            click.echo(format_layout_result(layout_result))
+        return
+
+    result = execute_nested_folder_repair(
+        info,
+        dry_run=dry_run,
+        qb_client=qb_client,
+        rpc_url=rt_rpc_url,
+    )
+    click.echo(format_nested_folder_repair_report(info, result, dry_run=dry_run))
+    if not result.success:
+        raise SystemExit(1)
+
+
+@client_drift.command("nested-folder-scan")
+@click.option("--limit", default=0, show_default=True, help="Max hits to return (0=unlimited).")
+@click.option("--qb-cache-max-age", "qb_cache_max_age_s", default=300, show_default=True,
+              help="Max QB cache age in seconds.")
+def client_drift_nested_folder_scan_cmd(limit, qb_cache_max_age_s):
+    """Scan QB+RT caches for doubly-nested torrent layouts in either or both clients.
+
+    Iterates every hash in the QB and RT caches and runs independent detection
+    on each: QB detection via save_path/name/name on disk; RT detection via
+    d.directory structure. Reports hits grouped by both / qb_only / rt_only.
+    """
+    import sys
+    from hashall.nested_folder_repair import scan_nested_folders, format_nested_folder_scan_report
+
+    hits, total_scanned = scan_nested_folders(
+        qb_cache_max_age_s=qb_cache_max_age_s,
+        limit=limit,
+    )
+
+    use_color = sys.stdout.isatty()
+    click.echo(format_nested_folder_scan_report(hits, scanned=total_scanned, use_color=use_color), nl=False)
+
+    if hits:
+        raise SystemExit(1)
+
+
+@client_drift.command("verify-layout")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")
+@click.option("--base-dir", "base_dir_override", type=click.Path(file_okay=False), default=None, help="Override base directory (default: QB save_path as FS path).")
+@click.option("--torrent-file", "torrent_file_override", type=click.Path(exists=True, dir_okay=False), default=None, help="Override .torrent file path.")
+def client_drift_verify_layout_cmd(hash_val, qb_url, base_dir_override, torrent_file_override):
+    """Verify folder depth/layout against .torrent bencode expected paths.
+
+    Uses info_name and info.files[].path from the .torrent file to compute
+    where each file SHOULD live, then checks actual disk layout. Files found
+    at the wrong depth are reported with their actual location.
+    """
+    from pathlib import Path as _Path
+    from hashall.torrent_verify import verify_layout, format_layout_result
+    from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
+    from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
+    from hashall.nested_folder_repair import _api_to_fs
+
+    prefix = str(hash_val).strip().lower()
+    qb_client = QBittorrentClient(base_url=qb_url)
+
+    qb_torrent = None
+    try:
+        cached = get_torrents_from_cache(max_age_s=600, cache_path=DEFAULT_QB_CACHE_FILE)
+        if cached is not None:
+            for r in cached:
+                t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                if t and t.hash and t.hash.lower().startswith(prefix):
+                    qb_torrent = t
+                    break
+        if qb_torrent is None:
+            live = qb_client.get_torrents_by_hashes([hash_val]) or {}
+            for h, t in live.items():
+                if h.lower().startswith(prefix):
+                    qb_torrent = t
+                    break
+    except Exception as e:
+        raise click.ClickException(f"QB lookup failed: {e}")
+
+    if qb_torrent is None:
+        raise click.ClickException(f"hash not found in QB: {hash_val}")
+
+    full_hash = qb_torrent.hash.upper()
+
+    if torrent_file_override:
+        torrent_path = _Path(torrent_file_override)
+    else:
+        torrent_path = DEFAULT_RT_SESSION_DIR / f"{full_hash}.torrent"
+        if not torrent_path.exists():
+            torrent_path = DEFAULT_RT_SESSION_DIR / f"{full_hash.lower()}.torrent"
+    if not torrent_path.exists():
+        raise click.ClickException(f".torrent not found: {torrent_path}")
+
+    if base_dir_override:
+        base_dir = _Path(base_dir_override)
+    else:
+        save_path_api = (qb_torrent.save_path or "").rstrip("/")
+        base_dir = _Path(_api_to_fs(save_path_api))
+
+    result = verify_layout(torrent_path, base_dir)
+    click.echo(format_layout_result(result))
+    if not result.success:
+        raise SystemExit(1)
+
+
+@client_drift.command("verify-layout-scan")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True)
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True)
+@click.option("--rt-session-dir", default=str(DEFAULT_RT_SESSION_DIR), show_default=True)
+@click.option("--zero-progress-only", is_flag=True, default=False, help="Only report hashes where both clients show 0% progress.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Max hashes to scan (0=all).")
+def client_drift_verify_layout_scan_cmd(qb_cache_file, rt_cache_file, rt_session_dir, zero_progress_only, limit):
+    """Scan all torrents with .torrent files for layout depth mismatches.
+
+    Checks each torrent's on-disk files against the expected paths from its
+    .torrent bencode. Reports hashes where files are at the wrong depth or
+    missing — these are candidates for manual review or correction.
+
+    Use --zero-progress-only to focus on torrents where both clients show 0%
+    (likely victims of incorrect nested-folder-repair from before v0.8.47).
+    """
+    from pathlib import Path as _Path
+    from hashall.client_drift import load_qb_cache_rows, load_rt_cache_rows, default_policy
+    from hashall.torrent_verify import verify_layout
+    from hashall.nested_folder_repair import _api_to_fs
+
+    policy = default_policy()
+    qb_rows = load_qb_cache_rows(_Path(qb_cache_file).expanduser())
+    rt_rows = load_rt_cache_rows(_Path(rt_cache_file).expanduser(), session_dir=_Path(rt_session_dir).expanduser(), policy=policy)
+    session_dir = _Path(rt_session_dir).expanduser()
+
+    # Build hash list from RT (since RT has the .torrent files)
+    hashes = sorted(rt_rows.keys())
+    if limit > 0:
+        hashes = hashes[:limit]
+
+    hits = []
+    skipped_no_torrent = 0
+    skipped_no_path = 0
+
+    for torrent_hash in hashes:
+        rt_row = rt_rows[torrent_hash]
+        qb_row = qb_rows.get(torrent_hash)
+
+        if zero_progress_only:
+            qb_progress = float((qb_row.progress if qb_row else 0) or 0)
+            rt_progress = float(rt_row.progress or 0)
+            if qb_progress > 0 or rt_progress > 0:
+                continue
+
+        torrent_path = session_dir / f"{torrent_hash.upper()}.torrent"
+        if not torrent_path.exists():
+            skipped_no_torrent += 1
+            continue
+
+        # Determine base_dir: prefer QB save_path, fall back to RT save_path parent
+        if qb_row and qb_row.save_path:
+            base_dir = _Path(_api_to_fs(qb_row.save_path.rstrip("/")))
+        elif rt_row.save_path:
+            # RT save_path for multi-file = info_name dir; parent = actual save_path
+            rt_sp = _Path(rt_row.save_path)
+            base_dir = rt_sp.parent if rt_row.is_multi_file else rt_sp
+        else:
+            skipped_no_path += 1
+            continue
+
+        try:
+            result = verify_layout(torrent_path, base_dir)
+        except Exception:
+            continue
+
+        if result.files_wrong_depth > 0 or result.files_missing > 0:
+            hits.append({
+                "hash": torrent_hash[:16],
+                "name": rt_row.name or (qb_row.name if qb_row else ""),
+                "ok": result.files_ok,
+                "wrong_depth": result.files_wrong_depth,
+                "missing": result.files_missing,
+                "base_dir": str(base_dir),
+                "qb_progress": float((qb_row.progress if qb_row else 0) or 0),
+                "rt_progress": float(rt_row.progress or 0),
+            })
+
+    total_scanned = len(hashes) - skipped_no_torrent - skipped_no_path
+    print(f"verify-layout-scan: scanned={total_scanned}  hits={len(hits)}  skipped(no .torrent)={skipped_no_torrent}  skipped(no path)={skipped_no_path}")
+    if not hits:
+        print("  (no layout mismatches found)")
+        return
+
+    print(f"\n{'HASH':<18} {'OK':>4} {'BAD':>4} {'MISS':>4}  {'QB%':>5}  {'RT%':>5}  NAME")
+    print("-" * 100)
+    for h in sorted(hits, key=lambda x: (-x["wrong_depth"] - x["missing"], x["name"])):
+        print(
+            f"{h['hash']:<18} {h['ok']:>4} {h['wrong_depth']:>4} {h['missing']:>4}"
+            f"  {h['qb_progress']*100:>5.1f}  {h['rt_progress']*100:>5.1f}  {h['name']}"
+        )
+        print(f"{'':18} base: {h['base_dir']}")
+
+
+@client_drift.command("verify-pieces")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")
+@click.option("--base-dir", "base_dir_override", type=click.Path(file_okay=False), default=None, help="Override base directory (default: QB save_path converted to FS path).")
+@click.option("--torrent-file", "torrent_file_override", type=click.Path(exists=True, dir_okay=False), default=None, help="Override .torrent file path (default: RT session dir).")
+def client_drift_verify_pieces_cmd(hash_val, qb_url, base_dir_override, torrent_file_override):
+    """Verify torrent piece hashes from .torrent file against data on disk.
+
+    Reads piece SHA1 hashes directly from the .torrent bencode metadata and
+    checks them against the actual bytes on disk — independent of QB or RT rechecks.
+    """
+    import sys
+    from pathlib import Path as _Path
+    from hashall.torrent_verify import verify_torrent_pieces, format_verify_result
+    from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
+    from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
+    from hashall.nested_folder_repair import _api_to_fs
+
+    prefix = str(hash_val).strip().lower()
+    qb_client = QBittorrentClient(base_url=qb_url)
+
+    # Resolve QB torrent to get save_path and full hash
+    qb_torrent = None
+    try:
+        cached = get_torrents_from_cache(max_age_s=600, cache_path=DEFAULT_QB_CACHE_FILE)
+        if cached is not None:
+            for r in cached:
+                t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                if t and t.hash and t.hash.lower().startswith(prefix):
+                    qb_torrent = t
+                    break
+        if qb_torrent is None:
+            live = qb_client.get_torrents_by_hashes([hash_val]) or {}
+            for h, t in live.items():
+                if h.lower().startswith(prefix):
+                    qb_torrent = t
+                    break
+    except Exception as e:
+        raise click.ClickException(f"QB lookup failed: {e}")
+
+    if qb_torrent is None:
+        raise click.ClickException(f"hash not found in QB: {hash_val}")
+
+    full_hash = qb_torrent.hash.upper()
+
+    # Resolve .torrent file
+    if torrent_file_override:
+        torrent_path = _Path(torrent_file_override)
+    else:
+        torrent_path = DEFAULT_RT_SESSION_DIR / f"{full_hash}.torrent"
+        if not torrent_path.exists():
+            torrent_path = DEFAULT_RT_SESSION_DIR / f"{full_hash.lower()}.torrent"
+    if not torrent_path.exists():
+        raise click.ClickException(f".torrent not found: {torrent_path}")
+
+    # Resolve base_dir (save_path on host FS)
+    if base_dir_override:
+        base_dir = _Path(base_dir_override)
+    else:
+        save_path_api = (qb_torrent.save_path or "").rstrip("/")
+        base_dir = _Path(_api_to_fs(save_path_api))
+
+    click.echo(f"Verifying: {qb_torrent.name}")
+    click.echo(f"  hash:        {full_hash.lower()[:16]}")
+    click.echo(f"  torrent:     {torrent_path}")
+    click.echo(f"  base_dir:    {base_dir}")
+
+    def _progress(idx: int, total: int) -> None:
+        pct = idx / total * 100
+        sys.stderr.write(f"\r  checking pieces: {idx}/{total} ({pct:.0f}%)  ")
+        sys.stderr.flush()
+
+    try:
+        result = verify_torrent_pieces(torrent_path, base_dir, progress_cb=_progress)
+    except Exception as e:
+        raise click.ClickException(f"verification failed: {e}")
+
+    sys.stderr.write("\n")
+    click.echo(format_verify_result(result))
+    if not result.success:
+        raise SystemExit(1)
+
+
 @cli.group("rt-qb-mirror")
 def rt_qb_mirror():
     """Mirror complete RT additions into qB as stopped torrents."""
@@ -3621,13 +4191,14 @@ def rt_qb_mirror_enqueue_cmd(torrent_hash, queue_dir, config_path, source):
 @click.option("--sleep-row", type=float, default=5.0, show_default=True)
 @click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default=str(DEFAULT_RT_QB_MIRROR_JOURNAL), show_default=True)
 @click.option("--tag", "extra_tags", multiple=True, default=("hashall-rt-qb-mirror",), help="Additional qB tag(s) for imported torrents.")
-@click.option("--skip-checking", is_flag=True, help="Ask qB to skip checking on add.")
+@click.option("--skip-checking/--no-skip-checking", default=True, show_default=True, help="Ask qB to skip piece verification on add (safe default; prevents auto-download in qB v5+).")
 @click.option(
     "--recheck-after-add/--no-recheck-after-add",
-    default=True,
+    default=False,
     show_default=True,
-    help="Trigger qB recheck after import so qB can verify the stopped mirror at its existing files.",
+    help="Trigger qB recheck after import. DANGEROUS with qB v5+: incomplete recheck auto-starts download.",
 )
+@click.option("--force", is_flag=True, help="Ignore journal and re-add all candidates (use when items were removed from qB after being journaled).")
 @click.option("--verify-timeout", type=float, default=0.0, show_default=True)
 @click.option("--verify-interval", type=float, default=5.0, show_default=True)
 @click.option("--wait-for-check", is_flag=True, help="Wait for qB recheck to reach 100%; uses --verify-timeout or 180s by default.")
@@ -3656,6 +4227,7 @@ def rt_qb_mirror_sync_cmd(
     monitor_timeout,
     monitor_interval,
     do_apply,
+    force,
 ):
     """Mirror safe RT-only rows into qB as stopped torrents."""
     disabled = _rt_qb_mirror_disabled_reason(config_path)
@@ -3670,22 +4242,38 @@ def rt_qb_mirror_sync_cmd(
         policy_mode=policy_mode,
     )
     journal = Path(journal_path).expanduser()
-    selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    selected, candidate_count, completed_count, stale_hashes = _select_client_drift_mirror_rows(
         report,
         hash_filters=hash_filters,
         limit=limit,
         journal_path=journal,
+        force=force,
     )
+    if stale_hashes and not force:
+        print(
+            _rt_qb_style(
+                f"\n  WARNING: {len(stale_hashes)} journal-completed item(s) are still RT-only — "
+                "they were added to qB but then removed.\n"
+                "  These will be SKIPPED. Re-run with --force to re-add them and update the journal.\n"
+                f"  Stale hashes: {', '.join(h[:16] for h in stale_hashes[:5])}"
+                + (" …" if len(stale_hashes) > 5 else ""),
+                fg="yellow",
+                bold=True,
+            )
+        )
     qb_only_count = report["summary"]["qb_only"]
     _print_rt_qb_summary(
         f"RT→qB mirror sync ({'APPLY' if do_apply else 'DRY RUN'})",
         [
             ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("force", "yes" if force else "no", "yellow" if force else None),
             ("policy_mode", report["summary"]["policy_mode"], "cyan"),
             ("rt_only", report["summary"]["rt_only"], "yellow" if report["summary"]["rt_only"] else "green"),
             ("qb_only", qb_only_count, "yellow" if qb_only_count else None),
             ("candidates", candidate_count, "yellow" if candidate_count else "green"),
             ("journal_completed", completed_count, None),
+            ("journal_stale", len(stale_hashes), "yellow" if stale_hashes else None),
             ("selected", len(selected), "yellow" if selected else "green"),
             ("journal", journal, None),
         ],
@@ -3720,6 +4308,7 @@ def rt_qb_mirror_sync_cmd(
                 orphaned_hashes_to_remove.append(str(row.get("hash") or ""))
 
     orphaned_removed_count = 0
+    qbit = None
     if do_apply and orphaned_hashes_to_remove:
         if qbit is None:
             from hashall.qbittorrent import get_qbittorrent_client
@@ -3772,6 +4361,8 @@ def rt_qb_mirror_sync_cmd(
             timeout_s=monitor_timeout,
             interval_s=monitor_interval,
         )
+    if do_apply and qbit is not None:
+        _warn_stopped_dl(qbit, events)
 
 
 @rt_qb_mirror.command("process-queue")
@@ -3787,12 +4378,14 @@ def rt_qb_mirror_sync_cmd(
 @click.option("--sleep-row", type=float, default=5.0, show_default=True)
 @click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default=str(DEFAULT_RT_QB_MIRROR_JOURNAL), show_default=True)
 @click.option("--tag", "extra_tags", multiple=True, default=("hashall-rt-qb-mirror",))
-@click.option("--skip-checking", is_flag=True)
+@click.option("--skip-checking/--no-skip-checking", default=True, show_default=True, help="Ask qB to skip piece verification on add (safe default; prevents auto-download in qB v5+).")
 @click.option(
     "--recheck-after-add/--no-recheck-after-add",
-    default=True,
+    default=False,
     show_default=True,
+    help="Trigger qB recheck after import. DANGEROUS with qB v5+: incomplete recheck auto-starts download.",
 )
+@click.option("--force", is_flag=True, help="Ignore journal and re-add all candidates.")
 @click.option("--verify-timeout", type=float, default=0.0, show_default=True)
 @click.option("--verify-interval", type=float, default=5.0, show_default=True)
 @click.option("--wait-for-check", is_flag=True, help="Wait for qB recheck to reach 100%; uses --verify-timeout or 180s by default.")
@@ -3822,6 +4415,7 @@ def rt_qb_mirror_process_queue_cmd(
     monitor_timeout,
     monitor_interval,
     do_apply,
+    force,
 ):
     """Process delayed RT completion queue entries."""
     disabled = _rt_qb_mirror_disabled_reason(config_path)
@@ -3842,21 +4436,36 @@ def rt_qb_mirror_process_queue_cmd(
         policy_mode=policy_mode,
     )
     journal = Path(journal_path).expanduser()
-    selected, candidate_count, completed_count = _select_client_drift_mirror_rows(
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    selected, candidate_count, completed_count, stale_hashes = _select_client_drift_mirror_rows(
         report,
         hash_filters=hash_filters,
         limit=0,
         journal_path=journal,
+        force=force,
     )
+    if stale_hashes and not force:
+        print(
+            _rt_qb_style(
+                f"\n  WARNING: {len(stale_hashes)} journal-completed item(s) are still RT-only — "
+                "removed from qB after being journaled. Re-run with --force to re-add.\n"
+                f"  Stale: {', '.join(h[:16] for h in stale_hashes[:5])}"
+                + (" …" if len(stale_hashes) > 5 else ""),
+                fg="yellow",
+                bold=True,
+            )
+        )
     _print_rt_qb_summary(
         f"RT→qB mirror queue ({'APPLY' if do_apply else 'DRY RUN'})",
         [
             ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("force", "yes" if force else "no", "yellow" if force else None),
             ("queue_dir", qdir, None),
             ("ready", len(ready), "yellow" if ready else "green"),
             ("waiting", len(waiting), None),
             ("candidates", candidate_count, "yellow" if candidate_count else "green"),
             ("journal_completed", completed_count, None),
+            ("journal_stale", len(stale_hashes), "yellow" if stale_hashes else None),
             ("selected", len(selected), "yellow" if selected else "green"),
         ],
     )
@@ -3892,6 +4501,8 @@ def rt_qb_mirror_process_queue_cmd(
             timeout_s=monitor_timeout,
             interval_s=monitor_interval,
         )
+    if do_apply and qbit is not None:
+        _warn_stopped_dl(qbit, events)
     finished = {
         str(event.get("hash") or "").lower()
         for event in events

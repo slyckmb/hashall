@@ -23,6 +23,7 @@ from hashall.hash_progress import HashProgressReporter
 from hashall.progress import TwoLineProgress
 
 BATCH_SIZE = 500
+BATCH_SIZE_METADATA_MODE = 2000  # Larger batches for read-mostly metadata-only scans
 
 T = TypeVar("T")
 
@@ -89,6 +90,32 @@ class ScanStats:
     bytes_hashed: int = 0
     inode_groups_hashed: int = 0  # Unique inodes hashed
     hardlinks_propagated: int = 0  # Hardlinks that got copied hashes
+    safety_guard_triggered: bool = False
+
+
+@dataclass
+class ScanResult:
+    """Result of a filesystem scan operation (Phase 3A: changed-scope gating).
+
+    Combines ScanStats + metadata for changed-scope gating, backward compatible with
+    existing code that expects ScanStats fields.
+    """
+    # Core metadata for gating
+    root_path: Path
+    device_id: int
+    fs_uuid: str
+    had_changes: bool  # True if any additions, updates, or deletions
+
+    # ScanStats fields (backward compatibility)
+    files_scanned: int = 0
+    files_added: int = 0
+    files_updated: int = 0
+    files_deleted: int = 0
+    files_unchanged: int = 0
+    files_skipped_other_device: int = 0
+    bytes_hashed: int = 0
+    inode_groups_hashed: int = 0
+    hardlinks_propagated: int = 0
     safety_guard_triggered: bool = False
 
 
@@ -1558,6 +1585,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     progress = TwoLineProgress(total=file_count, prefix="📦 Scanning", unit="files", enabled=use_two_line)
     progress_position = tqdm_position
     progress_file = None
+    commit_threshold = BATCH_SIZE_METADATA_MODE if drift_policy == "metadata" else BATCH_SIZE
 
     if not parallel:
         # Sequential scanning
@@ -1596,7 +1624,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 progress.update(desc=work_item['representative_path'], advance=len(results))
 
                 # Commit periodically
-                if stats.files_scanned % 500 == 0:
+                if stats.files_scanned % commit_threshold == 0:
                     conn.commit()
 
             conn.commit()
@@ -1635,7 +1663,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 stats.files_scanned += len(results)
 
                 # Commit periodically
-                if stats.files_scanned % 500 == 0:
+                if stats.files_scanned % commit_threshold == 0:
                     conn.commit()
 
             conn.commit()
@@ -1644,7 +1672,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         # Parallel scanning
         workers = max(1, workers or (os.cpu_count() or 1))
         max_inflight = workers * 10
-        batch_size = batch_size or BATCH_SIZE
+        effective_batch_size = BATCH_SIZE_METADATA_MODE if drift_policy == "metadata" else BATCH_SIZE
+        batch_size = batch_size or effective_batch_size
         pending = set()
         batch_rows = []
         work_iter = iter(work_items)
@@ -2034,4 +2063,21 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     # Close connection to prevent resource leaks with hierarchical scanning
     conn.close()
 
-    return stats
+    # Phase 3A: Return ScanResult with had_changes flag for gating
+    had_changes = (stats.files_added + stats.files_updated + stats.files_deleted) > 0
+    return ScanResult(
+        root_path=canonical_root,
+        device_id=device_id,
+        fs_uuid=fs_uuid,
+        had_changes=had_changes,
+        files_scanned=stats.files_scanned,
+        files_added=stats.files_added,
+        files_updated=stats.files_updated,
+        files_deleted=stats.files_deleted,
+        files_unchanged=stats.files_unchanged,
+        files_skipped_other_device=stats.files_skipped_other_device,
+        bytes_hashed=stats.bytes_hashed,
+        inode_groups_hashed=stats.inode_groups_hashed,
+        hardlinks_propagated=stats.hardlinks_propagated,
+        safety_guard_triggered=stats.safety_guard_triggered,
+    )

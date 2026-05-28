@@ -598,6 +598,8 @@ def prune_orphan_payloads(
     conn: sqlite3.Connection,
     roots: Optional[List[str]] = None,
     sample_limit: int = 5,
+    max_prune_count: Optional[int] = None,
+    max_prune_fraction: Optional[float] = None,
 ) -> Dict[str, object]:
     """
     Two-phase orphan payload GC:
@@ -750,7 +752,7 @@ def prune_orphan_payloads(
         "DELETE FROM payload_orphan_gc WHERE payload_id NOT IN (SELECT payload_id FROM payloads)"
     )
 
-    # Limits are configurable at call time via env vars (defaults: count=1000, fraction=0.25).
+    # Limits: explicit args > env vars > module defaults.
     effective_max_prune_count = ORPHAN_GC_MAX_PRUNE_COUNT
     try:
         effective_max_prune_count = int(
@@ -758,6 +760,9 @@ def prune_orphan_payloads(
         )
     except (ValueError, TypeError):
         pass
+    if max_prune_count is not None:
+        effective_max_prune_count = int(max_prune_count)
+
     effective_max_prune_fraction = ORPHAN_GC_MAX_PRUNE_FRACTION
     try:
         effective_max_prune_fraction = float(
@@ -765,6 +770,8 @@ def prune_orphan_payloads(
         )
     except (ValueError, TypeError):
         pass
+    if max_prune_fraction is not None:
+        effective_max_prune_fraction = float(max_prune_fraction)
 
     block_reason: Optional[str] = None
     if aged_prunable_ids and total_payloads >= ORPHAN_GC_SPIKE_MIN_TOTAL:

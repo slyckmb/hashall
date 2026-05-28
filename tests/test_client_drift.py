@@ -1523,6 +1523,9 @@ def test_client_drift_apply_path_drift_can_set_qb_location(tmp_path: Path, monke
             self.locations.append((torrent_hash, target))
             return True
 
+        def recheck_torrent(self, torrent_hash: str) -> bool:
+            return True
+
     fake = FakeQbit()
     monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", lambda: fake)
     result = CliRunner().invoke(

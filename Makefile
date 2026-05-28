@@ -8,11 +8,16 @@ REHOME_CLI := python3 -m rehome.cli
 CATALOG ?= $(HOME)/.hashall/catalog.db
 
 .PHONY: help test db-refresh db-refresh-verbose db-refresh-fast db-refresh-maintenance db-refresh-integrity \
+	db-refresh-fast-gated db-refresh-fast-parallel db-refresh-fast-gated-parallel \
         rt-qb-mirror-drift rt-qb-mirror-apply rt-qb-mirror-pause-seeding rt-qb-mirror-queue-apply \
         client-drift-audit client-drift-path-drift client-drift-selected \
         client-drift-rank \
         client-drift-rt-to-qb-dry client-drift-rt-to-qb-apply \
         client-drift-qb-to-rt-dry client-drift-qb-to-rt-apply \
+        client-drift-both-to-pool-dry client-drift-both-to-pool-apply \
+        client-drift-nested-repair-dry client-drift-nested-repair-apply \
+        client-drift-nested-folder-scan \
+        client-drift-verify-layout client-drift-verify-layout-scan client-drift-verify-pieces \
         rt-repoint-dry rt-repoint-apply \
         cross-seed-normalize-dry cross-seed-normalize-apply \
         hitchhiker-audit hitchhiker-plan hitchhiker-split-dry hitchhiker-split-apply \
@@ -20,7 +25,8 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
         rehome-auto-dry rehome-auto-apply rehome-relocate-plan rehome-normalize-plan rehome-drift-audit \
         qb-missing-audit qb-missing-remediate-dry qb-missing-remediate-apply \
         payload-show payload-siblings \
-        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs
+        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs trk-warn-replace-individual \
+        canonical-tree-report
 
 help:
 	@echo "Use the CLI directly:"
@@ -31,15 +37,20 @@ help:
 	@echo "  make test                    — run test suite"
 	@echo "  make db-refresh              — maintenance refresh (scan + dedup + payload SHA256 upgrade)"
 	@echo "  make db-refresh-fast         — fast freshness refresh for client-repair evidence"
+	@echo "  make db-refresh-fast-gated   — fast refresh + skip dedup if no changes (Phase 3B)"
+	@echo "  make db-refresh-fast-parallel — fast refresh with parallel 4-root scanning (Phase 4A)"
+	@echo "  make db-refresh-fast-gated-parallel — fast refresh with both optimizations (recommended)"
 	@echo "  make db-refresh-maintenance  — explicit maintenance refresh"
 	@echo "  make db-refresh-integrity    — slow full rehash integrity refresh"
 	@echo "  make db-refresh-verbose      — maintenance refresh with verbose output and logging"
 	@echo ""
 	@echo "  make rt-qb-mirror-drift      — show RT-only items safe to mirror into qB"
-	@echo "  make rt-qb-mirror-apply      — add safe RT-only items, recheck, monitor, re-stop"
-	@echo "  make rt-qb-mirror-apply NO_MONITOR=1 — fire-and-forget (no post-recheck stop)"
+	@echo "  make rt-qb-mirror-apply      — add safe RT-only items as stopped mirrors (skip-checking default)"
+	@echo "  make rt-qb-mirror-apply NO_MONITOR=1 — fire-and-forget (no post-add monitoring)"
+	@echo "  make rt-qb-mirror-apply FORCE=1 — re-add items journaled as done but missing from qB"
 	@echo "  make rt-qb-mirror-pause-seeding — pause any client-drift mirror items now in seeding state"
 	@echo "  make rt-qb-mirror-queue-apply — process RT-completion queue → qB (mirrors queued RT items)"
+	@echo "  make rt-qb-mirror-queue-apply FORCE=1 — same but bypass journal (re-add stale items)"
 	@echo ""
 	@echo "  make client-drift-audit        — classify qB/RT membership + path drift from caches"
 	@echo "  make client-drift-path-drift   — show only same-hash qB/RT path drift"
@@ -49,6 +60,14 @@ help:
 	@echo "  make client-drift-rt-to-qb-apply HASH=<hash> — apply RT repoint to qB path"
 	@echo "  make client-drift-qb-to-rt-dry HASH=<hash> — dry-run qB savepath change to RT path"
 	@echo "  make client-drift-qb-to-rt-apply HASH=<hash> — apply qB savepath change to RT path"
+	@echo "  make client-drift-both-to-pool-dry HASH=<hash> — dry-run repoint both qB+RT to pool sibling path"
+	@echo "  make client-drift-both-to-pool-apply HASH=<hash> — apply repoint both qB+RT to pool sibling path"
+	@echo "  make client-drift-nested-repair-dry HASH=<hash> — dry-run move doubly-nested content to canonical path"
+	@echo "  make client-drift-nested-repair-apply HASH=<hash> — apply doubly-nested content repair + repoint clients"
+	@echo "  make client-drift-nested-folder-scan — scan all QB+RT caches for doubly-nested layouts (either or both clients)"
+	@echo "  make client-drift-verify-layout HASH=<hash> — verify folder depth/layout against .torrent expected paths"
+	@echo "  make client-drift-verify-layout-scan — scan all torrents for layout depth mismatches (add ZERO=1 to filter 0% only)"
+	@echo "  make client-drift-verify-pieces HASH=<hash> — verify piece hashes from .torrent against data on disk"
 	@echo ""
 	@echo "  make hitchhiker-audit          — find N→1 payload groups and split safety"
 	@echo "  make hitchhiker-plan HASH=<hash>|PAYLOAD_ID=<id> — selected de-hitchhiker evidence"
@@ -73,6 +92,9 @@ help:
 	@echo "  make trk-warn-dry            — dry-run: plan removes + season-pack upgrades for deleted+other"
 	@echo "  make trk-warn-cleanup        — execute cleanup: remove deleted+other (no upgrades), sync to qB"
 	@echo "  make trk-warn-upgrade-packs  — season pack upgrades: erase individual eps, add pack, sync to qB"
+	@echo "  make trk-warn-replace-individual — individual-ep replacements: erase deleted ep, add correct ep"
+	@echo ""
+	@echo "  make canonical-tree-report     — report non-canonical path classes (FULL=1 for all items)"
 	@echo ""
 	@echo "  Vars: LIMIT=N HASH=<hash> PAYLOAD_ID=<id> JSON=1 ANCHOR_SCAN=N CATALOG=<db> JOURNAL=<path> SLEEP_ROW=N"
 
@@ -85,6 +107,15 @@ db-refresh:
 db-refresh-fast:
 	python3 -m hashall refresh --profile freshness $(REFRESH_OPTS)
 
+db-refresh-fast-gated:
+	python3 -m hashall refresh --profile freshness --gate-dedup-on-unchanged $(REFRESH_OPTS)
+
+db-refresh-fast-parallel:
+	python3 -m hashall refresh --profile freshness --parallel-scans 4 $(REFRESH_OPTS)
+
+db-refresh-fast-gated-parallel:
+	python3 -m hashall refresh --profile freshness --gate-dedup-on-unchanged --parallel-scans 4 $(REFRESH_OPTS)
+
 db-refresh-maintenance:
 	python3 -m hashall refresh --profile maintenance $(REFRESH_OPTS)
 
@@ -95,16 +126,22 @@ db-refresh-verbose:
 	python3 -m hashall refresh --profile maintenance --verbose $(REFRESH_OPTS) 2>&1 | tee ~/.logs/hashall/refresh-$$(date +%Y%m%d-%H%M%S).log
 
 rt-qb-mirror-drift:
-	@python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --sleep-row 0 --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-drift.jsonl}
+	@python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --sleep-row 0
 
 rt-qb-mirror-apply:
-	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --apply --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-apply.jsonl}
+	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; \
+	if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; \
+	FORCE_OPT=""; if [ "$${FORCE:-0}" = "1" ]; then FORCE_OPT="--force"; fi; \
+	python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --apply --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS $$FORCE_OPT
 
 rt-qb-mirror-pause-seeding:
 	@python3 scripts/pause_mirror_seeders.py
 
 rt-qb-mirror-queue-apply:
-	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; python3 -m hashall.cli rt-qb-mirror process-queue --queue-dir /dump/docker/gluetun_qbit/rtorrent_vpn/rt-qb-mirror-queue --apply --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS --journal $${JOURNAL:-/tmp/hashall-rt-qb-mirror-queue.jsonl}
+	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; \
+	if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; \
+	FORCE_OPT=""; if [ "$${FORCE:-0}" = "1" ]; then FORCE_OPT="--force"; fi; \
+	python3 -m hashall.cli rt-qb-mirror process-queue --queue-dir /dump/docker/gluetun_qbit/rtorrent_vpn/rt-qb-mirror-queue --apply --min-age $${MIN_AGE:-120} --limit $${LIMIT:-20} --sleep-row $${SLEEP_ROW:-5} $$MONITOR_OPTS $$FORCE_OPT
 
 client-drift-audit:
 	@$(HASHALL_CLI) client-drift audit --catalog "$(CATALOG)" --anchor-scan-max-files $${ANCHOR_SCAN:-0} --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
@@ -129,6 +166,30 @@ client-drift-qb-to-rt-dry:
 
 client-drift-qb-to-rt-apply:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_qb_to_rt_path --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-5} --journal "$${JOURNAL:-out/client-drift/path-drift-qb-to-rt.jsonl}" --apply
+
+client-drift-both-to-pool-dry:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_both_to_pool --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-0} --journal "$${JOURNAL:-out/client-drift/path-drift-both-to-pool.jsonl}"
+
+client-drift-both-to-pool-apply:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_both_to_pool --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-5} --journal "$${JOURNAL:-out/client-drift/path-drift-both-to-pool.jsonl}" --apply
+
+client-drift-nested-repair-dry:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift nested-folder-repair "$${HASH}"
+
+client-drift-nested-repair-apply:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift nested-folder-repair "$${HASH}" --apply
+
+client-drift-nested-folder-scan:
+	@$(HASHALL_CLI) client-drift nested-folder-scan $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}"); true
+
+client-drift-verify-layout:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift verify-layout "$${HASH}"
+
+client-drift-verify-layout-scan:
+	@$(HASHALL_CLI) client-drift verify-layout-scan $$([ -n "$${ZERO:-}" ] && echo "--zero-progress-only") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
+
+client-drift-verify-pieces:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift verify-pieces "$${HASH}"
 
 rt-repoint-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}"
@@ -212,4 +273,10 @@ trk-warn-cleanup:
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-upgrade-packs:
-	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --upgrade-season-packs --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+
+trk-warn-replace-individual:
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --prowlarr --replace-individual --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+
+canonical-tree-report:
+	@python3 scripts/canonical-tree-report.py $(if $(FULL),--full,)

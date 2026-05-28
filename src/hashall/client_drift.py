@@ -15,6 +15,7 @@ from hashall.pathing import canonicalize_path, remap_to_mount_alias
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE
 from hashall.rtorrent import DEFAULT_RT_SESSION_DIR, load_rt_torrent_meta, normalize_rt_target_directory, resolve_rt_session_files, rt_path_aligned
+from hashall.save_path_inference import ARR_CATEGORY_FINAL_MAP
 
 
 HEALTHY_QB_STATES = {"uploading", "stalledUP", "stoppedUP", "pausedUP"}
@@ -929,13 +930,222 @@ def _placement_kind(path: str, policy: ClientDriftPolicy) -> str:
     return "other"
 
 
+# Seeding subdirs that ARR sets after import (radarr→movies, sonarr→tv, etc.)
+_ARR_SEEDING_DIRS: frozenset[str] = frozenset(ARR_CATEGORY_FINAL_MAP.values())
+
+
+def _is_arr_seeding_path(path: str) -> bool:
+    """Return True if path's immediate seeding subdir is an ARR post-import category."""
+    if not path:
+        return False
+    parts = Path(path).parts
+    for i, part in enumerate(parts):
+        if part == "seeding" and i + 1 < len(parts):
+            return parts[i + 1] in _ARR_SEEDING_DIRS
+    return False
+
+
+_TRACKER_REGISTRY_SEARCH_PATHS: tuple[str, ...] = (
+    os.environ.get("HASHALL_TRACKER_REGISTRY", ""),
+    os.environ.get("TRACKER_REGISTRY", ""),
+    "/home/michael/dev/tools/traktor/config/tracker-registry.yml",
+    "/home/michael/dev/work/glider/glider-docker/tracker-ctl/config/tracker-registry.yml",
+    "/mnt/config/docker/tracker-ctl/config/tracker-registry.yml",
+)
+
+
+def _load_tracker_registry() -> dict[str, dict]:
+    """
+    Load tracker-registry.yml and return {tracker_key: {display_name, prowlarr_name, base_url, url_pattern}}.
+    Returns empty dict if registry not found or unreadable.
+    """
+    for raw_path in _TRACKER_REGISTRY_SEARCH_PATHS:
+        if not raw_path:
+            continue
+        p = Path(raw_path)
+        if not p.exists():
+            continue
+        try:
+            import yaml  # PyYAML — available as transitive dep; lazy import to avoid hard coupling
+            raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+            result: dict[str, dict] = {}
+            for key, entry in (raw.get("trackers") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                prowlarr = entry.get("prowlarr") or {}
+                qbitmanage = entry.get("qbitmanage") or {}
+                result[str(key)] = {
+                    "display_name": str(entry.get("display_name") or ""),
+                    "prowlarr_name": str(prowlarr.get("indexer_name") or ""),
+                    "base_url": str(prowlarr.get("base_url") or ""),
+                    "url_pattern": str(qbitmanage.get("tracker_url_pattern") or ""),
+                }
+            return result
+        except Exception:
+            return {}
+    return {}
+
+
+def _resolve_tracker(tracker_url: str, registry: dict[str, dict]) -> dict[str, str]:
+    """
+    Resolve a tracker announce URL to registry identity.
+    Returns {url, key, display_name, prowlarr_name}.
+    Matches against prowlarr.base_url hostname first, then qbitmanage.tracker_url_pattern.
+    Falls back to heuristic hostname extraction when registry has no match.
+    """
+    url_clean = str(tracker_url or "").strip()
+    result = {"url": url_clean, "key": "", "display_name": "", "prowlarr_name": ""}
+    if not url_clean:
+        return result
+
+    if registry:
+        url_lower = url_clean.lower()
+        for tracker_key, info in registry.items():
+            matched = False
+            base_url = info.get("base_url", "").lower().rstrip("/")
+            if base_url:
+                try:
+                    from urllib.parse import urlparse as _up
+                    base_host = _up(base_url).hostname or ""
+                    if base_host and base_host in url_lower:
+                        matched = True
+                except Exception:
+                    pass
+            if not matched:
+                pattern = info.get("url_pattern", "").lower()
+                if pattern and any(p.strip() in url_lower for p in pattern.split("|") if p.strip()):
+                    matched = True
+            if matched:
+                result.update({
+                    "key": tracker_key,
+                    "display_name": info.get("display_name", ""),
+                    "prowlarr_name": info.get("prowlarr_name", ""),
+                })
+                return result
+
+    # Fallback: heuristic hostname extraction
+    try:
+        from urllib.parse import urlparse as _up
+        host = _up(url_clean).hostname or url_clean.lower()
+        parts = host.split(".")
+        _SKIP = {"tracker", "announce", "t", "bt", "www", "torrent"}
+        while len(parts) > 1 and parts[0] in _SKIP:
+            parts = parts[1:]
+        if len(parts) > 1:
+            parts = parts[:-1]
+        result["key"] = parts[0].lower() if parts else host.lower()
+    except Exception:
+        pass
+    return result
+
+
+def _pool_seeding_category(root_path: str, pool_roots: tuple[str, ...]) -> str:
+    """Return the first path component after the pool root (e.g. 'torrentleech', 'cross-seed')."""
+    for pool_root in pool_roots:
+        if root_path.startswith(pool_root):
+            rel = root_path[len(pool_root):].lstrip("/")
+            return rel.split("/")[0] if rel else ""
+    return ""
+
+
+def _find_pool_sibling_path(
+    sibling_payloads: list[dict[str, Any]],
+    policy: "ClientDriftPolicy",
+    self_payload_id: int | None = None,
+    torrent_tracker_keys: set[str] | None = None,
+    all_tracker_keys: set[str] | None = None,
+) -> tuple[str, str] | None:
+    """
+    Scan sibling_payloads for content already on pool storage.
+    Returns (qb_save_path, sibling_root_path) for the best candidate, or None.
+
+    Tracker alignment: if a pool sibling sits under a seeding category that is a known
+    tracker key (e.g. /pool/.../torrentleech/...) and that tracker does NOT match the
+    current torrent's tracker, the candidate is excluded.  This prevents cross-tracker
+    path mis-assignment (e.g. pointing a seedpool torrent to a torrentleech directory).
+
+    Remaining candidates sorted by: tracker_match > tracker_neutral; canonical before
+    _rehome-unique; directory roots before file roots.
+    """
+    candidates: list[tuple[str, str, bool, bool, int]] = []
+    pool_roots = policy.pool_roots
+
+    for sib in sibling_payloads:
+        if self_payload_id is not None and int(sib.get("payload_id") or 0) == self_payload_id:
+            continue
+        root = str(sib.get("root_path") or "")
+        if not root or _placement_kind(root, policy) != "pool":
+            continue
+
+        # Tracker alignment check
+        category = _pool_seeding_category(root, pool_roots)
+        if all_tracker_keys and category in all_tracker_keys:
+            # Category is a known tracker-specific directory
+            if torrent_tracker_keys and category not in torrent_tracker_keys:
+                continue  # Wrong tracker — exclude
+            tracker_score = 0  # tracker-matching canonical dir
+        else:
+            tracker_score = 1  # tracker-neutral (cross-seed, _rehome-unique, etc.)
+
+        p = Path(root)
+        try:
+            if p.is_file():
+                save_path, is_dir = str(p.parent), False
+            elif p.is_dir():
+                save_path, is_dir = root, True
+            else:
+                continue  # path does not exist on disk
+        except OSError:
+            continue
+        is_canonical = "_rehome-unique" not in root
+        candidates.append((save_path, root, is_dir, is_canonical, tracker_score))
+
+    if not candidates:
+        return None
+    # Sort: tracker match first, then canonical, then directory roots before file roots
+    candidates.sort(key=lambda c: (c[4], not c[3], not c[2]))
+    best = candidates[0]
+    return best[0], best[1]
+
+
+def _detect_nested_folder(root_path: str, item_name: str, file_count: int) -> bool:
+    """True when a sibling catalog root is a directory named after the torrent (errant nested folder).
+
+    Only flags real directories that exist on disk. Using item_stem (not item_name) avoids
+    false positives when root_path is a flat single file whose filename == item_name.
+    """
+    if not root_path or not item_name:
+        return False
+    rp = Path(root_path)
+    if not rp.is_dir():
+        return False
+    dir_name = rp.name
+    item_stem = Path(item_name).stem
+    if file_count == 1:
+        # A nested single-file lives inside a directory named after the torrent stem.
+        # Never compare against item_name: when root_path IS the file, dir_name==item_name
+        # but that is a flat (correct) placement, not nesting.
+        return dir_name == item_stem
+    # Multi-file: nested only when the last two path components both equal the torrent name
+    return dir_name == item_name and rp.parent.name == item_name
+
+
 def _rt_repoint_target_for_content_path(content_path: str, rt_row: ClientTorrentRow) -> str:
     if not content_path:
         return ""
-    if rt_row.is_multi_file and rt_row.name and Path(content_path).name == rt_row.name:
-        return str(Path(content_path).parent)
+    p = Path(content_path)
     if rt_row.is_multi_file is False:
-        return str(Path(content_path).parent)
+        return str(p.parent)
+    if rt_row.is_multi_file and rt_row.name:
+        if p.name == rt_row.name:
+            return str(p.parent)
+        # content_path is a file inside the torrent folder.
+        # Find the first (outermost) path component matching the torrent name and
+        # return its parent — that is where RT should set its save directory.
+        parts = list(p.parts)
+        for i, part in enumerate(parts):
+            if part == rt_row.name:
+                return str(Path(*parts[:i])) if i > 0 else str(Path(parts[0]))
     return normalize_rt_target_directory(content_path, None)
 
 
@@ -961,7 +1171,6 @@ def _classify_common_path_drift(
     anchor = anchor_scanner.scan_paths(
         path for path in (qb_row.content_path, rt_row.content_path) if path
     )
-    blockers.extend(anchor.blockers)
     qb_has_nohl_tag = _has_tag(qb_row.tags, NO_HARDLINK_TAG)
     if qb_has_nohl_tag:
         reasons.append("qb_nohl_tag_present_advisory")
@@ -969,11 +1178,22 @@ def _classify_common_path_drift(
     if anchor.has_arr_anchor is True:
         desired_placement = "stash"
         reasons.append("arr_library_hardlink_anchor_present")
+        blockers.extend(anchor.blockers)
     elif anchor.has_arr_anchor is False:
         desired_placement = "pool"
         reasons.append("no_arr_library_hardlink_anchor_found")
+        blockers.extend(anchor.blockers)
     else:
-        blockers.append("hardlink_anchor_evidence_required_for_placement")
+        # Anchor scan inconclusive — infer stash placement from ARR seeding dir if unambiguous.
+        # Only propagate anchor blockers when we cannot resolve placement by other means.
+        rt_in_arr_dir = _is_arr_seeding_path(rt_row.content_path or rt_row.save_path)
+        qb_in_arr_dir = _is_arr_seeding_path(qb_row.content_path or qb_row.save_path)
+        if rt_in_arr_dir != qb_in_arr_dir:
+            desired_placement = "stash"
+            reasons.append("arr_seeding_dir_implies_stash_placement")
+        else:
+            blockers.extend(anchor.blockers)
+            blockers.append("hardlink_anchor_evidence_required_for_placement")
 
     qb_kind = _placement_kind(qb_row.save_path or qb_row.content_path, policy)
     rt_kind = _placement_kind(rt_row.target_qb_save_path or rt_row.save_path or rt_row.content_path, policy)
@@ -987,6 +1207,14 @@ def _classify_common_path_drift(
         "rt_target_qb_save_path": rt_row.target_qb_save_path,
         "rt_content_path": rt_row.content_path,
         "qb_has_nohl_tag": qb_has_nohl_tag,
+        "qb_tracker_url": "",
+        "qb_tracker_key": "",
+        "qb_tracker_display": "",
+        "qb_prowlarr_name": "",
+        "rt_tracker_url": "",
+        "rt_tracker_key": "",
+        "rt_tracker_display": "",
+        "rt_prowlarr_name": "",
         "proposed_qb_save_path": "",
         "proposed_rt_directory": "",
         "proposed_rt_content_path": "",
@@ -1016,7 +1244,86 @@ def _classify_common_path_drift(
             if not rt_row.path_exists:
                 blockers.append("selected_rt_target_missing")
         elif qb_matches and rt_matches:
-            blockers.append("both_clients_on_required_placement_but_paths_differ")
+            # Both sides are on the correct storage class but at different paths.
+            # Use inode comparison against the ARR anchor to pick canonical side.
+            anchor_inodes: set[int] = set()
+            for ap in anchor.anchor_paths:
+                try:
+                    anchor_inodes.add(os.stat(ap).st_ino)
+                except OSError:
+                    pass
+            qb_inode: int | None = None
+            rt_inode: int | None = None
+            if qb_row.content_path:
+                try:
+                    qb_inode = os.stat(qb_row.content_path).st_ino
+                except OSError:
+                    pass
+            if rt_row.content_path:
+                try:
+                    rt_inode = os.stat(rt_row.content_path).st_ino
+                except OSError:
+                    pass
+            rt_is_anchor = bool(anchor_inodes and rt_inode and rt_inode in anchor_inodes)
+            qb_is_anchor = bool(anchor_inodes and qb_inode and qb_inode in anchor_inodes)
+            if rt_is_anchor and not qb_is_anchor:
+                action = "repoint_qb_to_rt_path"
+                reasons.append(f"rt_on_required_{desired_placement}_placement")
+                reasons.append("rt_inode_matches_arr_anchor")
+                placement["proposed_source_client"] = "rt"
+                placement["proposed_qb_save_path"] = rt_row.target_qb_save_path or rt_row.save_path
+                if not rt_row.path_exists:
+                    blockers.append("selected_rt_target_missing")
+            elif qb_is_anchor and not rt_is_anchor:
+                action = "repoint_rt_to_qb_path"
+                reasons.append(f"qb_on_required_{desired_placement}_placement")
+                reasons.append("qb_inode_matches_arr_anchor")
+                placement["proposed_source_client"] = "qb"
+                placement["proposed_rt_directory"] = qb_row.content_path
+                placement["proposed_rt_content_path"] = qb_row.content_path
+                placement["proposed_rt_repoint_target"] = _rt_repoint_target_for_content_path(qb_row.content_path, rt_row)
+                if not qb_row.path_exists:
+                    blockers.append("selected_qb_target_missing")
+            else:
+                # Both share the same inode as the ARR anchor (same physical file,
+                # different directory names). Use ARR post-import seeding dir as
+                # the tiebreaker: the path whose immediate seeding subdir is an ARR
+                # category (movies/, tv/, music/, ebooks/, audiobooks/) is canonical —
+                # that's where ATM placed it after import.
+                rt_in_arr_dir = _is_arr_seeding_path(rt_row.content_path or rt_row.save_path)
+                qb_in_arr_dir = _is_arr_seeding_path(qb_row.content_path or qb_row.save_path)
+                if rt_in_arr_dir and not qb_in_arr_dir:
+                    action = "repoint_qb_to_rt_path"
+                    reasons.append(f"rt_on_required_{desired_placement}_placement")
+                    reasons.append("rt_path_in_arr_seeding_dir")
+                    placement["proposed_source_client"] = "rt"
+                    placement["proposed_qb_save_path"] = rt_row.target_qb_save_path or rt_row.save_path
+                    if not rt_row.path_exists:
+                        blockers.append("selected_rt_target_missing")
+                elif qb_in_arr_dir and not rt_in_arr_dir:
+                    action = "repoint_rt_to_qb_path"
+                    reasons.append(f"qb_on_required_{desired_placement}_placement")
+                    reasons.append("qb_path_in_arr_seeding_dir")
+                    placement["proposed_source_client"] = "qb"
+                    placement["proposed_rt_directory"] = qb_row.content_path
+                    placement["proposed_rt_content_path"] = qb_row.content_path
+                    placement["proposed_rt_repoint_target"] = _rt_repoint_target_for_content_path(qb_row.content_path, rt_row)
+                    if not qb_row.path_exists:
+                        blockers.append("selected_qb_target_missing")
+                else:
+                    # Both clients share the ARR anchor inode AND neither is in an
+                    # ARR seeding dir (e.g. both are cross-seed tracker dirs).
+                    # Policy (§8.4): RT is the active seeder and path authority.
+                    # Repoint qB to match RT unless RT's path is provably invalid.
+                    if rt_row.path_exists and rt_row.content_path:
+                        action = "repoint_qb_to_rt_path"
+                        reasons.append(f"rt_on_required_{desired_placement}_placement")
+                        reasons.append("rt_authoritative_path_wins")
+                        placement["proposed_source_client"] = "rt"
+                        placement["proposed_qb_save_path"] = rt_row.target_qb_save_path or rt_row.save_path
+                    else:
+                        blockers.append("both_clients_on_required_placement_but_paths_differ")
+                        blockers.append("rt_path_missing_cannot_apply_authority_rule")
         else:
             blockers.append(f"no_client_on_required_{desired_placement}_placement")
 
@@ -1051,6 +1358,7 @@ def build_client_drift_report(
     now = time.time()
     drift_rows: list[dict[str, Any]] = []
     anchor_scanner = _PlacementAnchorScanner(active_policy, catalog_path=catalog_path)
+    tracker_registry = _load_tracker_registry()
 
     for torrent_hash in sorted(common):
         if not _selected_hash(torrent_hash):
@@ -1071,6 +1379,18 @@ def build_client_drift_report(
             active_policy,
             anchor_scanner,
         )
+        qb_ti = _resolve_tracker(qb_row.tracker, tracker_registry)
+        rt_ti = _resolve_tracker(rt_row.tracker, tracker_registry)
+        placement.update({
+            "qb_tracker_url": qb_ti["url"],
+            "qb_tracker_key": qb_ti["key"],
+            "qb_tracker_display": qb_ti["display_name"],
+            "qb_prowlarr_name": qb_ti["prowlarr_name"],
+            "rt_tracker_url": rt_ti["url"],
+            "rt_tracker_key": rt_ti["key"],
+            "rt_tracker_display": rt_ti["display_name"],
+            "rt_prowlarr_name": rt_ti["prowlarr_name"],
+        })
         drift_rows.append(
             {
                 "hash": torrent_hash,
@@ -1123,6 +1443,37 @@ def build_client_drift_report(
                 "qb": row.to_dict(),
             }
         )
+
+    # Dual-repoint upgrade: resolve no_client_on_required_pool_placement → repoint_both_to_pool
+    # when the catalog contains a pool-resident sibling. Must run before summary counts.
+    if catalog_path is not None:
+        _pool_blocker = "no_client_on_required_pool_placement"
+        needs_upgrade = [r for r in drift_rows if _pool_blocker in (r.get("blockers") or [])]
+        if needs_upgrade:
+            all_tracker_keys: set[str] = set(tracker_registry.keys())
+            catalog_by_hash = _catalog_context_for_hashes(
+                catalog_path, (r["hash"] for r in needs_upgrade)
+            )
+            for row in needs_upgrade:
+                cat = catalog_by_hash.get(row["hash"], {})
+                p = row["placement"]
+                torrent_tracker_keys = {
+                    k for k in [p.get("qb_tracker_key"), p.get("rt_tracker_key")] if k
+                }
+                pool_cand = _find_pool_sibling_path(
+                    cat.get("sibling_payloads") or [],
+                    active_policy,
+                    self_payload_id=int(cat.get("payload_id") or 0) or None,
+                    torrent_tracker_keys=torrent_tracker_keys,
+                    all_tracker_keys=all_tracker_keys,
+                )
+                if pool_cand:
+                    pool_save_path, pool_root = pool_cand
+                    row["blockers"] = [b for b in row["blockers"] if b != _pool_blocker]
+                    row["action"] = "repoint_both_to_pool"
+                    p["proposed_qb_save_path"] = pool_save_path
+                    p["proposed_rt_directory"] = pool_save_path
+                    p["pool_sibling_root"] = pool_root
 
     action_counts = Counter(str(row["action"]) for row in drift_rows)
     side_counts = Counter(str(row["side"]) for row in drift_rows)
@@ -1232,6 +1583,27 @@ def _catalog_context_for_hashes(catalog_path: Path | None, torrent_hashes: Itera
                 payload_ids,
             ).fetchall()
             torrent_counts = {int(row["payload_id"] or 0): int(row["torrent_count"] or 0) for row in count_rows}
+        all_sibling_payload_ids = sorted({
+            int(row["payload_id"] or 0)
+            for rows_list in by_payload_hash.values()
+            for row in rows_list
+            if row["payload_id"]
+        })
+        hashes_by_payload_id: dict[int, list[str]] = {}
+        if all_sibling_payload_ids:
+            sib_id_placeholders = ",".join("?" for _ in all_sibling_payload_ids)
+            hash_rows = conn.execute(
+                f"""
+                SELECT lower(torrent_hash) AS torrent_hash, payload_id
+                FROM torrent_instances
+                WHERE payload_id IN ({sib_id_placeholders})
+                ORDER BY payload_id
+                """,
+                all_sibling_payload_ids,
+            ).fetchall()
+            for hr in hash_rows:
+                pid = int(hr["payload_id"] or 0)
+                hashes_by_payload_id.setdefault(pid, []).append(str(hr["torrent_hash"] or ""))
         for row in rows:
             payload_hash = str(row["payload_hash"] or "")
             sibling_payloads = [
@@ -1243,6 +1615,7 @@ def _catalog_context_for_hashes(catalog_path: Path | None, torrent_hashes: Itera
                     "file_count": int(sib["file_count"] or 0),
                     "total_bytes": int(sib["total_bytes"] or 0),
                     "torrent_count": int(sib["torrent_count"] or 0),
+                    "hashes": hashes_by_payload_id.get(int(sib["payload_id"] or 0), []),
                 }
                 for sib in by_payload_hash.get(payload_hash, [])
             ]
@@ -1335,6 +1708,8 @@ def build_path_drift_rank_report(
     catalog_path: Path | None = DEFAULT_CATALOG_PATH,
 ) -> dict[str, Any]:
     active_policy = policy or default_policy()
+    tracker_registry = _load_tracker_registry()
+    all_tracker_keys: set[str] = set(tracker_registry.keys())
     report = build_client_drift_report(
         qb_cache_file=qb_cache_file,
         rt_cache_file=rt_cache_file,
@@ -1352,31 +1727,69 @@ def build_path_drift_rank_report(
         anchor = placement.get("anchor_scan") or {}
         catalog = catalog_by_hash.get(torrent_hash, {})
         difficulty, difficulty_reasons = _difficulty_for_path_drift(row, catalog)
-        items.append(
-            {
-                "hash": torrent_hash,
-                "name": row.get("name") or "",
-                "difficulty": difficulty,
-                "difficulty_reasons": difficulty_reasons,
-                "action": row.get("action") or "",
-                "desired_root": placement.get("desired") or "",
-                "arr_status": _arr_status_from_anchor(anchor),
-                "arr_anchor_source": anchor.get("source") or "",
-                "arr_anchor_paths": anchor.get("anchor_paths") or [],
-                "qb_nohl": bool(placement.get("qb_has_nohl_tag")),
-                "qb_root_kind": placement.get("qb_kind") or "",
-                "rt_root_kind": placement.get("rt_kind") or "",
-                "qb_save_path": placement.get("qb_save_path") or "",
-                "qb_content_path": placement.get("qb_content_path") or "",
-                "rt_save_path": placement.get("rt_save_path") or "",
-                "rt_target_qb_save_path": placement.get("rt_target_qb_save_path") or "",
-                "rt_content_path": placement.get("rt_content_path") or "",
-                "file_count": int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0),
-                "blockers": row.get("blockers") or [],
-                "tags": (row.get("qb") or {}).get("tags") or "",
-                "catalog": catalog,
-            }
-        )
+        item: dict[str, Any] = {
+            "hash": torrent_hash,
+            "name": row.get("name") or "",
+            "difficulty": difficulty,
+            "difficulty_reasons": difficulty_reasons,
+            "action": row.get("action") or "",
+            "desired_root": placement.get("desired") or "",
+            "arr_status": _arr_status_from_anchor(anchor),
+            "arr_anchor_source": anchor.get("source") or "",
+            "arr_anchor_paths": anchor.get("anchor_paths") or [],
+            "qb_nohl": bool(placement.get("qb_has_nohl_tag")),
+            "qb_root_kind": placement.get("qb_kind") or "",
+            "rt_root_kind": placement.get("rt_kind") or "",
+            "qb_save_path": placement.get("qb_save_path") or "",
+            "qb_content_path": placement.get("qb_content_path") or "",
+            "rt_save_path": placement.get("rt_save_path") or "",
+            "rt_target_qb_save_path": placement.get("rt_target_qb_save_path") or "",
+            "rt_content_path": placement.get("rt_content_path") or "",
+            "file_count": int((row.get("rt") or {}).get("expected_file_count") or catalog.get("file_count") or 0),
+            "blockers": list(row.get("blockers") or []),
+            "tags": (row.get("qb") or {}).get("tags") or "",
+            "placement_reasons": list(row.get("reasons") or []),
+            "proposed_qb_save_path": placement.get("proposed_qb_save_path") or "",
+            "proposed_rt_directory": placement.get("proposed_rt_directory") or "",
+            "pool_sibling_root": placement.get("pool_sibling_root") or "",
+            "qb_tracker_url": placement.get("qb_tracker_url") or "",
+            "qb_tracker_key": placement.get("qb_tracker_key") or "",
+            "qb_tracker_display": placement.get("qb_tracker_display") or "",
+            "qb_prowlarr_name": placement.get("qb_prowlarr_name") or "",
+            "rt_tracker_url": placement.get("rt_tracker_url") or "",
+            "rt_tracker_key": placement.get("rt_tracker_key") or "",
+            "rt_tracker_display": placement.get("rt_tracker_display") or "",
+            "rt_prowlarr_name": placement.get("rt_prowlarr_name") or "",
+            "catalog": catalog,
+        }
+
+        # Dual-repoint: the base report resolves no_client_on_required_pool_placement →
+        # repoint_both_to_pool when catalog is available.  The rank item already picks up
+        # proposed_qb_save_path / pool_sibling_root from placement above.  Upgrade
+        # difficulty here; fall back to resolving if the base report had no catalog context.
+        if "no_client_on_required_pool_placement" in item["blockers"]:
+            torrent_tracker_keys = {k for k in [item["qb_tracker_key"], item["rt_tracker_key"]] if k}
+            pool_cand = _find_pool_sibling_path(
+                catalog.get("sibling_payloads") or [],
+                active_policy,
+                self_payload_id=int(catalog.get("payload_id") or 0) or None,
+                torrent_tracker_keys=torrent_tracker_keys,
+                all_tracker_keys=all_tracker_keys,
+            )
+            if pool_cand:
+                pool_save_path, pool_root = pool_cand
+                item["blockers"] = [b for b in item["blockers"] if b != "no_client_on_required_pool_placement"]
+                item["action"] = "repoint_both_to_pool"
+                item["proposed_qb_save_path"] = pool_save_path
+                item["proposed_rt_directory"] = pool_save_path
+                item["pool_sibling_root"] = pool_root
+        if item.get("action") == "repoint_both_to_pool" and item.get("pool_sibling_root") and not item["blockers"]:
+            item["difficulty"] = "medium"
+            item["difficulty_reasons"] = list(item.get("difficulty_reasons") or []) + [
+                "pool_sibling_exists:dual_repoint"
+            ]
+
+        items.append(item)
 
     order = {"easy": 0, "medium": 1, "hard": 2}
     items.sort(
@@ -1405,56 +1818,267 @@ def build_path_drift_rank_report(
     }
 
 
+def _layout_verify_badge(torrent_hash: str, qb_save_path: str) -> tuple[str, str] | None:
+    """
+    Run verify_layout for one hash and return a (text, style) badge for Rich display.
+    Returns None if the .torrent file is not found (skip silently).
+    """
+    try:
+        from pathlib import Path as _Path
+        from .torrent_verify import verify_layout
+        from .rtorrent import DEFAULT_RT_SESSION_DIR
+        from .nested_folder_repair import _api_to_fs
+
+        h_upper = str(torrent_hash).upper()
+        torrent_path = DEFAULT_RT_SESSION_DIR / f"{h_upper}.torrent"
+        if not torrent_path.exists():
+            return None
+
+        save_path_api = str(qb_save_path or "").rstrip("/")
+        if not save_path_api:
+            return None
+        base_dir = _Path(_api_to_fs(save_path_api))
+
+        result = verify_layout(torrent_path, base_dir)
+
+        if result.success:
+            return ("layout: ok", "green")
+        parts = []
+        if result.files_wrong_depth:
+            parts.append(f"{result.files_wrong_depth} wrong-depth")
+        if result.files_missing:
+            parts.append(f"{result.files_missing} missing")
+        detail = ", ".join(parts)
+        return (f"layout: FAIL ({detail})", "bold red")
+    except Exception:
+        return None
+
+
 def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool = False) -> str:
     if json_output:
         return json.dumps(report, indent=2)
+
+    import sys
+    from rich.console import Console
+    from rich.text import Text
+    from rich.rule import Rule
+    from io import StringIO
+
+    use_color = sys.stdout.isatty()
+    buf = StringIO()
+    console = Console(file=buf, highlight=False, markup=False, force_terminal=use_color, width=220)
+
+    # Color palette
+    LEVEL_STYLE = {"easy": "bold green", "medium": "bold yellow", "hard": "bold red"}
+    ACTION_STYLE = {
+        "repoint_qb_to_rt_path": "green",
+        "repoint_rt_to_qb_path": "cyan",
+        "repoint_both_to_pool": "bold cyan",
+        "mirror_rt_to_qb": "cyan",
+        "manual_review": "yellow",
+    }
+    ARR_STYLE = {"linked_to_arr": "green", "not_linked_to_arr": "dim", None: "dim"}
+
     summary = report.get("summary") or {}
-    lines = [
-        "Path Drift Repair Ranking",
-        (
-            f"  total={summary.get('path_drift', 0)} "
-            f"easy={summary.get('easy', 0)} medium={summary.get('medium', 0)} hard={summary.get('hard', 0)} "
-            f"anchor_scan_max_files={summary.get('anchor_scan_max_files', 0)}"
-        ),
-        "",
-    ]
+    n_easy = summary.get("easy", 0)
+    n_med = summary.get("medium", 0)
+    n_hard = summary.get("hard", 0)
+    n_total = summary.get("path_drift", 0)
+
+    console.print(Rule("Path Drift Repair Ranking", style="bold"))
+    console.print(
+        Text.assemble(
+            ("  total=", "dim"), (str(n_total), "bold"),
+            ("  easy=", "dim"), (str(n_easy), "bold green"),
+            ("  medium=", "dim"), (str(n_med), "bold yellow"),
+            ("  hard=", "dim"), (str(n_hard), "bold red"),
+        )
+    )
+    console.print()
+
     for level in ("easy", "medium", "hard"):
         items = (report.get("groups") or {}).get(level) or []
-        lines.append(f"{level.upper()}: {len(items)}")
+        level_style = LEVEL_STYLE[level]
+        console.print(Text(f"{level.upper()}: {len(items)}", style=level_style))
+        console.print()
+
         for item in items:
             catalog = item.get("catalog") or {}
             sibling_payloads = catalog.get("sibling_payloads") or []
-            sibling_roots = [
-                str(sib.get("root_path") or "")
-                for sib in sibling_payloads
-                if int(sib.get("payload_id") or 0) != int(catalog.get("payload_id") or 0)
+            self_payload_id = int(catalog.get("payload_id") or 0)
+            display_siblings = [
+                sib for sib in sibling_payloads
+                if int(sib.get("payload_id") or 0) != self_payload_id
             ]
-            lines.append(f"  {str(item.get('hash') or '')[:16]}  {item.get('name')}")
-            lines.append(
-                f"    desired={item.get('desired_root') or '-'} arr={item.get('arr_status')} "
-                f"noHL={'yes' if item.get('qb_nohl') else 'no'} files={item.get('file_count')}"
+            h = str(item.get("hash") or "")[:16]
+            name = str(item.get("name") or "")
+            action = str(item.get("action") or "manual_review")
+            blockers = item.get("blockers") or []
+            arr_status = item.get("arr_status")
+            nohl = item.get("qb_nohl")
+            desired = item.get("desired_root") or "-"
+            qb_path = item.get("qb_save_path") or "-"
+            rt_path = item.get("rt_target_qb_save_path") or item.get("rt_save_path") or "-"
+            file_count = item.get("file_count") or 0
+            qb_tracker_key = item.get("qb_tracker_key") or ""
+            qb_prowlarr = item.get("qb_prowlarr_name") or item.get("qb_tracker_display") or ""
+            rt_tracker_key = item.get("rt_tracker_key") or ""
+            rt_prowlarr = item.get("rt_prowlarr_name") or item.get("rt_tracker_display") or ""
+
+            # ── Title line
+            console.print(Text.assemble(
+                ("  ", ""),
+                (h, "dim"),
+                ("  ", ""),
+                (name, "bold"),
+            ))
+
+            # ── Action / status line
+            action_label = action.replace("_", " ")
+            action_s = ACTION_STYLE.get(action, "yellow")
+            arr_s = ARR_STYLE.get(arr_status, "dim")
+            nohl_text = Text.assemble(("~noHL", "yellow bold")) if nohl else Text("", style="")
+            console.print(Text.assemble(
+                ("    action=", "dim"),
+                (action_label, action_s),
+                ("  desired=", "dim"), (desired, ""),
+                ("  arr=", "dim"), (str(arr_status or "-"), arr_s),
+                ("  files=", "dim"), (str(file_count), ""),
+                ("  ", ""), nohl_text,
+            ))
+
+            # ── Tracker: key + Prowlarr name
+            if qb_tracker_key or rt_tracker_key:
+                def _tracker_cell(key: str, prowlarr: str) -> list[tuple[str, str]]:
+                    if not key:
+                        return []
+                    parts: list[tuple[str, str]] = [(key, "magenta")]
+                    if prowlarr and prowlarr.lower() != key.lower():
+                        parts += [(" (", "dim"), (prowlarr, "dim magenta"), (")", "dim")]
+                    return parts
+
+                tracker_parts: list[tuple[str, str]] = [("    tracker  ", "dim bold")]
+                qb_cell = _tracker_cell(qb_tracker_key, qb_prowlarr)
+                rt_cell = _tracker_cell(rt_tracker_key, rt_prowlarr)
+                if qb_cell:
+                    tracker_parts += [("qb=", "dim")] + qb_cell
+                if rt_cell:
+                    if qb_cell:
+                        tracker_parts.append(("  ", ""))
+                    tracker_parts += [("rt=", "dim")] + rt_cell
+                console.print(Text.assemble(*tracker_parts))
+
+            # ── Paths
+            console.print(Text.assemble(
+                ("    qb  ", "dim bold"), (qb_path, "cyan"),
+            ))
+            console.print(Text.assemble(
+                ("    rt  ", "dim bold"), (rt_path, "cyan"),
+            ))
+
+            # ── Layout verification badge
+            badge = _layout_verify_badge(
+                str(item.get("hash") or ""),
+                qb_path if qb_path != "-" else "",
             )
-            lines.append(
-                f"    qb={item.get('qb_root_kind') or '-'}:{item.get('qb_save_path')}"
-            )
-            lines.append(
-                f"    rt={item.get('rt_root_kind') or '-'}:{item.get('rt_target_qb_save_path') or item.get('rt_save_path')}"
-            )
-            if catalog:
-                lines.append(
-                    f"    catalog_payload={catalog.get('payload_id') or '-'} "
-                    f"payload_torrents={catalog.get('payload_torrent_count') or 0} "
-                    f"root={catalog.get('root_path') or '-'}"
-                )
-            if sibling_roots:
-                lines.append(f"    sibling_payload_roots={len(sibling_roots)}")
-                for root in sibling_roots[:3]:
-                    lines.append(f"      - {root}")
-            reasons = ",".join(item.get("difficulty_reasons") or [])
-            blockers = ",".join(item.get("blockers") or [])
-            if reasons:
-                lines.append(f"    rank_reasons={reasons}")
+            if badge:
+                console.print(Text.assemble(("    layout  ", "dim bold"), (badge[0], badge[1])))
+
+            # ── Sibling payload roots with metadata
+            if display_siblings:
+                baseline_file_count = int(catalog.get("file_count") or 0)
+                baseline_bytes = int(catalog.get("total_bytes") or 0)
+                item_name_str = str(item.get("name") or "")
+                console.print(Text.assemble(
+                    ("    siblings=", "dim"), (str(len(display_siblings)), "yellow"),
+                ))
+                for sib in display_siblings:
+                    root = str(sib.get("root_path") or "")
+                    sib_status = str(sib.get("status") or "")
+                    sib_hashes = sib.get("hashes") or []
+                    sib_file_count = int(sib.get("file_count") or 0)
+                    sib_bytes = int(sib.get("total_bytes") or 0)
+                    nested = _detect_nested_folder(root, item_name_str, sib_file_count)
+
+                    status_style = "green" if sib_status == "active" else ("yellow" if sib_status == "orphan" else "dim")
+                    hash_strs = " ".join(h[:16] for h in sib_hashes) if sib_hashes else "no-hashes"
+
+                    if baseline_file_count and sib_file_count:
+                        fc_delta = sib_file_count - baseline_file_count
+                        if fc_delta == 0:
+                            match_text, match_style = "match", "dim green"
+                        else:
+                            match_text = f"{'+' if fc_delta > 0 else ''}{fc_delta}f"
+                            match_style = "yellow"
+                    else:
+                        match_text, match_style = "?", "dim"
+
+                    if baseline_bytes and sib_bytes:
+                        b_delta = sib_bytes - baseline_bytes
+                        if abs(b_delta) < 1024 * 1024:
+                            size_text = ""
+                        else:
+                            sign = "+" if b_delta > 0 else ""
+                            size_text = f" {sign}{b_delta // (1024 * 1024)}MB"
+                    else:
+                        size_text = ""
+
+                    console.print(Text("      • " + root, style="dim"))
+                    meta: list[tuple[str, str]] = [("        ↳ ", "dim")]
+                    meta.append((sib_status or "unknown", status_style))
+                    meta.append((" · ", "dim"))
+                    meta.append((hash_strs, "dim"))
+                    meta.append((" · ", "dim"))
+                    meta.append((match_text, match_style))
+                    if size_text:
+                        meta.append((size_text, "dim"))
+                    if nested:
+                        meta.append((" ⚠ nested-folder", "yellow"))
+                    console.print(Text.assemble(*meta))
+
+            # ── Proposed paths for dual-repoint actions
+            proposed_qb = item.get("proposed_qb_save_path") or ""
+            proposed_rt = item.get("proposed_rt_directory") or ""
+            if proposed_qb and item.get("action") == "repoint_both_to_pool":
+                console.print(Text.assemble(
+                    ("    → both  ", "bold cyan"), (proposed_qb, "cyan"),
+                ))
+            elif proposed_qb:
+                console.print(Text.assemble(
+                    ("    → qb    ", "dim bold"), (proposed_qb, "cyan"),
+                ))
+            elif proposed_rt:
+                console.print(Text.assemble(
+                    ("    → rt    ", "dim bold"), (proposed_rt, "cyan"),
+                ))
+
+            # ── Blockers + context / reasons
+            _BOILERPLATE = frozenset({
+                "present_in_both_clients", "same_hash_path_drift", "rt_qb_path_not_aligned",
+            })
+            placement_reasons = [r for r in (item.get("placement_reasons") or []) if r not in _BOILERPLATE]
+            difficulty_reasons = item.get("difficulty_reasons") or []
+
             if blockers:
-                lines.append(f"    blockers={blockers}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
+                for b in blockers:
+                    console.print(Text("    ✖ " + b, style="bold red"))
+                # Surface diagnosis hints even when blocked
+                for dr in difficulty_reasons:
+                    if "needs_" in dr or "rehome" in dr:
+                        console.print(Text("    ↳ " + dr, style="dim"))
+            else:
+                auto_reasons = [r for r in difficulty_reasons if r.startswith("tool_selected") or r.startswith("pool_sibling")]
+                for ar in auto_reasons:
+                    console.print(Text("    ✔ " + ar, style="green"))
+
+            # Always show placement WHY-reasons so operator can verify the decision
+            for r in placement_reasons:
+                console.print(Text("    ✔ " + r, style="dim green"))
+
+            console.print()
+
+        if not items:
+            console.print(Text("  (none)", style="dim"))
+            console.print()
+
+    return buf.getvalue().rstrip()

@@ -534,11 +534,16 @@ class QBittorrentClient:
                     data={"username": self.username, "password": self.password},
                     timeout=self.request_timeout,
                 )
-                if response.text == "Ok.":
+                # Success: 200 with "Ok." or empty body (v5+), or 204 No Content
+                if response.status_code in (200, 204):
+                    if response.status_code == 200 and response.text.strip() not in {"Ok.", ""}:
+                        self.last_error = f"login failed: {response.text}"
+                        self._authenticated = False
+                        return False
                     self._authenticated = True
                     self.last_error = None
                     return True
-                self.last_error = f"login failed: {response.text}"
+                self.last_error = f"login failed: {response.status_code} {response.text}"
                 self._authenticated = False
                 return False
             except requests.RequestException as e:
@@ -689,7 +694,19 @@ class QBittorrentClient:
         category: Optional[str] = None,
         tag: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Fetch normalized raw torrent payloads from qB."""
+        """Fetch normalized raw torrent payloads from qB.
+
+        Proactively uses cache if fresh (< 30s), otherwise hits live API.
+        Falls back to stale cache on API failures.
+        """
+        # Proactively check if cache is fresh enough
+        cached_fresh = self._cached_payloads(
+            category=category, tag=tag, max_age_s=30.0
+        )
+        if cached_fresh:
+            self.last_error = None
+            return cached_fresh
+
         try:
             self._ensure_authenticated()
         except RuntimeError as e:

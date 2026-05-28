@@ -42,8 +42,24 @@ RT_CONTAINER_HOST_PATH_PREFIXES = (
     ("/pool/media", "/pool/media"),
 )
 
-# System tags that are not tracker identifiers
-SYSTEM_TAGS = {"private", "cross-seed", "~noHL", "needs_rehome"}
+# System tags that are not tracker identifiers.
+# See §4.4.5 of docs/REQUIREMENTS.md for the full spec.
+#
+# NOTE: "speed" is an alias of registry-tracker "speedcd" (domain: speed.click).
+#       Ideally resolved via tracker-registry.yml at runtime (see BACKLOG.md Gap 5).
+#       Until then, suppress it here as a pragmatic fix so the canonical "speedcd"
+#       wins the alphabetical tiebreaker. Do not add other tracker aliases here
+#       without confirming they are NOT in the registry.
+SYSTEM_TAGS = {
+    "private", "cross-seed", "~noHL", "needs_rehome",
+    "other", "public",  # qbm public-bucket placeholders, not tracker names
+    "_movie",           # qbm content-type bucket; sorts before tracker names alphabetically
+    "aither-like",      # qbm content-classification tag, not a tracker name
+    "speed",  # Tracker alias (speed.click / SpeedCD); suppress until registry resolution exists
+    "stoppeddl_not_recoverable",  # operational status tag, not a tracker
+    "rehome", "rehome_verify_ok", "rehome_cleanup_source_required",
+    "rehome_from_stash", "rehome_to_pool",
+}
 
 
 @dataclass
@@ -144,6 +160,11 @@ def choose_category_leaf_name(category: str, *paths: str) -> str:
     return aliases[0]  # default to first alias
 
 
+_STAGING_DIRS = frozenset({
+    "_rehome-unique", "_qb-finish", "_qb-unique-repair", "_qb-repair-v2",
+})
+
+
 def extract_cross_seed_provider_name(*paths: str) -> str | None:
     """Extract tracker name from cross-seed path.
 
@@ -161,11 +182,17 @@ def extract_cross_seed_provider_name(*paths: str) -> str | None:
             parts = Path(rel).parts if rel else ()
             if not parts:
                 continue
+            # Skip staging directories — not tracker names
+            if parts[0] in _STAGING_DIRS:
+                continue
             # Canonical: first component is the tracker name
             if parts[0] != "cross-seed":
                 return parts[0]
             # Legacy: /seeding/cross-seed/<tracker>/...
-            if len(parts) > 1:
+            # Skip if item is staged inside the tracker dir (tracker/_rehome-unique/...)
+            if len(parts) > 1 and parts[1] not in _STAGING_DIRS:
+                if len(parts) > 2 and parts[2] in _STAGING_DIRS:
+                    continue
                 return parts[1]
     return None
 
@@ -239,6 +266,11 @@ def load_qbm_config(config_path: str = "/home/michael/dev/sys/docker/qbit_manage
     """
     Load qbit_manage config.yml and extract category → save_path mapping.
     Returns {category: leaf_dir_name}.
+
+    LIMITATION: qbm config uses PyYAML `!ENV` custom tags. safe_load returns {}
+    because it cannot parse those tags. An env-aware loader or pyyaml include-resolver
+    is needed. Until then this function returns empty for the actual config, and the
+    alphabetical tag fallback is used. See BACKLOG.md Gap 5.
     """
     try:
         with open(config_path) as f:
@@ -296,16 +328,41 @@ def infer_canonical_save_path(
     category_norm = str(category or "").strip()
     tags_set = {t.strip() for t in (tags or "").split(",") if t.strip()}
 
-    # Determine device root based on ~noHL tag
+    notes = []
+
+    # Determine device root: ~noHL tag is authoritative; fall back to path hint.
     has_no_hardlinks = "~noHL" in tags_set
     if has_no_hardlinks:
         device_root = "/pool/media/torrents/seeding"
         device = "pool"
     else:
-        device_root = "/data/media/torrents/seeding"
-        device = "stash"
-
-    notes = []
+        # ~noHL absent — for cross-seed torrents, check path hints for pool prefix.
+        # ARR-imported content (tv/movies/etc.) always has hardlinks → always stash.
+        # cross-seed is seed-only and may land on pool before qbm applies ~noHL.
+        _category_lower = category_norm.lower()
+        _is_cross_seed = _category_lower == "cross-seed"
+        _pool_root = "/pool/media/torrents/seeding"
+        device_from_path = None
+        if _is_cross_seed:
+            for _hint in (current_save_path, current_content_path, current_rt_directory):
+                if not _hint:
+                    continue
+                _hint_norm = _hint.rstrip("/")
+                if _hint_norm == _pool_root or _hint_norm.startswith(_pool_root + "/"):
+                    _rel = _hint_norm[len(_pool_root):].lstrip("/")
+                    _first = _rel.split("/", 1)[0] if _rel else ""
+                    if _first not in _STAGING_DIRS:
+                        device_from_path = "pool"
+                        notes.append(
+                            f"device=pool inferred from path hint (no ~noHL tag): {_hint!r}"
+                        )
+                        break
+        if device_from_path == "pool":
+            device_root = _pool_root
+            device = "pool"
+        else:
+            device_root = "/data/media/torrents/seeding"
+            device = "stash"
 
     # Determine subdirectory
     subdir = ""
@@ -322,10 +379,16 @@ def infer_canonical_save_path(
         if provider:
             subdir = provider
         else:
-            # Fall back to tags
-            tracker_tags = tags_set - SYSTEM_TAGS
+            # Fall back to tags; exclude system tags, tilde-prefixed control tags, and rehome_* prefixes
+            tracker_tags = {
+                t for t in tags_set - SYSTEM_TAGS
+                if not t.startswith("~") and not t.startswith("rehome_")
+            }
             if tracker_tags:
-                tracker_slug = sorted(tracker_tags)[0]
+                # Prefer tags that match known qbm category names (more reliable than alphabetical)
+                qbm_config = load_qbm_config(qbm_config_path)
+                qbm_tags = tracker_tags & set(qbm_config.keys())
+                tracker_slug = sorted(qbm_tags)[0] if qbm_tags else sorted(tracker_tags)[0]
                 subdir = tracker_slug
                 notes.append(f"cross-seed provider from tags: {tracker_slug}")
             else:
