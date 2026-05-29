@@ -3370,7 +3370,10 @@ def _apply_client_drift_path_rows(
                     event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
                     # qB v5 resumes torrents after recheck; pause again to keep mirror stopped
                     if event["recheck_started"]:
-                        qbit.pause_torrent(torrent_hash)
+                        try:
+                            qbit.pause_torrent(torrent_hash)
+                        except Exception:
+                            event["pause_after_recheck_failed"] = str(getattr(qbit, "last_error", "unknown"))
         elif action == "repoint_both_to_pool":
             if qbit is None:
                 raise click.ClickException("qB client not initialized")
@@ -3400,7 +3403,10 @@ def _apply_client_drift_path_rows(
                     event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
                     # qB v5 resumes torrents after recheck; pause again to keep mirror stopped
                     if event["recheck_started"]:
-                        qbit.pause_torrent(torrent_hash)
+                        try:
+                            qbit.pause_torrent(torrent_hash)
+                        except Exception:
+                            event["pause_after_recheck_failed"] = str(getattr(qbit, "last_error", "unknown"))
         else:
             event["error"] = f"unsupported_path_drift_action:{action}"
 

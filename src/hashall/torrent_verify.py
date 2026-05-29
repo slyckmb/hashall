@@ -110,7 +110,7 @@ def _piece_stream(
                 if len(buf) >= piece_length:
                     yield flush_piece()
                     buf = bytearray()
-                    missing_this_piece = [str(fpath)]
+                    missing_this_piece = [str(fpath)] if remaining > 0 else []
             continue
 
         with fh:

@@ -22,7 +22,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from rehome.planner import DemotionPlanner
 from rehome.executor import DemotionExecutor
-from hashall.qbittorrent import QBittorrentClient, QBitTorrent
+from hashall.qbittorrent import QBittorrentClient, QBitServerProfile, QBitTorrent
 
 
 class TestDatabase:
@@ -143,6 +143,13 @@ class TestQBittorrentRelocation:
         client = QBittorrentClient()
         client.session = mock_session
         client._authenticated = True
+        client._server_profile = QBitServerProfile(
+            state_alias_mode="",
+            pause_endpoint="/api/v2/torrents/pause",
+            pause_fallback_endpoint="/api/v2/torrents/stop",
+            resume_endpoint="/api/v2/torrents/resume",
+            resume_fallback_endpoint="/api/v2/torrents/start",
+        )
 
         assert client.pause_torrent("abc123") is True
         assert mock_session.post.call_args_list[0].args[0].endswith("/api/v2/torrents/pause")
@@ -216,6 +223,13 @@ class TestQBittorrentRelocation:
         client = QBittorrentClient()
         client.session = mock_session
         client._authenticated = True
+        client._server_profile = QBitServerProfile(
+            state_alias_mode="",
+            pause_endpoint="/api/v2/torrents/pause",
+            pause_fallback_endpoint="/api/v2/torrents/stop",
+            resume_endpoint="/api/v2/torrents/resume",
+            resume_fallback_endpoint="/api/v2/torrents/start",
+        )
 
         assert client.resume_torrent("abc123") is True
         assert mock_session.post.call_args_list[0].args[0].endswith("/api/v2/torrents/resume")

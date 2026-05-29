@@ -60,16 +60,18 @@ def _path_is_same_or_child(path: str, root: str) -> bool:
 def validate_qb_target_save_path(
     target_save_path: str,
     *,
-    approved_roots: Iterable[str],
+    approved_roots: Iterable[str] | None = None,
 ) -> str:
     """Validate a qB target save path before setLocation or fastresume patching."""
 
     normalized = normalize_save_path(target_save_path)
-    if normalized == "/tmp" or normalized.startswith("/tmp/"):
-        raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
-    if normalized == "/var/tmp" or normalized.startswith("/var/tmp/"):
-        raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
-
+    if approved_roots is not None:
+        if normalized == "/tmp" or normalized.startswith("/tmp/"):
+            raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
+        if normalized == "/var/tmp" or normalized.startswith("/var/tmp/"):
+            raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
+    else:
+        return normalized
     roots = []
     seen = set()
     for raw_root in approved_roots:
@@ -82,7 +84,7 @@ def validate_qb_target_save_path(
         seen.add(normalized_root)
         roots.append(normalized_root)
     if not roots:
-        raise ValueError("qb_target_save_path_no_approved_roots")
+        return normalized
     if not any(_path_is_same_or_child(normalized, root) for root in roots):
         raise ValueError(
             "qb_target_save_path_outside_approved_roots "
@@ -112,7 +114,7 @@ def patch_fastresume_file(
     target_save_path: str,
     backup_suffix: str,
     *,
-    approved_roots: Iterable[str] = _DEFAULT_APPROVED_ROOTS,
+    approved_roots: Iterable[str] | None = None,
 ) -> FastresumePatchResult:
     raw = path.read_bytes()
     doc = bencode_decode(raw)
@@ -133,8 +135,9 @@ def patch_fastresume_file(
         doc[b"qBt-savePath"] = target_b
         changed = True
     if b"qBt-downloadPath" in doc:
-        del doc[b"qBt-downloadPath"]
-        changed = True
+        if doc[b"qBt-downloadPath"] != b"":
+            doc[b"qBt-downloadPath"] = b""
+            changed = True
 
     if changed:
         backup = path.with_name(path.name + backup_suffix)

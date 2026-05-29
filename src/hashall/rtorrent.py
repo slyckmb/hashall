@@ -559,7 +559,7 @@ def rt_apply_directory_repoint(
                 current_dir = rt_xmlrpc_call(
                     "d.directory", torrent_hash, rpc_url=rpc_url, timeout=20
                 )
-                if _xmlrpc_scalar_text(current_dir).rstrip("/") != target_directory.rstrip("/"):
+                if _xmlrpc_scalar_text(current_dir).rstrip("/") == target_directory.rstrip("/"):
                     rt_xmlrpc_call(
                         "d.start", torrent_hash, rpc_url=rpc_url, timeout=20
                     )

@@ -166,7 +166,8 @@ def get_qb_cached_server_profile(meta_path: "Path | None" = None) -> "QBitServer
     profile = meta.get("qb_profile")
     if not isinstance(profile, dict):
         return None
-    state_alias_mode = str(profile.get("state_alias_mode", "stop_aliases") or "stop_aliases")
+    raw_mode = profile.get("state_alias_mode")
+    state_alias_mode = str(raw_mode) if raw_mode is not None else "stop_aliases"
     if state_alias_mode == "stop_aliases":
         pause_ep = str(profile.get("pause_fallback_endpoint", "/api/v2/torrents/stop") or "/api/v2/torrents/stop")
         pause_fb = str(profile.get("pause_endpoint", "/api/v2/torrents/pause") or "/api/v2/torrents/pause")

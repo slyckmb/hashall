@@ -97,10 +97,13 @@ def _scan_staging_hashes(
             if hash_dir.is_dir():
                 key = hash_dir.name.lower()
                 if key in staging_hashes:
-                    logger.warning(
+                    logger.error(
                         "save_path_repair: hash collision %r: stash/pool _rehome-unique dirs; "
-                        "overriding %s with %s", key, staging_hashes[key], str(hash_dir),
+                        "skipping both %s and %s — manual resolution required",
+                        key, staging_hashes[key], str(hash_dir),
                     )
+                    del staging_hashes[key]
+                    continue
                 staging_hashes[key] = str(hash_dir)
 
     # _qb-finish and _qb-unique-repair: stash only
@@ -163,7 +166,9 @@ def _move_tree(src: Path, dst_parent: Path, *, dry_run: bool) -> int:
             if not dry_run:
                 dst_file.parent.mkdir(parents=True, exist_ok=True)
                 if dst_file.exists():
-                    if dst_file.stat().st_ino == item.stat().st_ino:
+                    dst_st = dst_file.stat()
+                    item_st = item.stat()
+                    if dst_st.st_ino == item_st.st_ino and dst_st.st_dev == item_st.st_dev:
                         # Same inode (hardlink): file already at target, just remove source link
                         item.unlink()
                     else:
