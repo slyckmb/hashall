@@ -21,10 +21,11 @@ Critical invariants:
 |---|---|---|
 | 1 | `SESSION.md` | Live session goal + step (chatrap-managed) |
 | 2 | `docs/SPRINT.md` | Current sprint focus, active repair queue, done-this-sprint |
-| 3 | `docs/operations/RUN-STATE.md` | Live evidence baseline, freshness snapshot |
-| 4 | `docs/ARCHITECTURE.md` | Storage model, pathing invariants, data components |
-| 5 | `docs/REQUIREMENTS.md` | Product and safety requirements (full) |
-| 6 | `docs/BACKLOG.md` | Ranked backlog priorities beyond the sprint |
+| 3 | `docs/USER-NOTES.md` | Operator intent: payload uniqueness, canonical paths, N→1 invariant |
+| 4 | `docs/operations/RUN-STATE.md` | Live evidence baseline, freshness snapshot |
+| 5 | `docs/ARCHITECTURE.md` | Storage model, pathing invariants, data components |
+| 6 | `docs/REQUIREMENTS.md` | Product and safety requirements (full) |
+| 7 | `docs/BACKLOG.md` | Ranked backlog priorities beyond the sprint |
 
 ## Reference Docs (read when relevant)
 
