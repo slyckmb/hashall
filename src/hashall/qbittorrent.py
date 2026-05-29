@@ -166,16 +166,27 @@ def get_qb_cached_server_profile(meta_path: "Path | None" = None) -> "QBitServer
     profile = meta.get("qb_profile")
     if not isinstance(profile, dict):
         return None
+    state_alias_mode = str(profile.get("state_alias_mode", "stop_aliases") or "stop_aliases")
+    if state_alias_mode == "stop_aliases":
+        pause_ep = str(profile.get("pause_fallback_endpoint", "/api/v2/torrents/stop") or "/api/v2/torrents/stop")
+        pause_fb = str(profile.get("pause_endpoint", "/api/v2/torrents/pause") or "/api/v2/torrents/pause")
+        resume_ep = str(profile.get("resume_fallback_endpoint", "/api/v2/torrents/start") or "/api/v2/torrents/start")
+        resume_fb = str(profile.get("resume_endpoint", "/api/v2/torrents/resume") or "/api/v2/torrents/resume")
+    else:
+        pause_ep = str(profile.get("pause_endpoint", "/api/v2/torrents/pause") or "/api/v2/torrents/pause")
+        pause_fb = str(profile.get("pause_fallback_endpoint", "/api/v2/torrents/stop") or "/api/v2/torrents/stop")
+        resume_ep = str(profile.get("resume_endpoint", "/api/v2/torrents/resume") or "/api/v2/torrents/resume")
+        resume_fb = str(profile.get("resume_fallback_endpoint", "/api/v2/torrents/start") or "/api/v2/torrents/start")
     return QBitServerProfile(
         app_version=str(profile.get("app_version", "") or ""),
         webapi_version=str(profile.get("webapi_version", "") or ""),
         qt_version=str(profile.get("qt_version", "") or ""),
         libtorrent_version=str(profile.get("libtorrent_version", "") or ""),
-        state_alias_mode=str(profile.get("state_alias_mode", "stop_aliases") or "stop_aliases"),
-        pause_endpoint=str(profile.get("pause_endpoint", "/api/v2/torrents/pause") or "/api/v2/torrents/pause"),
-        pause_fallback_endpoint=str(profile.get("pause_fallback_endpoint", "/api/v2/torrents/stop") or "/api/v2/torrents/stop"),
-        resume_endpoint=str(profile.get("resume_endpoint", "/api/v2/torrents/resume") or "/api/v2/torrents/resume"),
-        resume_fallback_endpoint=str(profile.get("resume_fallback_endpoint", "/api/v2/torrents/start") or "/api/v2/torrents/start"),
+        state_alias_mode=state_alias_mode,
+        pause_endpoint=pause_ep,
+        pause_fallback_endpoint=pause_fb,
+        resume_endpoint=resume_ep,
+        resume_fallback_endpoint=resume_fb,
     )
 
 
@@ -659,6 +670,9 @@ class QBittorrentClient:
         webapi_version = self._get_optional_text("/api/v2/app/webapiVersion") or ""
         build_info = self._get_optional_json("/api/v2/app/buildInfo") or {}
 
+        # Detect state_alias_mode from app_version: v5+ uses stop aliases
+        state_alias_mode = "stop_aliases" if app_version.startswith("v5") else ""
+
         profile = QBitServerProfile(
             app_version=app_version,
             webapi_version=webapi_version,
@@ -668,6 +682,11 @@ class QBittorrentClient:
                 or build_info.get("libtorrent_version")
                 or ""
             ),
+            state_alias_mode=state_alias_mode,
+            pause_endpoint="/api/v2/torrents/stop" if state_alias_mode == "stop_aliases" else "/api/v2/torrents/pause",
+            pause_fallback_endpoint="/api/v2/torrents/pause" if state_alias_mode == "stop_aliases" else "/api/v2/torrents/stop",
+            resume_endpoint="/api/v2/torrents/start" if state_alias_mode == "stop_aliases" else "/api/v2/torrents/resume",
+            resume_fallback_endpoint="/api/v2/torrents/resume" if state_alias_mode == "stop_aliases" else "/api/v2/torrents/start",
         )
         if not any((
             profile.app_version,

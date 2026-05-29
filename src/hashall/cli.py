@@ -3368,6 +3368,9 @@ def _apply_client_drift_path_rows(
                 if ok:
                     _rt_qb_progress("starting qB recheck to verify files at new location")
                     event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
+                    # qB v5 resumes torrents after recheck; pause again to keep mirror stopped
+                    if event["recheck_started"]:
+                        qbit.pause_torrent(torrent_hash)
         elif action == "repoint_both_to_pool":
             if qbit is None:
                 raise click.ClickException("qB client not initialized")
@@ -3395,6 +3398,9 @@ def _apply_client_drift_path_rows(
                 if ok:
                     _rt_qb_progress("starting qB recheck to verify files at new location")
                     event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
+                    # qB v5 resumes torrents after recheck; pause again to keep mirror stopped
+                    if event["recheck_started"]:
+                        qbit.pause_torrent(torrent_hash)
         else:
             event["error"] = f"unsupported_path_drift_action:{action}"
 
