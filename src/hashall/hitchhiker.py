@@ -41,6 +41,8 @@ class HitchhikerGroup:
     hashes: list[str]  # list of torrent hashes
     status: HitchhikerStatus
     notes: list[str]
+    hash_meta: dict = None  # type: ignore[assignment]
+    # keyed by hash: {category, tags, save_path, content_path, rt_directory}
 
 
 def query_hitchhiker_groups(db_path: Optional[str] = None, limit: Optional[int] = None) -> list[dict]:
@@ -285,6 +287,20 @@ def audit_hitchhiker_groups(
         if len(group_data["save_paths"]) > 1:
             notes.append(f"  Multiple save_paths: {group_data['save_paths']}")
 
+        # Build per-hash metadata for canonical path inference
+        hash_meta: dict[str, dict] = {}
+        for hash_val in hashes:
+            hk = hash_val.lower()
+            qb_t = qb_by_hash.get(hk)
+            rt_i = rt_by_hash.get(hk, {})
+            hash_meta[hash_val] = {
+                "category": getattr(qb_t, "category", "") if qb_t else "",
+                "tags": getattr(qb_t, "tags", "") if qb_t else "",
+                "save_path": getattr(qb_t, "save_path", "") if qb_t else "",
+                "content_path": getattr(qb_t, "content_path", "") if qb_t else "",
+                "rt_directory": str(rt_i.get("directory", "") or ""),
+            }
+
         groups.append(
             HitchhikerGroup(
                 payload_id=payload_id,
@@ -294,6 +310,7 @@ def audit_hitchhiker_groups(
                 hashes=hashes,
                 status=status,
                 notes=notes,
+                hash_meta=hash_meta,
             )
         )
 
