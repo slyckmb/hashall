@@ -138,15 +138,15 @@ def process_hash(qb, torrent_hash: str, dry_run: bool, idx: int, total: int) -> 
     log(f"  RT  current_dir={rt_dir}")
     log(f"  RT  planned_target={rt_target}")
 
-    # Skip check: if RT is already at the target and d.complete==1, nothing to do
+    # Skip check: if RT is already at the target and d.is_complete==1, nothing to do
     if rt_dir == rt_target or _rt_dir_matches_target(rt_dir, rt_target, torrent_hash):
         try:
-            xml = rt_xmlrpc_call("d.complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
+            xml = rt_xmlrpc_call("d.is_complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
             already_complete = _xmlrpc_scalar_text(xml).strip() == "1"
         except Exception:
             already_complete = False
         if already_complete:
-            log(f"  SKIP: RT already at target and d.complete=1 — already recovered")
+            log(f"  SKIP: RT already at target and d.is_complete=1 — already recovered")
             return "already_recovered"
 
     if dry_run:
@@ -210,17 +210,17 @@ def process_hash(qb, torrent_hash: str, dry_run: bool, idx: int, total: int) -> 
 
     # Verify RT complete
     try:
-        xml = rt_xmlrpc_call("d.complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
+        xml = rt_xmlrpc_call("d.is_complete", torrent_hash.lower(), rpc_url=RT_RPC_URL)
         rt_complete = _xmlrpc_scalar_text(xml).strip()
     except Exception as exc:
-        log(f"  ERROR: RT d.complete query failed: {exc}")
+        log(f"  ERROR: RT d.is_complete query failed: {exc}")
         return "fail_rt_complete_query"
 
     if rt_complete != "1":
-        log(f"  ERROR: RT recheck done but d.complete={rt_complete} — data not found at {rt_target}")
+        log(f"  ERROR: RT recheck done but d.is_complete={rt_complete} — data not found at {rt_target}")
         return "fail_rt_not_complete"
 
-    log(f"  RT recheck: d.complete=1 ✅")
+    log(f"  RT recheck: d.is_complete=1 ✅")
     log(f"  RESULT: RECOVERED ✅")
     return "recovered"
 

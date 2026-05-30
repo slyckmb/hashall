@@ -168,18 +168,23 @@ def plan_recovery(
     catalog_by_hash: dict = {}
     try:
         db = find_db_path()
-        conn = sqlite3.connect(str(db), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        hashes = [t.hash for t in qb_torrents if t.hash]
-        if hashes:
-            placeholders = ",".join("?" * len(hashes))
-            rows = conn.execute(
-                f"SELECT torrent_hash, save_path FROM torrent_instances WHERE torrent_hash IN ({placeholders})",
-                hashes,
-            ).fetchall()
-            for row in rows:
-                catalog_by_hash[row["torrent_hash"].lower()] = {"save_path": row["save_path"]}
-        conn.close()
+        if db is not None:
+            hashes = [t.hash for t in qb_torrents if t.hash]
+            conn = sqlite3.connect(str(db), timeout=30.0)
+            try:
+                conn.row_factory = sqlite3.Row
+                MAX_VARS = 900
+                for i in range(0, len(hashes), MAX_VARS):
+                    batch = hashes[i:i + MAX_VARS]
+                    placeholders = ",".join("?" * len(batch))
+                    rows = conn.execute(
+                        f"SELECT torrent_hash, save_path FROM torrent_instances WHERE torrent_hash IN ({placeholders})",
+                        batch,
+                    ).fetchall()
+                    for row in rows:
+                        catalog_by_hash[row["torrent_hash"].lower()] = {"save_path": row["save_path"]}
+            finally:
+                conn.close()
     except Exception:
         pass
 
@@ -266,6 +271,15 @@ def _move_displaced_to_canonical(
     """
     moved = 0
     skipped = 0
+    if not dry_run and src.exists():
+        src_stat = src.stat()
+        dst.mkdir(parents=True, exist_ok=True)
+        dst_stat = dst.stat()
+        if src_stat.st_dev != dst_stat.st_dev:
+            raise RuntimeError(
+                f"cross-filesystem move rejected: src={src} dev={src_stat.st_dev} "
+                f"dst={dst} dev={dst_stat.st_dev}"
+            )
     for item in sorted(src.rglob("*")):
         if not item.is_file():
             continue

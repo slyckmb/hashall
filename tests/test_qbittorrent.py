@@ -181,6 +181,7 @@ def test_login_retries_transient_connection_failures(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
 
     class FakeResponse:
+        status_code = 200
         text = "Ok."
 
     calls = {"count": 0}
@@ -410,6 +411,16 @@ def test_get_torrents_payload_falls_back_to_cache_on_auth_failure(monkeypatch, t
 
     monkeypatch.setattr(client, "_ensure_authenticated", fail_auth)
 
+    call_count = {"n": 0}
+
+    def stale_then_valid(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return None
+        return get_torrents_from_cache(cache_path=client.cache_file)
+
+    monkeypatch.setattr("hashall.qbittorrent.get_torrents_from_cache", stale_then_valid)
+
     payloads = client.get_torrents_payload(category="cross-seed")
 
     assert len(payloads) == 1
@@ -538,8 +549,9 @@ def test_get_torrents_from_cache_explicit_path_does_not_fallback(monkeypatch, tm
     assert payload is None
 
 
-def test_get_torrents_normalizes_pause_alias_and_derives_content_path(monkeypatch):
+def test_get_torrents_normalizes_pause_alias_and_derives_content_path(monkeypatch, tmp_path):
     client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    client.cache_file = tmp_path / "no-cache.json"
     monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
 
     class FakeResponse:

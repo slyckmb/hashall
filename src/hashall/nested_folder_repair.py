@@ -34,14 +34,14 @@ _FS_TO_API: list[tuple[str, str]] = [
 
 def _api_to_fs(path: str) -> str:
     for api_prefix, fs_prefix in _API_TO_FS:
-        if path.startswith(api_prefix):
+        if path.startswith(api_prefix) and (len(path) == len(api_prefix) or path[len(api_prefix)] == "/"):
             return fs_prefix + path[len(api_prefix):]
     return path
 
 
 def _fs_to_api(path: str) -> str:
     for fs_prefix, api_prefix in _FS_TO_API:
-        if path.startswith(fs_prefix):
+        if path.startswith(fs_prefix) and (len(path) == len(fs_prefix) or path[len(fs_prefix)] == "/"):
             return api_prefix + path[len(fs_prefix):]
     return path
 
@@ -112,18 +112,20 @@ def _detect_qb_nesting_from_torrent(
     torrent_name = qb_torrent.name or ""
     save_path_api = (qb_torrent.save_path or "").rstrip("/") + "/"
     content_path_api = qb_torrent.content_path or ""
+    # Use info_name from torrent metadata for path matching (matches filesystem)
+    path_name = (torrent_meta.info_name if torrent_meta and torrent_meta.info_name else torrent_name)
 
-    if not torrent_name or not save_path_api.strip("/"):
+    if not path_name or not save_path_api.strip("/"):
         return None
 
     save_path_fs = _api_to_fs(save_path_api.rstrip("/"))
     content_path_fs = _api_to_fs(content_path_api) if content_path_api else ""
 
-    outer = Path(save_path_fs) / torrent_name
+    outer = Path(save_path_fs) / path_name
     if not outer.is_dir():
         return None
 
-    inner = outer / torrent_name
+    inner = outer / path_name
     if inner.is_dir():
         # Verify the canonical files are actually in the nested dir, not already at the
         # correct depth. In cross-seed environments, save_path/name/name/ may exist as
@@ -135,7 +137,7 @@ def _detect_qb_nesting_from_torrent(
             if layout.success:
                 return None  # files already at correct depth; inner dir is another torrent
         file_count = _count_files(inner)
-        is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file
+        is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file if torrent_meta else file_count == 1
         return NestedFolderInfo(
             hash_val=qb_torrent.hash.lower(),
             torrent_name=torrent_name,
@@ -148,12 +150,12 @@ def _detect_qb_nesting_from_torrent(
             is_single_file=is_single_file,
         )
 
-    if Path(save_path_fs).name == torrent_name:
+    if Path(save_path_fs).name == path_name:
         corrected_save_path_fs = save_path_fs
-        while Path(corrected_save_path_fs).name == torrent_name:
+        while Path(corrected_save_path_fs).name == path_name:
             corrected_save_path_fs = str(Path(corrected_save_path_fs).parent)
         corrected_save_path_api = _fs_to_api(corrected_save_path_fs).rstrip("/") + "/"
-        nested_dir_for_case2 = Path(save_path_fs) / torrent_name
+        nested_dir_for_case2 = Path(save_path_fs) / path_name
         if not nested_dir_for_case2.is_dir():
             return None
         # Same layout guard for Case 2: if corrected save_path yields a passing layout,
@@ -165,7 +167,7 @@ def _detect_qb_nesting_from_torrent(
             if layout.success:
                 return None
         file_count = _count_files(nested_dir_for_case2)
-        is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file
+        is_single_file = torrent_meta is not None and not torrent_meta.is_multi_file if torrent_meta else file_count == 1
         return NestedFolderInfo(
             hash_val=qb_torrent.hash.lower(),
             torrent_name=torrent_name,

@@ -305,9 +305,23 @@ def rt_xmlrpc_multicall(
     response.raise_for_status()
     xml = response.text
     if "<fault>" in xml:
-        match = re.search(r"<name>faultString</name><value><string>(.*?)</string>", xml, re.DOTALL)
-        detail = match.group(1) if match else xml
-        raise RuntimeError(f"rt_xmlrpc_multicall fault calls={method_names} detail={detail}")
+        fault_strings = re.findall(
+            r"<name>faultString</name><value><string>(.*?)</string>", xml, re.DOTALL
+        )
+        fault_codes = re.findall(
+            r"<name>faultCode</name><value><i4>(\d+)</i4>", xml, re.DOTALL
+        )
+        faults = []
+        for i, fs in enumerate(fault_strings):
+            code = fault_codes[i] if i < len(fault_codes) else "?"
+            idx = i + 1
+            faults.append(f"[{idx}] code={code} {fs}")
+        if not faults:
+            faults.append(f"raw={xml[:500]}")
+        raise RuntimeError(
+            f"rt_xmlrpc_multicall {len(faults)} fault(s) in {len(calls)} calls: "
+            + "; ".join(faults[:5])
+        )
     return method_names
 
 
@@ -542,7 +556,13 @@ def rt_apply_directory_repoint(
     except Exception:
         if restart:
             try:
-                rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=20)
+                current_dir = rt_xmlrpc_call(
+                    "d.directory", torrent_hash, rpc_url=rpc_url, timeout=20
+                )
+                if _xmlrpc_scalar_text(current_dir).rstrip("/") == target_directory.rstrip("/"):
+                    rt_xmlrpc_call(
+                        "d.start", torrent_hash, rpc_url=rpc_url, timeout=20
+                    )
             except Exception:
                 pass
         raise
@@ -565,6 +585,7 @@ def rt_recheck_torrent(
         return rt_xmlrpc_multicall(calls, rpc_url=rpc_url, timeout=timeout)
     except Exception:
         try:
+            rt_xmlrpc_call("d.check_hash", torrent_hash, rpc_url=rpc_url, timeout=20)
             rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=20)
         except Exception:
             pass

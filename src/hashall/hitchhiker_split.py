@@ -121,6 +121,7 @@ def _inspect_split_target(src: Path, dst_parent: Path) -> tuple[str, bool, bool,
     warnings: list[str] = []
     blockers: list[str] = []
     same_device: Optional[bool] = None
+    is_canonical = "/_rehome-unique/" not in str(dst_parent)
 
     if not source_exists:
         blockers.append("source_root_missing_or_not_file_or_dir")
@@ -134,7 +135,7 @@ def _inspect_split_target(src: Path, dst_parent: Path) -> tuple[str, bool, bool,
             blockers.append("target_parent_exists_not_directory")
         if entries == 0:
             warnings.append("target_parent_exists_empty")
-        elif entries > 0:
+        elif entries > 0 and not is_canonical:
             blockers.append("target_parent_exists_non_empty")
     if target_content_exists:
         blockers.append("target_content_exists")
@@ -161,6 +162,56 @@ def _inspect_split_target(src: Path, dst_parent: Path) -> tuple[str, bool, bool,
     )
 
 
+def _compute_split_target(
+    secondary_hash: str,
+    meta: dict,
+    slug: str,
+    fs_root: str,
+    api_root: str,
+    root_path: str,
+) -> tuple[str, str]:
+    staging_fs = f"{fs_root}/_rehome-unique/{slug}"
+    staging_api = f"{api_root}/_rehome-unique/{slug}"
+
+    category = str(meta.get("category") or "").strip()
+    tags = str(meta.get("tags") or "").strip()
+    current_save_path = str(meta.get("save_path") or "").strip()
+    current_content_path = str(meta.get("content_path") or "").strip()
+    current_rt_directory = str(meta.get("rt_directory") or "").strip()
+
+    if not any([category, tags, current_save_path, current_rt_directory]):
+        return staging_fs, staging_api
+
+    try:
+        from .save_path_inference import infer_canonical_save_path
+        result = infer_canonical_save_path(
+            category=category,
+            tags=tags,
+            current_save_path=current_save_path,
+            current_content_path=current_content_path,
+            current_rt_directory=current_rt_directory,
+        )
+    except Exception:
+        return staging_fs, staging_api
+
+    if not result.canonical_save_path:
+        return staging_fs, staging_api
+
+    canonical_api = result.canonical_save_path
+
+    if canonical_api.startswith(api_root):
+        canonical_fs = fs_root + canonical_api[len(api_root):]
+    else:
+        canonical_fs = canonical_api
+
+    root_path_norm = str(root_path).rstrip("/")
+    canonical_fs_norm = canonical_fs.rstrip("/")
+    if canonical_fs_norm == root_path_norm:
+        return staging_fs, staging_api
+
+    return canonical_fs, canonical_api
+
+
 def plan_split_actions(group: HitchhikerGroup) -> list[SplitAction]:
     """Build the list of split actions for secondary hashes in a group."""
     root_path = group.root_path
@@ -171,13 +222,22 @@ def plan_split_actions(group: HitchhikerGroup) -> list[SplitAction]:
 
     src = Path(root_path)
     is_dir = src.is_dir()
+    hash_meta = getattr(group, "hash_meta", None) or {}
     actions = []
 
     # hashes[0] = primary, stays in place. hashes[1:] = secondaries to split.
     for secondary_hash in group.hashes[1:]:
         slug = secondary_hash[:16]
-        target_parent_fs = f"{fs_root}/_rehome-unique/{slug}"
-        target_parent_api = f"{api_root}/_rehome-unique/{slug}"
+        meta = hash_meta.get(secondary_hash, {})
+
+        target_parent_fs, target_parent_api = _compute_split_target(
+            secondary_hash=secondary_hash,
+            meta=meta,
+            slug=slug,
+            fs_root=fs_root,
+            api_root=api_root,
+            root_path=root_path,
+        )
         (
             target_content_fs,
             source_exists,

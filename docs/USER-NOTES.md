@@ -47,3 +47,38 @@ Q2-Answer:  <tracker-key> was originally defined in the qbit_manage config url v
      3. qB passive role — permanent or transitional? Should the code enforce qB-stopped as an invariant, or is it current operational posture only?
      
     Q3-Answer:  qB is not active and never will be again unless i decide to go back to it.  The goal is to convert over to rt and shutdown qb.  But during all of the rehome turmoil, the qb tage/category/path data is good to have so I'm keeping it alive on life support.  :)
+
+## Target State (defined 2026-05-29)
+
+### rTorrent
+
+All items should be actively seeding. The only acceptable non-seeding states
+are 4 stalledDL items that genuinely have zero seeds for their tiny payload
+files (typically season-pack extras like .nfo or sample clips).
+
+Acceptable RT states: stoppedUP, stalledUP, uploading.
+Unacceptable RT states: stoppedDL, pausedDL, stalledDL (except the 4 known),
+checkingDL (transient, should converge to stoppedUP), downloading (transient).
+
+### qBittorrent
+
+qB is a passive, silent mirror of RT. It never actively seeds. Every hash in
+RT must also exist in qB with matching progress. All qB items must be in a
+stopped/paused state at all times — after add, during recheck, and after
+recheck. The qB client is kept alive on life support for its tag/category/path
+data, which is the authoritative source for canonical path resolution.
+
+Acceptable qB states: stoppedUP, stoppedDL (only when RT is also incomplete),
+pausedDL (only when RT is also incomplete).
+Unacceptable qB states: error, downloading, pausedUP, anything not stopped/paused.
+
+### Path Unification
+
+Every item must have the same canonical save path in both qB and RT. The
+canonical path formula is:
+
+    <seeding-root>/<tracker-key>/<payload-name>
+
+Where <seeding-root> is /data/media/torrents/seeding (stash) or
+/pool/media/torrents/seeding (pool), and <tracker-key> is determined by the
+item origin (cross-seed tracker, arr app, qbit_manage assignent).

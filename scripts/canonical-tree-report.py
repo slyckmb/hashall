@@ -7,6 +7,8 @@ import argparse
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 from hashall.model import connect_db
 
 VERSION = "1.0.0"
@@ -24,28 +26,29 @@ CLASSES = [
         (
             "save_path LIKE '%/cross-seed/%'"
             " AND length(replace(save_path, rtrim(save_path, replace(save_path, '/', '')), '')) = 40"
-            # fallback: last path component is 40 hex chars
             " AND (save_path GLOB '*/cross-seed/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*')"
         ),
     ),
     (
         "Class 2",
         "cross-seed/other/  (unresolved tracker bucket)",
-        "save_path LIKE '%/cross-seed/other%'",
-    ),
-    (
-        "Class 3",
-        "cross-seed/_<name>/  (underscore-prefixed tracker bucket)",
         (
-            "save_path GLOB '*/cross-seed/_%'"
-            " AND save_path NOT LIKE '%/cross-seed/other%'"
+            "save_path LIKE '%/cross-seed/other%'"
             " AND NOT (save_path GLOB '*/cross-seed/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*')"
         ),
     ),
     (
+        "Class 3",
+        "cross-seed-link/<tracker>/  (legacy cross-seed-link symlink pattern)",
+        "save_path LIKE '%/cross-seed-link/%'",
+    ),
+    (
         "Class 4",
         "_rehome-unique/<hash>/  (pure-repoint needed)",
-        "save_path GLOB '*/_rehome-unique/*'",
+        (
+            "save_path GLOB '*/_rehome-unique/*'"
+            " AND save_path NOT GLOB '*/cross-seed/_rehome-unique/*'"
+        ),
     ),
     (
         "Class 5",
@@ -59,17 +62,12 @@ CLASSES = [
 ]
 
 
-def _last_component(path: str) -> str:
-    """Return the last non-empty path component."""
-    return path.rstrip("/").rsplit("/", 1)[-1]
-
-
 def _report(db_path: Path, full: bool, color: bool) -> None:
     def c(text: str, code: str) -> str:
         return f"\033[{code}m{text}\033[0m" if color else text
 
     conn = connect_db(db_path)
-    total_non_canonical = 0
+    seen_hashes: set[str] = set()
 
     print(f"{c('=== Canonical Tree Normalization Report ===', '1')} (v{VERSION})")
     print()
@@ -80,7 +78,7 @@ def _report(db_path: Path, full: bool, color: bool) -> None:
         ).fetchall()
 
         count = len(rows)
-        total_non_canonical += count
+        seen_hashes.update(row[0].lower() for row in rows)
 
         status = c(f"({count} items)", "33" if count else "32")
         print(f"{c(label, '1;36')}: {desc}  {status}")
@@ -107,7 +105,7 @@ def _report(db_path: Path, full: bool, color: bool) -> None:
         print()
 
     conn.close()
-    print(f"{c('Total non-canonical:', '1')} {total_non_canonical}")
+    print(f"{c('Total non-canonical:', '1')} {len(seen_hashes)}")
 
 
 def main() -> None:

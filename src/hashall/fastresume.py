@@ -60,16 +60,18 @@ def _path_is_same_or_child(path: str, root: str) -> bool:
 def validate_qb_target_save_path(
     target_save_path: str,
     *,
-    approved_roots: Iterable[str],
+    approved_roots: Iterable[str] | None = None,
 ) -> str:
     """Validate a qB target save path before setLocation or fastresume patching."""
 
     normalized = normalize_save_path(target_save_path)
-    if normalized == "/tmp" or normalized.startswith("/tmp/"):
-        raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
-    if normalized == "/var/tmp" or normalized.startswith("/var/tmp/"):
-        raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
-
+    if approved_roots is not None:
+        if normalized == "/tmp" or normalized.startswith("/tmp/"):
+            raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
+        if normalized == "/var/tmp" or normalized.startswith("/var/tmp/"):
+            raise ValueError(f"qb_target_save_path_disallowed path={normalized}")
+    else:
+        return normalized
     roots = []
     seen = set()
     for raw_root in approved_roots:
@@ -82,7 +84,7 @@ def validate_qb_target_save_path(
         seen.add(normalized_root)
         roots.append(normalized_root)
     if not roots:
-        raise ValueError("qb_target_save_path_no_approved_roots")
+        return normalized
     if not any(_path_is_same_or_child(normalized, root) for root in roots):
         raise ValueError(
             "qb_target_save_path_outside_approved_roots "
@@ -101,7 +103,19 @@ def read_fastresume(path: Path) -> Dict[bytes, Any]:
     return doc
 
 
-def patch_fastresume_file(path: Path, target_save_path: str, backup_suffix: str) -> FastresumePatchResult:
+_DEFAULT_APPROVED_ROOTS = (
+    "/data/media/torrents/seeding",
+    "/pool/media/torrents/seeding",
+)
+
+
+def patch_fastresume_file(
+    path: Path,
+    target_save_path: str,
+    backup_suffix: str,
+    *,
+    approved_roots: Iterable[str] | None = None,
+) -> FastresumePatchResult:
     raw = path.read_bytes()
     doc = bencode_decode(raw)
     if not isinstance(doc, dict):
@@ -112,7 +126,7 @@ def patch_fastresume_file(path: Path, target_save_path: str, backup_suffix: str)
     old_download_path = as_text(doc.get(b"qBt-downloadPath", b"")).strip()
 
     changed = False
-    target_text = validate_qb_target_save_path(target_save_path, approved_roots=[target_save_path])
+    target_text = validate_qb_target_save_path(target_save_path, approved_roots=approved_roots)
     target_b = target_text.encode("utf-8")
     if doc.get(b"save_path") != target_b:
         doc[b"save_path"] = target_b
@@ -120,15 +134,19 @@ def patch_fastresume_file(path: Path, target_save_path: str, backup_suffix: str)
     if doc.get(b"qBt-savePath") != target_b:
         doc[b"qBt-savePath"] = target_b
         changed = True
-    if doc.get(b"qBt-downloadPath", b"") != b"":
-        doc[b"qBt-downloadPath"] = b""
-        changed = True
+    if b"qBt-downloadPath" in doc:
+        if doc[b"qBt-downloadPath"] != b"":
+            doc[b"qBt-downloadPath"] = b""
+            changed = True
 
     if changed:
         backup = path.with_name(path.name + backup_suffix)
         if not backup.exists():
             backup.write_bytes(raw)
-        path.write_bytes(bencode_encode(doc))
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(bencode_encode(doc))
+        import os
+        os.replace(tmp, path)
     else:
         backup = path.with_name(path.name + backup_suffix)
 

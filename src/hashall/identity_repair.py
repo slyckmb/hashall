@@ -602,7 +602,7 @@ def run_identity_repair(
             for action in actions:
                 if action.table == "payloads":
                     if payload_has_updated_at:
-                        conn.execute(
+                        cursor = conn.execute(
                             """
                             UPDATE payloads
                             SET device_id = ?, fs_uuid = ?, updated_at = datetime('now')
@@ -611,7 +611,7 @@ def run_identity_repair(
                             (action.target_device_id, action.target_fs_uuid, int(action.key)),
                         )
                     else:
-                        conn.execute(
+                        cursor = conn.execute(
                             """
                             UPDATE payloads
                             SET device_id = ?, fs_uuid = ?
@@ -621,7 +621,7 @@ def run_identity_repair(
                         )
                 else:
                     if action.table == "torrent_instances" and torrent_has_updated_at:
-                        conn.execute(
+                        cursor = conn.execute(
                             """
                             UPDATE torrent_instances
                             SET device_id = ?, fs_uuid = ?, updated_at = datetime('now')
@@ -630,7 +630,7 @@ def run_identity_repair(
                             (action.target_device_id, action.target_fs_uuid, action.key),
                         )
                     elif action.table == "torrent_instances":
-                        conn.execute(
+                        cursor = conn.execute(
                             """
                             UPDATE torrent_instances
                             SET device_id = ?, fs_uuid = ?
@@ -639,7 +639,7 @@ def run_identity_repair(
                             (action.target_device_id, action.target_fs_uuid, action.key),
                         )
                     else:
-                        conn.execute(
+                        cursor = conn.execute(
                             """
                             UPDATE scan_sessions
                             SET device_id = ?, fs_uuid = ?
@@ -647,7 +647,10 @@ def run_identity_repair(
                             """,
                             (action.target_device_id, action.target_fs_uuid, action.key),
                         )
-                applied += 1
+                if cursor.rowcount > 0:
+                    applied += 1
+                if applied > 0 and applied % 100 == 0:
+                    conn.commit()
             conn.commit()
 
         return RepairResult(

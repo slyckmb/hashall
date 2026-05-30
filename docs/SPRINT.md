@@ -26,11 +26,11 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 9 | Refresh: run catalog refresh, verify clean audit | ✅ done |
 | 10 | Investigate RT→qB mirror watchdog failures (recurring down) | ✅ done |
 | 11 | Canonical tree normalization report: script + Makefile target | ✅ done |
-| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — may require data movement + repoint (see RUNBOOK.md) | ⏳ pending |
-| 12b | Class 2 repairs: `cross-seed/other/` — resolve tracker → rename → repoint | ⏳ pending |
-| 12c | Class 1 repairs: `cross-seed/<hash>/` — resolve tracker → rename → repoint | ⏳ pending |
+| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — staging cleared, 376 dirs deleted | ✅ done |
+| 12b | `cross-seed/<tracker>/` legacy prefix removal — ~2125 items: rename dir + repoint both clients | ⏳ pending |
+| 12c | Class 1 repairs: `cross-seed/<hash>/` — resolve tracker → rename → repoint (10 items) | ⏳ pending |
 | 12d | Class 3 repairs: `cross-seed/_<name>/` — resolve category → rename → repoint | ✅ done (0 items) |
-| 12e | Class 5 repairs: `_qb-unique-repair/`, `_qb-finish/` — verify healthy → repoint | ⏳ pending |
+| 12e | Class 5 repairs: `_qb-unique-repair/`, `_qb-finish/` — 38 repaired, 7 blocked (downloading/~issue) | ✅ done |
 | 13a | trk_warns: 19 Kitsune season pack upgrades (Outlander/Frontline/Gold Rush) | ✅ done |
 | 13b | trk_warns: 4–5 SNL items — manual Prowlarr check + execute | ✅ done |
 | 13c | **Implement + execute:** individual-ep replacement (`candidate_replace_individual`) | ✅ done |
