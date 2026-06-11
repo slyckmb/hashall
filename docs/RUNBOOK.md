@@ -178,27 +178,56 @@ Safe repair order: Class 4 → 2 → 1 → 3 → 5.
 | 4 | `_rehome-unique/<hash>/` | Use `save-path-repair` tool (see below) |
 | 5 | `_qb-finish/`, `_qb-unique-repair/`, `_qb-repair-v2/` | Investigate per-item state, then repoint |
 
-### Class 1 / 2 / 3 — tracker-name repairs
+### Prerequisite for ALL cross-seed path repairs
+
+**Always resolve the canonical tracker key from the registry before renaming any directory.**
+Never infer the tracker key from path strings, qB tags, or RT announce URLs alone.
 
 ```bash
-# 1. Get hashes and current paths
-make canonical-tree-report
-
-# 2. Look up tracker for a hash via RT XMLRPC
+# 1. Get the announce URL for a hash
 python3 -c "
 import xmlrpc.client
 s = xmlrpc.client.ServerProxy('http://127.0.0.1:18000/')
 print(s.d.tracker.url('<hash>'))
 "
 
+# 2. Look up tracker_key in the traktor registry by matching tracker_url_pattern
+#    Path: /home/michael/dev/tools/traktor/config/tracker-registry.yml
+grep -A5 "<domain-from-announce-url>" \
+  /home/michael/dev/tools/traktor/config/tracker-registry.yml
+# → tracker_key field is the canonical category directory name
+```
+
+### qB repoint rule — fastresume offline, NOT set_location
+
+**Always patch fastresume offline. Never use qB `set_location` API for path repairs.**
+
+- `set_location` triggers a **physical data move** on disk — it is not a repoint.
+- For all Class 1–5 repairs, the correct qB repoint method is:
+  1. Stop qB container: `docker stop qbittorrent_vpn`
+  2. Patch the `.fastresume` file at `/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup/<hash>.fastresume`
+  3. Start qB container: `docker start qbittorrent_vpn`
+- Recovery: `.bak-repair` backups are written automatically by the repair tools.
+  Manual backup path: same BT_backup directory.
+
+### Class 1 / 2 / 3 — tracker-name repairs
+
+```bash
+# 1. Get hashes and current paths
+make canonical-tree-report
+
+# 2. Get announce URL and resolve tracker_key from traktor registry (see Prerequisite above)
+
 # 3. Rename dir on filesystem (data/stash are same fs — plain mv)
-mv <seeding-root>/cross-seed/<old-name>/<content> <seeding-root>/cross-seed/<tracker-name>/<content>
+mv <seeding-root>/cross-seed/<old-name>/ <seeding-root>/<tracker-key>/
 
 # 4. RT repoint
-hashall rt repoint --hash <hash> --target <seeding-root>/cross-seed/<tracker-name> --apply
+hashall rt repoint --hash <hash> --target <seeding-root>/<tracker-key> --apply
 
-# 5. qB set_location (parent dir only — NOT the content dir)
-# via hashall client-drift or direct qB API call
+# 5. qB repoint via offline fastresume patch (NOT set_location — see rule above)
+docker stop qbittorrent_vpn
+# patch fastresume save_path to <seeding-root>/<tracker-key>/<content-name>
+docker start qbittorrent_vpn
 
 # 6. Verify
 make client-drift-audit ANCHOR_SCAN=200000  # expect drift=0
