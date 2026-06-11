@@ -26,7 +26,7 @@ multi-phase dry-run validation gate so that tools are trusted before use.
 | 9 | Refresh: run catalog refresh, verify clean audit | ✅ done |
 | 10 | Investigate RT→qB mirror watchdog failures (recurring down) | ✅ done |
 | 11 | Canonical tree normalization report: script + Makefile target | ✅ done |
-| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — staging cleared, 376 dirs deleted | ✅ done |
+| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — 376 dirs cleared; Group A (data moved), Group B (empty deleted), Group C (nested, manual) | ✅ done |
 | 12b | `cross-seed/<tracker>/` legacy prefix removal — ~2125 items: rename dir + repoint both clients | ⏳ pending |
 | 12c | Class 1 repairs: `cross-seed/<hash>/` — resolve tracker → rename → repoint (10 items) | ⏳ pending |
 | 12d | Class 3 repairs: `cross-seed/_<name>/` — resolve category → rename → repoint | ✅ done (0 items) |
