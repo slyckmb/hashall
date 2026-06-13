@@ -88,7 +88,7 @@ help:
 	@echo "  make qb-missing-remediate-dry SOURCE_ROOT=<old> TARGET_ROOT=<new> — dry-run qB missing remediation"
 	@echo ""
 	@echo "  make trk-warn                — list RT tracker-warning items (deleted/auth_err/other)"
-	@echo "  make trk-warn-prowlarr       — same, with Prowlarr replacement search"
+	@echo "  make trk-warn-prowlarr       — same, with Prowlarr search + verbose hit list"
 	@echo "  make trk-warn-dry            — dry-run: plan removes + season-pack upgrades for deleted+other"
 	@echo "  make trk-warn-cleanup        — execute cleanup: remove deleted+other (no upgrades), sync to qB"
 	@echo "  make trk-warn-upgrade-packs  — season pack upgrades: erase individual eps, add pack, sync to qB"
@@ -264,7 +264,7 @@ trk-warn:
 	@python3 $(TRK_WARN_SCRIPT) --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
 
 trk-warn-prowlarr:
-	@python3 $(TRK_WARN_SCRIPT) --prowlarr --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
+	@python3 $(TRK_WARN_SCRIPT) --prowlarr --verbose-prowlarr --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
 
 trk-warn-dry:
 	@python3 $(TRK_WARN_SCRIPT) --dryrun --prowlarr --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
