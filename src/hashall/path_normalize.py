@@ -26,8 +26,8 @@ _STOPPED_QB_STATES = {"stoppedup", "stoppeddl"}
 _STOPPED_RT_STATES = {"stoppedup", "stoppeddl"}
 _VERIFYING_QB_STATES = {"checkingdl", "checkingup", "checkingresumedata", "moving"}
 _VERIFYING_RT_STATES = {"checking", "checkingup", "checkingdl", "checkup", "checkpending"}
-_BAD_QB_STATES = {"error", "missingfiles"}
-_BAD_RT_STATES = {"error"}
+_BAD_QB_STATES = {"error", "missingfiles", "uploading", "stalledup", "forcedup", "pausedup", "downloading"}
+_BAD_RT_STATES = {"error", "stoppedup", "stoppeddl", "pauseddl"}
 
 
 def _normalized_state_text(value: str | None) -> str:

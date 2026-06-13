@@ -186,14 +186,13 @@ def _print_post_apply_summary(executor: "DemotionExecutor", plans: list) -> bool
 
     # States that are acceptable after a successful rehome.
     good_states = {
-        "stalledup", "uploading", "queuedup", "forcedup",
+        "stalledup", "uploading", "queuedup",
         "stoppedup",  # paused by operator (was seeding, user paused it)
-        "pausedup",
         "checkingup",  # transient post-recheck
     }
-    # States that are alarm-worthy.
+    # States that are alarm-worthy (qB must never actively upload or download).
     alarm_states = {"stoppeddl", "pauseddl", "downloading", "stalleddl",
-                    "missingfiles", "error"}
+                    "missingfiles", "error", "forcedup", "pausedup"}
 
     click.echo()
     click.echo("── Post-apply torrent state summary ──────────────────────────────")
