@@ -48,37 +48,22 @@ Q2-Answer:  <tracker-key> was originally defined in the qbit_manage config url v
      
     Q3-Answer:  qB is not active and never will be again unless i decide to go back to it.  The goal is to convert over to rt and shutdown qb.  But during all of the rehome turmoil, the qb tage/category/path data is good to have so I'm keeping it alive on life support.  :)
 
-## Target State (defined 2026-05-29)
+## Target State
 
-### rTorrent
+> **AUTHORITATIVE POLICY:** `docs/RT-QB-STATE-POLICY.md` (updated 2026-06-12)  
+> The original target state text below is archived at
+> `docs/archive/SUPERSEDED-STATE-GUIDANCE-2026-06-12.md`.  
+> Key correction from the original: `stoppedUP` is NOT acceptable in RT —
+> all RT items must be in an active state (stalledUP, uploading, or a DL state).
 
-All items should be actively seeding. The only acceptable non-seeding states
-are 4 stalledDL items that genuinely have zero seeds for their tiny payload
-files (typically season-pack extras like .nfo or sample clips).
+### Summary
 
-Acceptable RT states: stoppedUP, stalledUP, uploading.
-Unacceptable RT states: stoppedDL, pausedDL, stalledDL (except the 4 known),
-checkingDL (transient, should converge to stoppedUP), downloading (transient).
+- **RT:** All items must be actively seeding (`stalledUP`, `uploading`) or
+  actively downloading. Nothing may be stopped or paused.
+  Exception: `stalledDL` with zero seeds is acceptable (waiting for peers).
+- **qB:** Passive mirror only. All items must be `stoppedUP`, `stoppedDL`,
+  or `pausedDL`. qB must never actively upload or download.
+- **Paths:** Every item must share the same canonical path in both clients:
+  `<seeding-root>/<tracker-key>/<payload-name>`
 
-### qBittorrent
-
-qB is a passive, silent mirror of RT. It never actively seeds. Every hash in
-RT must also exist in qB with matching progress. All qB items must be in a
-stopped/paused state at all times — after add, during recheck, and after
-recheck. The qB client is kept alive on life support for its tag/category/path
-data, which is the authoritative source for canonical path resolution.
-
-Acceptable qB states: stoppedUP, stoppedDL (only when RT is also incomplete),
-pausedDL (only when RT is also incomplete).
-Unacceptable qB states: error, downloading, pausedUP, anything not stopped/paused.
-
-### Path Unification
-
-Every item must have the same canonical save path in both qB and RT. The
-canonical path formula is:
-
-    <seeding-root>/<tracker-key>/<payload-name>
-
-Where <seeding-root> is /data/media/torrents/seeding (stash) or
-/pool/media/torrents/seeding (pool), and <tracker-key> is determined by the
-item origin (cross-seed tracker, arr app, qbit_manage assignent).
+See `docs/RT-QB-STATE-POLICY.md` for the full decision tree and all state rules.
