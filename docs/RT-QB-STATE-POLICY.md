@@ -1,6 +1,6 @@
 # RT / qB Client State Policy
 
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **Status:** Authoritative  
 **Last updated:** 2026-06-12  
 **Source:** USER-NOTES.md (target state), operator Q&A (2026-06-12 session)  
@@ -92,16 +92,29 @@ cross-seed item is downloading in RT
 ├─ Search hashall DB for payload filename(s) at full size on any filesystem
 │   ├─ Data FOUND on disk
 │   │   ├─ nlinks > 1 (already hardlinked somewhere)
-│   │   │   └─ Hardlink to canonical path, repoint (d.set_directory),
-│   │   │      recheck (d.check_hash), start (d.start). → RESOLVED.
+│   │   │   └─ Repair sequence (order matters):
+│   │   │      1. Remove partial download files at RT path:
+│   │   │         For each file at RT path with nlinks=1 AND pct < 100%:
+│   │   │           rm '<rt_path>/<file>'  (NOT rm -rf — individual files only)
+│   │   │      2. Remove empty directory artifacts left by rogue code:
+│   │   │         For each empty dir at old path: rmdir '<old_empty_path>'
+│   │   │      3. Hardlink complete files from source to canonical path:
+│   │   │         ln -f '<source_path>/<file>' '<canonical_path>/<file>'
+│   │   │      4. Repoint RT: d.set_directory('<hash>', '<canonical_dir>')
+│   │   │      5. Recheck: d.check_hash('<hash>')
+│   │   │      6. Start: d.start('<hash>')
+│   │   │      → RESOLVED. Verify state=stalledUP after 30s.
 │   │   └─ nlinks = 1 (single copy — not hardlinked)
-│   │       └─ Investigate source. May be a standalone copy from rehome.
-│   │          Hardlink to canonical path, repoint, recheck, start. → RESOLVED.
+│   │       └─ Same repair sequence as above. The single copy is the source.
 │   └─ Data NOT FOUND anywhere on disk
 │       └─ Source was lost during rehome damage.
 │          Leave stopped. Escalate to operator — do NOT remove without approval.
 │          Operator decides: remove, restore from backup, or leave dead.
 ```
+
+**Note on rm vs rmdir:** Only use `rmdir` on confirmed empty directories (rogue code
+artifact directories). Only use `rm` on individual partial download files (nlinks=1,
+pct < 100%). Never use `rm -rf`.
 
 ---
 
@@ -117,6 +130,16 @@ cross-seed item is downloading in RT
 then `make trk-warn-upgrade-packs` or `make trk-warn-replace-individual` as appropriate.
 See SPRINT.md Slice 13 for prior execution history.
 
+**Quality rule for all replacements:**
+- System runs **1080p only**. Never add 2160p/4K/UHD/HDR torrents.
+- trk_warn scores Prowlarr results by: quality match (same resolution as original) →
+  group match (same release group) → seeders → grabs → size.
+- If only 2160p/4K is available → do not add. Report "no suitable 1080p replacement."
+- After a replacement is added, verify the title contains `1080p` and does NOT contain
+  `2160p`, `4K`, `UHD`.
+
+**ARR label for replacement torrents:** See §8.2.
+
 ---
 
 ## 6. Decision Tree — RT Item Repair
@@ -128,9 +151,20 @@ FOR EACH RT ITEM NOT AT 100% SEEDING (stalledUP/uploading):
   Step 0: LOCAL DATA INVESTIGATION (ALWAYS FIRST)
   ─────────────────────────────────────────────────────────
   
-    Search hashall DB for every payload file by name at full size:
-      sqlite3 ~/.hashall/catalog.db \
-        "SELECT path, size FROM files_fs_zfs_<uuid> WHERE path LIKE '%<filename>%'"
+    Search hashall DB for every payload file by name at full size.
+    The DB uses per-filesystem tables (NOT the empty `files` table):
+
+      Key filesystem tables (all scanned daily):
+        stash/media → files_fs_zfs_4624186565346049802  (/stash/media = /data/media in RT/qB)
+        pool-media  → files_fs_zfs_4673783476987974510  (/pool/media)
+        pool-data   → files_fs_zfs_7422444370835627448  (/pool/data)
+
+      Query (run for each table):
+        sqlite3 ~/.hashall/catalog.db \
+          "SELECT path, size FROM files_fs_zfs_<uuid> WHERE path LIKE '%<filename>%' AND size > 0"
+
+      Note: paths in the stash table are relative to /stash/media (e.g. torrents/seeding/...).
+      RT reports paths as /data/media/... which maps to /stash/media/... on the host.
     
     Data found at full size on same filesystem?
       YES →
@@ -283,6 +317,12 @@ result = patch_fastresume_file(
 # qB overwrites fastresume on state changes; the delete-and-readd approach is safer.
 ```
 
+**Important: setLocation API does NOT fix this.**
+Calling `POST /api/v2/torrents/setLocation` updates `qBt-savePath` in the fastresume
+but does NOT update `save_path`. When `qBt-downloadPath` is also set, qB ignores
+`qBt-savePath` and uses `save_path` (which still points to `/incomplete_torrents`).
+The delete-and-readd approach is the only reliable fix while qB is running.
+
 **Note:** `qBt-downloadPath` artifacts were introduced during the Feb-2026 disaster
 when `qBt-downloadPath` caused 2103 torrents to become stoppedDL on restart. Any
 torrent that was mid-download during that incident may have this artifact.
@@ -323,16 +363,53 @@ items must go through Step 0 investigation before being accepted as residual.
 
 ---
 
+### 8.2 ARR Label Protocol for Replacement Torrents
+
+When adding a replacement torrent for ARR-managed content (Sonarr, Radarr, etc.),
+the RT label MUST be the **download-stage label**, not the seeding label.
+
+**Why:** ARR apps monitor the download-stage label for completed items to trigger
+import. After import, the ARR flips the label to the seeding label. If you add a
+replacement with the seeding label, the ARR never sees it and never imports the files
+into the media library.
+
+| ARR | Download-stage label (use this) | Seeding label (RT uses after import) |
+|-----|--------------------------------|--------------------------------------|
+| Sonarr | `sonarr` | `tv` |
+| Radarr | `radarr` | `movies` |
+| Lidarr | `lidarr` | `music` |
+| Readarr | `readarr` | `ebooks` |
+| Speakarr | `speakarr` | `audiobooks` |
+
+**Rule:** When adding a replacement torrent to RT that should trigger ARR re-import
+(repacks, season pack upgrades, individual ep replacements), always set the label
+to the download-stage label (e.g. `sonarr`). After the ARR processes and imports,
+it will automatically flip the label to the seeding label (`tv`).
+
+**trk_warn handles this automatically** via `_arr_label_for_replacement()` in
+`rt-tracker-manual-report.py`, which maps the existing item's label to the correct
+download-stage label before adding the replacement.
+
+**Manual add:** If adding a replacement outside of trk_warn, derive the correct
+label from the item's current seeding label:
+```python
+seeding_to_download = {"tv": "sonarr", "movies": "radarr", "music": "lidarr",
+                       "ebooks": "readarr", "audiobooks": "speakarr"}
+download_label = seeding_to_download.get(current_label, current_label)
+```
+
+---
+
 ## 9. Gaps and Open Questions
 
 The following items are known gaps in this policy. See J03-T07 for full doc audit.
 
 | Gap | Description | Status |
 |---|---|---|
-| 4 known stalledDL hashes | Not enumerated anywhere — need J03-T06 findings | Open |
+| 4 known stalledDL hashes | Superseded — J03-T11 confirmed all had data on disk; no residuals | ✅ Resolved |
 | Tracker auth_err remediation | Credentials renewal is manual — no documented procedure | Out of scope |
-| qB recheck after RT path change | When is a qB recheck required vs just a fastresume patch? | Needs clarification |
-| RT d.start vs d.resume | Which command to use for stopped vs paused items | Needs agent verification |
+| qB recheck after RT path change | Documented in §7 and §7.1 — setLocation alone insufficient; use delete+readd | ✅ Resolved |
+| RT d.start vs d.resume | J03 confirmed d.start() works for both stoppedDL and pausedDL; d.check_hash() must precede d.start() when data was just hardlinked | ✅ Resolved |
 
 ---
 
