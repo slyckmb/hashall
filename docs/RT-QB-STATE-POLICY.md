@@ -1,6 +1,6 @@
 # RT / qB Client State Policy
 
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Authoritative  
 **Last updated:** 2026-06-12  
 **Source:** USER-NOTES.md (target state), operator Q&A (2026-06-12 session)  
@@ -211,7 +211,11 @@ FOR EACH qB ITEM:
               → ACCEPTABLE. qB mirrors RT. No action.
           RT = complete (stalledUP/uploading/stoppedUP)?
               → MISMATCH. qB thinks incomplete, RT is seeding.
-                 Trigger qB recheck. Should flip to stoppedUP.
+                 Step 1: Trigger qB recheck. Should flip to stoppedUP.
+                 Step 2: If recheck fails or stuck at 0% → see §7.1 (fastresume fix).
+    
+    stoppedDL at 0% AND RT is complete AND recheck fails?
+      → Fastresume qBt-downloadPath artifact. See §7.1.
     
     uploading, stalledUP, forcedUP, pausedUP?
       → STOP IT IMMEDIATELY. qB must not upload.
@@ -221,9 +225,67 @@ FOR EACH qB ITEM:
     
     error?
       → Check qB save_path against RT directory.
-         Path mismatch → repoint qB (offline fastresume patch).
+         Path mismatch → repoint qB (setLocation API or §7.1 fastresume patch).
          Path correct → investigate torrent data.
 ```
+
+---
+
+## 7.1 qB Fastresume `qBt-downloadPath` Fix
+
+**Symptom:** qB item is stoppedDL at 0% even though:
+- RT is at 100% complete and seeding
+- Data file(s) exist on disk at the expected path
+- qB recheck returns 0% every time
+- `content_path` in qB API shows `/incomplete_torrents/...` instead of the seeding path
+
+**Root cause:** The qB fastresume file has a stale `qBt-downloadPath` entry (e.g.
+`/incomplete_torrents`) that overrides `qBt-savePath`. qB uses the raw `save_path`
+key (not `qBt-savePath`) for recheck. When both are set, `save_path` wins and points
+to the wrong location.
+
+**Fix — delete and re-add via .torrent file (preferred, works while qB is running):**
+
+```bash
+HASH=<infohash>
+TORRENT=/dump/docker/gluetun_qbit/rtorrent_vpn/.session/${HASH^^}.torrent
+SAVE_PATH=<correct parent directory>   # parent of the torrent's content dir
+
+# 1. Delete from qB (no file deletion)
+curl -s -X POST http://localhost:9003/api/v2/torrents/delete \
+  --data "hashes=$HASH&deleteFiles=false"
+
+# 2. Re-add via .torrent file with correct save path (stopped)
+curl -s -X POST http://localhost:9003/api/v2/torrents/add \
+  -F "torrents=@$TORRENT" \
+  -F "savepath=$SAVE_PATH" \
+  -F "category=<original_category>" \
+  -F "stopped=true"
+
+# 3. Recheck
+curl -s -X POST http://localhost:9003/api/v2/torrents/recheck \
+  --data "hashes=$HASH"
+# → Should flip to stoppedUP at 100%
+```
+
+**Fix — offline fastresume patch (requires stopping qB or patching between flushes):**
+
+```python
+from pathlib import Path
+from hashall.fastresume import patch_fastresume_file
+
+result = patch_fastresume_file(
+    Path(f"/dump/docker/gluetun_qbit/rtorrent_vpn/.session/{HASH.upper()}.fastresume"),  # note: qB BT_backup, not RT session
+    target_save_path=SAVE_PATH,
+    backup_suffix=".bak",
+)
+# Then trigger recheck in qB — but only if qB doesn't immediately overwrite the file.
+# qB overwrites fastresume on state changes; the delete-and-readd approach is safer.
+```
+
+**Note:** `qBt-downloadPath` artifacts were introduced during the Feb-2026 disaster
+when `qBt-downloadPath` caused 2103 torrents to become stoppedDL on restart. Any
+torrent that was mid-download during that incident may have this artifact.
 
 ---
 
