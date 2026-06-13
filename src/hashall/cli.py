@@ -4852,7 +4852,7 @@ def rt_state_audit_cmd(rpc_url, cache_file, meta_file, cache_max_age, use_live, 
         }
     wanted = {str(item).strip() for item in state_filters if str(item).strip()}
     if bad_only:
-        rows = [row for row in rows if row["state"] not in {"uploading", "stalledUP", "stoppedUP"}]
+        rows = [row for row in rows if row["state"] not in {"uploading", "stalledUP"}]
     if wanted:
         rows = [row for row in rows if row["state"] in wanted]
     rows.sort(key=lambda row: (row["state"], row["name"].lower(), row["hash"]))

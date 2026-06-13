@@ -23,7 +23,7 @@ from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
 from hashall.scan import scan_path  # Phase 3B: For in-process scans with changed-scope gating
 
 # States acceptable after a successful rehome (lower-case for comparison).
-SEED_READY = {"uploading", "stalledup", "queuedup", "forcedup", "pausedup", "stoppedup"}
+SEED_READY = {"uploading", "stalledup", "queuedup", "stoppedup"}
 
 
 # ---------------------------------------------------------------------------
