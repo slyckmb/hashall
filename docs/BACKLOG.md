@@ -1,7 +1,11 @@
 # Backlog (Ranked Priorities)
 
-Last updated: 2026-05-20
-Status: canonical
+Last updated: 2026-06-16
+Status: reference
+
+> **Live issue tracker has moved to `docs/OPS.md`.**
+> Open gaps from this file are captured there as OP-04 through OP-09.
+> This file is retained as reference context for the gap descriptions and history.
 
 Extracted from PLAN.md. For current-sprint work see `docs/SPRINT.md`.
 
