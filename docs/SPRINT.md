@@ -41,30 +41,32 @@ Prereqs: fresh canonical-tree-report counts, RUNBOOK execution protocol (OP-02).
 Each item: resolve tracker from hash via RT XMLRPC → rename dir → RT repoint → qB set_location.
 Depends on 12b being complete (shared tooling).
 
-## Evidence Baseline (2026-05-20, post-slice-9 — stale, refresh pending)
+## Evidence Baseline (2026-06-16, post-refresh)
 
-- qB: 4818 rows, daemon_live
-- RT: 4818 rows, daemon_live
-- Catalog last scan: 2026-05-20 ✅ (db-refresh-fast-gated-parallel, 5m26s)
-- Payload sync: 4762 complete, 56 incomplete, 1 missing-in-catalog
-- Orphan GC candidates: 2480 (2477 aged, 2 new) — blocked (>1000 limit)
-- **Drift: 0** (path drift: 0 high/medium/low)
-- RT-only: 0
-- Hitchhiker audit: 162 groups — 54 Type A, 60 safe-to-split, 47 blocked, 1 busy
+- torrent_instances: 5577 (qB + RT combined)
+- Payloads: 7759
+- Catalog last scan: 2026-06-16 22:55 ✅ (db-refresh-fast-gated-parallel)
+- **Drift: 4** (high=2, medium=0, low=2)
+  - `2d4016de` NOVA.S50 — repoint qB to RT path (high)
+  - `f0bc85ee` Magic.City.S01 — repoint qB to RT path (high)
+  - `a6d3ae00` The.Rookie.S05 — manual review (low)
+  - `e581c2ac` Lego.Masters.US.S04 — manual review (low)
+- QB-only: 0  RT-only: 0
+- Hitchhiker audit: 117 groups — 31 Type A, 58 safe-to-split, 27 blocked, 1 busy
 
 _Update this section after each `make db-refresh-fast-gated-parallel` + audit run._
 
-## Canonical Path Class Table (2026-05-20 counts — refresh pending)
+## Canonical Path Class Table (2026-06-16 counts)
 
 | Class | Count | Pattern | Status |
 |---|---|---|---|
-| 1 | 10 | `cross-seed/<40-hex-hash>/` | ⏳ slice 12c |
-| 2 | 6 | `cross-seed/other/` | ⏳ slice 12b |
-| 3 | 30 | `cross-seed/_movie/`, `cross-seed/_<name>/` | ⏳ slice 12b |
-| 4 | 10 | `_rehome-unique/<hash>/` | ✅ cleared (slice 12a) |
-| 5 | 49 | `_qb-unique-repair/`, `_qb-repair-v2/`, `_qb-finish/` | ✅ cleared (slice 12e) |
+| 1 | 3 | `cross-seed/<40-hex-hash>/` | ⏳ slice 12c |
+| 2 | 0 | `cross-seed/other/` | ✅ clear |
+| 3 | 0 | `cross-seed-link/<tracker>/` | ✅ clear |
+| 4 | 64 | `_rehome-unique/<hash>/` | ⏳ needs investigation (was 10 — grew) |
+| 5 | 15 | `_qb-unique-repair/`, `_qb-repair-v2/`, `_qb-finish/` | ⏳ needs investigation |
 
-Repair sequence: Class 2 → 1 → 3 → Type A de-hitchhike (last).
+Repair sequence: Class 1 → 4 → 5 → Type A de-hitchhike (last).
 
 ## Safety Rules (active every session)
 
