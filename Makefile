@@ -277,7 +277,7 @@ trk-warn-upgrade-packs:
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --upgrade-season-packs --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-replace-individual:
-	@python3 $(TRK_WARN_SCRIPT) --cleanup --prowlarr --replace-individual --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --replace-individual --bucket $${BUCKET:-deleted,auth_err} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-fix-multi-loc:
 	@python3 $(TRK_WARN_SCRIPT) --fix-multi-loc
