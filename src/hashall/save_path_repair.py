@@ -10,6 +10,8 @@ All hashes are moved to their canonical paths based on category/tags and
 stash-vs-pool placement decisions.
 """
 
+__version__ = "0.1.0"
+
 import logging
 import os
 import shutil
@@ -299,10 +301,12 @@ def _resolve_full_hash(hash_val: str, qb_by_hash: dict, conn_db) -> str:
     """
     Resolve a possibly-truncated hash (hash16) to its full 40-char hash.
     Searches qB dict by prefix, then DB by LIKE prefix.
-    Returns the input unchanged if already 40 chars or not found.
+    Returns the input unchanged if already 40 chars.
 
     Bug B guard: if prefix matches more than one full hash, raise ValueError
     instead of silently using the first match. See BACKLOG.md Gap 6.
+
+    Raises ValueError if 0 matches found in qB dict and catalog DB.
     """
     if len(hash_val) >= 40:
         return hash_val.lower()
@@ -335,7 +339,9 @@ def _resolve_full_hash(hash_val: str, qb_by_hash: dict, conn_db) -> str:
             logger.warning(
                 "save_path_repair: DB lookup failed for prefix %r", prefix, exc_info=True,
             )
-    return prefix  # fallback: return as-is
+    raise ValueError(
+        f"No match for prefix {prefix!r} in qB or catalog — cannot resolve full hash"
+    )
 
 
 def _docker_stop_qb(container: str = DEFAULT_QB_CONTAINER) -> None:
@@ -439,7 +445,11 @@ def execute_repair(
         pass
 
     # Resolve hash_val to full 40-char hash (hash_val may be truncated 16-char dir name)
-    effective_hash = _resolve_full_hash(hash_val.lower(), qb_by_hash, conn_db)
+    try:
+        effective_hash = _resolve_full_hash(hash_val.lower(), qb_by_hash, conn_db)
+    except ValueError as e:
+        result.error = str(e)
+        return result
 
     # Load catalog entry for category hint
     try:
