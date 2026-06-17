@@ -176,6 +176,26 @@ Before any pool rehome is authorized for a `~noHL` item:
 3. Verify the item's actual on-disk location using BOTH RT save_path and qB save_path — they may differ; check both
 4. Only after all three checks pass may pool placement be authorized for the group
 
+### Single-file torrent path rule (operator-confirmed 2026-06-17)
+
+The canonical path for a single-file torrent depends on what the **torrent itself defines internally**:
+
+| Torrent internal structure | Canonical on-disk form |
+|---|---|
+| Bare file (no folder defined in torrent) | `<seeding-root>/<category>/<filename>` — file sits directly in category dir, NO subdirectory |
+| Folder defined in torrent | `<seeding-root>/<category>/<folder-name>/<filename>` — subdirectory matches torrent's internal folder name |
+
+**Spurious subdirectory = bug.** If a single bare-file torrent has a release-name folder around it that is NOT defined in the torrent, that folder was created by RT (known RT artifact) and is incorrect. Classify as NEEDS_REPAIR. Do not propagate the spurious folder to the canonical path calculation.
+
+**How to check:** qB and RT both report whether a torrent has a top-level folder. If `content_path == save_path + "/" + filename` with no intermediate directory, the torrent has no internal folder.
+
+### Single-file scan mode for placement verification (operator-confirmed 2026-06-17)
+
+The unified path tool will support two scan modes for ~noHL verification:
+
+- **Default (simulated):** Uses catalog DB + `~noHL` tag + known hardlink counts as a proxy. Fast. May produce false positives (stale tags). Suitable for dry-run planning.
+- **`--full-scan` mode:** Performs live filesystem hardlink check on all files across all sibling payloads. Slow but accurate. Results are saved to disk (e.g., `~/.hashall/noHL-scan-<date>.json`) for offline review and reuse in subsequent runs without rescanning.
+
 ### Inode-sharing groups (hitchhiker groups) — placement is group-scoped
 
 When two or more torrents share file data via hardlinks on the same filesystem, they form an inode-sharing group. Placement decisions (stash vs pool) apply to the **entire group**, not to individual items.
