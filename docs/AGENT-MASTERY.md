@@ -109,13 +109,23 @@ Staging dirs are NOT canonical — always temporary: `_rehome-unique/<hash>/`, `
 
 ### Cross-seed item identification (operator-confirmed 2026-06-17)
 
-An item is a cross-seed item if it has **qB category = `cross-seed`**. The cross-seed tool hardlinks files from an existing seeding item and places them under `cross-seed/<prowlarr-tracker-name>/`. To identify the canonical tracker name for a cross-seed item:
+An item is a cross-seed item if it has **qB category = `cross-seed`**. The cross-seed tool hardlinks files from an existing seeding item and places them under `cross-seed/<prowlarr-tracker-name>/`.
 
-1. **qB tracker tag** — qbit_manage assigns tracker tags derived from announce URLs; use this first
-2. **Traktor registry lookup** — match announce URL domain against `tracker-registry.yml` in `/home/michael/dev/tools/traktor/config/`
-3. **Prowlarr display name** — the Prowlarr indexer display name is what cross-seed uses as the directory name; both display name and short registry key are canonical for on-disk paths
+**To identify the canonical tracker name for a cross-seed item — use the traktor registry first:**
 
-**`cross-seed/<tracker>/` IS the canonical form for cross-seed items.** Do not remove the `cross-seed/` prefix. Do not rename to the short registry key if the Prowlarr display name was used. The cross-seed tool will re-create the display-name path on the next injection cycle regardless.
+The traktor registry at `/home/michael/dev/tools/traktor/config/tracker-registry.yml` is the authoritative one-stop source. It tracks all three identifiers per tracker:
+- `tracker_key` — short canonical key (e.g., `darkpeers`)
+- `prowlarr_display_name` — Prowlarr indexer display name (e.g., `Darkpeers (API)`) — what cross-seed uses as the on-disk directory name
+- `tracker_url_pattern` — announce URL pattern for runtime lookup from RT
+
+Resolution priority:
+1. **Traktor registry** — look up announce URL from RT XMLRPC → match `tracker_url_pattern` → get both `tracker_key` and `prowlarr_display_name`
+2. **qB tracker tag** — qbit_manage assigns tags from announce URLs; use as fallback if RT unavailable
+3. **Current save_path** — parse directory name as last resort; unreliable if path is damaged
+
+Both `prowlarr_display_name` and `tracker_key` are acceptable on-disk directory names. Do NOT rename an existing `prowlarr_display_name` path to `tracker_key` form — cross-seed re-creates the display-name path on the next injection cycle.
+
+**`cross-seed/<tracker>/` IS the canonical form for cross-seed items.** Do not remove the `cross-seed/` prefix.
 
 **Implication for Slice 12b:** The sprint description "legacy prefix removal" is stale — it predates the §4.4 policy confirmation. `canonical-tree-report` correctly does not flag `cross-seed/<tracker>/` items as non-canonical (82 total non-canonical items; none in this pattern). Slice 12b as written should be treated as superseded unless the operator explicitly reauthorizes it with a revised path transformation.
 
@@ -148,6 +158,31 @@ Cross-seed's config link folder has had two names over time:
 **Known damage (OP-16/OP-17, confirmed 2026-06-17):** `save_path_inference.py` `derive_policy_base_save_path` line 223 has a policy inversion — it returns bare `<tracker>/` for cross-seed category items instead of `cross-seed/<tracker>/`. Rogue hashall code using this function moved ~2000 cross-seed items OUT of `cross-seed/<tracker>/` into bare `<tracker>/` paths at the seeding root. Only FearNoPeer (~185 items, injected after the cross-seed config changed to the shorter `cross-seed/` root) remains at the correct `cross-seed/FearNoPeer/` paths.
 
 **Do not treat bare `<tracker>/` paths as canonical for cross-seed category items.** They are damaged paths. No migration may proceed until OP-16 (code fix) is 4-gate validated.
+
+### ~noHL tag — advisory only, never authoritative (operator-confirmed 2026-06-17)
+
+`~noHL` is a tag applied by qbit_manage at a point in time based on reference data available to qbm at that moment. It is a HINT, not a fact. It can be wrong in multiple ways:
+
+- **Staleness:** A new ARR import may have created a library hardlink AFTER the tag was applied. The tag won't update until qbm runs again.
+- **qbm accuracy:** qbm's reference data about what files are in media libraries may itself be incomplete or out of date.
+- **Scope:** The tag applies to the **qB item only** — it says nothing about sibling payloads in the same inode-sharing group. A sibling may have library hardlinks even if this item doesn't.
+- **RT/qB path divergence:** qB and RT can report different save_paths for the same torrent. The tag is on the qB record; the actual file location may differ.
+
+**`~noHL` may be used as a starting hint that pool placement is worth investigating — nothing more.**
+
+Before any pool rehome is authorized for a `~noHL` item:
+1. Re-verify via filesystem scan that NO file in the torrent has an external hardlink consumer in any media library path (`/stash/media/movies/`, `/shows/`, `/books/`, etc.)
+2. Extend that check to **all sibling payloads** in the inode-sharing group on the same filesystem — if any sibling has a library hardlink, the whole group must stay on stash
+3. Verify the item's actual on-disk location using BOTH RT save_path and qB save_path — they may differ; check both
+4. Only after all three checks pass may pool placement be authorized for the group
+
+### Inode-sharing groups (hitchhiker groups) — placement is group-scoped
+
+When two or more torrents share file data via hardlinks on the same filesystem, they form an inode-sharing group. Placement decisions (stash vs pool) apply to the **entire group**, not to individual items.
+
+Example: `Aither/Show.S01/episode.mkv` and `Darkpeers/Show.S01/episode.mkv` are hardlinked to the same inode. Moving `Aither/Show.S01/` to pool would physically move the file bytes — leaving `Darkpeers/Show.S01/episode.mkv` pointing to a vacated location on stash.
+
+**Rule:** Before authorizing any pool rehome, enumerate the full inode-sharing group for all files in the torrent. If any member of the group has an external library hardlink, the whole group stays on stash. The group check must happen at the planning step, before any execution.
 
 ### Migration moratorium (operator directive 2026-06-17)
 
