@@ -11,6 +11,7 @@ from hashall.qbittorrent import (
     QBitFile,
     QBitServerProfile,
     QBitTorrent,
+    _files_exist_at_target,
     get_torrents_from_cache,
 )
 
@@ -661,3 +662,115 @@ def test_enrich_torrent_payload_with_trackers_falls_back_to_fastresume(tmp_path)
     assert payload["real_trackers_count"] == 2
     assert payload["tracker_domains"] == ["tracker.example", "backup.example"]
     assert payload["tracker_enrichment_source"] == "fastresume"
+
+
+def test_files_exist_at_target_returns_true_when_files_found(tmp_path):
+    d = tmp_path / "target"
+    d.mkdir()
+    f = d / "movie.mkv"
+    f.write_bytes(b"x" * 100)
+    files = [QBitFile(name="movie.mkv", size=100)]
+    assert _files_exist_at_target(files, str(d)) is True
+
+
+def test_files_exist_at_target_returns_false_when_missing(tmp_path):
+    d = tmp_path / "target"
+    d.mkdir()
+    files = [QBitFile(name="missing.mkv", size=100)]
+    assert _files_exist_at_target(files, str(d)) is False
+
+
+def test_files_exist_at_target_returns_false_for_empty_list(tmp_path):
+    d = tmp_path / "target"
+    d.mkdir()
+    assert _files_exist_at_target([], str(d)) is False
+
+
+def test_set_location_cross_device_bypass_when_files_exist(tmp_path, monkeypatch, capsys):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+    monkeypatch.setattr(client, "pause_torrent", lambda h: True)
+    monkeypatch.setattr(client, "resume_torrent", lambda h: True)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    import os as _real_os
+    real_stat = _real_os.stat
+    devs = {"old": 49, "new": 45}
+    def fake_stat(path, **kwargs):
+        p = str(path)
+        if "pool/seeding/item/movie" in p:
+            return real_stat(path, **kwargs)
+        if "pool" in p:
+            return SimpleNamespace(st_dev=devs["new"])
+        if "stash" in p:
+            return SimpleNamespace(st_dev=devs["old"])
+        return real_stat(path, **kwargs)
+    monkeypatch.setattr("os.stat", fake_stat)
+
+    monkeypatch.setattr(
+        client, "get_torrent_info",
+        lambda h: SimpleNamespace(save_path=str(tmp_path / "stash"), state="pausedUP"),
+    )
+
+    # Create the file at target so bypass kicks in
+    target = tmp_path / "pool" / "seeding" / "item"
+    target.mkdir(parents=True)
+    movie = target / "movie.mkv"
+    movie.write_bytes(b"x" * 100)
+
+    monkeypatch.setattr(
+        client, "get_torrent_files",
+        lambda h: [QBitFile(name="movie.mkv", size=100)],
+    )
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+    monkeypatch.setattr(client.session, "post", lambda url, data=None, timeout=None: FakeResponse())
+
+    ok = client.set_location("abc123", str(target))
+    assert ok is True
+    captured = capsys.readouterr()
+    assert "cross-device setLocation bypass" in captured.out
+
+
+def test_set_location_cross_device_blocked_when_files_missing(tmp_path, monkeypatch):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+    monkeypatch.setattr(client, "pause_torrent", lambda h: True)
+    monkeypatch.setattr(client, "resume_torrent", lambda h: True)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    import os as _real_os
+    import stat
+    real_stat = _real_os.stat
+    devs = {"old": 49, "new": 45}
+    def fake_stat(path, **kwargs):
+        p = str(path)
+        if "pool/seeding/item/movie" in p:
+            # File doesn't exist — return stat-like result where isfile returns False
+            return SimpleNamespace(st_dev=devs["new"], st_mode=0)
+        if "pool" in p:
+            return SimpleNamespace(st_dev=devs["new"], st_mode=stat.S_IFDIR)
+        if "stash" in p:
+            return SimpleNamespace(st_dev=devs["old"], st_mode=stat.S_IFDIR)
+        return real_stat(path, **kwargs)
+    monkeypatch.setattr("os.stat", fake_stat)
+
+    monkeypatch.setattr(
+        client, "get_torrent_info",
+        lambda h: SimpleNamespace(save_path=str(tmp_path / "stash"), state="pausedUP"),
+    )
+
+    # No files created at target — bypass should NOT kick in
+    target = tmp_path / "pool" / "seeding" / "item"
+    target.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        client, "get_torrent_files",
+        lambda h: [QBitFile(name="movie.mkv", size=100)],
+    )
+
+    import pytest
+    with pytest.raises(ValueError, match="cross-device setLocation blocked"):
+        client.set_location("abc123", str(target))
