@@ -301,32 +301,46 @@ make trk-warn-replace-individual BUCKET=deleted
 
 ## 6. Active Session State
 
-**Session goal:** `Post-12b repair: T1 operator review → T2a-T2e path repairs toward zero mismatches`
+**Version:** 1.3.0 → 1.4.0
+**Session goal:** `Zero-drift, zero non-canonical paths — unified path resolver approach`
 
-**T1 (operator review) = DONE.** j09 cold-read audit (5 tools, 47 findings) + j10 critical bug fixes (3 bugs fixed, all tests green) committed to CR branch and merged to main.
+**Jobs completed this session:**
 
-**What is committed (CR branch `cr/hashall-20260530-000517-claude`, merged to main):**
-- j09: R1–R5 audit findings for all 5 mutation tools (docs/review/)
-- j10: `_resolve_full_hash` 0-match fix, `set_location` pause guard, `repoint_both_to_pool` order fix
-- j11-T01: Gate 1+2 certification for drift fix (CERTIFIED SAFE FOR DRY-RUN)
-- j11-T02: Gate 3 dry-run + pilot — BLOCKED by cross-device guard (working as designed)
-- This file (AGENT-MASTERY.md)
+| Job | Tag | What it delivered |
+|-----|-----|-------------------|
+| j09 | `job9/cold-read-audit` | R1–R5 audit findings, 47 issues, 5 tools reviewed |
+| j10 | `job10/critical-fixes` | 3 critical bugs fixed: `_resolve_full_hash`, `set_location` pause guard, `repoint_both_to_pool` order |
+| j11 | `job11/drift-fix-class4-investigation` | Gate 1+2 cert, Gate 3 blocked by cross-device guard (correct), Class 4 root cause (84 items, hitchhiker-split May 29 batch) |
+| j12 | `job12/cross-device-guard` | `_files_exist_at_target` bypass added; both HIGH drift items cleared (NOVA.S50, Magic.City.S01); drift high=0 |
+| j13 | `job13/canonical-path-tree` | `CANONICAL-PATH-SPEC.md` v1.0.0-draft — unified 5-step decision tree, 10-row action table, all policy settled |
 
-**In-flight (j11, open):**
-- T03: Class 4 investigation (64 `_rehome-unique/<hash>/` items — grew from 10, cause unknown)
+**Drift baseline (2026-06-17):**
+- torrent_instances: 5577 | drift: 3 (high=0, low=2, medium=1)
+- LOW: `a6d3ae0` The.Rookie.S05, `e581c2ac` Lego.Masters.US.S04
+- MEDIUM: `97ca3832` Lego.Movie (RT-only)
 
-**Open work (planned jobs):**
+**Canonical tree (2026-06-17, 4898 qB items):**
+- CANONICAL: ~2100 (ARR + correctly-placed items)
+- NEEDS REPAIR — cross-seed prefix missing (OP-17): 2393 items — **HOLD**
+- NEEDS REPAIR — Class 4 staging (`_rehome-unique/`): ~84 items
+- NEEDS REPAIR — Class 1 (`cross-seed/<hash>/`): 3 items
+- NEEDS REPAIR — Class 5 staging: ~3 items
+- NEEDS CLASSIFICATION: ~332 items (uncategorized)
 
-| Job | Goal | Blocked on |
-|-----|------|-----------|
-| j12 | Refine cross-device guard — check file existence at target before blocking | Ready to start |
-| j12 | Re-run Gate 3 drift fix after guard refinement — execute 2 HIGH items | j12 guard fix |
-| j13 | Slice 12b — rename `cross-seed/<tracker>/` + repoint both clients (~2125 items) | j12 complete |
-| j14 | Slice 12c — `cross-seed/<hash>/` items (3) | j13 complete |
-| j15 | Class 4 repair (64 staging items) | j11-T03 investigation |
+**Migration moratorium:** No mutations from `rehome`, `save_path_inference`, or `save-path-repair --execute` until unified path resolver (OP-18) is 4-gate validated. See moratorium section above.
 
-**Drift baseline (2026-06-16):**
-- torrent_instances: 5577 | drift: 4 (high=2, low=2)
+**The spec:** `docs/CANONICAL-PATH-SPEC.md` is the authoritative path resolution reference. Implementation agents must read it before writing any path-related code.
+
+**Open work:**
+
+| OP | Type | Next action |
+|----|------|-------------|
+| OP-16 | bug | Fix `save_path_inference.py` line 223 — after moratorium lifted |
+| OP-17 | reliability | 2393-item cross-seed prefix restoration — HOLD, awaiting migration strategy |
+| OP-18 | reliability | Implement unified path resolver tool per `CANONICAL-PATH-SPEC.md` — next job |
+| OP-19 | bug | Audit spurious subdirectories on bare single-file torrents |
+| OP-09 | reliability | Slice 12c — 3 `cross-seed/<hash>/` items, tracker resolution via qB tags |
+| OP-14 | reliability | Merge CR branch to main (j05/j06 Makefile fixes pending) |
 - NOVA.S50 `2d4016de` — qB on stash, RT on pool-media, files exist on pool-media → blocked by cross-device guard
 - Magic.City.S01 `f0bc85ee` — same pattern
 

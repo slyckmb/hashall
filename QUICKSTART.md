@@ -12,83 +12,98 @@ _Read this first after /clear. Everything you need to resume in under 2 minutes.
 | CR branch | `cr/hashall-20260530-000517-claude` |
 | CR worktree | `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude` |
 | Lead pane | `%324` |
-| Agent pane | `%463` (OpenCode / DeepSeek V4 Flash Free) |
+| Agent pane | `%463` (OpenCode / DeepSeek V4 Flash, Go tier) |
 
 ---
 
 ## 2. Current Goal
 
-Repair all torrent save-path drift and legacy path patterns to zero mismatches, migrating seed-only content to pool-media using validated, gate-checked tooling.
+Zero-drift, zero non-canonical paths — build and validate a unified path resolver
+tool based on `docs/CANONICAL-PATH-SPEC.md`, then use it to make one correct move
+per item (combining rehome + path fix) rather than chaining broken piecemeal tools.
 
 ---
 
-## 3. In-Flight Jobs
+## 3. Session Summary — What Has Been Done
 
-| Job | Branch | Status | Last commit |
-|-----|--------|--------|-------------|
-| j11 `drift-fix-class4-investigation` | `cr/hashall-20260530-000517-claude__j11` | **active — T03 running on agent** | `dca2e3d` AGENT-MASTERY.md v1.1.0 |
+| Job | Delivered |
+|-----|-----------|
+| j09 | Cold-read audit of 5 mutation tools, 47 findings, OPS.md created |
+| j10 | 3 critical bug fixes: `_resolve_full_hash`, `set_location` pause guard, `repoint_both_to_pool` order |
+| j11 | Gate 1+2 cert for drift fix; Gate 3 pilot blocked by cross-device guard (correct); Class 4 root cause (84 items) |
+| j12 | Cross-device guard bypass (`_files_exist_at_target`); both HIGH drift items cleared; drift high=0 |
+| j13 | `CANONICAL-PATH-SPEC.md` v1.0.0-draft — unified 5-step decision tree covering all 4898 items |
 
-### j11 task status
-
-| Task | Status | Finding |
-|------|--------|---------|
-| T01 — Gate 1+2 drift fix validation | ✅ done | CERTIFIED SAFE FOR DRY-RUN (`cd5c029`) |
-| T02 — Gate 3 dry-run + pilot | ✅ done | BLOCKED — cross-device guard fired correctly (`6fe5107`) |
-| T03 — Class 4 investigation | 🔄 **in-progress on agent pane %463** | 47.4K/24% tokens, running |
-
-### What T02 found (important)
-
-Both HIGH drift items (NOVA.S50 `2d4016de`, Magic.City.S01 `f0bc85ee`) have qB on stash (device 49) and RT on pool-media (device 45). Files already exist on pool-media (RT is seeding). The cross-device guard in `qbittorrent.py` blocked `set_location` because devices differ — but the guard is too conservative: it does not check whether files already exist at the target. If files exist there, no copy would occur. This is j12.
+**Current drift baseline (2026-06-17):** 3 items (high=0, low=2, medium=1)
 
 ---
 
-## 4. Next Actions (in order)
+## 4. Migration Moratorium (CRITICAL)
 
-1. **Check agent pane %463** for T03 completion or stall:
-   ```bash
-   tmux capture-pane -t %463 -p 2>/dev/null | grep -E '[0-9]+\.[0-9]+K|Permission|Allow|next instruction|done'
-   ```
+**No mutations** from `rehome`, `save_path_inference`, or `save-path-repair --execute`
+until the unified path resolver (OP-18) is implemented and 4-gate validated.
 
-2. **When T03 log arrives** — read it, triage Class 4 findings, update OPS.md, accept or block:
-   ```bash
-   cat /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__j11/comms/logs/J11-T03-log.md
-   ```
-
-3. **Update T03 expected_head in J11-T03 brief, then accept T03**, update JOB-QUEUE.md, and close j11 with `chatrap job done` from the j11 worktree.
-
-4. **Start j12** — cross-device guard refinement. Brief: before blocking on `st_dev` mismatch, check whether files exist at the target path. If they do, allow `set_location` (qB updates metadata only, no copy). Then re-run Gate 3 on the 2 HIGH drift items.
-
-5. **After j12** — proceed to Slice 12b (2125 `cross-seed/<tracker>/` items): three-gate validation, then pilot 5 items.
+Both tools have caused mass displacement at scale. The spec replaces them.
+Dry-run and audit commands remain permitted.
 
 ---
 
-## 5. Key Commands
+## 5. The Canonical Path Spec
+
+**`docs/CANONICAL-PATH-SPEC.md`** is the authoritative reference for all path decisions.
+Read it before writing any path-related code. Key points:
+
+- 5-step tree: pre-screen → classify (qB category + tags) → WHERE (stash/pool) → WHAT PATH → assemble → diff both clients
+- Neither RT nor qB is assumed correct — the tree is the arbiter
+- 2393 items have missing `cross-seed/` prefix (OP-17) — HOLD, awaiting migration strategy
+- `~noHL` is advisory only — never authoritative, requires `--full-scan` verification before any pool move
+- Single-file torrents: no subdirectory unless torrent internally defines one
+
+---
+
+## 6. Next Actions
+
+1. **Brief j14** — implement the unified path resolver tool per `CANONICAL-PATH-SPEC.md`
+   - Read-only audit output first (dry-run report per item: actual vs canonical)
+   - 4-gate validation before any execute path is written
+   - OP-16 fix (`save_path_inference.py` line 223) likely part of this job
+
+2. **Decide migration strategy** for the 2393 HOLD items before any execution
+
+3. **Context threshold hit** (`context_steps=20`) — run `/clear` before briefing j14
+
+---
+
+## 7. Key Commands
 
 ```bash
-# Check agent pane state
-tmux capture-pane -t %463 -p -S -20 2>/dev/null | tail -20
+# Confirm worktree context
+git branch --show-current  # must show cr/hashall-20260530-000517-claude
 
-# Send task brief to agent (replace BRIEF_PATH and TASK_ID)
-tmux send-keys -t %463 "[chatrap-lead] task-brief ready: <TASK_ID> — read it at <BRIEF_PATH> — ack to %324 when received, then execute" Enter
+# Check agent pane
+tmux capture-pane -t %463 -p | tail -20
 
-# Check j11 job branch state
-git -C /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__j11 log --oneline -5
+# Send brief to agent
+tmux send-keys -t %463 "[chatrap-lead] <TASK_ID> brief: read <PATH> — ack to %324" Enter
 
-# Close j11 after all tasks accepted (run from j11 worktree)
-cd /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__j11 && chatrap job done
-
-# Drift audit (always use ANCHOR_SCAN=200000)
+# Drift audit (always ANCHOR_SCAN=200000)
 make -C /home/michael/dev/work/hashall client-drift-audit ANCHOR_SCAN=200000
+
+# Create next job
+chatrap job --name <slug>   # from CR worktree
+
+# Close job
+cd <job-worktree> && chatrap job done
 ```
 
 ---
 
-## 6. Open Risks and Blockers
+## 8. Key Files
 
-| Risk | Severity | Detail |
-|------|----------|--------|
-| Cross-device guard too conservative | HIGH | Blocks 2 HIGH drift items that are actually safe. Fix in j12 before any bulk drift repair. |
-| Class 4 grew from 10 → 64 items | MEDIUM | Cause unknown — T03 is investigating. Do not repair Class 4 until investigation complete. |
-| 42+ open OPs in OPS.md | MEDIUM | Rollback fragmentation across all tools — no tool has a complete undo path. Gate everything. |
-| Agent pane %463 narrow (30 cols) | LOW | Token counter and status wrap badly. Use `-S -20` captures and grep for key strings. |
-| J11-T03 still in-flight | BLOCKER | Cannot close j11 or start j12 until T03 log is received and accepted. |
+| File | Purpose |
+|------|---------|
+| `docs/CANONICAL-PATH-SPEC.md` | Authoritative path resolution spec — read before any path work |
+| `docs/AGENT-MASTERY.md` | Full repo context, invariants, moratorium, policy rules |
+| `docs/OPS.md` | 19 open items — OP-16 (code fix), OP-17 (2393 migration HOLD), OP-18 (unified tool) |
+| `docs/REQUIREMENTS.md` | System requirements and §4.4 canonical path formula |
+| `SESSION.md` | Live session goal + step |
