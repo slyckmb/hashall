@@ -86,11 +86,30 @@ The placement unit is the **inode-sharing group** — all torrents whose files s
 
 ### Client roles
 
-**rTorrent (RT)** — active seeder, path authority. RT's path wins every dispute. RT items must always be in an active state (`stalledUP`, `uploading`, or downloading). Nothing in RT should be stopped or paused.
+**rTorrent (RT)** — active seeder. RT items must always be in an active state (`stalledUP`, `uploading`, or downloading). Nothing in RT should be stopped or paused.
 
 **qBittorrent (qB)** — passive deprecated mirror. Kept alive for tag/category/path metadata only. Will be shut down after RT migration completes. qB items must always be `stoppedUP`. Any qB item found actively uploading or downloading is a hard violation — stop it immediately.
 
-Path dispute rule: if RT and qB disagree on save_path, RT wins → repoint qB to RT's path. RT is wrong only if: its path doesn't follow category rules, the path doesn't physically exist, or there is a documented reason.
+### Path dispute rule — the decision tree is the arbiter, not either client
+
+When RT and qB report different save_paths for the same item, **do not assume RT is correct**. Either client may be at a damaged path. The correct procedure:
+
+1. Run the decision tree on the item using qB metadata (category + tags) as input to compute the **canonical target path**
+2. Diff RT's save_path against the canonical target independently
+3. Diff qB's save_path against the canonical target independently
+4. Act on the result:
+
+| RT path | qB path | Action |
+|---|---|---|
+| Canonical | Canonical | No action needed |
+| Canonical | Wrong | Repoint qB to canonical (RT path) |
+| Wrong | Canonical | Repoint RT to canonical (qB path) — investigate why RT drifted |
+| Both wrong, same path | Both wrong, same path | Move files to canonical, repoint both |
+| Both wrong, different paths | Both wrong, different paths | Move files to canonical, repoint both — do NOT use either client path as the target |
+
+**qB metadata (category, tags) is used to BUILD the canonical target.** qB's save_path (where qB thinks the files are) is a separate input used only in the diff step. These are different fields and must not be confused.
+
+The old "RT wins" shorthand is only valid when the decision tree has already confirmed RT is at the canonical path. It is not a substitute for running the tree.
 
 ### Canonical path formula
 
