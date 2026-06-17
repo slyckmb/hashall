@@ -119,6 +119,36 @@ An item is a cross-seed item if it has **qB category = `cross-seed`**. The cross
 
 **Implication for Slice 12b:** The sprint description "legacy prefix removal" is stale — it predates the §4.4 policy confirmation. `canonical-tree-report` correctly does not flag `cross-seed/<tracker>/` items as non-canonical (82 total non-canonical items; none in this pattern). Slice 12b as written should be treated as superseded unless the operator explicitly reauthorizes it with a revised path transformation.
 
+### Two distinct path-routing mechanisms (operator-confirmed 2026-06-17)
+
+There are two completely different mechanisms that determine where a torrent's files land, and they produce different path schemas. Confusing them has been the root cause of multiple rogue-code incidents.
+
+**Mechanism 1 — Explicit save_path (cross-seed items, ATM OFF):**
+- The cross-seed tool assigns `category=cross-seed` AND explicitly sets `save_path` to `<seeding-root>/cross-seed/<prowlarr-tracker-name>/` at injection time.
+- ATM is OFF for all cross-seed items. qB respects the explicit path and does not move the torrent.
+- Canonical result: `seeding/cross-seed/<prowlarr-tracker-name>/<item>/`
+
+**Mechanism 2 — ATM-managed (regular items, ATM ON):**
+- qBittorrent's Automatic Torrent Management maps `category → base save path` using the category's configured directory in qB settings.
+- A torrent with `category=tv` and ATM ON lands at `seeding/tv/<item>/`.
+- A tracker-tagged item with `category=darkpeers` and ATM ON lands at `seeding/darkpeers/<item>/`.
+- Canonical result: `seeding/<category-or-tracker-key>/<item>/` — NO `cross-seed/` prefix.
+
+**The two schemas must never be mixed.** `seeding/<tracker>/` is NOT a valid path for a cross-seed item. `seeding/cross-seed/<tracker>/` is NOT a valid path for an ATM-managed item.
+
+### Cross-seed path history and known damage (2026-06-17)
+
+Cross-seed's config link folder has had two names over time:
+
+| Era | Config root | On-disk form |
+|-----|-------------|--------------|
+| Old | `cross-seed-link/` | `seeding/cross-seed-link/<tracker>/<item>/` — legacy, `normalize_cross_seed_refactor_path` migrates these to `cross-seed/` |
+| Current | `cross-seed/` | `seeding/cross-seed/<tracker>/<item>/` — canonical |
+
+**Known damage (OP-16/OP-17, confirmed 2026-06-17):** `save_path_inference.py` `derive_policy_base_save_path` line 223 has a policy inversion — it returns bare `<tracker>/` for cross-seed category items instead of `cross-seed/<tracker>/`. Rogue hashall code using this function moved ~2000 cross-seed items OUT of `cross-seed/<tracker>/` into bare `<tracker>/` paths at the seeding root. Only FearNoPeer (~185 items, injected after the cross-seed config changed to the shorter `cross-seed/` root) remains at the correct `cross-seed/FearNoPeer/` paths.
+
+**Do not treat bare `<tracker>/` paths as canonical for cross-seed category items.** They are damaged paths. No migration may proceed until OP-16 (code fix) is 4-gate validated.
+
 ### Cross-device guard (j10 + j12 — resolved)
 
 `set_location` in `qbittorrent.py` pauses the torrent, checks `st_dev`, and blocks if source and target are on different devices. **j12 added a bypass:** if files already exist at the target path (confirmed via `_files_exist_at_target`), the cross-device block is skipped — qB updates metadata only, no physical copy. Both HIGH drift items (NOVA.S50, Magic.City.S01) cleared via this bypass. Drift `high=0` as of 2026-06-17.
