@@ -257,6 +257,22 @@ class QBitFile:
     size: int
 
 
+def _files_exist_at_target(files: List[QBitFile], target_path: str) -> bool:
+    """
+    Check if any torrent files already exist at the target path on disk.
+
+    Used by set_location to determine whether a cross-device repoint
+    is safe: if files exist at the target, qB only updates metadata
+    (no physical copy). Returns True if at least one file is found.
+    """
+    if not files:
+        return False
+    return any(
+        os.path.isfile(os.path.join(target_path, f.name))
+        for f in files
+    )
+
+
 class QBittorrentClient:
     """
     qBittorrent Web API client (read-only operations).
@@ -1427,11 +1443,22 @@ class QBittorrentClient:
             )
             return False
         if old_dev != new_dev:
-            raise ValueError(
-                f"cross-device setLocation blocked for {torrent_hash[:16]}: "
-                f"old path device {old_dev} != new path device {new_dev} "
-                "(would trigger physical file copy)"
-            )
+            # Allow if files already exist at target (metadata-only update, no copy)
+            try:
+                torrent_files = self.get_torrent_files(torrent_hash)
+            except Exception:
+                torrent_files = []
+            if _files_exist_at_target(torrent_files, new_location):
+                print(
+                    f"✅ cross-device setLocation bypass for {torrent_hash[:16]}: "
+                    "files exist at target (metadata-only update)"
+                )
+            else:
+                raise ValueError(
+                    f"cross-device setLocation blocked for {torrent_hash[:16]}: "
+                    f"old path device {old_dev} != new path device {new_dev} "
+                    "(would trigger physical file copy)"
+                )
 
         # Pause before setLocation to prevent physical file move on active torrent
         if not self.pause_torrent(torrent_hash):
