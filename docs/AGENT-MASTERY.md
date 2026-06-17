@@ -149,6 +149,25 @@ Cross-seed's config link folder has had two names over time:
 
 **Do not treat bare `<tracker>/` paths as canonical for cross-seed category items.** They are damaged paths. No migration may proceed until OP-16 (code fix) is 4-gate validated.
 
+### Migration moratorium (operator directive 2026-06-17)
+
+**No mutations from rehome or save_path_inference until OP-18 exploration is complete and 4-gate validated.**
+
+Two tools have each caused mass displacement at scale:
+
+| Tool | Dimension | Damage caused |
+|------|-----------|---------------|
+| `rehome/planner.py` + `executor.py` | WHERE (stash vs pool placement) | Original chaos — buggy executor displaced thousands of items |
+| `save_path_inference.py` | WHAT PATH (category formula) | OP-16 policy inversion stripped `cross-seed/` prefix from ~2000 items |
+
+Running them independently in any order risks compounding damage — one broken result becomes input to the other. OP-18 explores building one unified, validated tool that resolves both dimensions per item before any execution: placement policy → seeding-root, category → path formula → full target path, diff vs actual, migrate, sync qB.
+
+Until OP-18 is resolved:
+- Do not run `hashall save-path-repair --execute`
+- Do not run `hashall rehome apply` or any rehome executor path
+- Do not run `hashall client-drift apply --apply` for cross-seed category items
+- Dry-run and audit commands remain permitted
+
 ### Cross-device guard (j10 + j12 — resolved)
 
 `set_location` in `qbittorrent.py` pauses the torrent, checks `st_dev`, and blocks if source and target are on different devices. **j12 added a bypass:** if files already exist at the target path (confirmed via `_files_exist_at_target`), the cross-device block is skipped — qB updates metadata only, no physical copy. Both HIGH drift items (NOVA.S50, Magic.City.S01) cleared via this bypass. Drift `high=0` as of 2026-06-17.
