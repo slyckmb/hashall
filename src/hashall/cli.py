@@ -3385,20 +3385,31 @@ def _apply_client_drift_path_rows(
             elif not Path(target).exists():
                 event["error"] = f"proposed_target_missing:{target}"
             else:
-                _rt_qb_progress("repointing RT to pool path")
-                rt_completed = rt_apply_directory_repoint(
-                    torrent_hash,
-                    target,
-                    rpc_url=rt_rpc_url,
-                    restart=True,
-                )
+                event["save_path"] = target
+                # qB first — fail-fast; if set_location fails, RT is untouched
                 _rt_qb_progress("setting qB save path to pool path")
                 ok = qbit.set_location(torrent_hash, target)
-                event["status"] = "ok" if ok else "error"
-                event["save_path"] = target
-                event["rt_calls"] = rt_completed
-                event["error"] = "" if ok else str(qbit.last_error or "qbit_set_location_failed")
-                if ok:
+                if not ok:
+                    event["status"] = "error"
+                    event["error"] = str(qbit.last_error or "qbit_set_location_failed")
+                else:
+                    event["qbit_done"] = True
+                    _rt_qb_progress("repointing RT to pool path")
+                    try:
+                        rt_completed = rt_apply_directory_repoint(
+                            torrent_hash,
+                            target,
+                            rpc_url=rt_rpc_url,
+                            restart=True,
+                        )
+                        event["status"] = "ok"
+                        event["rt_calls"] = rt_completed
+                        event["error"] = ""
+                    except Exception:
+                        event["status"] = "error"
+                        event["error"] = "rt_repoint_failed_after_qb"
+                        _append_client_drift_journal(journal, event)
+                        raise
                     _rt_qb_progress("starting qB recheck to verify files at new location")
                     event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
                     # qB v5 resumes torrents after recheck; pause again to keep mirror stopped
