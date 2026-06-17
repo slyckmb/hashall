@@ -2552,6 +2552,7 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
             "item_type": res.canonical.item_type.value,
             "seeding_device": res.canonical.seeding_device.value,
             "canonical_path": res.canonical.canonical_path,
+            "canonical_content_path": res.canonical.canonical_content_path,
             "category_subdir": res.canonical.category_subdir,
             "qb_actual": res.qb_diff.actual_path,
             "qb_drift": res.qb_diff.drift_type.value,
@@ -2597,7 +2598,7 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
             typ = r["item_type"]
             rt_d = r["rt_drift"]
             qb_d = r["qb_drift"]
-            canon = r["canonical_path"]
+            canon = r["canonical_content_path"]
             action = r["action"]
             if len(canon) > 60:
                 canon = canon[:57] + "..."
