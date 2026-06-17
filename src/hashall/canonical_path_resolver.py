@@ -347,6 +347,15 @@ def _path_relative_to_root(path: str, root: str) -> Optional[str]:
     return None
 
 
+def _get_root_and_rel(norm_path: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (root, relative_path) if path is under a known seeding root."""
+    for root in (STASH_ROOT, POOL_ROOT):
+        rel = _path_relative_to_root(norm_path, root)
+        if rel is not None:
+            return root, rel
+    return None, None
+
+
 def diff_client_path(
     actual_path: Optional[str],
     canonical_path: str,
@@ -373,16 +382,13 @@ def diff_client_path(
     if norm_actual == norm_canonical:
         return DriftType.CANONICAL
 
-    # Check if same relative path under a different root
-    for root in (STASH_ROOT, POOL_ROOT):
-        rel = _path_relative_to_root(norm_actual, root)
-        if rel is not None:
-            # Found a known root in actual_path — compare relative parts
-            canon_rel = _path_relative_to_root(norm_canonical, root)
-            if canon_rel is not None and rel == canon_rel:
-                # Same relative path under different root
-                return DriftType.ROOT_DRIFT
-            return DriftType.CATEGORY_DRIFT
+    # Different paths — determine if same relative under different root
+    actual_root, actual_rel = _get_root_and_rel(norm_actual)
+    canon_root, canon_rel = _get_root_and_rel(norm_canonical)
+
+    if actual_rel is not None and canon_rel is not None:
+        if actual_root != canon_root and actual_rel == canon_rel:
+            return DriftType.ROOT_DRIFT
 
     return DriftType.CATEGORY_DRIFT
 
