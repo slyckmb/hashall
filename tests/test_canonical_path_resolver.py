@@ -207,20 +207,20 @@ class TestResolveCategorySubdir:
 
 class TestAssembleCanonicalPath:
     def test_cross_seed_stash(self):
-        result = assemble_canonical_path(SeedingDevice.STASH, "cross-seed/darkpeers", "SomeRelease")
-        assert result == f"{STASH}/cross-seed/darkpeers/SomeRelease"
+        result = assemble_canonical_path(SeedingDevice.STASH, "cross-seed/darkpeers")
+        assert result == f"{STASH}/cross-seed/darkpeers"
 
     def test_cross_seed_pool(self):
-        result = assemble_canonical_path(SeedingDevice.POOL, "cross-seed/fearnopeer", "SomeRelease")
-        assert result == f"{POOL}/cross-seed/fearnopeer/SomeRelease"
+        result = assemble_canonical_path(SeedingDevice.POOL, "cross-seed/fearnopeer")
+        assert result == f"{POOL}/cross-seed/fearnopeer"
 
     def test_tv_show(self):
-        result = assemble_canonical_path(SeedingDevice.STASH, "tv", "Show.S01")
-        assert result == f"{STASH}/tv/Show.S01"
+        result = assemble_canonical_path(SeedingDevice.STASH, "tv")
+        assert result == f"{STASH}/tv"
 
     def test_no_subdir(self):
-        result = assemble_canonical_path(SeedingDevice.STASH, "", "bare-file.mkv")
-        assert result == f"{STASH}/bare-file.mkv"
+        result = assemble_canonical_path(SeedingDevice.STASH, "")
+        assert result == STASH
 
 
 # ═══════════════════════════════════════════════════════
@@ -281,14 +281,15 @@ class TestResolveCanonicalPath:
             client="qb",
             torrent_hash="a" * 40,
             name="SomeRelease",
-            save_path=f"{POOL}/cross-seed/darkpeers/SomeRelease",
-            content_path=f"{POOL}/cross-seed/darkpeers/SomeRelease",
+            save_path=f"{POOL}/cross-seed/darkpeers",
+            content_path=f"{POOL}/cross-seed/darkpeers",
             category="cross-seed",
             tags="darkpeers,private,~noHL",
         )
-        rt = f"{POOL}/cross-seed/darkpeers/SomeRelease"
+        rt = f"{POOL}/cross-seed/darkpeers"
         res = resolve_canonical_path(qb, rt)
-        assert res.canonical.canonical_path == f"{POOL}/cross-seed/darkpeers/SomeRelease"
+        assert res.canonical.canonical_path == f"{POOL}/cross-seed/darkpeers"
+        assert res.canonical.canonical_content_path == f"{POOL}/cross-seed/darkpeers/SomeRelease"
         assert res.qb_diff.drift_type == DriftType.CANONICAL
         assert res.rt_diff.drift_type == DriftType.CANONICAL
         assert "correctly placed" in res.action
@@ -298,14 +299,15 @@ class TestResolveCanonicalPath:
             client="qb",
             torrent_hash="b" * 40,
             name="SomeRelease",
-            save_path=f"{POOL}/darkpeers/SomeRelease",
-            content_path=f"{POOL}/darkpeers/SomeRelease",
+            save_path=f"{POOL}/darkpeers",
+            content_path=f"{POOL}/darkpeers",
             category="cross-seed",
             tags="darkpeers,private,~noHL",
         )
-        rt = f"{POOL}/darkpeers/SomeRelease"
+        rt = f"{POOL}/darkpeers"
         res = resolve_canonical_path(qb, rt)
-        assert res.canonical.canonical_path == f"{POOL}/cross-seed/darkpeers/SomeRelease"
+        assert res.canonical.canonical_path == f"{POOL}/cross-seed/darkpeers"
+        assert res.canonical.canonical_content_path == f"{POOL}/cross-seed/darkpeers/SomeRelease"
         assert res.qb_diff.drift_type == DriftType.CATEGORY_DRIFT
         assert res.rt_diff.drift_type == DriftType.CATEGORY_DRIFT
         assert "Rename" in res.action
@@ -315,13 +317,15 @@ class TestResolveCanonicalPath:
             client="qb",
             torrent_hash="c" * 40,
             name="Show.S01",
-            save_path=f"{STASH}/_rehome-unique/abc123/Show.S01",
-            content_path=f"{STASH}/_rehome-unique/abc123/Show.S01",
+            save_path=f"{STASH}/_rehome-unique/abc123",
+            content_path=f"{STASH}/_rehome-unique/abc123",
             category="tv",
             tags="private",
         )
-        rt = f"{STASH}/_rehome-unique/abc123/Show.S01"
+        rt = f"{STASH}/_rehome-unique/abc123"
         res = resolve_canonical_path(qb, rt)
+        assert res.canonical.canonical_path == f"{STASH}/tv"
+        assert res.canonical.canonical_content_path == f"{STASH}/tv/Show.S01"
         assert res.qb_diff.drift_type == DriftType.STAGING_NEEDS_REPAIR
         assert res.rt_diff.drift_type == DriftType.STAGING_NEEDS_REPAIR
         assert "repair tool" in res.action

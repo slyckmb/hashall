@@ -76,7 +76,8 @@ class DriftType(enum.Enum):
 
 @dataclass
 class CanonicalPathResult:
-    canonical_path: str
+    canonical_path: str            # save path: <root>/<category_subdir>
+    canonical_content_path: str    # full path: <root>/<category_subdir>/<payload_name>
     item_type: ItemType
     seeding_device: SeedingDevice
     category_subdir: str
@@ -308,20 +309,17 @@ def resolve_category_subdir(
 def assemble_canonical_path(
     seeding_device: SeedingDevice,
     category_subdir: str,
-    payload_name: str,
 ) -> str:
     """
-    Returns full canonical path: <root>/<category_subdir>/<payload_name>
+    Returns canonical SAVE PATH: <root>/<category_subdir> (no payload name).
 
-    If category_subdir is empty, returns <root>/<payload_name>.
-    payload_name should be the bare filename for single-file torrents
-    or the release directory name for multi-file torrents (caller's
-    responsibility — see §6.2 Single-File Torrent Rule).
+    This is the parent directory that qB save_path and RT directory represent.
+    Use canonical_content_path for the full path including the payload name.
     """
     root = STASH_ROOT if seeding_device == SeedingDevice.STASH else POOL_ROOT
     if category_subdir:
-        return f"{root}/{category_subdir}/{payload_name}"
-    return f"{root}/{payload_name}"
+        return f"{root}/{category_subdir}"
+    return root
 
 
 # ═══════════════════════════════════════════════════════
@@ -485,10 +483,12 @@ def resolve_canonical_path(
 
     # Step 4: Assemble canonical path
     payload_name = qb_row.name
-    canonical_path = assemble_canonical_path(seeding_device, category_subdir, payload_name)
+    canonical_path = assemble_canonical_path(seeding_device, category_subdir)
+    canonical_content_path = f"{canonical_path}/{payload_name}" if payload_name else canonical_path
 
     canonical_result = CanonicalPathResult(
         canonical_path=canonical_path,
+        canonical_content_path=canonical_content_path,
         item_type=item_type,
         seeding_device=seeding_device,
         category_subdir=category_subdir,
