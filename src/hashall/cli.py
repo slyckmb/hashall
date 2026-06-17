@@ -2459,7 +2459,155 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
                     print(f"    note: {note}")
 
 
-@payload.command("save-path-repair")
+@payload.command("canonical-path")
+@click.option("--limit", type=int, default=None, help="Limit items audited.")
+@click.option("--hash", "hash_filter", default=None, help="Audit a single torrent by hash.")
+@click.option("--drifted-only", is_flag=True, help="Show only items not at canonical path.")
+@click.option("--needs-review", is_flag=True, help="Show only items flagged for human review.")
+def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
+    """
+    Audit canonical paths for all managed torrents.
+
+    Computes the canonical save path for each item per CANONICAL-PATH-SPEC.md
+    and diffs both qB and RT current paths against it. Dry-run only.
+
+    Always writes a JSON report to ~/.hashall/reports/canonical-path-<timestamp>.json.
+    """
+    import datetime
+    import json as stdjson
+    import os
+
+    from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
+    from hashall.rt_cache import load_rt_cache_snapshot
+    from hashall.client_drift import ClientTorrentRow
+    from hashall.canonical_path_resolver import resolve_canonical_path
+
+    # Load qB torrents from file cache
+    qb_torrents = []
+    try:
+        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
+        if cached_raw is not None:
+            qb_client = QBittorrentClient()
+            qb_torrents = [
+                qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                for r in cached_raw
+            ]
+        else:
+            qb_torrents = QBittorrentClient().get_torrents() or []
+    except Exception as e:
+        click.echo(f"Error loading qB torrent data: {e}", err=True)
+        return
+
+    if not qb_torrents:
+        click.echo("No qB torrents found.", err=True)
+        return
+
+    # Load RT cache and index by hash
+    rt_by_hash: dict = {}
+    try:
+        snapshot = load_rt_cache_snapshot() or {}
+        rows = snapshot.get("rows") or []
+        rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
+    except Exception:
+        pass
+
+    # Resolve each item
+    results: list[dict] = []
+    count = 0
+    for qb_torrent in qb_torrents:
+        if limit and count >= limit:
+            break
+
+        tor_hash = qb_torrent.hash.lower()
+        if hash_filter and hash_filter.lower() not in tor_hash:
+            continue
+
+        rt_info = rt_by_hash.get(tor_hash, {})
+        rt_path = rt_info.get("directory") or None
+
+        qb_row = ClientTorrentRow(
+            client="qb",
+            torrent_hash=qb_torrent.hash,
+            name=qb_torrent.name,
+            save_path=qb_torrent.save_path,
+            content_path=qb_torrent.content_path,
+            category=qb_torrent.category,
+            tags=qb_torrent.tags,
+        )
+
+        try:
+            res = resolve_canonical_path(qb_row, rt_path)
+        except Exception as e:
+            click.echo(f"Error resolving {tor_hash[:16]}: {e}", err=True)
+            continue
+
+        if drifted_only and res.qb_diff.drift_type.value == "canonical" and res.rt_diff.drift_type.value == "canonical":
+            continue
+        if needs_review and not res.needs_human_review:
+            continue
+
+        results.append({
+            "hash": res.torrent_hash,
+            "name": res.canonical.payload_name,
+            "item_type": res.canonical.item_type.value,
+            "seeding_device": res.canonical.seeding_device.value,
+            "canonical_path": res.canonical.canonical_path,
+            "canonical_content_path": res.canonical.canonical_content_path,
+            "category_subdir": res.canonical.category_subdir,
+            "qb_actual": res.qb_diff.actual_path,
+            "qb_drift": res.qb_diff.drift_type.value,
+            "rt_actual": res.rt_diff.actual_path,
+            "rt_drift": res.rt_diff.drift_type.value,
+            "action": res.action,
+            "needs_human_review": res.needs_human_review,
+            "notes": res.canonical.notes,
+        })
+        count += 1
+
+    # Write JSON report
+    reports_dir = os.path.expanduser("~/.hashall/reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    json_path = os.path.join(reports_dir, f"canonical-path-{timestamp}.json")
+    with open(json_path, "w") as f:
+        stdjson.dump(results, f, indent=2)
+    click.echo(f"JSON report: {json_path}", err=True)
+
+    # Terminal table
+    canonical_count = sum(
+        1 for r in results
+        if r["qb_drift"] == "canonical" and r["rt_drift"] == "canonical"
+    )
+    drifted_count = len(results) - canonical_count
+    review_count = sum(1 for r in results if r["needs_human_review"])
+
+    scan_count = len(results)
+    click.echo()
+    click.echo(f"Canonical Path Audit — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    click.echo(f"{scan_count} items scanned  |  canonical: {canonical_count}  |  "
+               f"drifted: {drifted_count}  |  needs-review: {review_count}")
+    click.echo()
+
+    if results:
+        header = f"{'HASH':<16} {'TYPE':<13} {'RT':<15} {'QB':<15} {'CANONICAL':<60} {'ACTION':<40}"
+        sep = "-" * len(header)
+        click.echo(header)
+        click.echo(sep)
+        for r in results:
+            hash_short = r["hash"][:16]
+            typ = r["item_type"]
+            rt_d = r["rt_drift"]
+            qb_d = r["qb_drift"]
+            canon = r["canonical_content_path"]
+            action = r["action"]
+            if len(canon) > 60:
+                canon = canon[:57] + "..."
+            if len(action) > 40:
+                action = action[:37] + "..."
+            click.echo(f"{hash_short:<16} {typ:<13} {rt_d:<15} {qb_d:<15} {canon:<60} {action:<40}")
+
+
+
 @click.option(
     "--dry-run/--execute",
     default=True,

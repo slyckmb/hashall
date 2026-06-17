@@ -220,7 +220,7 @@ def derive_policy_base_save_path(
                 rt_host_directory,
             )
             if provider:
-                return f"{primary_root}/{provider}", None, "cross_seed_provider"
+                return f"{primary_root}/cross-seed/{provider}", None, "cross_seed_provider"
             return f"{primary_root}/cross-seed", None, "cross_seed_root"
         leaf = choose_category_leaf_name(category_norm, save_path, content_path, rt_host_directory)
         return f"{primary_root}/{leaf}", None, "category_root"
@@ -373,11 +373,10 @@ def infer_canonical_save_path(
         subdir = ""
         reliability = "ambiguous"
     elif category_norm.lower() == "cross-seed":
-        # Canonical: /seeding/<tracker-name>/ (no cross-seed/ prefix)
-        # extract_cross_seed_provider_name handles both canonical and legacy paths
+        # Canonical: cross-seed/<tracker-name>/ per CANONICAL-PATH-SPEC.md §3a
         provider = extract_cross_seed_provider_name(current_save_path, current_content_path)
         if provider:
-            subdir = provider
+            subdir = f"cross-seed/{provider}"
         else:
             # Fall back to tags; exclude system tags, tilde-prefixed control tags, and rehome_* prefixes
             tracker_tags = {
@@ -389,7 +388,7 @@ def infer_canonical_save_path(
                 qbm_config = load_qbm_config(qbm_config_path)
                 qbm_tags = tracker_tags & set(qbm_config.keys())
                 tracker_slug = sorted(qbm_tags)[0] if qbm_tags else sorted(tracker_tags)[0]
-                subdir = tracker_slug
+                subdir = f"cross-seed/{tracker_slug}"
                 notes.append(f"cross-seed provider from tags: {tracker_slug}")
             else:
                 subdir = "cross-seed"

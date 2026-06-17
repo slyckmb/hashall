@@ -45,30 +45,31 @@ def test_check_path_alignment(current, canonical, expected):
 @pytest.mark.parametrize(
     "category,tags,save_path,expected_canonical,expected_device,reliability",
     [
-        # cross-seed: new canonical — tracker dir directly under seeding root
+        # cross-seed: current save_path is bare tracker (damaged, OP-17)
+        # canonical is cross-seed/<tracker>/ per CANONICAL-PATH-SPEC.md §3a
         (
             "cross-seed",
             "cross-seed, private, Aither (API)",
             f"{STASH}/Aither (API)",
-            f"{STASH}/Aither (API)",
+            f"{STASH}/cross-seed/Aither (API)",
             "stash",
             "reliable",
         ),
-        # cross-seed + ~noHL → pool device, new canonical
+        # cross-seed + ~noHL → pool device, canonical with cross-seed/ prefix
         (
             "cross-seed",
             "cross-seed, ~noHL, fearnopeer",
             f"{POOL}/fearnopeer",
-            f"{POOL}/fearnopeer",
+            f"{POOL}/cross-seed/fearnopeer",
             "pool",
             "reliable",
         ),
-        # cross-seed: legacy path (/seeding/cross-seed/<tracker>) → canonical is /seeding/<tracker>
+        # cross-seed: legacy path (/seeding/cross-seed/<tracker>) → canonical preserves cross-seed/ prefix
         (
             "cross-seed",
             "cross-seed, private",
             f"{STASH}/cross-seed/FileList.io",
-            f"{STASH}/FileList.io",
+            f"{STASH}/cross-seed/FileList.io",
             "stash",
             "reliable",
         ),
