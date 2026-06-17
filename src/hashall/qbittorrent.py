@@ -1408,6 +1408,52 @@ class QBittorrentClient:
         """
         self._ensure_authenticated()
 
+        # Cross-device guard: stat old and new path; raise if st_dev differs
+        info = self.get_torrent_info(torrent_hash)
+        if info is None:
+            print(
+                f"⚠️ setLocation cannot get torrent info for {torrent_hash[:16]}, "
+                "cannot verify device"
+            )
+            return False
+        old_path = info.save_path
+        try:
+            old_dev = os.stat(old_path).st_dev
+            new_dev = os.stat(new_location).st_dev
+        except OSError as e:
+            print(
+                f"⚠️ setLocation cannot stat paths for cross-device check "
+                f"hash={torrent_hash[:16]}: {e}"
+            )
+            return False
+        if old_dev != new_dev:
+            raise ValueError(
+                f"cross-device setLocation blocked for {torrent_hash[:16]}: "
+                f"old path device {old_dev} != new path device {new_dev} "
+                "(would trigger physical file copy)"
+            )
+
+        # Pause before setLocation to prevent physical file move on active torrent
+        if not self.pause_torrent(torrent_hash):
+            print(
+                f"⚠️ Failed to pause torrent {torrent_hash[:16]} before setLocation"
+            )
+            return False
+
+        paused_states = {"pausedUP", "stoppedUP", "pausedDL"}
+        for _ in range(20):
+            info = self.get_torrent_info(torrent_hash)
+            if info is not None and info.state in paused_states:
+                break
+            time.sleep(0.5)
+        else:
+            print(
+                f"⚠️ Timed out waiting for torrent {torrent_hash[:16]} to pause "
+                "before setLocation"
+            )
+            self.resume_torrent(torrent_hash)
+            return False
+
         response: Optional[requests.Response] = None
         for attempt in range(1, self.request_retries + 1):
             try:
@@ -1418,6 +1464,18 @@ class QBittorrentClient:
                 )
                 response.raise_for_status()
                 self.last_error = None
+
+                time.sleep(0.5)
+                post_info = self.get_torrent_info(torrent_hash)
+                if post_info and post_info.state in ("moving", "MV"):
+                    print(
+                        f"⚠️ Torrent {torrent_hash[:16]} in moving state "
+                        "after setLocation"
+                    )
+                    self.resume_torrent(torrent_hash)
+                    return False
+
+                self.resume_torrent(torrent_hash)
                 return True
             except requests.Timeout as e:
                 self.last_error = str(e)
@@ -1430,7 +1488,7 @@ class QBittorrentClient:
                     time.sleep(delay)
                     continue
                 print(f"⚠️ Failed to set location for torrent {torrent_hash}: {e}")
-                return False
+                break
             except requests.HTTPError as e:
                 status = self._status_from_error(e, response)
                 body = self._response_body_snippet(
@@ -1453,7 +1511,7 @@ class QBittorrentClient:
                 if body:
                     msg += f" body={body}"
                 print(msg)
-                return False
+                break
             except requests.RequestException as e:
                 self.last_error = str(e)
                 if attempt < self.request_retries:
@@ -1466,7 +1524,9 @@ class QBittorrentClient:
                     time.sleep(delay)
                     continue
                 print(f"⚠️ Failed to set location for torrent {torrent_hash}: {e}")
-                return False
+                break
+
+        self.resume_torrent(torrent_hash)
         return False
 
     def recheck_torrents(self, torrent_hashes: List[str]) -> bool:

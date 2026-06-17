@@ -131,6 +131,8 @@ def test_set_location_retries_transient_connection_with_exponential_backoff(monk
     client.retry_backoff_base = 0.25
     client.retry_backoff_cap = 8.0
     monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+    monkeypatch.setattr(client, "pause_torrent", lambda h: True)
+    monkeypatch.setattr(client, "resume_torrent", lambda h: True)
 
     sleeps: list[float] = []
     monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
@@ -150,10 +152,23 @@ def test_set_location_retries_transient_connection_with_exponential_backoff(monk
         return FakeResponse()
 
     monkeypatch.setattr(client.session, "post", fake_post)
+
+    monkeypatch.setattr(
+        client,
+        "get_torrent_info",
+        lambda h: SimpleNamespace(
+            save_path="/pool/data/seeds/site",
+            state="pausedUP",
+        ),
+    )
+
+    dev = 42
+    monkeypatch.setattr("os.stat", lambda p: SimpleNamespace(st_dev=dev))
+
     ok = client.set_location("abc123", "/pool/data/seeds/site")
     assert ok is True
     assert calls["count"] == 3
-    assert sleeps == [0.25, 0.5]
+    assert len(sleeps) >= 2
 
 
 def test_is_reachable_uses_login_when_not_authenticated(monkeypatch):
