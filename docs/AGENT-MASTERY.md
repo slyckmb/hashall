@@ -1,6 +1,6 @@
 # Hashall Agent Mastery Reference
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 **Audience:** CLI agents bootstrapping into any hashall session
 **Read this before touching anything. Complete section 8 before dispatching any task.**
 
@@ -107,11 +107,21 @@ Category by origin:
 
 Staging dirs are NOT canonical — always temporary: `_rehome-unique/<hash>/`, `_qb-finish/`, `_qb-unique-repair/`, `_qb-repair-v2/`
 
-### Cross-device guard (j10, with known refinement)
+### Cross-seed item identification (operator-confirmed 2026-06-17)
 
-`set_location` in `qbittorrent.py` pauses the torrent, checks that source and target are on the same device (`st_dev`), and blocks if they differ. This prevents qB from triggering a physical cross-filesystem file copy.
+An item is a cross-seed item if it has **qB category = `cross-seed`**. The cross-seed tool hardlinks files from an existing seeding item and places them under `cross-seed/<prowlarr-tracker-name>/`. To identify the canonical tracker name for a cross-seed item:
 
-**Known gap (j12):** the guard blocks even when files already exist at the target path, in which case qB would only update metadata — no copy needed. Before blocking on `st_dev` mismatch, the guard should verify whether files already exist at the target. Until j12 is complete, two HIGH drift items (NOVA.S50, Magic.City.S01) are blocked by this guard.
+1. **qB tracker tag** — qbit_manage assigns tracker tags derived from announce URLs; use this first
+2. **Traktor registry lookup** — match announce URL domain against `tracker-registry.yml` in `/home/michael/dev/tools/traktor/config/`
+3. **Prowlarr display name** — the Prowlarr indexer display name is what cross-seed uses as the directory name; both display name and short registry key are canonical for on-disk paths
+
+**`cross-seed/<tracker>/` IS the canonical form for cross-seed items.** Do not remove the `cross-seed/` prefix. Do not rename to the short registry key if the Prowlarr display name was used. The cross-seed tool will re-create the display-name path on the next injection cycle regardless.
+
+**Implication for Slice 12b:** The sprint description "legacy prefix removal" is stale — it predates the §4.4 policy confirmation. `canonical-tree-report` correctly does not flag `cross-seed/<tracker>/` items as non-canonical (82 total non-canonical items; none in this pattern). Slice 12b as written should be treated as superseded unless the operator explicitly reauthorizes it with a revised path transformation.
+
+### Cross-device guard (j10 + j12 — resolved)
+
+`set_location` in `qbittorrent.py` pauses the torrent, checks `st_dev`, and blocks if source and target are on different devices. **j12 added a bypass:** if files already exist at the target path (confirmed via `_files_exist_at_target`), the cross-device block is skipped — qB updates metadata only, no physical copy. Both HIGH drift items (NOVA.S50, Magic.City.S01) cleared via this bypass. Drift `high=0` as of 2026-06-17.
 
 ---
 
