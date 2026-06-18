@@ -12,6 +12,7 @@ from hashall.canonical_path_resolver import (
     SeedingDevice,
     DriftType,
     _is_staging_path,
+    _normalize_rt_path,
     classify_item_type,
     classify_seeding_device,
     resolve_category_subdir,
@@ -271,6 +272,56 @@ class TestDiffClientPath:
 
 
 # ═══════════════════════════════════════════════════════
+# _normalize_rt_path
+# ═══════════════════════════════════════════════════════
+
+
+class TestNormalizeRtPath:
+    def test_single_file_same_depth(self):
+        result = _normalize_rt_path(
+            f"{STASH}/books",
+            f"{STASH}/books",
+        )
+        assert result == f"{STASH}/books"
+
+    def test_multi_file_same_root_truncates(self):
+        result = _normalize_rt_path(
+            f"{STASH}/books/01 Trackers",
+            f"{STASH}/books",
+        )
+        assert result == f"{STASH}/books"
+
+    def test_multi_file_different_root_truncates_to_depth(self):
+        result = _normalize_rt_path(
+            f"{STASH}/abtorrents/03 A Winter Haunting",
+            f"{POOL}/abtorrents",
+        )
+        assert result == f"{STASH}/abtorrents"
+
+    def test_cross_seed_two_level_category(self):
+        result = _normalize_rt_path(
+            f"{STASH}/cross-seed/darkpeers/SomeRelease",
+            f"{POOL}/cross-seed/darkpeers",
+        )
+        assert result == f"{STASH}/cross-seed/darkpeers"
+
+    def test_two_levels_deeper_not_truncated(self):
+        result = _normalize_rt_path(
+            f"{STASH}/books/Season1/Episode1",
+            f"{STASH}/books",
+        )
+        assert result == f"{STASH}/books/Season1/Episode1"
+
+    def test_none_returns_none(self):
+        result = _normalize_rt_path(None, f"{STASH}/books")
+        assert result is None
+
+    def test_empty_returns_empty(self):
+        result = _normalize_rt_path("", f"{STASH}/books")
+        assert result == ""
+
+
+# ═══════════════════════════════════════════════════════
 # resolve_canonical_path — integration tests
 # ═══════════════════════════════════════════════════════
 
@@ -329,3 +380,35 @@ class TestResolveCanonicalPath:
         assert res.qb_diff.drift_type == DriftType.STAGING_NEEDS_REPAIR
         assert res.rt_diff.drift_type == DriftType.STAGING_NEEDS_REPAIR
         assert "repair tool" in res.action
+
+    def test_rt_multi_file_same_root_canonical(self):
+        """RT multi-file content folder same root as canonical → CANONICAL (not false CATEGORY_DRIFT)."""
+        qb = ClientTorrentRow(
+            client="qb",
+            torrent_hash="ddd" * 14,
+            name="Show.S01",
+            save_path=f"{STASH}/tv",
+            content_path=f"{STASH}/tv/Show.S01",
+            category="tv",
+            tags="private",
+        )
+        rt = f"{STASH}/tv/Show.S01"
+        res = resolve_canonical_path(qb, rt)
+        assert res.rt_diff.drift_type == DriftType.CANONICAL
+        assert res.qb_diff.drift_type == DriftType.CANONICAL
+
+    def test_rt_multi_file_wrong_root_root_drift(self):
+        """RT multi-file content folder on wrong root → ROOT_DRIFT (not false CATEGORY_DRIFT)."""
+        qb = ClientTorrentRow(
+            client="qb",
+            torrent_hash="eee" * 14,
+            name="AudioBook",
+            save_path=f"{STASH}/abtorrents",
+            content_path=f"{STASH}/abtorrents/AudioBook",
+            category="abtorrents",
+            tags="~noHL,private",
+        )
+        rt = f"{STASH}/abtorrents/AudioBook"
+        res = resolve_canonical_path(qb, rt)
+        assert res.rt_diff.drift_type == DriftType.ROOT_DRIFT
+        assert res.qb_diff.drift_type == DriftType.ROOT_DRIFT
