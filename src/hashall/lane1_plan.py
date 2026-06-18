@@ -76,11 +76,42 @@ def _seeding_root_of(path: Optional[str]) -> Optional[str]:
     return None
 
 
+def _is_safe_source_dir(path: Optional[str]) -> bool:
+    """
+    A valid Lane 1 source is exactly ONE level below a seeding root
+    (e.g. /pool/.../darkpeers, /data/.../tv) OR two levels where the
+    first is 'cross-seed' (e.g. /pool/.../cross-seed/darkpeers).
+
+    Invalid sources:
+    - The seeding root itself (zero levels deep)
+    - The cross-seed category root itself (one level deep but is 'cross-seed')
+    - Content subdirs (more than one level for non-cross-seed, more than two
+      for cross-seed)
+    """
+    if not path:
+        return False
+    norm = path.rstrip("/")
+    for root in SEEDING_ROOTS:
+        if norm == root:
+            # Source is the seeding root itself → invalid
+            return False
+        if norm.startswith(root + "/"):
+            rel = norm[len(root) + 1:]
+            parts = rel.split("/")
+            if len(parts) == 1 and parts[0] != "cross-seed":
+                return True
+            if len(parts) == 2 and parts[0] == "cross-seed":
+                return True
+            return False
+    return False
+
+
 def _is_lane1_eligible(resolution: ItemResolution) -> bool:
     """
     Item qualifies for Lane 1 (same-root rename only):
     - Both clients CATEGORY_DRIFT, or one CATEGORY_DRIFT + one CANONICAL
     - Source path and canonical path are under the same seeding root
+    - Source path is a valid category directory (not root, not cross-seed root)
 
     Items with different seeding roots (compound drift) belong to Lane 2.
     """
@@ -100,7 +131,14 @@ def _is_lane1_eligible(resolution: ItemResolution) -> bool:
         or resolution.rt_diff.actual_path
     )
     canonical_path = resolution.canonical.canonical_path
-    return _seeding_root_of(source_path) == _seeding_root_of(canonical_path)
+    if _seeding_root_of(source_path) != _seeding_root_of(canonical_path):
+        return False
+
+    # Source depth check: must be a valid category directory
+    if not _is_safe_source_dir(source_path):
+        return False
+
+    return True
 
 
 def build_lane1_plan(resolutions: list[ItemResolution]) -> list[Lane1PlanItem]:
