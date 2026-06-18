@@ -206,3 +206,95 @@ class TestExecuteLane1GroupAtomic:
         # source still exists → logged in errors
         source_errors = [e for e in result.get("errors", []) if "source dir still exists" in e]
         assert len(source_errors) >= 1
+
+
+class TestQBRepause:
+    """Re-pause logic: re-pause qB after set_location when not in PAUSED_STATES."""
+
+    def test_qb_already_paused_no_repause(self):
+        """Already paused after set_location → pause_torrent NOT called."""
+        items = [_make_group_item(tor_hash="a" * 40)]
+        qb = MagicMock()
+        qb.set_location.return_value = True
+
+        # First call = pre-check (pausedUP), remaining = save_path poll (pausedUP, match)
+        def fake_info(h):
+            return FakeQBitTorrent(save_path=CANONICAL, state="pausedUP")
+        qb.get_torrent_info.side_effect = fake_info
+
+        with patch("os.rename"), patch("os.makedirs"), \
+             patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", return_value=False), \
+             patch("hashall.lane1_execute.rt_apply_directory_repoint"), \
+             patch("hashall.lane1_execute.rt_xmlrpc_call"), \
+             patch("hashall.lane1_execute._xmlrpc_scalar_text", return_value=CANONICAL), \
+             patch("time.sleep"):
+            result = execute_lane1_group_atomic(items, dry_run=False, qb_client=qb)
+
+        assert result["items"][0]["qb"] == "ok"
+        qb.pause_torrent.assert_not_called()
+        notes = " ".join(result["items"][0].get("notes", []))
+        assert "pausedUP" in notes
+
+    def test_qb_repause_after_checking_up(self):
+        """checkingUP → stalledUP → re-pause succeeds."""
+        items = [_make_group_item(tor_hash="a" * 40)]
+        qb = MagicMock()
+        qb.set_location.return_value = True
+
+        # Track call count to vary return values
+        call_n = [0]
+        def fake_info(h):
+            call_n[0] += 1
+            n = call_n[0]
+            if n == 1:
+                # Pre-check: paused, old path
+                return FakeQBitTorrent(save_path="/pool/old", state="pausedUP")
+            if n <= 5:
+                # Save_path poll: checkingUP, path matches on 2nd+ poll
+                return FakeQBitTorrent(save_path=CANONICAL, state="checkingUP")
+            # checkingUP loop + after: 6th call = stalledUP, rest = pausedUP
+            return FakeQBitTorrent(save_path=CANONICAL,
+                                   state="stalledUP" if n == 6 else "pausedUP")
+        qb.get_torrent_info.side_effect = fake_info
+
+        with patch("os.rename"), patch("os.makedirs"), \
+             patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", return_value=False), \
+             patch("hashall.lane1_execute.rt_apply_directory_repoint"), \
+             patch("hashall.lane1_execute.rt_xmlrpc_call"), \
+             patch("hashall.lane1_execute._xmlrpc_scalar_text", return_value=CANONICAL), \
+             patch("time.sleep"):
+            result = execute_lane1_group_atomic(items, dry_run=False, qb_client=qb)
+
+        assert result["items"][0]["qb"] == "ok"
+        qb.pause_torrent.assert_called_once()
+        notes = " ".join(result["items"][0].get("notes", []))
+        assert "pausedUP" in notes
+
+    def test_qb_repause_times_out(self):
+        """Re-pause called but state stays stalledUP → warn_not_paused."""
+        items = [_make_group_item(tor_hash="a" * 40)]
+        qb = MagicMock()
+        qb.set_location.return_value = True
+
+        call_n = [0]
+        def fake_info(h):
+            call_n[0] += 1
+            n = call_n[0]
+            if n == 1:
+                return FakeQBitTorrent(save_path="/pool/old", state="pausedUP")
+            return FakeQBitTorrent(save_path=CANONICAL, state="stalledUP")
+        qb.get_torrent_info.side_effect = fake_info
+
+        with patch("os.rename"), patch("os.makedirs"), \
+             patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", return_value=False), \
+             patch("hashall.lane1_execute.rt_apply_directory_repoint"), \
+             patch("hashall.lane1_execute.rt_xmlrpc_call"), \
+             patch("hashall.lane1_execute._xmlrpc_scalar_text", return_value=CANONICAL), \
+             patch("time.sleep"):
+            result = execute_lane1_group_atomic(items, dry_run=False, qb_client=qb)
+
+        assert result["items"][0]["qb"] == "warn_not_paused"
+        qb.pause_torrent.assert_called_once()
