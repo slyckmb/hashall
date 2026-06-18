@@ -74,24 +74,55 @@ A torrent whose hash-check failed (goes to downloading state) after repoint woul
   qB repoint still proceeds (path must be updated regardless), but operator is alerted.
 - `_rt_fetch_health` RPC error returns `{}` → skips pre-flight block (avoids false-positive block on transient RPC issues).
 
+### RC-10: Gate 0 audit triggered RT hash checks on 43 cross-seed torrents (2026-06-18 ~12:20)
+
+J20-T01 brief authorized `qb.recheck_torrent()` on stoppedDL torrents. This caused 43 RT
+cross-seed torrents to enter `checking` state. Root cause is one or both of:
+
+- **A** — qB recheck resumed the torrent; qB's file I/O (or the resume itself) triggered RT's
+  inotify/watch to detect changes and start a hash check on the same content.
+- **B** — Agent violated brief's RT read-only constraint and called RT mutations
+  (`rt_apply_directory_repoint` or `d.start`) directly.
+
+**Immediate response:** Lead called `d.stop` on all 43 checking RT torrents → 42 settled to
+`stoppedUP`, 1 settled to `stoppedDL` (`speedcd/Dexter.S07` — may indicate incomplete data
+at canonical path). 4 pre-existing non-cross-seed `stalledDL` confirmed unrelated.
+
+**Gate 0 redesign required:** qB recheck is unsafe for the audit. The correct audit is
+read-only: RT health snapshot + `os.path.exists` on disk. NO qB mutations during Gate 0.
+Any recheck must be a separate Gate-3-equivalent step after operator approval.
+
 ---
 
-## Current State (post-incident)
+## Current State (post-incident 2)
 
-- **4786 stoppedUP** — seeding torrents, all paused (correct)
-- **115 stoppedDL** — cross-seed torrents, paused as downloads — **integrity unverified**
-- **0 stalledUP** — cleared by manual pause
-- **0 checkingUP** — cleared
+- **4852 stalledUP** — seeding normally
+- **42 stoppedUP** — cross-seed torrents stopped mid-check by lead; need operator approval to restart (data likely complete)
+- **115 stoppedDL (qB)** — cross-seed torrents, paused as downloads in qB — **integrity unverified**
+- **1 stoppedDL (RT)** — `speedcd/Dexter.S07` at canonical path — may be incomplete
+- **4 stalledDL (RT)** — pre-existing non-cross-seed (TorrentDay/TorrentLeech/DigitalCore)
+- **2 uploading** — normal
 
 ---
 
 ## Required Before Any Further Lane 1 Execution
 
 ### Gate 0 — Incident recovery (before new pilot)
-- [ ] Audit the 115 stoppedDL: verify data integrity for each (RT still seeding? files present at canonical path?)
-- [ ] Determine correct state for each — should be stoppedUP if content is complete
-- [ ] Recheck + re-pause each stoppedDL that has complete content at canonical path
-- [ ] Document any that lost data or got stuck in bad state
+
+**⚠ AUDIT MUST BE READ-ONLY. NO qB mutations (no recheck, no resume, no set_location). NO RT mutations.**
+RC-10 proved qB recheck triggers RT hash checks. Any recheck step requires separate operator approval.
+
+- [ ] Resolve 42 stoppedUP (RT): operator approves restart → `d.start` → confirm back to stalledUP
+- [ ] Investigate `speedcd/Dexter.S07` stoppedDL (RT): check if files present at canonical path; if missing, flag for data recovery
+- [ ] Audit 115 qB stoppedDL:
+  - Read-only: query RT `d.complete` + `d.down.rate` + `d.directory` for each hash
+  - Read-only: `os.path.exists(canonical_path)` for each
+  - Classify: HEALTHY (RT complete, files present) / MISSING_DATA / RT_DOWNLOADING / UNKNOWN
+  - Produce `docs/GATE0-STOPPDL-AUDIT.md` with per-torrent table
+- [ ] Recheck step (SEPARATE, requires operator approval per torrent or batch):
+  - Only for HEALTHY torrents confirmed by RT + disk check
+  - Do NOT use agent automation — operator runs rechecks manually or via narrow approved script
+- [ ] Document any torrents with missing data or unrecoverable state
 
 ### Gate 1 — Pre-flight checks
 - [ ] Verify editable install points to CR worktree (`cat __editable__.hashall-*.pth`)
