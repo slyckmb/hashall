@@ -1,0 +1,116 @@
+# Lane 1 Pilot RCCA — 2026-06-18
+
+**Status:** FAILED  
+**Pilot scope:** 23 groups, 138 items renamed + repointed  
+**Date:** 2026-06-18 ~09:20–10:05 EDT
+
+---
+
+## Observed Failures
+
+1. **27 stalledUP** after run — seeding torrents resumed by `set_location` internal `resume_torrent()`, race with re-pause logic.
+2. **110 checkingUP** after run — same root cause; set_location resumed → recheck triggered.
+3. **115 stoppedDL** (UI: stalledDL) after mass cleanup pause — cross-seed torrents that were in checkingUP when paused are now classified as incomplete downloads.
+4. **j18 was never closed** before pilot — its anomalous filter was not merged to CR; the run operated on stale j18 editable install, not CR code.
+
+---
+
+## Root Causes
+
+### RC-1: Stale editable install (process failure)
+The hashall venv editable install (`__editable__.hashall-*.pth`) pointed to `__j18` worktree, not the CR branch. Every `hashall` invocation during the pilot used j18 code. j19's re-pause fix, the `stoppedDL` pause-wait fix, and `resume_after=False` were all absent at runtime.
+
+**Evidence:** pth file contained `/hashall-20260530-000517-claude__j18/src` throughout the run.
+
+### RC-2: `set_location()` unconditionally calls `resume_torrent()` (code bug)
+`qbittorrent.py` `set_location()` resumes the torrent before returning `True`. In a lane1 context where qB must stay paused post-repoint, this is wrong. Added `resume_after=False` parameter but fix was not present during the run.
+
+**Effect:** Every `set_location` call in the run resumed the torrent → checkingUP → stalledUP.
+
+### RC-3: `stoppedDL` missing from set_location pre-pause wait (code bug)
+`set_location()` waited for `{pausedUP, stoppedUP, pausedDL}` before calling setLocation, but not `stoppedDL`. For any cross-seed torrent in download-incomplete state (`stoppedDL`), the pause wait timed out → returned False → no repoint.
+
+**Fixed:** Added `stoppedDL` to the set, but again absent during the run.
+
+### RC-4: re-pause logic race condition (code bug)
+Even with j19's re-pause logic present, it can observe `stoppedUP` while qB's queued resume hasn't yet fired, declare success, and exit — leaving the torrent to later transition to stalledUP. Root fix is `resume_after=False` (RC-2 fix).
+
+### RC-5: Mass pause during checkingUP corrupted download state (operational failure)
+To clean up stalledUP/checkingUP, `pause_torrents` was sent to all 110 checkingUP torrents. Pausing during checkingUP when the torrent is cross-seed (may be incomplete) caused qB to land the torrent in `stoppedDL` instead of `stoppedUP`. These 110 (+ 5 pre-existing) are now `stoppedDL` — UI shows `stalledDL`.
+
+**These 115 stoppedDL torrents are in an unknown state: qB may consider them incomplete downloads. Their data integrity is unverified.**
+
+### RC-6: Insufficient gate validation before full run (process failure)
+Gate 3 pilot (j17) ran only 2 items (`filelist` group). This did not exercise the checkingUP transition, multi-item groups, or the set_location race condition. The jump to 138 items (23 groups) was premature.
+
+### RC-7: j18 not closed before pilot (process failure)
+j18's anomalous filter fix was uncommitted to CR at pilot time. `chatrap job done` was never run for j18. As a result, the editable install was still pointing at j18 and the CR branch did not contain j18's code.
+
+### RC-8: `lane1_plan` category-dir check absent (code bug)
+`build_lane1_plan` flagged items as safe even when the target category dir already existed. 17 groups (232 items) were planned as safe but failed with "target already exists" at execute time.
+
+---
+
+## Code Fixes Applied (all post-run, not validated under load)
+
+| Fix | File | Status |
+|-----|------|--------|
+| Re-pause after checkingUP | `lane1_execute.py` | Committed (j19) |
+| `stoppedDL` in pause wait | `qbittorrent.py` | Committed |
+| `resume_after=False` | `qbittorrent.py` + `lane1_execute.py` | Committed |
+| Category-dir exists check | `lane1_plan.py` | Committed |
+| `_is_safe_source_dir` | `lane1_plan.py` | Committed (j18 merge) |
+
+---
+
+## Current State (post-incident)
+
+- **4786 stoppedUP** — seeding torrents, all paused (correct)
+- **115 stoppedDL** — cross-seed torrents, paused as downloads — **integrity unverified**
+- **0 stalledUP** — cleared by manual pause
+- **0 checkingUP** — cleared
+
+---
+
+## Required Before Any Further Lane 1 Execution
+
+### Gate 0 — Incident recovery (before new pilot)
+- [ ] Audit the 115 stoppedDL: verify data integrity for each (RT still seeding? files present at canonical path?)
+- [ ] Determine correct state for each — should be stoppedUP if content is complete
+- [ ] Recheck + re-pause each stoppedDL that has complete content at canonical path
+- [ ] Document any that lost data or got stuck in bad state
+
+### Gate 1 — Pre-flight checks
+- [ ] Verify editable install points to CR worktree (`cat __editable__.hashall-*.pth`)
+- [ ] Confirm all jobs for current session are closed (no orphan `__jNN` worktrees)
+- [ ] Run full test suite (36 tests) green
+- [ ] Catalog pre-run qB state (all states + counts) before touching anything
+- [ ] Confirm zero stalledUP, zero checkingUP before starting
+
+### Gate 2 — Dry-run validation
+- [ ] `hashall payload lane1-plan` produces 0 safe items (all 244 now blocked) — confirm
+- [ ] When next safe batch is identified: dry-run each group with `--dry-run` flag
+- [ ] Verify plan JSON canonical_path values match expected canonical spec
+
+### Gate 3 — Single-group pilot (NEW)
+- [ ] Run exactly ONE group (smallest available safe group, 1–3 items)
+- [ ] After run: check qB states — zero stalledUP, zero stalledDL new entries
+- [ ] Verify RT is seeding at canonical path
+- [ ] Verify qB is stoppedUP (not stoppedDL) at canonical path
+- [ ] Wait 60s, re-check states — confirm no spontaneous state transitions
+- [ ] Human review of pilot group result before proceeding
+
+### Gate 4 — Batch execution (gated)
+- [ ] Run remaining groups in batches of ≤5 groups
+- [ ] Full state check after each batch (stalledUP=0, stalledDL stable)
+- [ ] Human sign-off before each next batch
+
+---
+
+## Process Changes Required
+
+1. **Editable install guard**: Before any `hashall payload` CLI execution, verify pth file points to CR worktree. Add to Gate 1 checklist.
+2. **Job lifecycle**: All jobs MUST be closed (`chatrap job done`) before running production operations. Verify with `git log --oneline | grep merge` to confirm all jNN are merged.
+3. **Pre-run qB snapshot**: Record `state_breakdown` before any execute operation. Compare after.
+4. **No mass-pause on checkingUP**: When cleaning up unexpected states, pause stalledUP individually and wait for checkingUP to complete naturally before pausing those.
+5. **Single-item test per code change**: Each new lane1_execute code change requires a single-item live test before batch use.
