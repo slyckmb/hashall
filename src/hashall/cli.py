@@ -2607,6 +2607,178 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
             click.echo(f"{hash_short:<16} {typ:<13} {rt_d:<15} {qb_d:<15} {canon:<60} {action:<40}")
 
 
+@payload.command("lane1-plan")
+@click.option("--limit", type=int, default=None, help="Limit items planned.")
+@click.option("--hash", "hash_filter", default=None, help="Plan a single torrent by hash.")
+@click.option("--safe-only", is_flag=True, default=True, help="Show only safe-to-rename items (default: on).")
+@click.option("--show-unsafe", is_flag=True, help="Also show unsafe items (source missing, target exists, cross-device).")
+def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe):
+    """
+    Dry-run rename plan for Lane 1 (CATEGORY_DRIFT) items.
+
+    Produces a plan of directory renames needed to repair CATEGORY_DRIFT items.
+    No filesystem mutations are performed. Always writes a JSON plan file.
+
+    Safe items: source exists, target absent, same device.
+    Unsafe items flagged separately -- review before acting.
+    """
+    import datetime
+    import json as stdjson
+    import os
+
+    from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
+    from hashall.rt_cache import load_rt_cache_snapshot
+    from hashall.client_drift import ClientTorrentRow
+    from hashall.canonical_path_resolver import DriftType, resolve_canonical_path
+    from hashall.lane1_plan import build_lane1_plan
+
+    # Load qB torrents from file cache
+    qb_torrents = []
+    try:
+        cached_raw = get_torrents_from_cache(max_age_s=300, cache_path=DEFAULT_QB_CACHE_FILE)
+        if cached_raw is not None:
+            qb_client = QBittorrentClient()
+            qb_torrents = [
+                qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                for r in cached_raw
+            ]
+        else:
+            qb_torrents = QBittorrentClient().get_torrents() or []
+    except Exception as e:
+        click.echo(f"Error loading qB torrent data: {e}", err=True)
+        return
+
+    if not qb_torrents:
+        click.echo("No qB torrents found.", err=True)
+        return
+
+    # Load RT cache and index by hash
+    rt_by_hash: dict = {}
+    try:
+        snapshot = load_rt_cache_snapshot() or {}
+        rows = snapshot.get("rows") or []
+        rt_by_hash = {str(r.get("hash") or "").lower(): r for r in rows}
+    except Exception:
+        pass
+
+    # Resolve all items
+    resolutions: list = []
+    count = 0
+    for qb_torrent in qb_torrents:
+        if limit and count >= limit:
+            break
+
+        tor_hash = qb_torrent.hash.lower()
+        if hash_filter and hash_filter.lower() not in tor_hash:
+            continue
+
+        rt_info = rt_by_hash.get(tor_hash, {})
+        rt_path = rt_info.get("directory") or None
+
+        qb_row = ClientTorrentRow(
+            client="qb",
+            torrent_hash=qb_torrent.hash,
+            name=qb_torrent.name,
+            save_path=qb_torrent.save_path,
+            content_path=qb_torrent.content_path,
+            category=qb_torrent.category,
+            tags=qb_torrent.tags,
+        )
+
+        try:
+            res = resolve_canonical_path(qb_row, rt_path)
+        except Exception:
+            continue
+
+        resolutions.append(res)
+        count += 1
+
+    # Build Lane 1 plan
+    plan = build_lane1_plan(resolutions)
+
+    # Write JSON plan
+    reports_dir = os.path.expanduser("~/.hashall/reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    json_path = os.path.join(reports_dir, f"lane1-plan-{timestamp}.json")
+    json_data = [
+        {
+            "hash": p.torrent_hash,
+            "name": p.name,
+            "item_type": p.item_type,
+            "source_dir": p.source_dir,
+            "target_dir": p.target_dir,
+            "canonical_path": p.canonical_path,
+            "source_exists": p.source_exists,
+            "target_exists": p.target_exists,
+            "same_device": p.same_device,
+            "safe": p.safe,
+            "notes": p.notes,
+        }
+        for p in plan
+    ]
+    with open(json_path, "w") as f:
+        stdjson.dump(json_data, f, indent=2)
+
+    # Terminal output
+    safe_items = [p for p in plan if p.safe]
+    unsafe_items = [p for p in plan if not p.safe]
+    display = plan if show_unsafe else safe_items
+
+    click.echo()
+    click.echo(f"Lane 1 Dry-Run Plan — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    click.echo(f"{len(plan)} CATEGORY_DRIFT items  |  "
+               f"safe: {len(safe_items)}  |  "
+               f"unsafe: {len(unsafe_items)}")
+    click.echo()
+
+    if display:
+        header = f"{'HASH':<16} {'NAME':<30} {'SOURCE':<50} {'TARGET':<50} {'STATUS':<30}"
+        sep = "-" * len(header)
+        click.echo(header)
+        click.echo(sep)
+        for p in display:
+            h = p.torrent_hash[:16]
+            name = (p.name or "")[:27] + "..." if len(p.name or "") > 30 else (p.name or "")
+            src = (p.source_dir or "N/A")
+            if len(src) > 50:
+                src = "..." + src[-(47):]
+            tgt = p.target_dir
+            if len(tgt) > 50:
+                tgt = "..." + tgt[-(47):]
+
+            if p.safe:
+                status = "SAFE"
+            elif not p.source_exists:
+                status = "UNSAFE-source-missing"
+            elif p.target_exists:
+                status = "UNSAFE-target-exists"
+            elif not p.same_device:
+                status = "UNSAFE-cross-device"
+            else:
+                status = "UNSAFE-other"
+
+            click.echo(f"{h:<16} {name:<30} {src:<50} {tgt:<50} {status:<30}")
+    else:
+        click.echo("No items to display.")
+
+    if unsafe_items:
+        click.echo()
+        click.echo(f"Unsafe items ({len(unsafe_items)}):")
+        for p in unsafe_items:
+            reason = []
+            if not p.source_exists:
+                reason.append("source missing")
+            if p.target_exists:
+                reason.append("target exists")
+            if not p.same_device:
+                reason.append("cross-device")
+            click.echo(f"  {p.torrent_hash[:16]} {p.name}: {', '.join(reason)}")
+
+    click.echo()
+    click.echo(f"JSON plan: {json_path}")
+
+
 
 @click.option(
     "--dry-run/--execute",
