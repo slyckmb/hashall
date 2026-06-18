@@ -15,14 +15,14 @@ from hashall.canonical_path_resolver import (
     STASH_ROOT,
     POOL_ROOT,
 )
-from hashall.lane1_plan import Lane1PlanItem, build_lane1_plan
+from hashall.lane1_plan import Lane1PlanItem, build_lane1_plan, _is_safe_source_dir
 
-SOURCE_DIR = "/pool/media/torrents/seeding/darkpeers/SomeRelease"
-PARENT_DIR = "/pool/media/torrents/seeding/darkpeers"
+SOURCE_DIR = "/pool/media/torrents/seeding/darkpeers"
+PARENT_DIR = "/pool/media/torrents/seeding"
 TARGET_DIR = "/pool/media/torrents/seeding/cross-seed/darkpeers/SomeRelease"
 TARGET_PARENT = "/pool/media/torrents/seeding/cross-seed/darkpeers"
 CANONICAL_SAVE = "/pool/media/torrents/seeding/cross-seed/darkpeers"
-STASH_SOURCE = "/data/media/torrents/seeding/XSpeeds/SomeRelease"
+STASH_SOURCE = "/data/media/torrents/seeding/XSpeeds"
 STASH_CANONICAL = "/data/media/torrents/seeding/cross-seed/XSpeeds"
 
 
@@ -66,26 +66,22 @@ def _make_resolution(
 
 def _build_plan(resolutions, src_dev=42, tgt_dev=42,
                 source_exists=True, target_exists=False, parent_exists=True):
-    """Helper to build plan with path-aware mocks.
+    """Helper to build plan with path-aware mocks."""
 
-    os.path.isdir returns True only for the source and its parent directories.
-    os.path.isfile returns False for everything.
-    os.stat returns src_dev for source paths and tgt_dev for target paths.
-    """
     def fake_isdir(path):
-        p = str(path)
-        if not parent_exists and TARGET_PARENT in p and TARGET_DIR not in p:
+        p = str(path).rstrip("/")
+        if not parent_exists and p == TARGET_PARENT:
             return False
-        if not target_exists and TARGET_DIR in p:
+        if not target_exists and p == TARGET_DIR:
             return False
-        if not source_exists and SOURCE_DIR in p and TARGET_DIR not in p:
+        if not source_exists and p == SOURCE_DIR:
             return False
         return True
 
     def fake_stat(path):
-        p = str(path)
+        p = str(path).rstrip("/")
         class FS:
-            st_dev = src_dev if SOURCE_DIR in p and TARGET_DIR not in p else tgt_dev
+            st_dev = src_dev if p == SOURCE_DIR else tgt_dev
         return FS()
 
     with patch("os.path.isdir", side_effect=fake_isdir), \
@@ -216,5 +212,67 @@ class TestBuildLane1Plan:
     def test_source_path_none_excluded(self):
         """source_path=None (PATH_MISSING) → excluded."""
         res = _make_resolution(save_path="", rt_path="")
+        plan = _build_plan([res])
+        assert len(plan) == 0
+
+
+class TestIsSafeSourceDir:
+    def test_category_level_valid(self):
+        """One level below root (darkpeers) → valid."""
+        assert _is_safe_source_dir("/pool/media/torrents/seeding/darkpeers") is True
+
+    def test_cross_seed_tracker_valid(self):
+        """cross-seed/<tracker> (two levels) → valid."""
+        assert _is_safe_source_dir("/pool/media/torrents/seeding/cross-seed/darkpeers") is True
+
+    def test_seeding_root_invalid(self):
+        """Seeding root itself → invalid."""
+        assert _is_safe_source_dir("/pool/media/torrents/seeding") is False
+
+    def test_cross_seed_root_invalid(self):
+        """cross-seed root (no tracker subdir) → invalid."""
+        assert _is_safe_source_dir("/pool/media/torrents/seeding/cross-seed") is False
+
+    def test_content_subdir_invalid(self):
+        """Two levels below root (darkpeers/SomeRelease) → invalid."""
+        assert _is_safe_source_dir("/pool/media/torrents/seeding/darkpeers/SomeRelease") is False
+
+    def test_deep_path_invalid(self):
+        """Three levels below root → invalid."""
+        assert _is_safe_source_dir("/pool/media/torrents/seeding/tv/Show.S01/S01E01") is False
+
+    def test_none_invalid(self):
+        assert _is_safe_source_dir(None) is False
+
+    def test_empty_invalid(self):
+        assert _is_safe_source_dir("") is False
+
+
+class TestBuildLane1PlanDepthFilter:
+    """Lane 1 eligibility with source depth filtering."""
+
+    def test_source_at_seeding_root_excluded(self):
+        """Source at seeding root level → excluded."""
+        res = _make_resolution(
+            save_path="/pool/media/torrents/seeding",
+        )
+        plan = _build_plan([res])
+        assert len(plan) == 0
+
+    def test_source_at_cross_seed_root_excluded(self):
+        """Source at cross-seed category root → excluded."""
+        res = _make_resolution(
+            save_path="/pool/media/torrents/seeding/cross-seed",
+            canonical_save="/pool/media/torrents/seeding/cross-seed/torrentleech",
+        )
+        plan = _build_plan([res])
+        assert len(plan) == 0
+
+    def test_source_at_content_subdir_excluded(self):
+        """Source at content subdir (3 levels deep) → excluded."""
+        res = _make_resolution(
+            save_path="/pool/media/torrents/seeding/tv/Show.S01",
+            canonical_save="/pool/media/torrents/seeding/torrentleech",
+        )
         plan = _build_plan([res])
         assert len(plan) == 0
