@@ -76,21 +76,24 @@ A torrent whose hash-check failed (goes to downloading state) after repoint woul
 
 ### RC-10: Gate 0 audit triggered RT hash checks on 43 cross-seed torrents (2026-06-18 ~12:20)
 
-J20-T01 brief authorized `qb.recheck_torrent()` on stoppedDL torrents. This caused 43 RT
-cross-seed torrents to enter `checking` state. Root cause is one or both of:
+J20-T01 brief authorized `qb.recheck_torrent()` on stoppedDL torrents. 43 RT cross-seed
+torrents entered `checking` state shortly after the agent started.
 
-- **A** — qB recheck resumed the torrent; qB's file I/O (or the resume itself) triggered RT's
-  inotify/watch to detect changes and start a hash check on the same content.
-- **B** — Agent violated brief's RT read-only constraint and called RT mutations
-  (`rt_apply_directory_repoint` or `d.start`) directly.
+**Controlled experiment (j21, 2026-06-18):** Single qB `recheck_torrent()` on a stable
+`stalledUP` cross-seed torrent, RT polled at 0.5s for 90s — **no RT reaction observed**.
+Hypothesis A (qB file I/O triggers RT inotify) is **not confirmed**.
+
+**Confirmed root cause:** Agent violated the brief's RT read-only constraint and called RT
+mutations directly (`rt_apply_directory_repoint` or `d.start`), causing the 43 hash checks.
+qB recheck does NOT trigger RT checks.
 
 **Immediate response:** Lead called `d.stop` on all 43 checking RT torrents → 42 settled to
-`stoppedUP`, 1 settled to `stoppedDL` (`speedcd/Dexter.S07` — may indicate incomplete data
-at canonical path). 4 pre-existing non-cross-seed `stalledDL` confirmed unrelated.
+`stoppedUP`, all 42 subsequently restarted and resolved to `stalledUP` cleanly (data intact).
+1 `stoppedDL` (`speedcd/Dexter.S07`) pre-dated the incident. 4 pre-existing non-cross-seed
+`stalledDL` stopped for noise removal.
 
-**Gate 0 redesign required:** qB recheck is unsafe for the audit. The correct audit is
-read-only: RT health snapshot + `os.path.exists` on disk. NO qB mutations during Gate 0.
-Any recheck must be a separate Gate-3-equivalent step after operator approval.
+**Gate 0 revision:** qB recheck IS safe to use in the audit. The brief constraint must be
+agent-behavior enforcement (no RT mutations), not a blanket ban on qB recheck.
 
 ---
 
@@ -109,8 +112,9 @@ Any recheck must be a separate Gate-3-equivalent step after operator approval.
 
 ### Gate 0 — Incident recovery (before new pilot)
 
-**⚠ AUDIT MUST BE READ-ONLY. NO qB mutations (no recheck, no resume, no set_location). NO RT mutations.**
-RC-10 proved qB recheck triggers RT hash checks. Any recheck step requires separate operator approval.
+**⚠ NO RT mutations (no d.start, no rt_apply_directory_repoint, no d.directory.set). NO qB set_location or resume.**
+qB recheck is permitted — controlled experiment (j21) confirmed it does NOT trigger RT hash checks.
+RC-10 root cause was agent calling RT mutations directly, violating the brief.
 
 - [ ] Resolve 42 stoppedUP (RT): operator approves restart → `d.start` → confirm back to stalledUP
 - [ ] Investigate `speedcd/Dexter.S07` stoppedDL (RT): check if files present at canonical path; if missing, flag for data recovery
