@@ -12,6 +12,8 @@ from hashall.canonical_path_resolver import (
     ItemResolution,
     ItemType,
     SeedingDevice,
+    STASH_ROOT,
+    POOL_ROOT,
 )
 from hashall.lane1_plan import Lane1PlanItem, build_lane1_plan
 
@@ -20,6 +22,8 @@ PARENT_DIR = "/pool/media/torrents/seeding/darkpeers"
 TARGET_DIR = "/pool/media/torrents/seeding/cross-seed/darkpeers/SomeRelease"
 TARGET_PARENT = "/pool/media/torrents/seeding/cross-seed/darkpeers"
 CANONICAL_SAVE = "/pool/media/torrents/seeding/cross-seed/darkpeers"
+STASH_SOURCE = "/data/media/torrents/seeding/XSpeeds/SomeRelease"
+STASH_CANONICAL = "/data/media/torrents/seeding/cross-seed/XSpeeds"
 
 
 def _make_resolution(
@@ -29,22 +33,26 @@ def _make_resolution(
     rt_path: str = SOURCE_DIR,
     name: str = "SomeRelease",
     tor_hash: str = "a" * 40,
+    canonical_save: str = CANONICAL_SAVE,
 ) -> ItemResolution:
+    content_path = f"{canonical_save}/{name}"
+    device = (SeedingDevice.POOL if "/pool/" in canonical_save
+              else SeedingDevice.STASH)
     canonical = CanonicalPathResult(
-        canonical_path=CANONICAL_SAVE,
-        canonical_content_path=TARGET_DIR,
+        canonical_path=canonical_save,
+        canonical_content_path=content_path,
         item_type=ItemType.CROSS_SEED,
-        seeding_device=SeedingDevice.POOL,
+        seeding_device=device,
         category_subdir="cross-seed/darkpeers",
         payload_name=name,
     )
     qb_diff = ClientDiffResult(
         client="qb", drift_type=qb_drift, actual_path=save_path,
-        canonical_path=CANONICAL_SAVE,
+        canonical_path=canonical_save,
     )
     rt_diff = ClientDiffResult(
         client="rt", drift_type=rt_drift, actual_path=rt_path,
-        canonical_path=CANONICAL_SAVE,
+        canonical_path=canonical_save,
     )
     return ItemResolution(
         torrent_hash=tor_hash,
@@ -159,3 +167,54 @@ class TestBuildLane1Plan:
         plan = _build_plan([safe_res, skip_res])
         assert len(plan) == 1
         assert plan[0].name == "Safe"
+
+    def test_compound_drift_pool_to_stash_excluded(self):
+        """Source on POOL, canonical on STASH → excluded (compound drift)."""
+        res = _make_resolution(
+            save_path=SOURCE_DIR,
+            canonical_save=STASH_CANONICAL,
+        )
+        plan = _build_plan([res])
+        assert len(plan) == 0
+
+    def test_compound_drift_stash_to_pool_excluded(self):
+        """Source on STASH, canonical on POOL → excluded (compound drift)."""
+        res = _make_resolution(
+            save_path=STASH_SOURCE,
+            canonical_save=CANONICAL_SAVE,
+        )
+        plan = _build_plan([res])
+        assert len(plan) == 0
+
+    def test_same_root_stash_eligible(self):
+        """Source on STASH, canonical on STASH (different subdir) → eligible."""
+        res = _make_resolution(
+            save_path=STASH_SOURCE,
+            canonical_save=STASH_CANONICAL,
+        )
+        def stash_isdir(path):
+            p = str(path)
+            if "cross-seed" in p:
+                return False  # target doesn't exist
+            return True  # source exists
+        def stash_stat(path):
+            return type("", (), {"st_dev": 42})()
+        with patch("os.path.isdir", side_effect=stash_isdir), \
+             patch("os.path.isfile", return_value=False), \
+             patch("os.stat", side_effect=stash_stat):
+            plan = build_lane1_plan([res])
+        assert len(plan) == 1
+        assert plan[0].safe is True
+
+    def test_same_root_pool_eligible(self):
+        """Source on POOL, canonical on POOL (different subdir) → eligible."""
+        res = _make_resolution()
+        plan = _build_plan([res])
+        assert len(plan) == 1
+        assert plan[0].safe is True
+
+    def test_source_path_none_excluded(self):
+        """source_path=None (PATH_MISSING) → excluded."""
+        res = _make_resolution(save_path="", rt_path="")
+        plan = _build_plan([res])
+        assert len(plan) == 0

@@ -10,7 +10,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .canonical_path_resolver import DriftType, ItemResolution
+from .canonical_path_resolver import DriftType, ItemResolution, STASH_ROOT, POOL_ROOT
+
+SEEDING_ROOTS = (STASH_ROOT, POOL_ROOT)
 
 
 @dataclass
@@ -63,15 +65,42 @@ def _check_same_device(source_dir: str, target_dir: str) -> tuple[bool, Optional
     return False, "no existing parent directory found for target"
 
 
+def _seeding_root_of(path: Optional[str]) -> Optional[str]:
+    """Return the seeding root prefix of path, or None if not under any known root."""
+    if not path:
+        return None
+    norm = path.rstrip("/")
+    for root in SEEDING_ROOTS:
+        if norm == root or norm.startswith(root + "/"):
+            return root
+    return None
+
+
 def _is_lane1_eligible(resolution: ItemResolution) -> bool:
-    """Item qualifies for Lane 1: both clients CATEGORY_DRIFT, or one CATEGORY_DRIFT
-    and the other CANONICAL. Excludes ROOT_DRIFT, PATH_MISSING, STAGING_NEEDS_REPAIR."""
+    """
+    Item qualifies for Lane 1 (same-root rename only):
+    - Both clients CATEGORY_DRIFT, or one CATEGORY_DRIFT + one CANONICAL
+    - Source path and canonical path are under the same seeding root
+
+    Items with different seeding roots (compound drift) belong to Lane 2.
+    """
     eligible_drifts = {DriftType.CATEGORY_DRIFT, DriftType.CANONICAL}
-    return (
+    if not (
         resolution.qb_diff.drift_type in eligible_drifts
         and resolution.rt_diff.drift_type in eligible_drifts
-        and DriftType.CATEGORY_DRIFT in (resolution.qb_diff.drift_type, resolution.rt_diff.drift_type)
+        and DriftType.CATEGORY_DRIFT in (
+            resolution.qb_diff.drift_type, resolution.rt_diff.drift_type
+        )
+    ):
+        return False
+
+    # Compound drift check: source and canonical must share the same seeding root
+    source_path = (
+        resolution.qb_diff.actual_path
+        or resolution.rt_diff.actual_path
     )
+    canonical_path = resolution.canonical.canonical_path
+    return _seeding_root_of(source_path) == _seeding_root_of(canonical_path)
 
 
 def build_lane1_plan(resolutions: list[ItemResolution]) -> list[Lane1PlanItem]:
