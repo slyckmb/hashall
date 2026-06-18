@@ -141,10 +141,11 @@ def execute_lane1_group_atomic(
                     h, canonical_path,
                     rpc_url=rt_rpc_url, restart=True,
                 )
-                # Verify RT
+                # Verify RT — allow RT directory at save-path level or one level deeper
                 rt_dir_xml = rt_xmlrpc_call("d.directory", h, rpc_url=rt_rpc_url)
                 rt_dir = _xmlrpc_scalar_text(rt_dir_xml).rstrip("/")
-                if rt_dir == canonical_path.rstrip("/"):
+                rt_canon = canonical_path.rstrip("/")
+                if rt_dir == rt_canon or rt_dir.startswith(rt_canon + "/"):
                     rt_state_xml = rt_xmlrpc_call("d.state", h, rpc_url=rt_rpc_url)
                     rt_state = _xmlrpc_scalar_text(rt_state_xml).strip()
                     item_res["rt"] = "ok"
