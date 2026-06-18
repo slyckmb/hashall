@@ -10,6 +10,8 @@ category directory does not yet exist.
 
 Client behavior:
   RT: repoint via rt_apply_directory_repoint (restart=True, resumes seeding)
+      After repoint: polled until d.hashing=0, then verified complete=1 and
+      down_rate=0. If RT starts downloading the group is flagged warn_downloading.
   qB: repoint via set_location (pauses torrent, stays paused -- DO NOT resume)
 """
 
@@ -32,6 +34,79 @@ def _group_items(plan_items: list[dict], source_dir: str) -> list[dict]:
     group = [it for it in plan_items if (it.get("source_dir") or "") == source_dir]
     group.sort(key=lambda it: it.get("hash", ""))
     return group
+
+
+def _rt_fetch_health(
+    torrent_hash: str,
+    rpc_url: str,
+) -> dict:
+    """
+    Fetch RT torrent health fields in one snapshot.
+
+    Returns dict with keys: complete (int), hashing (int), down_rate (int).
+    Returns empty dict on RPC error.
+    """
+    try:
+        return {
+            "complete": int(_xmlrpc_scalar_text(
+                rt_xmlrpc_call("d.complete", torrent_hash, rpc_url=rpc_url)
+            ).strip()),
+            "hashing": int(_xmlrpc_scalar_text(
+                rt_xmlrpc_call("d.hashing", torrent_hash, rpc_url=rpc_url)
+            ).strip()),
+            "down_rate": int(_xmlrpc_scalar_text(
+                rt_xmlrpc_call("d.down.rate", torrent_hash, rpc_url=rpc_url)
+            ).strip()),
+        }
+    except Exception:
+        return {}
+
+
+def _rt_health_check(
+    torrent_hash: str,
+    rpc_url: str,
+    poll_secs: float = 15.0,
+) -> dict:
+    """
+    Poll RT until hashing clears, then verify complete=1 and down_rate=0.
+
+    Returns:
+      ok (bool)       — True if complete=1 and down_rate=0 after hashing clears
+      complete (int)  — final d.complete value
+      down_rate (int) — final d.down.rate value
+      hashing (int)   — final d.hashing value
+      note (str)      — human-readable status
+    """
+    polls = max(1, int(poll_secs / 0.5))
+    fields: dict = {}
+
+    for _ in range(polls):
+        fields = _rt_fetch_health(torrent_hash, rpc_url)
+        if not fields:
+            return {"ok": False, "complete": -1, "down_rate": -1, "hashing": -1,
+                    "note": "RPC error fetching RT health"}
+        if fields["hashing"] == 0:
+            break
+        time.sleep(0.5)
+
+    complete = fields.get("complete", -1)
+    down_rate = fields.get("down_rate", -1)
+    hashing = fields.get("hashing", -1)
+
+    if hashing != 0:
+        return {"ok": False, "complete": complete, "down_rate": down_rate,
+                "hashing": hashing,
+                "note": f"RT still hashing after {poll_secs:.0f}s poll"}
+    if complete != 1:
+        return {"ok": False, "complete": complete, "down_rate": down_rate,
+                "hashing": hashing,
+                "note": f"RT incomplete after hashing: complete={complete}"}
+    if down_rate > 0:
+        return {"ok": False, "complete": complete, "down_rate": down_rate,
+                "hashing": hashing,
+                "note": f"RT downloading after hashing: down_rate={down_rate}"}
+    return {"ok": True, "complete": complete, "down_rate": down_rate,
+            "hashing": hashing, "note": "RT seeding ok"}
 
 
 def execute_lane1_group_atomic(
@@ -91,7 +166,7 @@ def execute_lane1_group_atomic(
         result["errors"].append(f"target already exists: {canonical_path}")
         return result
 
-    # Check active downloads
+    # Check qB active downloads
     if qb_client:
         for it in group_items:
             h = it.get("hash", "")
@@ -103,7 +178,7 @@ def execute_lane1_group_atomic(
                     "downloading", "stalledDL", "checkingDL", "metaDL",
                 ):
                     result["errors"].append(
-                        f"active download in group: {h[:16]} state={qb_info.state}"
+                        f"active qB download in group: {h[:16]} state={qb_info.state}"
                     )
                     return result
             except Exception as e:
@@ -111,6 +186,21 @@ def execute_lane1_group_atomic(
                     f"could not check qB state for {h[:16]}: {e}"
                 )
                 return result
+
+    # Check RT not downloading pre-rename
+    for it in group_items:
+        h = it.get("hash", "")
+        if not h:
+            continue
+        fields = _rt_fetch_health(h, rt_rpc_url)
+        if not fields:
+            continue  # RPC unavailable — don't block on transient error
+        if fields.get("complete", 1) != 1 or fields.get("down_rate", 0) > 0:
+            result["errors"].append(
+                f"RT downloading pre-rename: {h[:16]} "
+                f"complete={fields.get('complete')} down_rate={fields.get('down_rate')}"
+            )
+            return result
 
     # Step 2 -- Rename directory
     try:
@@ -141,15 +231,22 @@ def execute_lane1_group_atomic(
                     h, canonical_path,
                     rpc_url=rt_rpc_url, restart=True,
                 )
-                # Verify RT — allow RT directory at save-path level or one level deeper
+                # Verify RT directory
                 rt_dir_xml = rt_xmlrpc_call("d.directory", h, rpc_url=rt_rpc_url)
                 rt_dir = _xmlrpc_scalar_text(rt_dir_xml).rstrip("/")
                 rt_canon = canonical_path.rstrip("/")
                 if rt_dir == rt_canon or rt_dir.startswith(rt_canon + "/"):
-                    rt_state_xml = rt_xmlrpc_call("d.state", h, rpc_url=rt_rpc_url)
-                    rt_state = _xmlrpc_scalar_text(rt_state_xml).strip()
-                    item_res["rt"] = "ok"
-                    item_res["notes"].append(f"RT directory={rt_dir} state={rt_state}")
+                    # Poll until RT hash-check clears, then assert seeding (not downloading)
+                    health = _rt_health_check(h, rt_rpc_url, poll_secs=15.0)
+                    item_res["notes"].append(
+                        f"RT directory={rt_dir} complete={health['complete']} "
+                        f"down_rate={health['down_rate']} hashing={health['hashing']}"
+                    )
+                    if health["ok"]:
+                        item_res["rt"] = "ok"
+                    else:
+                        item_res["rt"] = "warn_downloading"
+                        item_res["notes"].append(f"RT health: {health['note']}")
                 else:
                     item_res["rt"] = "failed"
                     item_res["notes"].append(
@@ -159,7 +256,7 @@ def execute_lane1_group_atomic(
                 item_res["rt"] = "failed"
                 item_res["notes"].append(f"RT repoint error: {e}")
 
-        # qB set_location
+        # qB set_location — always attempt even if RT warns, path must be corrected
         if h and qb_client:
             try:
                 success = qb_client.set_location(h, canonical_path, resume_after=False)
@@ -178,11 +275,11 @@ def execute_lane1_group_atomic(
                             pass
                         time.sleep(0.5)
                     if qb_info and qb_info.save_path.rstrip("/") == canonical_path.rstrip("/"):
-                        # Save path confirmed — now re-pause if needed
+                        # Save path confirmed — re-pause safety net
                         PAUSED_STATES = {"pausedUP", "stoppedUP", "pausedDL", "stoppedDL"}
                         state = qb_info.state or ""
 
-                        # Step A — wait for checkingUP to clear (up to 15s)
+                        # Wait for checkingUP to clear (up to 15s)
                         for _ in range(30):
                             if state != "checkingUP":
                                 break
@@ -193,14 +290,14 @@ def execute_lane1_group_atomic(
                             except Exception:
                                 pass
 
-                        # Step B — re-pause if not already paused
+                        # Re-pause if not already paused
                         if state not in PAUSED_STATES:
                             try:
                                 qb_client.pause_torrent(h)
                             except Exception as e:
                                 state = f"{state} (pause_called_err={e})"
 
-                        # Step C — poll up to 5s for paused state
+                        # Poll up to 5s for paused state
                         for _ in range(10):
                             if state in PAUSED_STATES:
                                 break
@@ -211,7 +308,6 @@ def execute_lane1_group_atomic(
                             except Exception:
                                 pass
 
-                        # Step D — record
                         item_res["notes"].append(
                             f"qB save_path={canonical_path} state={state}"
                         )
@@ -242,6 +338,14 @@ def execute_lane1_group_atomic(
     if not os.path.isdir(canonical_path):
         result["errors"].append(
             f"canonical path missing after rename: {canonical_path}"
+        )
+
+    # Propagate any RT warn_downloading to group-level errors for visibility
+    rt_warn = [it for it in result["items"] if it.get("rt") == "warn_downloading"]
+    if rt_warn:
+        result["errors"].append(
+            f"RT downloading post-repoint: {len(rt_warn)} item(s) — "
+            + ", ".join(it["hash"][:16] for it in rt_warn)
         )
 
     return result

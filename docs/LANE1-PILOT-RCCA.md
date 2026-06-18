@@ -60,6 +60,19 @@ j18's anomalous filter fix was uncommitted to CR at pilot time. `chatrap job don
 | `resume_after=False` | `qbittorrent.py` + `lane1_execute.py` | Committed |
 | Category-dir exists check | `lane1_plan.py` | Committed |
 | `_is_safe_source_dir` | `lane1_plan.py` | Committed (j18 merge) |
+| RT download monitor (pre-flight + post-repoint health check) | `lane1_execute.py` | Committed — 49 tests pass |
+
+### RC-9: No RT download guard (code gap, not in run)
+`lane1_execute.py` had no check for RT downloading state pre-rename or post-repoint.
+A torrent whose hash-check failed (goes to downloading state) after repoint would be invisible.
+
+**Fixes added:**
+- **Pre-flight** (`_rt_fetch_health`): before rename, check `d.complete=1` and `d.down.rate=0` for all items.
+  If any item is actively downloading → block the group before `os.rename`.
+- **Post-repoint health poll** (`_rt_health_check`): after RT repoint, poll until `d.hashing=0` (up to 15s),
+  then assert `d.complete=1` and `d.down.rate=0`. Failure → `rt="warn_downloading"` + group error.
+  qB repoint still proceeds (path must be updated regardless), but operator is alerted.
+- `_rt_fetch_health` RPC error returns `{}` → skips pre-flight block (avoids false-positive block on transient RPC issues).
 
 ---
 
