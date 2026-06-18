@@ -18,9 +18,10 @@ _Read this first after /clear. Everything you need to resume in under 2 minutes.
 
 ## 2. Current Goal
 
-Zero-drift, zero non-canonical paths — build and validate a unified path resolver
-tool based on `docs/CANONICAL-PATH-SPEC.md`, then use it to make one correct move
-per item (combining rehome + path fix) rather than chaining broken piecemeal tools.
+Execute Lane 1 migration: rename category directories and repoint clients for the
+378 same-root CATEGORY_DRIFT items (no data movement). The resolver is built and
+4-gate validated. The execute path is proven (j17 pilot). A qB stalledUP fix is
+needed in `lane1_execute.py` before running more groups.
 
 ---
 
@@ -30,80 +31,130 @@ per item (combining rehome + path fix) rather than chaining broken piecemeal too
 |-----|-----------|
 | j09 | Cold-read audit of 5 mutation tools, 47 findings, OPS.md created |
 | j10 | 3 critical bug fixes: `_resolve_full_hash`, `set_location` pause guard, `repoint_both_to_pool` order |
-| j11 | Gate 1+2 cert for drift fix; Gate 3 pilot blocked by cross-device guard (correct); Class 4 root cause (84 items) |
-| j12 | Cross-device guard bypass (`_files_exist_at_target`); both HIGH drift items cleared; drift high=0 |
-| j13 | `CANONICAL-PATH-SPEC.md` v1.0.0-draft — unified 5-step decision tree covering all 4898 items |
-
-**Current drift baseline (2026-06-17):** 3 items (high=0, low=2, medium=1)
-
----
-
-## 4. Migration Moratorium (CRITICAL)
-
-**No mutations** from `rehome`, `save_path_inference`, or `save-path-repair --execute`
-until the unified path resolver (OP-18) is implemented and 4-gate validated.
-
-Both tools have caused mass displacement at scale. The spec replaces them.
-Dry-run and audit commands remain permitted.
+| j11 | Gate 1+2 cert for drift fix; Gate 3 pilot blocked by cross-device guard (correct); Class 4 root cause |
+| j12 | Cross-device guard bypass; both HIGH drift items cleared; drift high=0 |
+| j13 | `CANONICAL-PATH-SPEC.md` v1.0.0-draft — 5-step decision tree |
+| j14 | `canonical_path_resolver.py` + CLI `hashall payload canonical-path`; 3 bugs fixed; Gates 1-3 pass |
+| j15 | RT multi-file directory normalization fix (`_normalize_rt_path`); Gate 3 re-run pass |
+| j16 | `lane1_plan.py` + CLI `hashall payload lane1-plan`; anomalous source filter (partial — j18 pending) |
+| j17 | `lane1_execute.py` + CLI `hashall payload lane1-execute`; filelist pilot (2 items) ✓ |
+| j18 | In progress: anomalous filter fix + qB stalledUP fix |
 
 ---
 
-## 5. The Canonical Path Spec
+## 4. Migration Moratorium
 
-**`docs/CANONICAL-PATH-SPEC.md`** is the authoritative reference for all path decisions.
-Read it before writing any path-related code. Key points:
-
-- 5-step tree: pre-screen → classify (qB category + tags) → WHERE (stash/pool) → WHAT PATH → assemble → diff both clients
-- Neither RT nor qB is assumed correct — the tree is the arbiter
-- 2393 items have missing `cross-seed/` prefix (OP-17) — HOLD, awaiting migration strategy
-- `~noHL` is advisory only — never authoritative, requires `--full-scan` verification before any pool move
-- Single-file torrents: no subdirectory unless torrent internally defines one
+**No mutations** from `rehome`, `save_path_inference`, or `save-path-repair --execute`.
+The canonical path resolver replaces them. Dry-run and audit commands permitted.
 
 ---
 
-## 6. Next Actions
+## 5. Current Migration State
 
-1. **Brief j14** — implement the unified path resolver tool per `CANONICAL-PATH-SPEC.md`
-   - Read-only audit output first (dry-run report per item: actual vs canonical)
-   - 4-gate validation before any execute path is written
-   - OP-16 fix (`save_path_inference.py` line 223) likely part of this job
+**Gate 3 validated:** 4901 items — 1049 canonical, 3852 drifted, 0 unexpected combos.
 
-2. **Decide migration strategy** for the 2393 HOLD items before any execution
+### Lane breakdown
 
-3. **Context threshold hit** (`context_steps=20`) — run `/clear` before briefing j14
+| Lane | Items | Type | Status |
+|------|-------|------|--------|
+| Lane 1 true | 376 safe | Same-root rename (no data movement) | **In progress** — 2 done (filelist), 374 remaining |
+| Compound drift | 2361 | STASH→POOL + rename | Deferred to Lane 2 |
+| Pure ROOT_DRIFT | 1030 | Root migration only | Deferred to Lane 2 |
+| Staging | 58 | `_rehome-unique` etc | Deferred (moratorium) |
+| Target-exists | 12 | Content at canonical, clients not repointed | Deferred |
+| Anomalous | 4 | Dangerous source paths (see below) | Excluded, manual review needed |
+| Multi-target | ~36 | readarr→books+ebooks, speakarr→audiobooks+books | Excluded, need item-level moves |
+
+### Clean target-absent groups ready to execute (~134 items, ~23 groups)
+All are cross-seed `cross-seed/` prefix additions on POOL:
+Darkpeers (API):18, FileList.io:17, seedpool (API):17, hawke-uno:13, TorrentDay:10,
+DigitalCore (API):9, YUSCENE (API):8, _movie:7, FearNoPeer:6, XSpeeds:5,
+TorrentLeech:5, YOiNKED (API):4, DocsPedia:4, movies:3, onlyencodes:3,
+filelist:2(done), tv:2, MyAnonamouse:1, yuscene:1, speedcd:1, HD-Space:1, torrentleech:1, SpeedCD:1, hawkeuno:1
 
 ---
 
-## 7. Key Commands
+## 6. CRITICAL: qB stalledUP Violation
+
+`set_location` in qB: pause → setLocation → checkingUP (hash recheck) → **auto-resumes to stalledUP**.
+The 2 filelist items were manually re-paused. `lane1_execute.py` needs this fix before any more groups run:
+
+```python
+# After set_location, poll until checkingUP finishes, then re-pause if needed
+PAUSED_STATES = {"pausedUP", "stoppedUP", "pausedDL", "stoppedDL"}
+CHECK_STATES  = {"checkingUP", "checkingDL", "moving"}
+for _ in range(60):  # up to 30s
+    info = qb_client.get_torrent_info(hash)
+    if info and info.state not in CHECK_STATES:
+        break
+    time.sleep(0.5)
+if info and info.state not in PAUSED_STATES:
+    qb_client.pause_torrent(hash)
+    time.sleep(1)
+    info = qb_client.get_torrent_info(hash)
+assert info.state in PAUSED_STATES
+```
+
+---
+
+## 7. Anomalous Items (Excluded from Automation)
+
+4 items with dangerous source paths — must NOT be passed to `lane1-execute`:
+- `/pool/media/torrents/seeding` (seeding root itself)
+- `/pool/media/torrents/seeding/cross-seed` (cross-seed dir)
+- `/pool/.../FileList.io/Beetlejuice.1988...` (content subdir, 2 levels deep)
+- `/pool/.../FileList.io/UEFA.Europa...` (content subdir, 2 levels deep)
+
+---
+
+## 8. Next Actions After /clear
+
+1. **Check j18 status** — `tmux capture-pane -t %463 -p | tail -20`
+   - If agent has committed anomalous filter fix → send execute fix brief (j18-T02)
+   - If not → redirect agent to implement `_is_safe_source_dir()` in `lane1_plan.py`
+
+2. **j18-T02** — fix `lane1_execute.py` stalledUP: poll checkingUP, re-pause if needed
+
+3. **j18-T03** (or j19) — execute next batch of target-absent groups after fix validated
+
+4. **Eventually** — merge clean target-absent groups (134 items), then plan Lane 2 (compound drift + ROOT_DRIFT)
+
+---
+
+## 9. Key Commands
 
 ```bash
-# Confirm worktree context
-git branch --show-current  # must show cr/hashall-20260530-000517-claude
-
 # Check agent pane
 tmux capture-pane -t %463 -p | tail -20
 
-# Send brief to agent
-tmux send-keys -t %463 "[chatrap-lead] <TASK_ID> brief: read <PATH> — ack to %324" Enter
+# Send brief to agent (ALWAYS /clear pane first, wait 15s)
+tmux send-keys -t %463 "/clear" Enter && sleep 15
+source /home/michael/dev/tools/chatrap/lib/chatrap-common.sh
+chatrap_send_to_agent_pane %463 "$(cat /tmp/<brief-file>.md)"
 
-# Drift audit (always ANCHOR_SCAN=200000)
-make -C /home/michael/dev/work/hashall client-drift-audit ANCHOR_SCAN=200000
+# Re-run lane1 plan (after reinstall if needed)
+pip install -e /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude -q
+hashall payload lane1-plan
 
-# Create next job
-chatrap job --name <slug>   # from CR worktree
+# Verify specific hash
+hashall payload canonical-path --hash <hash>
 
-# Close job
+# Create next job (from CR worktree)
+chatrap job --name <slug>
+
+# Close job (from job worktree)
 cd <job-worktree> && chatrap job done
 ```
 
 ---
 
-## 8. Key Files
+## 10. Key Files
 
 | File | Purpose |
 |------|---------|
-| `docs/CANONICAL-PATH-SPEC.md` | Authoritative path resolution spec — read before any path work |
-| `docs/AGENT-MASTERY.md` | Full repo context, invariants, moratorium, policy rules |
-| `docs/OPS.md` | 19 open items — OP-16 (code fix), OP-17 (2393 migration HOLD), OP-18 (unified tool) |
-| `docs/REQUIREMENTS.md` | System requirements and §4.4 canonical path formula |
+| `docs/CANONICAL-PATH-SPEC.md` | Authoritative path resolution spec |
+| `src/hashall/canonical_path_resolver.py` | Core resolver — 5-step decision tree |
+| `src/hashall/lane1_plan.py` | Lane 1 dry-run plan generator |
+| `src/hashall/lane1_execute.py` | Lane 1 execute (stalledUP fix needed) |
 | `SESSION.md` | Live session goal + step |
+| `~/.hashall/reports/lane1-plan-*.json` | Latest plan report (source of truth for groups) |
