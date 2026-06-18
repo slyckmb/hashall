@@ -65,11 +65,13 @@ def _make_resolution(
 
 
 def _build_plan(resolutions, src_dev=42, tgt_dev=42,
-                source_exists=True, target_exists=False, parent_exists=True):
+                source_exists=True, target_exists=False, parent_exists=True,
+                category_dir_exists=False):
     """Helper to build plan with path-aware mocks.
 
     os.path.isdir returns True only for the source and its parent directories.
     os.path.isfile returns False for everything.
+    os.path.exists returns category_dir_exists for the canonical_path (category dir).
     os.stat returns src_dev for source paths and tgt_dev for target paths.
     """
     def fake_isdir(path):
@@ -82,6 +84,9 @@ def _build_plan(resolutions, src_dev=42, tgt_dev=42,
             return False
         return True
 
+    def fake_exists(path):
+        return category_dir_exists if str(path) == CANONICAL_SAVE else False
+
     def fake_stat(path):
         p = str(path)
         class FS:
@@ -90,6 +95,7 @@ def _build_plan(resolutions, src_dev=42, tgt_dev=42,
 
     with patch("os.path.isdir", side_effect=fake_isdir), \
          patch("os.path.isfile", return_value=False), \
+         patch("os.path.exists", side_effect=fake_exists), \
          patch("os.stat", side_effect=fake_stat):
         return build_lane1_plan(resolutions)
 
@@ -201,6 +207,7 @@ class TestBuildLane1Plan:
             return type("", (), {"st_dev": 42})()
         with patch("os.path.isdir", side_effect=stash_isdir), \
              patch("os.path.isfile", return_value=False), \
+             patch("os.path.exists", return_value=False), \
              patch("os.stat", side_effect=stash_stat):
             plan = build_lane1_plan([res])
         assert len(plan) == 1

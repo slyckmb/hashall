@@ -126,6 +126,9 @@ def build_lane1_plan(resolutions: list[ItemResolution]) -> list[Lane1PlanItem]:
         if source_dir:
             source_exists = os.path.isdir(source_dir) or os.path.isfile(source_dir)
 
+        canonical_path = res.canonical.canonical_path
+        category_dir_exists = bool(canonical_path and os.path.exists(canonical_path))
+
         if target_dir:
             target_exists = os.path.isdir(target_dir) or os.path.isfile(target_dir)
 
@@ -134,8 +137,10 @@ def build_lane1_plan(resolutions: list[ItemResolution]) -> list[Lane1PlanItem]:
             same_device = same_dev
             if err:
                 notes.append(err)
+        if category_dir_exists:
+            notes.append(f"category dir already exists: {canonical_path}")
 
-        safe = source_exists and not target_exists and same_device
+        safe = source_exists and not target_exists and same_device and not category_dir_exists
 
         plan.append(Lane1PlanItem(
             torrent_hash=res.torrent_hash,
