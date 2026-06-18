@@ -2779,6 +2779,136 @@ def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe):
     click.echo(f"JSON plan: {json_path}")
 
 
+@payload.command("lane1-execute")
+@click.option("--source-dir", required=True,
+              help="Source category directory to rename (must match plan).")
+@click.option("--dry-run", is_flag=True,
+              help="Print what would happen without making any changes.")
+def payload_lane1_execute_cmd(source_dir, dry_run):
+    """
+    Execute Lane 1 rename for a single category group.
+
+    Renames the source category directory to its canonical path and
+    repoints both RT and qB clients. qB torrents remain paused after
+    repoint. RT torrents resume seeding automatically.
+
+    Always loads from the most recent lane1-plan JSON report.
+    Aborts if source_dir is not in the plan or not flagged safe.
+    """
+    import datetime
+    import glob
+    import json
+    import os as _os
+
+    from hashall.lane1_execute import execute_lane1_group_atomic, _group_items
+    from hashall.qbittorrent import QBittorrentClient
+
+    # Load latest plan
+    reports_dir = _os.path.expanduser("~/.hashall/reports")
+    reports = sorted(glob.glob(_os.path.join(reports_dir, "lane1-plan-*.json")))
+    if not reports:
+        raise click.ClickException(
+            "No lane1-plan report found. Run `hashall payload lane1-plan` first."
+        )
+    plan_items = json.load(open(reports[-1]))
+
+    # Filter to requested source_dir
+    group = _group_items(plan_items, source_dir)
+    if not group:
+        raise click.ClickException(
+            f"Source dir {source_dir!r} not found in plan or has no items."
+        )
+
+    # Verify all items are safe
+    unsafe = [it for it in group if not it.get("safe", False)]
+    if unsafe:
+        raise click.ClickException(
+            f"{len(unsafe)} unsafe item(s) in group: "
+            + ", ".join(it.get("hash", "?")[:16] for it in unsafe)
+        )
+
+    canonical_path = group[0].get("canonical_path", "")
+
+    click.echo()
+    click.echo(f"Lane 1 Execute — {'DRY RUN' if dry_run else 'LIVE'}")
+    click.echo(f"Group: {source_dir} → {canonical_path}")
+    click.echo()
+
+    if dry_run:
+        click.echo(f"  [RENAME]  os.rename(")
+        click.echo(f"              {source_dir},")
+        click.echo(f"              {canonical_path}")
+        click.echo(f"            )")
+        click.echo()
+        for it in group:
+            h = (it.get("hash") or "")[:16]
+            name = (it.get("name") or "")[:50]
+            click.echo(f"  [REPOINT] {h}  {name}")
+            click.echo(f"            RT: d.directory.set → {canonical_path}")
+            click.echo(f"            qB: set_location  → {canonical_path}")
+            click.echo(f"                                 (stays paused)")
+        click.echo()
+        click.echo("  Dry-run complete. No mutations performed.")
+        return
+
+    # Execute
+    qb_client = QBittorrentClient()
+
+    try:
+        result = execute_lane1_group_atomic(
+            group,
+            dry_run=False,
+            qb_client=qb_client,
+        )
+    except Exception as e:
+        raise click.ClickException(f"Execution failed: {e}")
+
+    # Print results
+    errors = result.get("errors", [])
+    rename_done = result.get("rename_done", False)
+    items = result.get("items", [])
+
+    if rename_done:
+        click.echo(f"  [RENAME]   ✓ renamed → {canonical_path}")
+    else:
+        click.echo(f"  [RENAME]   ✗ rename not performed")
+
+    click.echo()
+
+    rt_ok = sum(1 for it in items if it.get("rt") == "ok")
+    rt_fail = sum(1 for it in items if it.get("rt") == "failed")
+    qb_ok = sum(1 for it in items if it.get("qb") == "ok")
+    qb_fail = sum(1 for it in items if it.get("qb") == "failed")
+
+    for it in items:
+        h = (it.get("hash") or "")[:16]
+        name = (it.get("name") or "")[:40]
+        rt_status = it.get("rt", "?")
+        qb_status = it.get("qb", "?")
+        rt_icon = "✓" if rt_status == "ok" else "✗"
+        qb_icon = "✓" if qb_status == "ok" else "✗"
+        click.echo(f"  [REPOINT]  {h}  {name}")
+        click.echo(f"             RT: {rt_icon} {rt_status}")
+        for n in it.get("notes", []):
+            if n:
+                click.echo(f"                 {n}")
+        click.echo(f"             qB: {qb_icon} {qb_status}")
+
+    click.echo()
+
+    if errors:
+        click.echo(f"  Errors ({len(errors)}):")
+        for e in errors:
+            click.echo(f"    ✗ {e}")
+        click.echo()
+
+    total = len(items)
+    click.echo(
+        f"  {'✅' if rename_done and rt_fail == 0 and qb_fail == 0 else '⚠️'} "
+        f"Group complete: {rt_ok}/{total} RT repointed, {qb_ok}/{total} qB repointed"
+    )
+
+
 
 @click.option(
     "--dry-run/--execute",
