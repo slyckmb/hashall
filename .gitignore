@@ -4,6 +4,7 @@
 
 # 📁 Infrastructure
 tmp/
+comms/
 .vscode/
 .idea/
 *.code-workspace
