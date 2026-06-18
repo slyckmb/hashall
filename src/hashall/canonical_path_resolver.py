@@ -354,6 +354,31 @@ def _get_root_and_rel(norm_path: str) -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _normalize_rt_path(rt_path: str, canonical_path: str) -> str:
+    """
+    Truncate RT path to canonical save-path depth when RT directory is
+    exactly one level deeper (multi-file torrent content folder appended).
+
+    RT's ``directory`` field includes the content folder for multi-file
+    torrents. The canonical save path is always the parent (category level).
+    If the RT path has exactly one extra component beyond the canonical depth,
+    strip it so the comparison is at the same level.
+    """
+    if not rt_path or not canonical_path:
+        return rt_path
+
+    norm_rt = _normalize_path(rt_path)
+    norm_canon = _normalize_path(canonical_path)
+
+    canon_parts = norm_canon.rstrip("/").split("/")
+    rt_parts = norm_rt.rstrip("/").split("/")
+
+    if len(rt_parts) == len(canon_parts) + 1:
+        return "/".join(rt_parts[: len(canon_parts)])
+
+    return rt_path
+
+
 def diff_client_path(
     actual_path: Optional[str],
     canonical_path: str,
@@ -502,7 +527,9 @@ def resolve_canonical_path(
     else:
         qb_drift = diff_client_path(qb_row.save_path, canonical_path)
 
-    rt_drift = diff_client_path(rt_path, canonical_path)
+    # Normalize RT path to save-path depth (strips multi-file content folder)
+    rt_path_normalized = _normalize_rt_path(rt_path, canonical_path) if rt_path else rt_path
+    rt_drift = diff_client_path(rt_path_normalized, canonical_path)
 
     qb_diff = ClientDiffResult(
         client="qb",
