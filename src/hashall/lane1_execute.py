@@ -162,7 +162,7 @@ def execute_lane1_group_atomic(
         # qB set_location
         if h and qb_client:
             try:
-                success = qb_client.set_location(h, canonical_path)
+                success = qb_client.set_location(h, canonical_path, resume_after=False)
                 if not success:
                     item_res["qb"] = "failed"
                     item_res["notes"].append("qB set_location returned False")

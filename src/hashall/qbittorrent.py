@@ -1406,7 +1406,7 @@ class QBittorrentClient:
         return self.resume_torrents([torrent_hash])
 
 
-    def set_location(self, torrent_hash: str, new_location: str) -> bool:
+    def set_location(self, torrent_hash: str, new_location: str, resume_after: bool = True) -> bool:
         """
         Relocate a torrent to a new save path.
 
@@ -1510,7 +1510,8 @@ class QBittorrentClient:
                     self.resume_torrent(torrent_hash)
                     return False
 
-                self.resume_torrent(torrent_hash)
+                if resume_after:
+                    self.resume_torrent(torrent_hash)
                 return True
             except requests.Timeout as e:
                 self.last_error = str(e)
