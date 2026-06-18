@@ -178,10 +178,50 @@ def execute_lane1_group_atomic(
                             pass
                         time.sleep(0.5)
                     if qb_info and qb_info.save_path.rstrip("/") == canonical_path.rstrip("/"):
-                        item_res["qb"] = "ok"
+                        # Save path confirmed — now re-pause if needed
+                        PAUSED_STATES = {"pausedUP", "stoppedUP", "pausedDL", "stoppedDL"}
+                        state = qb_info.state or ""
+
+                        # Step A — wait for checkingUP to clear (up to 15s)
+                        for _ in range(30):
+                            if state != "checkingUP":
+                                break
+                            time.sleep(0.5)
+                            try:
+                                qb_info = qb_client.get_torrent_info(h)
+                                state = (qb_info.state or "") if qb_info else ""
+                            except Exception:
+                                pass
+
+                        # Step B — re-pause if not already paused
+                        if state not in PAUSED_STATES:
+                            try:
+                                qb_client.pause_torrent(h)
+                            except Exception as e:
+                                state = f"{state} (pause_called_err={e})"
+
+                        # Step C — poll up to 5s for paused state
+                        for _ in range(10):
+                            if state in PAUSED_STATES:
+                                break
+                            time.sleep(0.5)
+                            try:
+                                qb_info = qb_client.get_torrent_info(h)
+                                state = (qb_info.state or "") if qb_info else ""
+                            except Exception:
+                                pass
+
+                        # Step D — record
                         item_res["notes"].append(
-                            f"qB save_path={qb_info.save_path} state={qb_info.state}"
+                            f"qB save_path={canonical_path} state={state}"
                         )
+                        if state in PAUSED_STATES:
+                            item_res["qb"] = "ok"
+                        else:
+                            item_res["qb"] = "warn_not_paused"
+                            item_res["notes"].append(
+                                f"not paused after re-pause attempt: state={state}"
+                            )
                     else:
                         item_res["qb"] = "failed"
                         item_res["notes"].append(
