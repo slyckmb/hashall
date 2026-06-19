@@ -2,17 +2,21 @@
 Lane 1 execute: rename category directories and repoint clients.
 
 Two code paths:
-  A. Target-absent: os.rename(source_dir, canonical_path)  -- atomic
-  B. Target-exists: deferred (not implemented in this module)
+  A. Target-absent (execute_lane1_group_atomic):
+     os.rename(source_dir, canonical_path) — atomic category-dir rename.
+     Used when the canonical category directory does not yet exist.
 
-This module implements Path A only. Path A is used when the canonical
-category directory does not yet exist.
+  B. Merge-into-existing (execute_lane1b_merge_group):
+     os.rename(source_dir/item, canonical_path/item) — per-item rename.
+     Used when the canonical category directory already exists.
+     After all items moved, source_dir is removed if empty.
 
-Client behavior:
-  RT: repoint via rt_apply_directory_repoint (restart=True, resumes seeding)
+Client behavior (both paths):
+  RT: repoint via rt_apply_directory_repoint(hash, canonical_path, restart=True)
       After repoint: polled until d.hashing=0, then verified complete=1 and
       down_rate=0. If RT starts downloading the group is flagged warn_downloading.
-  qB: repoint via set_location (pauses torrent, stays paused -- DO NOT resume)
+  qB: repoint via set_location(hash, canonical_path, resume_after=False)
+      Stays paused — DO NOT resume.
 """
 
 import os
@@ -341,6 +345,259 @@ def execute_lane1_group_atomic(
         )
 
     # Propagate any RT warn_downloading to group-level errors for visibility
+    rt_warn = [it for it in result["items"] if it.get("rt") == "warn_downloading"]
+    if rt_warn:
+        result["errors"].append(
+            f"RT downloading post-repoint: {len(rt_warn)} item(s) — "
+            + ", ".join(it["hash"][:16] for it in rt_warn)
+        )
+
+    return result
+
+
+def execute_lane1b_merge_group(
+    group_items: list[dict],
+    *,
+    dry_run: bool = False,
+    qb_client: Optional[QBittorrentClient] = None,
+    rt_rpc_url: str = DEFAULT_RT_RPC_URL,
+) -> dict:
+    """
+    Execute a single Lane 1b merge group (per-item rename into existing category dir).
+
+    All items must share the same source_dir and canonical_path.
+    The canonical_path MUST already exist (this is the merge-into-existing path).
+    Each item is renamed individually: os.rename(source_dir/name, canonical_path/name).
+    After all items, source_dir is removed if empty.
+
+    RT and qB repoint logic is identical to execute_lane1_group_atomic.
+    """
+    if not group_items:
+        return {
+            "group_source": "",
+            "group_canonical": "",
+            "items_moved": 0,
+            "source_removed": False,
+            "items": [],
+            "errors": [],
+        }
+
+    source_dir = group_items[0].get("source_dir", "")
+    canonical_path = group_items[0].get("canonical_path", "")
+
+    result: dict = {
+        "group_source": source_dir,
+        "group_canonical": canonical_path,
+        "items_moved": 0,
+        "source_removed": False,
+        "items": [],
+        "errors": [],
+    }
+
+    if dry_run:
+        result["items"] = [
+            {
+                "hash": it.get("hash", ""),
+                "name": it.get("name", ""),
+                "source_item": os.path.join(source_dir, it.get("name", "")),
+                "target_item": os.path.join(canonical_path, it.get("name", "")),
+                "rt": "dry_run",
+                "qb": "dry_run",
+                "notes": ["dry-run: no mutations performed"],
+            }
+            for it in group_items
+        ]
+        return result
+
+    # Pre-checks
+    if not os.path.isdir(source_dir):
+        result["errors"].append(f"source dir missing: {source_dir}")
+        return result
+
+    if not os.path.isdir(canonical_path):
+        result["errors"].append(f"canonical dir missing (must exist for merge): {canonical_path}")
+        return result
+
+    # Verify no target item conflicts
+    for it in group_items:
+        target_item = os.path.join(canonical_path, it.get("name", ""))
+        if os.path.exists(target_item):
+            result["errors"].append(f"target item already exists: {target_item}")
+            return result
+
+    # Check qB active downloads
+    if qb_client:
+        for it in group_items:
+            h = it.get("hash", "")
+            if not h:
+                continue
+            try:
+                qb_info = qb_client.get_torrent_info(h)
+                if qb_info and qb_info.state in (
+                    "downloading", "stalledDL", "checkingDL", "metaDL",
+                ):
+                    result["errors"].append(
+                        f"active qB download in group: {h[:16]} state={qb_info.state}"
+                    )
+                    return result
+            except Exception as e:
+                result["errors"].append(f"could not check qB state for {h[:16]}: {e}")
+                return result
+
+    # RT pre-flight: check not downloading
+    for it in group_items:
+        h = it.get("hash", "")
+        if not h:
+            continue
+        fields = _rt_fetch_health(h, rt_rpc_url)
+        if not fields:
+            continue  # transient RPC error — don't block
+        if fields.get("complete", 1) != 1 or fields.get("down_rate", 0) > 0:
+            result["errors"].append(
+                f"RT downloading pre-move: {h[:16]} "
+                f"complete={fields.get('complete')} down_rate={fields.get('down_rate')}"
+            )
+            return result
+
+    PAUSED_STATES = {"pausedUP", "stoppedUP", "pausedDL", "stoppedDL"}
+
+    # Per-item rename + repoint
+    for it in group_items:
+        h = it.get("hash", "")
+        name = it.get("name", "")
+        source_item = os.path.join(source_dir, name)
+        target_item = os.path.join(canonical_path, name)
+
+        item_res: dict = {
+            "hash": h,
+            "name": name,
+            "source_item": source_item,
+            "target_item": target_item,
+            "rt": "pending",
+            "qb": "pending",
+            "notes": [],
+        }
+
+        # Move the item
+        if not os.path.exists(source_item):
+            item_res["rt"] = "skipped"
+            item_res["qb"] = "skipped"
+            item_res["notes"].append(f"source item missing: {source_item}")
+            result["items"].append(item_res)
+            continue
+
+        try:
+            os.rename(source_item, target_item)
+            item_res["notes"].append(f"moved: {source_item} → {target_item}")
+            result["items_moved"] += 1
+        except OSError as e:
+            item_res["rt"] = "failed"
+            item_res["qb"] = "failed"
+            item_res["notes"].append(f"rename failed: {e}")
+            result["items"].append(item_res)
+            result["errors"].append(f"rename failed for {name}: {e}")
+            continue
+
+        # RT repoint — same as lane1: set d.directory to canonical_path (category level)
+        if h:
+            try:
+                rt_apply_directory_repoint(
+                    h, canonical_path,
+                    rpc_url=rt_rpc_url, restart=True,
+                )
+                rt_dir_xml = rt_xmlrpc_call("d.directory", h, rpc_url=rt_rpc_url)
+                rt_dir = _xmlrpc_scalar_text(rt_dir_xml).rstrip("/")
+                rt_canon = canonical_path.rstrip("/")
+                if rt_dir == rt_canon or rt_dir.startswith(rt_canon + "/"):
+                    health = _rt_health_check(h, rt_rpc_url, poll_secs=15.0)
+                    item_res["notes"].append(
+                        f"RT directory={rt_dir} complete={health['complete']} "
+                        f"down_rate={health['down_rate']} hashing={health['hashing']}"
+                    )
+                    item_res["rt"] = "ok" if health["ok"] else "warn_downloading"
+                    if not health["ok"]:
+                        item_res["notes"].append(f"RT health: {health['note']}")
+                else:
+                    item_res["rt"] = "failed"
+                    item_res["notes"].append(
+                        f"RT directory mismatch: got {rt_dir!r} expected prefix {canonical_path!r}"
+                    )
+            except Exception as e:
+                item_res["rt"] = "failed"
+                item_res["notes"].append(f"RT repoint error: {e}")
+
+        # qB repoint — set save_path to canonical_path (category level), same as lane1
+        if h and qb_client:
+            try:
+                success = qb_client.set_location(h, canonical_path, resume_after=False)
+                if not success:
+                    item_res["qb"] = "failed"
+                    item_res["notes"].append("qB set_location returned False")
+                else:
+                    qb_info = None
+                    for _ in range(20):
+                        try:
+                            qb_info = qb_client.get_torrent_info(h)
+                            if qb_info and qb_info.save_path.rstrip("/") == canonical_path.rstrip("/"):
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.5)
+
+                    if qb_info and qb_info.save_path.rstrip("/") == canonical_path.rstrip("/"):
+                        state = qb_info.state or ""
+                        for _ in range(30):
+                            if state != "checkingUP":
+                                break
+                            time.sleep(0.5)
+                            try:
+                                qb_info = qb_client.get_torrent_info(h)
+                                state = (qb_info.state or "") if qb_info else ""
+                            except Exception:
+                                pass
+                        if state not in PAUSED_STATES:
+                            try:
+                                qb_client.pause_torrent(h)
+                            except Exception as e:
+                                state = f"{state} (pause_err={e})"
+                        for _ in range(10):
+                            if state in PAUSED_STATES:
+                                break
+                            time.sleep(0.5)
+                            try:
+                                qb_info = qb_client.get_torrent_info(h)
+                                state = (qb_info.state or "") if qb_info else ""
+                            except Exception:
+                                pass
+                        item_res["notes"].append(f"qB save_path={canonical_path} state={state}")
+                        item_res["qb"] = "ok" if state in PAUSED_STATES else "warn_not_paused"
+                        if state not in PAUSED_STATES:
+                            item_res["notes"].append(f"not paused after re-pause attempt: state={state}")
+                    else:
+                        item_res["qb"] = "failed"
+                        item_res["notes"].append("qB save_path did not update after 10s poll")
+            except Exception as e:
+                item_res["qb"] = "failed"
+                item_res["notes"].append(f"qB set_location error: {e}")
+
+        result["items"].append(item_res)
+
+    # Remove source dir if now empty
+    try:
+        remaining = os.listdir(source_dir)
+        if not remaining:
+            os.rmdir(source_dir)
+            result["source_removed"] = True
+        else:
+            result["errors"].append(
+                f"source dir not empty after merge ({len(remaining)} entries remain): {source_dir}"
+            )
+    except FileNotFoundError:
+        result["source_removed"] = True  # already gone
+    except OSError as e:
+        result["errors"].append(f"could not remove source dir: {e}")
+
+    # Propagate RT warn_downloading
     rt_warn = [it for it in result["items"] if it.get("rt") == "warn_downloading"]
     if rt_warn:
         result["errors"].append(

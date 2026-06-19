@@ -511,3 +511,170 @@ class TestRTHealthCheck:
 
         assert result["ok"] is False
         assert "RPC error" in result["note"]
+
+
+# ---------------------------------------------------------------------------
+# Lane 1b — merge into existing category directory
+# ---------------------------------------------------------------------------
+
+SRC_MERGE = "/data/media/torrents/seeding/MaM"
+DST_MERGE = "/data/media/torrents/seeding/myanonamouse"
+
+
+def _make_merge_item(name="AudioBook.m4b", tor_hash="b" * 40):
+    return {
+        "hash": tor_hash,
+        "name": name,
+        "source_dir": SRC_MERGE,
+        "canonical_path": DST_MERGE,
+        "target_dir": f"{DST_MERGE}/{name}",
+        "safe": False,
+        "source_exists": True,
+        "target_exists": False,
+        "same_device": True,
+    }
+
+
+def _merge_rt_mocks():
+    return [
+        patch("hashall.lane1_execute._rt_fetch_health", return_value=_HEALTHY_FIELDS),
+        patch("hashall.lane1_execute._rt_health_check", return_value=_HEALTH_OK),
+        patch("hashall.lane1_execute.rt_apply_directory_repoint"),
+        patch("hashall.lane1_execute.rt_xmlrpc_call", return_value="<ok>"),
+        patch("hashall.lane1_execute._xmlrpc_scalar_text", return_value=DST_MERGE),
+    ]
+
+
+from hashall.lane1_execute import execute_lane1b_merge_group
+
+
+class TestLane1bMergeGroup:
+
+    def test_dry_run_returns_without_mutation(self, tmp_path):
+        """Dry-run returns items with no filesystem or client calls."""
+        items = [_make_merge_item()]
+        result = execute_lane1b_merge_group(items, dry_run=True)
+        assert result["items_moved"] == 0
+        assert result["items"][0]["rt"] == "dry_run"
+        assert result["items"][0]["qb"] == "dry_run"
+        assert not result["errors"]
+
+    def test_empty_group_returns_error(self):
+        result = execute_lane1b_merge_group([])
+        assert result["errors"] == ["empty group"] or result["group_source"] == ""
+
+    def test_source_dir_missing_blocks(self, tmp_path):
+        items = [_make_merge_item()]
+        with patch("os.path.isdir", side_effect=lambda p: p == DST_MERGE):
+            result = execute_lane1b_merge_group(items)
+        assert any("source dir missing" in e for e in result["errors"])
+
+    def test_canonical_missing_blocks(self, tmp_path):
+        items = [_make_merge_item()]
+        with patch("os.path.isdir", side_effect=lambda p: p == SRC_MERGE):
+            result = execute_lane1b_merge_group(items)
+        assert any("canonical dir missing" in e for e in result["errors"])
+
+    def test_target_conflict_blocks(self, tmp_path):
+        """If target item already exists, abort before any move."""
+        items = [_make_merge_item("Book.m4b")]
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", return_value=True):
+            result = execute_lane1b_merge_group(items)
+        assert any("target item already exists" in e for e in result["errors"])
+        assert result["items_moved"] == 0
+
+    def test_active_qb_download_blocks(self, tmp_path):
+        items = [_make_merge_item()]
+        fake_info = MagicMock()
+        fake_info.state = "stalledDL"
+        fake_qb = MagicMock()
+        fake_qb.get_torrent_info.return_value = fake_info
+
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", return_value=False):
+            result = execute_lane1b_merge_group(items, qb_client=fake_qb)
+        assert any("active qB download" in e for e in result["errors"])
+
+    def test_rt_downloading_preflight_blocks(self, tmp_path):
+        """RT downloading pre-move → block without moving."""
+        items = [_make_merge_item()]
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", return_value=False), \
+             patch("hashall.lane1_execute._rt_fetch_health",
+                   return_value={"complete": 0, "hashing": 0, "down_rate": 500}):
+            result = execute_lane1b_merge_group(items)
+        assert any("RT downloading pre-move" in e for e in result["errors"])
+        assert result["items_moved"] == 0
+
+    def test_successful_move_and_repoint(self, tmp_path):
+        """Happy path: item moved, RT and qB repointed, source dir removed."""
+        items = [_make_merge_item("Show.S01")]
+        src_item = f"{SRC_MERGE}/Show.S01"
+        dst_item = f"{DST_MERGE}/Show.S01"
+
+        fake_info = MagicMock()
+        fake_info.save_path = DST_MERGE
+        fake_info.state = "stoppedUP"
+        fake_qb = MagicMock()
+        fake_qb.get_torrent_info.return_value = fake_info
+        fake_qb.set_location.return_value = True
+
+        moved = {}
+
+        def fake_rename(src, dst):
+            moved["src"] = src
+            moved["dst"] = dst
+
+        mp = _merge_rt_mocks()
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", side_effect=lambda p: p == src_item and "dst" not in moved), \
+             patch("os.rename", side_effect=fake_rename), \
+             patch("os.listdir", return_value=[]), \
+             patch("os.rmdir"), \
+             patch("time.sleep"), \
+             mp[0], mp[1], mp[2], mp[3], mp[4]:
+            result = execute_lane1b_merge_group(items, qb_client=fake_qb)
+
+        assert moved["src"] == src_item
+        assert moved["dst"] == dst_item
+        assert result["items_moved"] == 1
+        assert result["items"][0]["rt"] == "ok"
+        assert result["items"][0]["qb"] == "ok"
+        assert not result["errors"]
+
+    def test_rename_failure_recorded_as_error(self, tmp_path):
+        items = [_make_merge_item()]
+        # source_item exists (so it's not skipped), target does not (no conflict)
+        def exists_side(p):
+            return SRC_MERGE in p and DST_MERGE not in p
+
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", side_effect=exists_side), \
+             patch("hashall.lane1_execute._rt_fetch_health", return_value=_HEALTHY_FIELDS), \
+             patch("os.rename", side_effect=OSError("cross-device")):
+            result = execute_lane1b_merge_group(items)
+        assert result["items_moved"] == 0
+        assert any("rename failed" in e for e in result["errors"])
+        assert result["items"][0]["rt"] == "failed"
+
+    def test_source_dir_not_removed_if_nonempty(self, tmp_path):
+        """If source dir still has entries after merge, record an error."""
+        items = [_make_merge_item("Book.m4b")]
+        fake_info = MagicMock()
+        fake_info.save_path = DST_MERGE
+        fake_info.state = "stoppedUP"
+        fake_qb = MagicMock()
+        fake_qb.get_torrent_info.return_value = fake_info
+        fake_qb.set_location.return_value = True
+
+        mp = _merge_rt_mocks()
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", side_effect=lambda p: "Book.m4b" in p and "myanonamouse" not in p), \
+             patch("os.rename"), \
+             patch("os.listdir", return_value=["other_file.m4b"]), \
+             patch("time.sleep"), \
+             mp[0], mp[1], mp[2], mp[3], mp[4]:
+            result = execute_lane1b_merge_group(items, qb_client=fake_qb)
+        assert result["source_removed"] is False
+        assert any("not empty" in e for e in result["errors"])

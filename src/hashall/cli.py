@@ -2910,6 +2910,183 @@ def payload_lane1_execute_cmd(source_dir, dry_run):
 
 
 
+@payload.command("lane1b-plan")
+@click.option("--source-dir", default=None,
+              help="Filter to one source directory.")
+def payload_lane1b_plan_cmd(source_dir):
+    """
+    Show Lane 1b merge groups (per-item moves into existing category dirs).
+
+    Reads the most recent lane1-plan report and extracts blocked groups
+    that are safe to merge: same-device, target_exists=False for each item.
+    12 conflict items (target_exists=True) are listed separately.
+    """
+    import glob
+    import json
+    import os as _os
+
+    reports_dir = _os.path.expanduser("~/.hashall/reports")
+    reports = sorted(glob.glob(_os.path.join(reports_dir, "lane1-plan-*.json")))
+    if not reports:
+        raise click.ClickException(
+            "No lane1-plan report found. Run `hashall payload lane1-plan` first."
+        )
+    plan = json.load(open(reports[-1]))
+    click.echo(f"Plan: {reports[-1]}")
+
+    # Collect mergeable and conflict items
+    import collections
+    merge_groups: dict = collections.defaultdict(list)
+    conflicts: list = []
+
+    for g in plan:
+        if g.get("safe"):
+            continue
+        if not g.get("same_device", True):
+            continue
+        if g.get("target_exists"):
+            conflicts.append(g)
+        else:
+            key = (g.get("source_dir", ""), g.get("canonical_path", ""))
+            merge_groups[key].append(g)
+
+    if source_dir:
+        merge_groups = {k: v for k, v in merge_groups.items() if k[0] == source_dir}
+
+    click.echo()
+    click.echo(f"Mergeable groups: {len(merge_groups)}  "
+               f"Total items: {sum(len(v) for v in merge_groups.values())}")
+    click.echo(f"Conflicts (target exists): {len(conflicts)}")
+    click.echo()
+
+    for (src, dst), items in sorted(merge_groups.items(), key=lambda x: -len(x[1])):
+        click.echo(f"  {len(items):3d} items  {src}")
+        click.echo(f"            → {dst}")
+
+    if conflicts:
+        click.echo()
+        click.echo("Conflicts (require manual review):")
+        for g in conflicts:
+            click.echo(f"  {g.get('hash','')[:16]}  {g.get('name','')[:50]}")
+            click.echo(f"    src: {g.get('source_dir','')}")
+            click.echo(f"    dst: {g.get('target_dir','')}")
+
+
+@payload.command("lane1b-execute")
+@click.option("--source-dir", required=True,
+              help="Source category directory whose items will be merged.")
+@click.option("--dry-run", is_flag=True,
+              help="Print what would happen without making changes.")
+def payload_lane1b_execute_cmd(source_dir, dry_run):
+    """
+    Execute Lane 1b per-item merge for one source directory.
+
+    Moves each item from source_dir into its canonical category dir,
+    then repoints RT and qB. Source dir is removed if empty after merge.
+    Reads from the most recent lane1-plan report.
+    """
+    import glob
+    import json
+    import os as _os
+
+    from hashall.lane1_execute import execute_lane1b_merge_group
+    from hashall.qbittorrent import QBittorrentClient
+
+    reports_dir = _os.path.expanduser("~/.hashall/reports")
+    reports = sorted(glob.glob(_os.path.join(reports_dir, "lane1-plan-*.json")))
+    if not reports:
+        raise click.ClickException(
+            "No lane1-plan report found. Run `hashall payload lane1-plan` first."
+        )
+    plan = json.load(open(reports[-1]))
+
+    # Collect group items for this source_dir (blocked, same-device, no conflict)
+    group = [
+        g for g in plan
+        if g.get("source_dir") == source_dir
+        and not g.get("safe")
+        and g.get("same_device", True)
+        and not g.get("target_exists")
+    ]
+    if not group:
+        raise click.ClickException(
+            f"No mergeable items for source_dir {source_dir!r} in plan. "
+            "Run `hashall payload lane1b-plan` to see available groups."
+        )
+
+    canonical_path = group[0].get("canonical_path", "")
+    click.echo()
+    click.echo(f"Lane 1b Merge — {'DRY RUN' if dry_run else 'LIVE'}")
+    click.echo(f"Source: {source_dir}")
+    click.echo(f"Target: {canonical_path}")
+    click.echo(f"Items:  {len(group)}")
+    click.echo()
+
+    if dry_run:
+        for it in group:
+            name = it.get("name", "")
+            h = (it.get("hash") or "")[:16]
+            click.echo(f"  [MOVE]    {_os.path.join(source_dir, name)}")
+            click.echo(f"          → {_os.path.join(canonical_path, name)}")
+            click.echo(f"  [REPOINT] {h}  RT→{canonical_path}  qB→{canonical_path}")
+        click.echo()
+        click.echo("  Dry-run complete. No mutations performed.")
+        return
+
+    qb_client = QBittorrentClient()
+    try:
+        result = execute_lane1b_merge_group(
+            group,
+            dry_run=False,
+            qb_client=qb_client,
+        )
+    except Exception as e:
+        raise click.ClickException(f"Execution failed: {e}")
+
+    items_moved = result.get("items_moved", 0)
+    source_removed = result.get("source_removed", False)
+    errors = result.get("errors", [])
+    items = result.get("items", [])
+
+    rt_ok = sum(1 for it in items if it.get("rt") == "ok")
+    rt_fail = sum(1 for it in items if it.get("rt") in ("failed", "warn_downloading"))
+    qb_ok = sum(1 for it in items if it.get("qb") == "ok")
+    qb_fail = sum(1 for it in items if it.get("qb") in ("failed", "warn_not_paused"))
+
+    click.echo(f"  Items moved:  {items_moved}/{len(items)}")
+    click.echo(f"  Source removed: {'yes' if source_removed else 'no'}")
+    click.echo()
+
+    for it in items:
+        h = (it.get("hash") or "")[:16]
+        name = (it.get("name") or "")[:40]
+        rt_status = it.get("rt", "?")
+        qb_status = it.get("qb", "?")
+        rt_icon = "✓" if rt_status == "ok" else ("~" if "warn" in rt_status else "✗")
+        qb_icon = "✓" if qb_status == "ok" else ("~" if "warn" in qb_status else "✗")
+        click.echo(f"  {h}  {name}")
+        click.echo(f"    RT: {rt_icon} {rt_status}   qB: {qb_icon} {qb_status}")
+        for n in it.get("notes", []):
+            if n:
+                click.echo(f"       {n}")
+
+    click.echo()
+    if errors:
+        click.echo(f"  Errors ({len(errors)}):")
+        for e in errors:
+            click.echo(f"    ✗ {e}")
+        click.echo()
+
+    ok = items_moved == len(items) and rt_fail == 0 and qb_fail == 0
+    click.echo(
+        f"  {'✅' if ok else '⚠️'} "
+        f"{items_moved}/{len(items)} moved, "
+        f"{rt_ok}/{len(items)} RT ok, "
+        f"{qb_ok}/{len(items)} qB ok"
+        + (f", source {'removed' if source_removed else 'NOT removed'}")
+    )
+
+
 @click.option(
     "--dry-run/--execute",
     default=True,
