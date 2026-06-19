@@ -301,8 +301,8 @@ make trk-warn-replace-individual BUCKET=deleted
 
 ## 6. Active Session State
 
-**Version:** 1.3.0 → 1.4.0
-**Session goal:** `Zero-drift, zero non-canonical paths — unified path resolver approach`
+**Version:** 1.4.0
+**Session goal:** `Re-execute Lane 1 migration safely after pilot failure and Gate 0 recovery`
 
 **Jobs completed this session:**
 
@@ -310,39 +310,41 @@ make trk-warn-replace-individual BUCKET=deleted
 |-----|-----|-------------------|
 | j09 | `job9/cold-read-audit` | R1–R5 audit findings, 47 issues, 5 tools reviewed |
 | j10 | `job10/critical-fixes` | 3 critical bugs fixed: `_resolve_full_hash`, `set_location` pause guard, `repoint_both_to_pool` order |
-| j11 | `job11/drift-fix-class4-investigation` | Gate 1+2 cert, Gate 3 blocked by cross-device guard (correct), Class 4 root cause (84 items, hitchhiker-split May 29 batch) |
-| j12 | `job12/cross-device-guard` | `_files_exist_at_target` bypass added; both HIGH drift items cleared (NOVA.S50, Magic.City.S01); drift high=0 |
-| j13 | `job13/canonical-path-tree` | `CANONICAL-PATH-SPEC.md` v1.0.0-draft — unified 5-step decision tree, 10-row action table, all policy settled |
+| j11 | `job11/drift-fix-class4-investigation` | Gate 1+2 cert, Gate 3 blocked by cross-device guard (correct), Class 4 root cause |
+| j12 | `job12/cross-device-guard` | `_files_exist_at_target` bypass; both HIGH drift items cleared; drift high=0 |
+| j13 | `job13/canonical-path-tree` | `CANONICAL-PATH-SPEC.md` v1.0.0-draft — 5-step decision tree |
+| j14 | `job14/canonical-path-resolver` | `canonical_path_resolver.py` + CLI; Gates 1-3 pass |
+| j15 | `job15/rt-multifile-normalize` | `_normalize_rt_path` fix; Gate 3 re-run pass |
+| j16 | `job16/lane1-plan` | `lane1_plan.py` + CLI `hashall payload lane1-plan` |
+| j17 | `job17/lane1-execute` | `lane1_execute.py` + CLI; filelist pilot (2 items) ✓ |
+| j18 | `job18/lane1-execute-fixes` | `_is_safe_source_dir`, `resume_after=False`, `stoppedDL` in pause-wait |
+| j19 | `job19/lane1-rt-monitor` | Re-pause after checkingUP; RT pre-flight + post-repoint health checks; 49 tests |
+| j20 | `job20/gate0-stoppdl-audit` | Gate 0 audit + repair: 115→6 stoppedDL; 4896 stoppedUP |
+| j21 | `job21/qb-rt-interaction-experiment` | Confirmed qB recheck does NOT trigger RT hash checks |
 
-**Drift baseline (2026-06-17):**
+**qB state (2026-06-18 post-Gate 0):**
+- stoppedUP: 4896 — seeding normally
+- stoppedDL: 6 — pre-existing only (5 RT_INCOMPLETE + 1 MISSING_DATA)
+- 0 checkingUP, 0 stalledUP
+
+**Drift baseline (2026-06-17, not re-run since):**
 - torrent_instances: 5577 | drift: 3 (high=0, low=2, medium=1)
-- LOW: `a6d3ae0` The.Rookie.S05, `e581c2ac` Lego.Masters.US.S04
-- MEDIUM: `97ca3832` Lego.Movie (RT-only)
 
-**Canonical tree (2026-06-17, 4898 qB items):**
-- CANONICAL: ~2100 (ARR + correctly-placed items)
-- NEEDS REPAIR — cross-seed prefix missing (OP-17): 2393 items — **HOLD**
-- NEEDS REPAIR — Class 4 staging (`_rehome-unique/`): ~84 items
-- NEEDS REPAIR — Class 1 (`cross-seed/<hash>/`): 3 items
-- NEEDS REPAIR — Class 5 staging: ~3 items
-- NEEDS CLASSIFICATION: ~332 items (uncategorized)
+**Migration moratorium:** No mutations from `rehome`, `save_path_inference`, or `save-path-repair --execute`. The canonical path resolver replaces them. Dry-run and audit commands permitted.
 
-**Migration moratorium:** No mutations from `rehome`, `save_path_inference`, or `save-path-repair --execute` until unified path resolver (OP-18) is 4-gate validated. See moratorium section above.
-
-**The spec:** `docs/CANONICAL-PATH-SPEC.md` is the authoritative path resolution reference. Implementation agents must read it before writing any path-related code.
+**Lane 1 status:**
+- Pilot (2026-06-18): FAILED — 9 root causes; full RCCA in `docs/LANE1-PILOT-RCCA.md`
+- Gate 0 complete (2026-06-18): all stoppedDL from pilot repaired
+- **Next: Gate 1 pre-flight → Gate 2 dry-run → Gate 3 single-group pilot**
 
 **Open work:**
 
 | OP | Type | Next action |
 |----|------|-------------|
 | OP-16 | bug | Fix `save_path_inference.py` line 223 — after moratorium lifted |
-| OP-17 | reliability | 2393-item cross-seed prefix restoration — HOLD, awaiting migration strategy |
-| OP-18 | reliability | Implement unified path resolver tool per `CANONICAL-PATH-SPEC.md` — next job |
+| OP-17 | reliability | 2393-item cross-seed prefix restoration — HOLD |
 | OP-19 | bug | Audit spurious subdirectories on bare single-file torrents |
-| OP-09 | reliability | Slice 12c — 3 `cross-seed/<hash>/` items, tracker resolution via qB tags |
-| OP-14 | reliability | Merge CR branch to main (j05/j06 Makefile fixes pending) |
-- NOVA.S50 `2d4016de` — qB on stash, RT on pool-media, files exist on pool-media → blocked by cross-device guard
-- Magic.City.S01 `f0bc85ee` — same pattern
+| OP-09 | reliability | 3 `cross-seed/<hash>/` items, tracker resolution via qB tags |
 
 ---
 
@@ -366,10 +368,18 @@ make trk-warn-replace-individual BUCKET=deleted
 - Use offline fastresume patch (stop → patch → start) for relocation — not `setLocation` alone
 - Verify post-state after any pilot: run the audit again, confirm target items left drift report
 
-**Three-gate validation (mandatory for all live mutations):**
-- Gate 1 — Code review: read every touched file, confirm j10 fixes present, certify no bugs
-- Gate 2 — Walkthrough: trace execution with real params, certify safe for dry-run
-- Gate 3 — Dry-run + pilot ≤5 items: inspect output, verify post-state, then authorize full batch
+**Four-gate validation (mandatory for lane1 execute):**
+- Gate 0 — Incident recovery: resolve any stoppedDL / stalledUP from prior run before proceeding
+- Gate 1 — Pre-flight: verify editable install → CR worktree; all jobs closed; test suite green; snapshot qB state; confirm 0 stalledUP + 0 checkingUP
+- Gate 2 — Dry-run: `lane1-plan` output verified; canonical_path values match spec
+- Gate 3 — Single-group pilot: ONE group (1–3 items); post-check; 60s hold; human sign-off
+- Gate 4 — Batch (≤5 groups per batch): full state check + human sign-off between batches
+
+**RT download monitor (lane1_execute.py — j19):**
+- Pre-flight: `_rt_fetch_health` checks all items not downloading before `os.rename`
+- Post-repoint: `_rt_health_check` polls `d.hashing=0` up to 15s, then asserts `d.complete=1` and `d.down.rate=0`
+- Failure → `rt="warn_downloading"` + group error; qB repoint still proceeds (path correction required regardless)
+- qB recheck does NOT trigger RT hash checks (confirmed by j21 experiment)
 
 ---
 

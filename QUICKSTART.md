@@ -18,10 +18,10 @@ _Read this first after /clear. Everything you need to resume in under 2 minutes.
 
 ## 2. Current Goal
 
-Execute Lane 1 migration: rename category directories and repoint clients for the
-378 same-root CATEGORY_DRIFT items (no data movement). The resolver is built and
-4-gate validated. The execute path is proven (j17 pilot). A qB stalledUP fix is
-needed in `lane1_execute.py` before running more groups.
+Re-execute Lane 1 migration safely after the 2026-06-18 pilot failure and Gate 0 recovery.
+Lane 1 renames category dirs + repoints RT/qB for ~134 CATEGORY_DRIFT items (no data movement).
+All code fixes are committed. Gate 0 incident recovery is complete (115→6 stoppedDL).
+**Next: Gate 1 pre-flight, then Gate 2 dry-run, then Gate 3 single-group pilot.**
 
 ---
 
@@ -38,7 +38,10 @@ needed in `lane1_execute.py` before running more groups.
 | j15 | RT multi-file directory normalization fix (`_normalize_rt_path`); Gate 3 re-run pass |
 | j16 | `lane1_plan.py` + CLI `hashall payload lane1-plan`; anomalous source filter (partial — j18 pending) |
 | j17 | `lane1_execute.py` + CLI `hashall payload lane1-execute`; filelist pilot (2 items) ✓ |
-| j18 | In progress: anomalous filter fix + qB stalledUP fix |
+| j18 | Anomalous filter fix (`_is_safe_source_dir`) + `resume_after=False` in `set_location`; `stoppedDL` added to pause-wait set |
+| j19 | Re-pause fix after `checkingUP` in `lane1_execute.py`; 134 tests pass |
+| j20 | Gate 0 recovery: audit 115 stoppedDL (82 HEALTHY, 28 MISSING_DATA, 5 RT_INCOMPLETE); batch repair → 115→6 stoppedDL |
+| j21 | Controlled experiment: qB `recheck_torrent()` does NOT trigger RT hash checks (hypothesis not confirmed) |
 
 ---
 
@@ -65,7 +68,16 @@ The canonical path resolver replaces them. Dry-run and audit commands permitted.
 | Anomalous | 4 | Dangerous source paths (see below) | Excluded, manual review needed |
 | Multi-target | ~36 | readarr→books+ebooks, speakarr→audiobooks+books | Excluded, need item-level moves |
 
-### Clean target-absent groups ready to execute (~134 items, ~23 groups)
+### Pilot result (2026-06-18 — FAILED)
+
+23 groups / 138 items attempted. Stale editable install (j18 not closed) + `resume_after=False` absent → 115 stoppedDL. Full RCCA in `docs/LANE1-PILOT-RCCA.md`. **All 9 root causes documented and fixed.**
+
+### Gate 0 recovery (complete)
+
+115 stoppedDL → **6 stoppedDL**. Remaining 6 are pre-existing (5 RT_INCOMPLETE + 1 MISSING_DATA). 4896 stoppedUP confirmed seeding. 0 RT writes during recovery.
+
+### Clean target-absent groups (~134 items, ~23 groups) — ready to re-execute after Gate 1-3
+
 All are cross-seed `cross-seed/` prefix additions on POOL:
 Darkpeers (API):18, FileList.io:17, seedpool (API):17, hawke-uno:13, TorrentDay:10,
 DigitalCore (API):9, YUSCENE (API):8, _movie:7, FearNoPeer:6, XSpeeds:5,
@@ -74,26 +86,21 @@ filelist:2(done), tv:2, MyAnonamouse:1, yuscene:1, speedcd:1, HD-Space:1, torren
 
 ---
 
-## 6. CRITICAL: qB stalledUP Violation
+## 6. Code Fixes Applied (all committed, all tested)
 
-`set_location` in qB: pause → setLocation → checkingUP (hash recheck) → **auto-resumes to stalledUP**.
-The 2 filelist items were manually re-paused. `lane1_execute.py` needs this fix before any more groups run:
+All fixes are live in CR branch. **Do NOT proceed to Gate 1 without verifying editable install points to CR worktree.**
 
-```python
-# After set_location, poll until checkingUP finishes, then re-pause if needed
-PAUSED_STATES = {"pausedUP", "stoppedUP", "pausedDL", "stoppedDL"}
-CHECK_STATES  = {"checkingUP", "checkingDL", "moving"}
-for _ in range(60):  # up to 30s
-    info = qb_client.get_torrent_info(hash)
-    if info and info.state not in CHECK_STATES:
-        break
-    time.sleep(0.5)
-if info and info.state not in PAUSED_STATES:
-    qb_client.pause_torrent(hash)
-    time.sleep(1)
-    info = qb_client.get_torrent_info(hash)
-assert info.state in PAUSED_STATES
-```
+| Fix | File | Commit |
+|-----|------|--------|
+| `resume_after=False` in `set_location` | `qbittorrent.py` | j18 |
+| `stoppedDL` added to pause-wait set | `qbittorrent.py` | j18 |
+| Re-pause after `checkingUP` in execute | `lane1_execute.py` | j19 |
+| Category-dir exists check in plan | `lane1_plan.py` | j18 |
+| `_is_safe_source_dir` anomalous filter | `lane1_plan.py` | j18 |
+| RT pre-flight download check (`_rt_fetch_health`) | `lane1_execute.py` | j19 |
+| RT post-repoint health poll (`_rt_health_check`) | `lane1_execute.py` | j19 |
+
+**49 tests pass** in `tests/test_lane1_execute.py`.
 
 ---
 
@@ -109,15 +116,24 @@ assert info.state in PAUSED_STATES
 
 ## 8. Next Actions After /clear
 
-1. **Check j18 status** — `tmux capture-pane -t %463 -p | tail -20`
-   - If agent has committed anomalous filter fix → send execute fix brief (j18-T02)
-   - If not → redirect agent to implement `_is_safe_source_dir()` in `lane1_plan.py`
+**Gate 1 — Pre-flight (do this before any lane1 execution):**
+1. Verify editable install: `cat $(python3 -c "import site; print(site.getsitepackages()[0])")/__editable__.hashall-*.pth` — must show CR worktree path
+2. Confirm no open jobs: `git worktree list` — only CR worktree should exist
+3. Run test suite: `pytest tests/test_lane1_execute.py tests/test_lane1_plan.py -q` — all green
+4. Snapshot qB state: `python3 -c "import sys; sys.path.insert(0,'src'); from hashall.qbittorrent import QBittorrentClient; qb=QBittorrentClient('http://localhost:9003',username='admin',password='adminadmin'); [print(t.state) for t in qb.get_torrents()]" | sort | uniq -c`
+5. Confirm: **0 stalledUP, 0 checkingUP** before touching anything
 
-2. **j18-T02** — fix `lane1_execute.py` stalledUP: poll checkingUP, re-pause if needed
+**Gate 2 — Dry-run:**
+6. `hashall payload lane1-plan` — confirm group list, check canonical_path values
 
-3. **j18-T03** (or j19) — execute next batch of target-absent groups after fix validated
+**Gate 3 — Single-group pilot:**
+7. Run ONE group (smallest, 1–3 items) with `hashall payload lane1-execute`
+8. Check: 0 new stalledUP, 0 new stoppedDL, RT seeding at canonical path, qB stoppedUP
+9. Wait 60s, re-check states — confirm no spontaneous transitions
+10. Human sign-off before Gate 4
 
-4. **Eventually** — merge clean target-absent groups (134 items), then plan Lane 2 (compound drift + ROOT_DRIFT)
+**Gate 4 — Batch (≤5 groups per batch, human sign-off between):**
+11. `hashall payload lane1-execute` in batches, full state check after each
 
 ---
 
@@ -153,8 +169,11 @@ cd <job-worktree> && chatrap job done
 | File | Purpose |
 |------|---------|
 | `docs/CANONICAL-PATH-SPEC.md` | Authoritative path resolution spec |
+| `docs/LANE1-PILOT-RCCA.md` | Pilot failure analysis — 9 root causes, Gate 0 complete |
+| `docs/GATE0-STOPPDL-AUDIT.md` | Gate 0 T01 audit — 115 stoppedDL classified |
+| `docs/GATE0-T02-REPAIR.md` | Gate 0 T02 repair — 115→6 stoppedDL, 4896 stoppedUP |
 | `src/hashall/canonical_path_resolver.py` | Core resolver — 5-step decision tree |
 | `src/hashall/lane1_plan.py` | Lane 1 dry-run plan generator |
-| `src/hashall/lane1_execute.py` | Lane 1 execute (stalledUP fix needed) |
+| `src/hashall/lane1_execute.py` | Lane 1 execute — all fixes committed, 49 tests pass |
 | `SESSION.md` | Live session goal + step |
 | `~/.hashall/reports/lane1-plan-*.json` | Latest plan report (source of truth for groups) |
