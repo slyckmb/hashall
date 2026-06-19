@@ -1438,12 +1438,24 @@ class QBittorrentClient:
             old_dev = os.stat(old_path).st_dev
             new_dev = os.stat(new_location).st_dev
         except FileNotFoundError:
-            # Old path no longer exists (already renamed) → metadata-only, safe
-            print(
-                f"ℹ️ setLocation: old path no longer exists for "
-                f"{torrent_hash[:16]}, metadata-only update"
-            )
-            skip_device_check = True
+            # Cannot stat old path on host (e.g. container path /data/ not visible here).
+            # Do not assume same-device; verify files exist at target before allowing.
+            try:
+                torrent_files = self.get_torrent_files(torrent_hash)
+            except Exception:
+                torrent_files = []
+            if _files_exist_at_target(torrent_files, new_location):
+                print(
+                    f"✅ setLocation: old path not stat-able on host for "
+                    f"{torrent_hash[:16]}, files confirmed at target (metadata-only)"
+                )
+                skip_device_check = True
+            else:
+                raise ValueError(
+                    f"setLocation blocked for {torrent_hash[:16]}: "
+                    f"old path not found on host and files not at target "
+                    f"{new_location!r} — would risk unauthorized cross-device move in container"
+                )
         except OSError as e:
             print(
                 f"⚠️ setLocation cannot stat paths for cross-device check "
