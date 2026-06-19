@@ -2975,9 +2975,11 @@ def payload_lane1b_plan_cmd(source_dir):
 @payload.command("lane1b-execute")
 @click.option("--source-dir", required=True,
               help="Source category directory whose items will be merged.")
+@click.option("--canonical-path", default=None,
+              help="Target canonical directory (required when source maps to multiple targets).")
 @click.option("--dry-run", is_flag=True,
               help="Print what would happen without making changes.")
-def payload_lane1b_execute_cmd(source_dir, dry_run):
+def payload_lane1b_execute_cmd(source_dir, canonical_path, dry_run):
     """
     Execute Lane 1b per-item merge for one source directory.
 
@@ -3014,7 +3016,22 @@ def payload_lane1b_execute_cmd(source_dir, dry_run):
             "Run `hashall payload lane1b-plan` to see available groups."
         )
 
-    canonical_path = group[0].get("canonical_path", "")
+    # If source maps to multiple targets, require --canonical-path to disambiguate
+    targets = {g.get("canonical_path") for g in group}
+    if len(targets) > 1 and not canonical_path:
+        raise click.ClickException(
+            f"Source {source_dir!r} maps to multiple targets: "
+            + ", ".join(sorted(targets))
+            + ". Use --canonical-path to select one."
+        )
+    if canonical_path:
+        group = [g for g in group if g.get("canonical_path") == canonical_path]
+        if not group:
+            raise click.ClickException(
+                f"No items for source_dir {source_dir!r} with canonical_path {canonical_path!r}."
+            )
+
+    canonical_path = canonical_path or group[0].get("canonical_path", "")
     click.echo()
     click.echo(f"Lane 1b Merge — {'DRY RUN' if dry_run else 'LIVE'}")
     click.echo(f"Source: {source_dir}")

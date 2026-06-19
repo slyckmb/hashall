@@ -688,3 +688,48 @@ class TestLane1bMergeGroup:
             result = execute_lane1b_merge_group(items, qb_client=fake_qb)
         assert result["source_removed"] is False
         assert any("not empty" in e for e in result["errors"])
+
+    def test_cross_seed_duplicate_repoints_without_rename(self, tmp_path):
+        """Two items share same filename: second sees source missing but target exists → repoints RT/qB."""
+        item1 = _make_merge_item("Show.S01", tor_hash="a" * 40)
+        item2 = _make_merge_item("Show.S01", tor_hash="c" * 40)
+        items = [item1, item2]
+
+        fake_info = MagicMock()
+        fake_info.save_path = DST_MERGE
+        fake_info.state = "stoppedUP"
+        fake_qb = MagicMock()
+        fake_qb.get_torrent_info.return_value = fake_info
+        fake_qb.set_location.return_value = True
+
+        rename_calls = []
+        def fake_rename(src, dst):
+            rename_calls.append((src, dst))
+
+        src_item = f"{SRC_MERGE}/Show.S01"
+        dst_item = f"{DST_MERGE}/Show.S01"
+
+        def exists_side(p):
+            if p == src_item:
+                return len(rename_calls) == 0  # exists before first rename
+            if p == dst_item:
+                return len(rename_calls) > 0   # exists after first rename
+            return True  # dirs exist
+
+        mp = _merge_rt_mocks()
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.path.exists", side_effect=exists_side), \
+             patch("os.rename", side_effect=fake_rename), \
+             patch("os.listdir", return_value=[]), \
+             patch("os.rmdir"), \
+             patch("time.sleep"), \
+             mp[0], mp[1], mp[2], mp[3], mp[4]:
+            result = execute_lane1b_merge_group(items, qb_client=fake_qb)
+
+        assert len(rename_calls) == 1, "OS rename called only once"
+        assert result["items_moved"] == 2, "Both items count as moved"
+        assert result["items"][0]["rt"] == "ok"
+        assert result["items"][1]["rt"] == "ok"
+        assert result["items"][1]["qb"] == "ok"
+        notes1 = " ".join(result["items"][1].get("notes", []))
+        assert "cross-seed dup" in notes1

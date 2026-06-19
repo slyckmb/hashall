@@ -481,25 +481,33 @@ def execute_lane1b_merge_group(
             "notes": [],
         }
 
-        # Move the item
-        if not os.path.exists(source_item):
+        # Move the item (skip OS rename if already at target — cross-seed duplicate case)
+        source_exists = os.path.exists(source_item)
+        target_exists = os.path.exists(target_item)
+
+        if not source_exists and not target_exists:
             item_res["rt"] = "skipped"
             item_res["qb"] = "skipped"
             item_res["notes"].append(f"source item missing: {source_item}")
             result["items"].append(item_res)
             continue
 
-        try:
-            os.rename(source_item, target_item)
-            item_res["notes"].append(f"moved: {source_item} → {target_item}")
+        if source_exists:
+            try:
+                os.rename(source_item, target_item)
+                item_res["notes"].append(f"moved: {source_item} → {target_item}")
+                result["items_moved"] += 1
+            except OSError as e:
+                item_res["rt"] = "failed"
+                item_res["qb"] = "failed"
+                item_res["notes"].append(f"rename failed: {e}")
+                result["items"].append(item_res)
+                result["errors"].append(f"rename failed for {name}: {e}")
+                continue
+        else:
+            # target already exists — another item in this group moved it (cross-seed dup)
+            item_res["notes"].append(f"already at target (cross-seed dup): {target_item}")
             result["items_moved"] += 1
-        except OSError as e:
-            item_res["rt"] = "failed"
-            item_res["qb"] = "failed"
-            item_res["notes"].append(f"rename failed: {e}")
-            result["items"].append(item_res)
-            result["errors"].append(f"rename failed for {name}: {e}")
-            continue
 
         # RT repoint — same as lane1: set d.directory to canonical_path (category level)
         if h:
