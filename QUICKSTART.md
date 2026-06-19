@@ -18,10 +18,13 @@ _Read this first after /clear. Everything you need to resume in under 2 minutes.
 
 ## 2. Current Goal
 
-Re-execute Lane 1 migration safely after the 2026-06-18 pilot failure and Gate 0 recovery.
-Lane 1 renames category dirs + repoints RT/qB for ~134 CATEGORY_DRIFT items (no data movement).
-All code fixes are committed. Gate 0 incident recovery is complete (115→6 stoppedDL).
-**Next: Gate 1 pre-flight, then Gate 2 dry-run, then Gate 3 single-group pilot.**
+Lane 1 and Lane 1b migrations COMPLETE as of 2026-06-19.
+- Lane 1 (target-absent renames): 23 groups / 138 items — all done
+- Lane 1b (merge into existing category dirs): 19 groups / 232 items — all done
+- 12 conflict items (target already exists with different content) — pending manual review
+- 22 cross-seed RT-only duplicates ("source missing, target exists") — RT repointed, no action needed
+
+**Next: investigate 12 conflict items, then plan Lane 2 (ROOT_DRIFT + compound drift).**
 
 ---
 
@@ -42,6 +45,7 @@ All code fixes are committed. Gate 0 incident recovery is complete (115→6 stop
 | j19 | Re-pause fix after `checkingUP` in `lane1_execute.py`; 134 tests pass |
 | j20 | Gate 0 recovery: audit 115 stoppedDL (82 HEALTHY, 28 MISSING_DATA, 5 RT_INCOMPLETE); batch repair → 115→6 stoppedDL |
 | j21 | Controlled experiment: qB `recheck_torrent()` does NOT trigger RT hash checks (hypothesis not confirmed) |
+| j22 | Lane 1b executor: `execute_lane1b_merge_group()`, `lane1b-execute` CLI, cross-seed dup repoint fix (0.8.61) |
 
 ---
 
@@ -60,13 +64,14 @@ The canonical path resolver replaces them. Dry-run and audit commands permitted.
 
 | Lane | Items | Type | Status |
 |------|-------|------|--------|
-| Lane 1 true | 376 safe | Same-root rename (no data movement) | **In progress** — 2 done (filelist), 374 remaining |
+| Lane 1 (target-absent) | 23 groups / 138 items | Same-root category rename | **COMPLETE** |
+| Lane 1b (merge-into-existing) | 19 groups / 232 items | Per-item merge + repoint | **COMPLETE** |
+| Conflict items | 12 | Target already has different content | Pending manual review |
+| Cross-seed RT-only dups | 22 | "source missing, target exists" — RT repointed | **DONE** |
 | Compound drift | 2361 | STASH→POOL + rename | Deferred to Lane 2 |
 | Pure ROOT_DRIFT | 1030 | Root migration only | Deferred to Lane 2 |
 | Staging | 58 | `_rehome-unique` etc | Deferred (moratorium) |
-| Target-exists | 12 | Content at canonical, clients not repointed | Deferred |
 | Anomalous | 4 | Dangerous source paths (see below) | Excluded, manual review needed |
-| Multi-target | ~36 | readarr→books+ebooks, speakarr→audiobooks+books | Excluded, need item-level moves |
 
 ### Pilot result (2026-06-18 — FAILED)
 
@@ -100,7 +105,7 @@ All fixes are live in CR branch. **Do NOT proceed to Gate 1 without verifying ed
 | RT pre-flight download check (`_rt_fetch_health`) | `lane1_execute.py` | j19 |
 | RT post-repoint health poll (`_rt_health_check`) | `lane1_execute.py` | j19 |
 
-**49 tests pass** in `tests/test_lane1_execute.py`.
+**36 tests pass** in `tests/test_lane1_execute.py` (v0.8.61).
 
 ---
 
@@ -116,24 +121,23 @@ All fixes are live in CR branch. **Do NOT proceed to Gate 1 without verifying ed
 
 ## 8. Next Actions After /clear
 
-**Gate 1 — Pre-flight (do this before any lane1 execution):**
-1. Verify editable install: `cat $(python3 -c "import site; print(site.getsitepackages()[0])")/__editable__.hashall-*.pth` — must show CR worktree path
-2. Confirm no open jobs: `git worktree list` — only CR worktree should exist
-3. Run test suite: `pytest tests/test_lane1_execute.py tests/test_lane1_plan.py -q` — all green
-4. Snapshot qB state: `python3 -c "import sys; sys.path.insert(0,'src'); from hashall.qbittorrent import QBittorrentClient; qb=QBittorrentClient('http://localhost:9003',username='admin',password='adminadmin'); [print(t.state) for t in qb.get_torrents()]" | sort | uniq -c`
-5. Confirm: **0 stalledUP, 0 checkingUP** before touching anything
+**Lane 1 + 1b are complete. Next work is conflict review + Lane 2 planning.**
 
-**Gate 2 — Dry-run:**
-6. `hashall payload lane1-plan` — confirm group list, check canonical_path values
+**Conflict investigation (12 items):**
+1. `hashall payload lane1-plan` — current plan shows 34 unsafe items
+   - 22 "source missing, target exists, cross-device" → already handled (RT repointed, no action)
+   - 12 "target exists" → genuine conflicts where a different file exists at canonical target
+2. For each "target exists" conflict: check if the item at target is the same torrent or different content
+3. If same torrent already at target: just repoint RT/qB (no move needed)
+4. If different content: manual resolution (which to keep, where to move the other)
 
-**Gate 3 — Single-group pilot:**
-7. Run ONE group (smallest, 1–3 items) with `hashall payload lane1-execute`
-8. Check: 0 new stalledUP, 0 new stoppedDL, RT seeding at canonical path, qB stoppedUP
-9. Wait 60s, re-check states — confirm no spontaneous transitions
-10. Human sign-off before Gate 4
+**Conflict items list:**
+- Greenland.2020.Repack..., It.Ends.With.Us.2024..., Legion.S03..., Leslie Glass/Lindsey Glass (book),
+  Saturday.Night.Live.S01..., Shut.In.2022..., Sorry.to.Bother.You.2018..., The.Fantastic.Four.First.Steps.2025...,
+  The.Matrix.1999..., The.Monkey.2025..., Wonders of Life (2013) Season 1, white.fire.1984...
 
-**Gate 4 — Batch (≤5 groups per batch, human sign-off between):**
-11. `hashall payload lane1-execute` in batches, full state check after each
+**qB current state (as of 2026-06-19 ~01:43):**
+- stalledUP: 0, checkingUP: 0 (confirmed clean after all lane 1b batches)
 
 ---
 
