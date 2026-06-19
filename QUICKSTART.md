@@ -18,13 +18,15 @@ _Read this first after /clear. Everything you need to resume in under 2 minutes.
 
 ## 2. Current Goal
 
-Lane 1 and Lane 1b migrations COMPLETE as of 2026-06-19.
-- Lane 1 (target-absent renames): 23 groups / 138 items — all done
-- Lane 1b (merge into existing category dirs): 19 groups / 232 items — all done
-- 12 conflict items (target already exists with different content) — pending manual review
-- 22 cross-seed RT-only duplicates ("source missing, target exists") — RT repointed, no action needed
+**CATEGORY_DRIFT = 0. All lane 1 + 1b work complete as of 2026-06-19.**
 
-**Next: investigate 12 conflict items, then plan Lane 2 (ROOT_DRIFT + compound drift).**
+- Lane 1 (target-absent renames): 23 groups / 138 items — DONE
+- Lane 1b (merge into existing category dirs): 19 groups / 232 items — DONE
+- 12 "conflict" items (hardlinked, both paths existed): repointed RT+qB to canonical — DONE
+- 22 cross-seed RT-only duplicates: repointed to cross-seed canonical — DONE
+- `hashall payload lane1-plan` → **0 items** (confirmed 2026-06-19 ~02:00)
+
+**Next: Lane 2 — ROOT_DRIFT (1030 items) + compound drift (2361 items, STASH→POOL + rename).**
 
 ---
 
@@ -81,14 +83,6 @@ The canonical path resolver replaces them. Dry-run and audit commands permitted.
 
 115 stoppedDL → **6 stoppedDL**. Remaining 6 are pre-existing (5 RT_INCOMPLETE + 1 MISSING_DATA). 4896 stoppedUP confirmed seeding. 0 RT writes during recovery.
 
-### Clean target-absent groups (~134 items, ~23 groups) — ready to re-execute after Gate 1-3
-
-All are cross-seed `cross-seed/` prefix additions on POOL:
-Darkpeers (API):18, FileList.io:17, seedpool (API):17, hawke-uno:13, TorrentDay:10,
-DigitalCore (API):9, YUSCENE (API):8, _movie:7, FearNoPeer:6, XSpeeds:5,
-TorrentLeech:5, YOiNKED (API):4, DocsPedia:4, movies:3, onlyencodes:3,
-filelist:2(done), tv:2, MyAnonamouse:1, yuscene:1, speedcd:1, HD-Space:1, torrentleech:1, SpeedCD:1, hawkeuno:1
-
 ---
 
 ## 6. Code Fixes Applied (all committed, all tested)
@@ -121,23 +115,21 @@ All fixes are live in CR branch. **Do NOT proceed to Gate 1 without verifying ed
 
 ## 8. Next Actions After /clear
 
-**Lane 1 + 1b are complete. Next work is conflict review + Lane 2 planning.**
+**CATEGORY_DRIFT complete. Next: Lane 2.**
 
-**Conflict investigation (12 items):**
-1. `hashall payload lane1-plan` — current plan shows 34 unsafe items
-   - 22 "source missing, target exists, cross-device" → already handled (RT repointed, no action)
-   - 12 "target exists" → genuine conflicts where a different file exists at canonical target
-2. For each "target exists" conflict: check if the item at target is the same torrent or different content
-3. If same torrent already at target: just repoint RT/qB (no move needed)
-4. If different content: manual resolution (which to keep, where to move the other)
+**Lane 2 scope:**
+- 1030 pure ROOT_DRIFT items: same category, wrong seeding root (STASH→POOL or vice versa)
+- 2361 compound drift items: wrong root AND wrong category simultaneously
+- Both require STASH→POOL copy (cross-device, can't rename) — need rsync or rehome
 
-**Conflict items list:**
-- Greenland.2020.Repack..., It.Ends.With.Us.2024..., Legion.S03..., Leslie Glass/Lindsey Glass (book),
-  Saturday.Night.Live.S01..., Shut.In.2022..., Sorry.to.Bother.You.2018..., The.Fantastic.Four.First.Steps.2025...,
-  The.Matrix.1999..., The.Monkey.2025..., Wonders of Life (2013) Season 1, white.fire.1984...
+**Start here:**
+1. `hashall payload lane1-plan` → confirm still 0 (sanity check)
+2. `hashall payload canonical-path --hash <any drifted hash>` → inspect a ROOT_DRIFT and compound item
+3. Plan the Lane 2 executor (STASH→POOL rsync + hardlink + RT/qB repoint)
+4. Gate 1-3 before any execution
 
-**qB current state (as of 2026-06-19 ~01:43):**
-- stalledUP: 0, checkingUP: 0 (confirmed clean after all lane 1b batches)
+**qB state (confirmed 2026-06-19 ~02:00):**
+- stalledUP: 0, checkingUP: 0, stoppedDL: 6 (pre-existing, non-recoverable)
 
 ---
 
