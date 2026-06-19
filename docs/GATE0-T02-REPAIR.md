@@ -10,14 +10,14 @@
 
 Repaired 110 stoppedDL cross-seed torrents using `set_location(resume_after=False)` + recheck + pause.
 
-| Metric | Before | After | Change |
-|--------|--------|-------|--------|
-| stoppedDL | 115 | 2 | **–113** |
-| stoppedUP | 4787 | 4833 | +46 (confirmed) |
-| checkingUP/DL | 0 | 67 | +67 (expected settle to stoppedUP within minutes) |
+| Metric | Before | After (final) | Change |
+|--------|--------|---------------|--------|
+| stoppedDL | 115 | **6** | **–109** |
+| stoppedUP | 4813 | **4896** | **+83** |
+| checkingUP/DL | 0 | 0 | settled ✅ |
 | RT checking | 0 | 0 | unchanged ✅ |
 
-**Remaining 2 stoppedDL:** Pre-existing RT_INCOMPLETE (Dexter.S02, Dexter.S07) — excluded per brief.
+**Remaining 6 stoppedDL:** 5 pre-existing RT_INCOMPLETE + 1 MISSING_DATA with no data at canonical path (English Grammar Boot Camp). See breakdown below.
 
 **RT writes:** 0. RT checking count confirmed 0 at start and end.
 
@@ -100,6 +100,21 @@ Processed sequentially (1 item at a time) to avoid RT RPC overload.
 
 ---
 
+## Final stoppedDL Breakdown (confirmed settled)
+
+| Hash (16) | Name | Reason |
+|-----------|------|--------|
+| 245f2bce6afaf96b | Dexter.S02.720p.x265-ZMNT | RT_INCOMPLETE (d.complete=0, excluded from brief) |
+| e36553b12dc118d8 | Dexter.S07.720p.x265-ZMNT | RT_INCOMPLETE (d.complete=0, excluded from brief) |
+| 127c38342cfedaf4 | River Monsters S07 | RT_INCOMPLETE (missed in brief — was in J20-T01 audit list) |
+| 5caca88d29e64de4 | The.Diary.of.a.Teenage.Girl.2015 | RT_INCOMPLETE (missed in brief) |
+| 96d896ca35f42d93 | Transformers.Rise.of.the.Beasts.2023 | RT_INCOMPLETE (missed in brief) |
+| 4bf5c39fea1a3341 | English Grammar Boot Camp | MISSING_DATA — files not found at canonical path after set_location |
+
+**Note:** Brief only excluded 2 of the 5 RT_INCOMPLETE items (Dexter S02/S07). The remaining 3 were processed but correctly landed in stoppedDL after recheck confirmed incompleteness.
+
 ## Recommendation
 
-Notify lead when the 67 checkingUP items settle. Estimated: 2–5 minutes for small files, 5–15 minutes for large REMUX files (32GB+). The 2 RT_INCOMPLETE Dexter items may need operator action (re-download or remove from both clients).
+All 6 stoppedDL are pre-existing issues unrelated to lane1 execute damage:
+- 5× RT_INCOMPLETE: operator should decide whether to re-download or remove from both clients
+- 1× English Grammar Boot Camp: investigate if data exists elsewhere on disk; if not, remove
