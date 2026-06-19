@@ -483,15 +483,25 @@ class TestRTHealthCheck:
         assert result["ok"] is True
         assert call_n[0] == 2
 
-    def test_timeout_stays_hashing(self):
-        """All polls return hashing=1 → ok=False, 'still hashing' note."""
+    def test_timeout_still_hashing_complete_ok(self):
+        """All polls return hashing=1 but complete=1 and down_rate=0 → ok=True (just verifying)."""
         with patch("hashall.lane1_execute._rt_fetch_health",
                    return_value={"complete": 1, "hashing": 1, "down_rate": 0}), \
              patch("time.sleep"):
             result = _rt_health_check("abc", "http://rt/RPC2", poll_secs=1.0)
 
+        assert result["ok"] is True
+        assert "verifying" in result["note"] or "seeding ok" in result["note"]
+
+    def test_timeout_stays_hashing_with_incomplete(self):
+        """All polls return hashing=1, complete=0 → ok=False (genuinely incomplete)."""
+        with patch("hashall.lane1_execute._rt_fetch_health",
+                   return_value={"complete": 0, "hashing": 1, "down_rate": 0}), \
+             patch("time.sleep"):
+            result = _rt_health_check("abc", "http://rt/RPC2", poll_secs=1.0)
+
         assert result["ok"] is False
-        assert "still hashing" in result["note"]
+        assert "hashing" in result["note"]
 
     def test_downloading_after_hashing_clears(self):
         """Hashing clears but complete=0 → ok=False."""

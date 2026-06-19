@@ -97,20 +97,23 @@ def _rt_health_check(
     down_rate = fields.get("down_rate", -1)
     hashing = fields.get("hashing", -1)
 
-    if hashing != 0:
+    # If poll timed out but complete=1 and down_rate=0, RT is only verifying —
+    # not downloading. Treat as ok; it will settle to stalledUP when done.
+    if hashing != 0 and (complete != 1 or down_rate > 0):
         return {"ok": False, "complete": complete, "down_rate": down_rate,
                 "hashing": hashing,
-                "note": f"RT still hashing after {poll_secs:.0f}s poll"}
-    if complete != 1:
+                "note": f"RT still hashing after {poll_secs:.0f}s poll and not complete or downloading"}
+    if complete != 1 and hashing == 0:
         return {"ok": False, "complete": complete, "down_rate": down_rate,
                 "hashing": hashing,
                 "note": f"RT incomplete after hashing: complete={complete}"}
-    if down_rate > 0:
+    if down_rate > 0 and hashing == 0:
         return {"ok": False, "complete": complete, "down_rate": down_rate,
                 "hashing": hashing,
                 "note": f"RT downloading after hashing: down_rate={down_rate}"}
+    note = "RT seeding ok" if hashing == 0 else f"RT verifying (hashing={hashing}), complete=1 down_rate=0"
     return {"ok": True, "complete": complete, "down_rate": down_rate,
-            "hashing": hashing, "note": "RT seeding ok"}
+            "hashing": hashing, "note": note}
 
 
 def execute_lane1_group_atomic(
