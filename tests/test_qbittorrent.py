@@ -774,3 +774,81 @@ def test_set_location_cross_device_blocked_when_files_missing(tmp_path, monkeypa
     import pytest
     with pytest.raises(ValueError, match="cross-device setLocation blocked"):
         client.set_location("abc123", str(target))
+
+
+def test_set_location_fnf_files_at_target_allows(tmp_path, monkeypatch, capsys):
+    """FileNotFoundError on old path, files exist at target → allow setLocation."""
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+    monkeypatch.setattr(client, "pause_torrent", lambda h: True)
+    monkeypatch.setattr(client, "resume_torrent", lambda h: True)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    import os as _real_os
+    hook_stat = _real_os.stat
+    def fake_stat(path, **kwargs):
+        p = str(path)
+        if "stash" in p:
+            raise FileNotFoundError(f"no such file or directory: {p}")
+        return hook_stat(path, **kwargs)
+    monkeypatch.setattr("os.stat", fake_stat)
+
+    monkeypatch.setattr(
+        client, "get_torrent_info",
+        lambda h: SimpleNamespace(save_path=str(tmp_path / "stash"), state="pausedUP"),
+    )
+
+    target = tmp_path / "pool" / "seeding" / "item"
+    target.mkdir(parents=True)
+    movie = target / "movie.mkv"
+    movie.write_bytes(b"x" * 100)
+
+    monkeypatch.setattr(
+        client, "get_torrent_files",
+        lambda h: [QBitFile(name="movie.mkv", size=100)],
+    )
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+    monkeypatch.setattr(client.session, "post", lambda url, data=None, timeout=None: FakeResponse())
+
+    ok = client.set_location("abc123", str(target))
+    assert ok is True
+    captured = capsys.readouterr()
+    assert "files confirmed at target" in captured.out
+
+
+def test_set_location_fnf_no_files_at_target_blocks(tmp_path, monkeypatch):
+    """FileNotFoundError on old path, no files at target → raise ValueError."""
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+    monkeypatch.setattr(client, "pause_torrent", lambda h: True)
+    monkeypatch.setattr(client, "resume_torrent", lambda h: True)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    import os as _real_os
+    hook_stat = _real_os.stat
+    def fake_stat(path, **kwargs):
+        p = str(path)
+        if "stash" in p:
+            raise FileNotFoundError(f"no such file or directory: {p}")
+        return hook_stat(path, **kwargs)
+    monkeypatch.setattr("os.stat", fake_stat)
+
+    monkeypatch.setattr(
+        client, "get_torrent_info",
+        lambda h: SimpleNamespace(save_path=str(tmp_path / "stash"), state="pausedUP"),
+    )
+
+    target = tmp_path / "pool" / "seeding" / "item"
+    target.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        client, "get_torrent_files",
+        lambda h: [QBitFile(name="movie.mkv", size=100)],
+    )
+
+    import pytest
+    with pytest.raises(ValueError, match="setLocation blocked"):
+        client.set_location("abc123", str(target))
