@@ -116,17 +116,11 @@ All fixes are live in CR branch. **Do NOT proceed to Gate 1 without verifying ed
 
 ## 8. Next Actions After /clear
 
-**MUTATION LOCK ACTIVE** — no `hashall payload` mutations until OP-20 investigation closes.
+**MUTATION LOCK LIFTED** — j24/j25/j26 complete (2026-06-20). English Grammar Boot Camp repaired. stoppedDL = 5 (pre-existing only).
 
-### Immediate priority — damage investigation (OP-20, OP-22, OP-27)
+### ~~j24–j26 (COMPLETE 2026-06-20)~~ — damage investigation + repair
 
-| Job | Scope | OPs |
-|-----|-------|-----|
-| j24 | Deep investigation: which job/code broke English Grammar Boot Camp; fix + 4-stage validation | OP-20 |
-| j25 | Audit 34 j22-touched items for FNF bypass damage + j20 MISSING_DATA misclassification audit | OP-22, OP-27 |
-| j26 | Repair English Grammar Boot Camp qB to stoppedUP (after j24 clears) | OP-21 |
-
-### After mutation lock lifts
+### Next jobs
 
 | Job | Scope | OPs |
 |-----|-------|-----|
@@ -144,9 +138,10 @@ pip install -e /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-
 pip show hashall | grep Location  # must show CR worktree path
 ```
 
-**qB state (confirmed 2026-06-20):**
-- stalledUP: 0, checkingUP: 0, stoppedUP: 4897
-- stoppedDL: 6 — 5 pre-existing RT_INCOMPLETE (Dexter S02/S07, River Monsters, Diary of Teenage Girl, Transformers); 1 damaged by our work (English Grammar Boot Camp `4bf5c3` — see OP-20/21/22)
+**qB state (confirmed 2026-06-20, after j24-j26):**
+- stoppedUP: 4898 (English Grammar Boot Camp repaired +1)
+- stoppedDL: 5 — all pre-existing RT_INCOMPLETE (Dexter S02/S07, River Monsters, Diary of Teenage Girl, Transformers)
+- 0 items damaged by our work
 
 ---
 
