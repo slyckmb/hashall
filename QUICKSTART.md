@@ -48,6 +48,7 @@ _Read this first after /clear. Everything you need to resume in under 2 minutes.
 | j20 | Gate 0 recovery: audit 115 stoppedDL (82 HEALTHY, 28 MISSING_DATA, 5 RT_INCOMPLETE); batch repair → 115→6 stoppedDL |
 | j21 | Controlled experiment: qB `recheck_torrent()` does NOT trigger RT hash checks (hypothesis not confirmed) |
 | j22 | Lane 1b executor: `execute_lane1b_merge_group()`, `lane1b-execute` CLI, cross-seed dup repoint fix (0.8.61) |
+| j23 | `set_location()` FileNotFoundError bypass fix — blocked unauthorized cross-device move for container paths; RCCA at `docs/RCCA-SETLOCATION-FNF.md`; v0.8.62; 2 new tests |
 
 ---
 
@@ -115,21 +116,37 @@ All fixes are live in CR branch. **Do NOT proceed to Gate 1 without verifying ed
 
 ## 8. Next Actions After /clear
 
-**CATEGORY_DRIFT complete. Next: Lane 2.**
+**MUTATION LOCK ACTIVE** — no `hashall payload` mutations until OP-20 investigation closes.
 
-**Lane 2 scope:**
-- 1030 pure ROOT_DRIFT items: same category, wrong seeding root (STASH→POOL or vice versa)
-- 2361 compound drift items: wrong root AND wrong category simultaneously
-- Both require STASH→POOL copy (cross-device, can't rename) — need rsync or rehome
+### Immediate priority — damage investigation (OP-20, OP-22, OP-27)
 
-**Start here:**
-1. `hashall payload lane1-plan` → confirm still 0 (sanity check)
-2. `hashall payload canonical-path --hash <any drifted hash>` → inspect a ROOT_DRIFT and compound item
-3. Plan the Lane 2 executor (STASH→POOL rsync + hardlink + RT/qB repoint)
-4. Gate 1-3 before any execution
+| Job | Scope | OPs |
+|-----|-------|-----|
+| j24 | Deep investigation: which job/code broke English Grammar Boot Camp; fix + 4-stage validation | OP-20 |
+| j25 | Audit 34 j22-touched items for FNF bypass damage + j20 MISSING_DATA misclassification audit | OP-22, OP-27 |
+| j26 | Repair English Grammar Boot Camp qB to stoppedUP (after j24 clears) | OP-21 |
 
-**qB state (confirmed 2026-06-19 ~02:00):**
-- stalledUP: 0, checkingUP: 0, stoppedDL: 6 (pre-existing, non-recoverable)
+### After mutation lock lifts
+
+| Job | Scope | OPs |
+|-----|-------|-----|
+| j27 | Operator review: 12 conflict items + 4 anomalous items — decision and resolution | OP-23, OP-24 |
+| j28 | Lane 2 strategy decision + executor planning (STASH→POOL, 1030 ROOT_DRIFT + 2361 compound) | OP-26 |
+
+**Lane 2 scope (deferred):**
+- 1030 pure ROOT_DRIFT: same category, wrong seeding root (STASH→POOL)
+- 2361 compound drift: wrong root AND wrong category simultaneously
+- Both require cross-device copy — no executor exists yet; 19.4 TB unique data vs ~3.1 TB free on pool
+
+**Pre-mutation gate (mandatory before any mutation run):**
+```bash
+pip install -e /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude -q
+pip show hashall | grep Location  # must show CR worktree path
+```
+
+**qB state (confirmed 2026-06-20):**
+- stalledUP: 0, checkingUP: 0, stoppedUP: 4897
+- stoppedDL: 6 — 5 pre-existing RT_INCOMPLETE (Dexter S02/S07, River Monsters, Diary of Teenage Girl, Transformers); 1 damaged by our work (English Grammar Boot Camp `4bf5c3` — see OP-20/21/22)
 
 ---
 
@@ -164,7 +181,11 @@ cd <job-worktree> && chatrap job done
 
 | File | Purpose |
 |------|---------|
+| `docs/OPS.md` | All open opportunities and observations — OP-01 through OP-27 |
 | `docs/CANONICAL-PATH-SPEC.md` | Authoritative path resolution spec |
+| `docs/RCCA-SETLOCATION-FNF.md` | j23 RCCA — set_location FNF bypass root cause and fix |
+| `docs/OP-INVESTIGATE-GRAMMAR-BREAK.md` | OP-20 procedure — English Grammar Boot Camp investigation |
+| `docs/OP-REPAIR-GRAMMAR-QB.md` | OP-21 procedure — English Grammar Boot Camp qB repair |
 | `docs/LANE1-PILOT-RCCA.md` | Pilot failure analysis — 9 root causes, Gate 0 complete |
 | `docs/GATE0-STOPPDL-AUDIT.md` | Gate 0 T01 audit — 115 stoppedDL classified |
 | `docs/GATE0-T02-REPAIR.md` | Gate 0 T02 repair — 115→6 stoppedDL, 4896 stoppedUP |
