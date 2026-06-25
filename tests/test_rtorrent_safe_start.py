@@ -68,14 +68,16 @@ class TestCheckAndConditionallyStart:
         assert len(d_start_calls) == 0
 
     def test_timeout(self):
-        """d.hashing never reaches 0 → timed out, started=False."""
+        """d.hashing never reaches 0, d.complete final read returns 0 → timed out, started=False."""
         call_log = []
 
         def fake_xmlrpc(method, *args, rpc_url=RPC, timeout=60):
             call_log.append((method, args))
             if method == "d.hashing":
                 return _scalar_text(1)
-            return "<value><i4>1</i4></value>"
+            if method == "d.complete":
+                return _scalar_text(0)
+            return "<value><i4>0</i4></value>"
 
         with patch("hashall.rtorrent.rt_xmlrpc_call", side_effect=fake_xmlrpc), \
              patch("hashall.rtorrent.time.sleep"), \
@@ -85,6 +87,29 @@ class TestCheckAndConditionallyStart:
         assert result["started"] is False
         assert result["complete"] == -1
         assert "timed out" in result["note"]
+
+    def test_final_check_starts_after_timeout(self):
+        """d.hashing never reaches 0, but final d.complete read returns 1 → started=True."""
+        call_log = []
+
+        def fake_xmlrpc(method, *args, rpc_url=RPC, timeout=60):
+            call_log.append((method, args))
+            if method == "d.hashing":
+                return _scalar_text(1)
+            if method == "d.complete":
+                return _scalar_text(1)
+            return "<value><i4>0</i4></value>"
+
+        with patch("hashall.rtorrent.rt_xmlrpc_call", side_effect=fake_xmlrpc) as mock_call, \
+             patch("hashall.rtorrent.time.sleep"), \
+             patch("hashall.rtorrent.time.monotonic", side_effect=[0, 0.5, 1.5, 3.0]):
+            result = rt_check_and_conditionally_start(HASH, rpc_url=RPC, poll_secs=1.0)
+
+        assert result["started"] is True
+        assert result["complete"] == 1
+        assert "final check" in result["note"]
+        d_start_calls = [c for c in call_log if c[0] == "d.start"]
+        assert len(d_start_calls) == 1
 
 
 class TestApplyDirectoryRepoint:

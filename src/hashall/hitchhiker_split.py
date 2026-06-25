@@ -322,6 +322,7 @@ def execute_split_group(
                     action.target_parent_api,
                     rpc_url=rpc_url,
                     restart=True,
+                    check_before_start=True,
                 )
 
             action.completed = True

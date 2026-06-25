@@ -3991,6 +3991,7 @@ def _apply_client_drift_path_rows(
                     target,
                     rpc_url=rt_rpc_url,
                     restart=True,
+                    check_before_start=True,
                 )
                 event["status"] = "ok"
                 event["target_directory"] = target
@@ -4045,6 +4046,7 @@ def _apply_client_drift_path_rows(
                             target,
                             rpc_url=rt_rpc_url,
                             restart=True,
+                            check_before_start=True,
                         )
                         event["status"] = "ok"
                         event["rt_calls"] = rt_completed
@@ -5571,7 +5573,7 @@ def rt_repoint_cmd(torrent_hash, target_directory, rpc_url, do_apply):
     print(f"   apply: {do_apply}")
     if not do_apply:
         return
-    completed = rt_apply_directory_repoint(torrent_key, normalized_target, rpc_url=rpc_url)
+    completed = rt_apply_directory_repoint(torrent_key, normalized_target, rpc_url=rpc_url, check_before_start=True)
     print(f"   completed: {completed}")
 
 
@@ -6211,7 +6213,7 @@ def rt_repair_apply_cmd(report_path, session_dir, rpc_url, action_bucket, hash_f
         if not do_apply:
             continue
         try:
-            rt_apply_directory_repoint(row["hash"], row["target_directory"], rpc_url=rpc_url)
+            rt_apply_directory_repoint(row["hash"], row["target_directory"], rpc_url=rpc_url, check_before_start=True)
             applied += 1
             print("      result: OK")
         except Exception as exc:

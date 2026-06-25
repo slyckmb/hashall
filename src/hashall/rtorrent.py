@@ -620,6 +620,16 @@ def rt_check_and_conditionally_start(
     else:
         hashing_xml = rt_xmlrpc_call("d.hashing", torrent_hash, rpc_url=rpc_url, timeout=timeout)
         hashing = int(_xmlrpc_scalar_text(hashing_xml))
+        complete_xml = rt_xmlrpc_call("d.complete", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+        complete = int(_xmlrpc_scalar_text(complete_xml))
+        if complete == 1:
+            rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+            return {
+                "started": True,
+                "complete": 1,
+                "hashing": hashing,
+                "note": "started after poll timeout final check",
+            }
         return {
             "started": False,
             "complete": -1,
