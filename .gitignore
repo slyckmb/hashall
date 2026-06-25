@@ -64,3 +64,22 @@ AGENTS.override.md
 CLAUDE.md
 GEMINI.md
 jobs
+
+# chatrap
+.agent/logs/
+.agent/signals/
+.agent/artifacts/
+session-ses_*.md
+AGENTS.md
+/projects/
+jobs/
+JOB-QUEUE.md
+TASK-BRIEF.md
+STATUS.md
+CONFLICT-MAP.md
+OBE-CLEANUP-REPORT.md
+SESSION-REHYDRATE.md
+shared-prompts.md
+comms/.chatrap-mastery-proof
+status/CURRENT.md
+docs/S01--inventory-and-requirements.md
