@@ -1,8 +1,8 @@
 # Job Queue — hashall CR
 
-session: hashall-20260530-000517-claude
-branch: cr/hashall-20260530-000517-claude
-worktree: /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
+session: hashall-20260626-151456
+branch: cr/hashall-20260626-151456
+worktree: /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
 updated: 2026-06-26
 
 ---
@@ -11,8 +11,8 @@ updated: 2026-06-26
 
 | Job | Slug | OPs |
 |-----|------|-----|
-| j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 | done |
-| j37 | code-bug-fix | OP-04,OP-05,OP-06,OP-16 | done |
+| j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 | Merged to CR. merge(cr/hashall-20260530-000517-claude__j36). |
+| j37 | code-bug-fix | OP-04,OP-05,OP-06,OP-16 | Merged to CR. merge(cr/hashall-20260530-000517-claude__j37). |
 | j38 | rcca-and-audit | RCCA/audit complete; follow-ups moved forward | Merged to CR. merge(cr/hashall-20260530-000517-claude__j38). |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j40 | docs-batch | OP-01,OP-02,OP-03,OP-07,OP-08,OP-11,OP-12,OP-13,OP-25 |

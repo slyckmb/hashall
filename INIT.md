@@ -1,8 +1,8 @@
 # INIT — CR Lead Bootstrap Protocol
 
-Session: `hashall-20260530-000517-claude`
-Branch: `cr/hashall-20260530-000517-claude`
-Worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude`
+Session: `hashall-20260626-151456`
+Branch: `cr/hashall-20260626-151456`
+Worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456`
 Updated: 2026-06-26
 
 ---
@@ -24,29 +24,29 @@ if [[ "$_cwd" =~ __j[0-9]+ ]]; then
     echo "⚠ WARNING: CWD is an orphaned job worktree: $_cwd"
     echo "  This directory is not a registered git worktree."
     echo "  Switch to CR worktree before continuing:"
-    echo "  cd /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude"
+    echo "  cd /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456"
   fi
 fi
 
-/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude/bin/chatrap lead status
+/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456/bin/chatrap lead status
 ```
 
 Then confirm git state:
 
 ```bash
-git -C /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude log --oneline -5
-git -C /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude status --short
+git -C /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456 log --oneline -5
+git -C /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456 status --short
 ```
 
-Expected: clean tree, branch `cr/hashall-20260530-000517-claude`. Verify HEAD matches `chatrap lead status` output above.
+Expected: clean tree, branch `cr/hashall-20260626-151456`. Verify HEAD matches `chatrap lead status` output above.
 
 ---
 
 ## STEP 2 — Mastery gate (must pass before any dispatch)
 
 ```bash
-/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude/bin/chatrap ack lead \
-  --repo-root /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
+/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456/bin/chatrap ack lead \
+  --repo-root /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
 ```
 
 If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
@@ -71,9 +71,9 @@ Tasks: j40-t01 docs audit/plan brief authored.
 Set path variables (use these everywhere below):
 
 ```bash
-CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
+CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
 JOB=j40
-JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
+JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__${JOB}
 ```
 
 Create the worktree (use absolute path to avoid nesting — j22 lesson):
@@ -81,7 +81,7 @@ Create the worktree (use absolute path to avoid nesting — j22 lesson):
 ```bash
 git -C ${CR_WORKTREE} \
   worktree add ${JOB_WORKTREE} \
-  -b cr/hashall-20260530-000517-claude__${JOB} cr/hashall-20260530-000517-claude
+  -b cr/hashall-20260626-151456__${JOB} cr/hashall-20260626-151456
 ```
 
 Copy briefs into job worktree (OP-152 — `comms/` is gitignored, briefs are disk-only):
@@ -95,7 +95,7 @@ Then dispatch t01 immediately (standard model):
 
 ```bash
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-t01.md"
-LOG="${CR_WORKTREE}/.agent/logs/hashall-20260530-000517-claude/${JOB}/${JOB}-t01-opencode.log"
+LOG="${CR_WORKTREE}/.agent/logs/hashall-20260626-151456/${JOB}/${JOB}-t01-opencode.log"
 mkdir -p "$(dirname "$LOG")"
 (cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode-go/deepseek-v4-flash \
   opencode run "Read and execute $BRIEF. Follow it literally. Emit the required task-log." \
@@ -115,7 +115,7 @@ For every task after t01:
 
 ```bash
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-tNN.md"
-LOG="${CR_WORKTREE}/.agent/logs/hashall-20260530-000517-claude/${JOB}/${JOB}-tNN-opencode.log"
+LOG="${CR_WORKTREE}/.agent/logs/hashall-20260626-151456/${JOB}/${JOB}-tNN-opencode.log"
 mkdir -p "$(dirname "$LOG")"
 (cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode-go/minimax-m3 \
   opencode run "Read and execute $BRIEF. Follow it literally. Emit the required task-log." \
