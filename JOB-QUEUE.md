@@ -11,7 +11,7 @@ updated: 2026-06-26
 
 | Job | Slug | OPs |
 |-----|------|-----|
-| j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 | Merged to CR. merge(cr/hashall-20260530-000517-claude__j36). 
+| j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 | done |
 | j37 | code-bug-fix | OP-04,OP-05,OP-06,OP-16 |
 | j38 | rcca-and-audit | OP-19,OP-24,OP-47 |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17 |
@@ -41,6 +41,21 @@ Notes:
 - j43 (monitoring) should run promptly — OP-43 items have a 48h check window
 - j44 (chatrap infra) is upstream work; file issues with chatrap maintainers, not code in this repo
 - j36 first to clear resolved OPs and keep opscan count accurate
+
+---
+
+## j37 — code-bug-fix
+
+**Slug:** code-bug-fix
+**OPs:** OP-04, OP-05, OP-06, OP-16
+**Goal:** Audit 4 open code bugs; close those already fixed; fix any still open.
+
+### Tasks
+
+| Task | Type | Goal |
+|------|------|------|
+| j37-t01 | discovery | Verify OP-05, OP-06, OP-16 status in current code; close confirmed-fixed OPs; document OP-04 fix scope |
+| j37-t02 | implementation | Fix OP-04: integrate SYSTEM_TAGS with traktor registry (TBD after t01) |
 
 ---
 
