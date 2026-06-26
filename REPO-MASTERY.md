@@ -1,7 +1,7 @@
 # Chatrap - Repo Mastery Reference
 
 Session: `hashall-20260530-000517-claude`
-Updated: 2026-06-26 13:34:24
+Updated: 2026-06-26 15:51:28
 
 ## What Chatrap Is
 
@@ -19,8 +19,8 @@ Chatrap is a Bash/tmux/git-worktree orchestration layer for AI coding sessions.
 
 ## Current Architecture Rules
 
-- Active CR worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude`
-- Active branch: `cr/hashall-20260530-000517-claude`
+- Active CR worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456`
+- Active branch: `cr/hashall-20260626-151456`
 - Job branches use `cr/<chat_id>__jNN`.
 - Job and task identifiers are lowercase: `jNN`, `tNN`, `jNN-tNN`.
 - Prefer the worktree `./bin/chatrap` for validation.
