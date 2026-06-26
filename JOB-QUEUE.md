@@ -13,8 +13,8 @@ updated: 2026-06-26
 |-----|------|-----|
 | j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 | done |
 | j37 | code-bug-fix | OP-04,OP-05,OP-06,OP-16 | done |
-| j38 | rcca-and-audit | OP-19,OP-24,OP-47 |
-| j39 | cross-seed-repair | OP-09,OP-15,OP-17 |
+| j38 | rcca-and-audit | RCCA/audit complete; follow-ups moved forward | Merged to CR. merge(cr/hashall-20260530-000517-claude__j38). |
+| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j40 | docs-batch | OP-01,OP-02,OP-03,OP-07,OP-08,OP-11,OP-12,OP-13,OP-25 |
 | j41 | explore-unified-tool | OP-18 |
 | j42 | lane2-strategy | OP-23,OP-26 |
@@ -59,8 +59,24 @@ Notes:
 
 ---
 
+## j40 — docs-batch
+
+Status: planned
+Slug: docs-batch
+OPs: OP-01, OP-02, OP-03, OP-07, OP-08, OP-11, OP-12, OP-13, OP-25
+Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
+
+### Tasks
+
+| Task | Type | Goal |
+|------|------|------|
+| j40-t01 | discovery | Audit docs OPs and produce a precise docs-batch implementation plan; close any already-satisfied docs OPs with evidence |
+
+---
+
 ## Queue State Notes
 
 JOB-QUEUE.md written 2026-06-26 by lead after opscan showed 32 unslotted OPs.
 All 32 open OPs now slotted across 10 planned jobs.
-Next job to dispatch: j38 (rcca-and-audit).
+After j38 RCCA, OP-19/24/47 remain open and are re-slotted to j39 for follow-up repair/audit.
+Next job to dispatch: j40 (docs-batch), per run order.

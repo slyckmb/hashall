@@ -55,24 +55,24 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j38 — rcca-and-audit**
-OPs: OP-19,OP-24,OP-47
-Goal: RCCA and audit for outstanding reliability OPs.
+**Next job: j40 — docs-batch**
+OPs: OP-01,OP-02,OP-03,OP-07,OP-08,OP-11,OP-12,OP-13,OP-25
+Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
 
-Tasks: TBD — author briefs after ack init.
+Tasks: j40-t01 docs audit/plan brief authored.
 
 **Session state as of 2026-06-26:**
-- Merged: j28–j37 (j37 closed OP-04,OP-05,OP-06,OP-16)
+- Merged: j28–j38 (j38 added RCCA path audit and RT repoint target validation; OP-19/24/47 follow-ups moved to j39)
 - RT stopped: 0 (all 80 resolved)
 - RT seeding at 99.9x% (OP-43): River Monsters 127C3834, Transformers 96D896CA, Dexter S02 245F2BCE, Dexter S07 E36553B1 — check complete=1 by 2026-06-27
-- Version: 0.8.68
-- Open OPs: 24 (slotted j38–j45 per JOB-QUEUE.md)
+- Version: 0.8.69
+- Open OPs: 24 (slotted j39–j45 per JOB-QUEUE.md)
 
 Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
-JOB=j38
+JOB=j40
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
 ```
 
@@ -91,7 +91,7 @@ mkdir -p ${JOB_WORKTREE}/comms/briefs
 cp ${CR_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-*.md ${JOB_WORKTREE}/comms/briefs/
 ```
 
-Then dispatch t01 immediately (standard model — j38 briefs not yet authored; author them first):
+Then dispatch t01 immediately (standard model):
 
 ```bash
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-t01.md"
