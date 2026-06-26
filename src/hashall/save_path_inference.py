@@ -6,11 +6,51 @@ Ported from ~/dev/sys/docker/gluetun_qbit/qbittorrent_vpn/bin/qb-to-rt-migrate.p
 """
 
 import functools
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
+
+
+_TRACKER_REGISTRY_SEARCH_PATHS = [
+    os.environ.get("TRACKER_REGISTRY_PATH"),
+    "/home/michael/dev/tools/traktor/config/tracker-registry.yml",
+    "/home/michael/dev/work/glider/glider-docker/tracker-ctl/config/tracker-registry.yml",
+    "/mnt/config/docker/tracker-ctl/config/tracker-registry.yml",
+]
+
+
+def _load_tracker_registry_keys() -> tuple[set[str], set[str]]:
+    """Return (canonical_keys, alias_keys) from tracker-registry.yml.
+
+    canonical_keys: all top-level tracker keys.
+    alias_keys: qbitmanage tags that differ from the canonical key.
+    Returns (set(), set()) if registry not found or unreadable.
+    """
+    for raw_path in _TRACKER_REGISTRY_SEARCH_PATHS:
+        if not raw_path:
+            continue
+        p = Path(raw_path)
+        if not p.exists():
+            continue
+        try:
+            raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+            canonical: set[str] = set()
+            aliases: set[str] = set()
+            for key, entry in (raw.get("trackers") or {}).items():
+                canonical.add(key)
+                if not isinstance(entry, dict):
+                    continue
+                qbm = entry.get("qbitmanage") or {}
+                for tag in qbm.get("tags") or []:
+                    if tag != key:
+                        aliases.add(tag)
+            return canonical, aliases
+        except Exception:
+            return set(), set()
+    return set(), set()
 
 
 # Canonical seeding roots (device-aware)
@@ -44,19 +84,12 @@ RT_CONTAINER_HOST_PATH_PREFIXES = (
 
 # System tags that are not tracker identifiers.
 # See §4.4.5 of docs/REQUIREMENTS.md for the full spec.
-#
-# NOTE: "speed" is an alias of registry-tracker "speedcd" (domain: speed.click).
-#       Ideally resolved via tracker-registry.yml at runtime (see BACKLOG.md Gap 5).
-#       Until then, suppress it here as a pragmatic fix so the canonical "speedcd"
-#       wins the alphabetical tiebreaker. Do not add other tracker aliases here
-#       without confirming they are NOT in the registry.
 SYSTEM_TAGS = {
     "private", "cross-seed", "~noHL", "needs_rehome",
-    "other", "public",  # qbm public-bucket placeholders, not tracker names
-    "_movie",           # qbm content-type bucket; sorts before tracker names alphabetically
-    "aither-like",      # qbm content-classification tag, not a tracker name
-    "speed",  # Tracker alias (speed.click / SpeedCD); suppress until registry resolution exists
-    "stoppeddl_not_recoverable",  # operational status tag, not a tracker
+    "other", "public",
+    "_movie",
+    "aither-like",
+    "stoppeddl_not_recoverable",
     "rehome", "rehome_verify_ok", "rehome_cleanup_source_required",
     "rehome_from_stash", "rehome_to_pool",
 }
@@ -384,10 +417,20 @@ def infer_canonical_save_path(
                 if not t.startswith("~") and not t.startswith("rehome_")
             }
             if tracker_tags:
-                # Prefer tags that match known qbm category names (more reliable than alphabetical)
+                registry_canonical, registry_aliases = _load_tracker_registry_keys()
+                # Prefer canonical registry keys; exclude known aliases
+                canonical_candidates = tracker_tags & registry_canonical
+                non_alias_candidates = tracker_tags - registry_aliases
                 qbm_config = load_qbm_config(qbm_config_path)
                 qbm_tags = tracker_tags & set(qbm_config.keys())
-                tracker_slug = sorted(qbm_tags)[0] if qbm_tags else sorted(tracker_tags)[0]
+                if qbm_tags:
+                    tracker_slug = sorted(qbm_tags)[0]
+                elif canonical_candidates:
+                    tracker_slug = sorted(canonical_candidates)[0]
+                elif non_alias_candidates:
+                    tracker_slug = sorted(non_alias_candidates)[0]
+                else:
+                    tracker_slug = sorted(tracker_tags)[0]
                 subdir = f"cross-seed/{tracker_slug}"
                 notes.append(f"cross-seed provider from tags: {tracker_slug}")
             else:
