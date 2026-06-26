@@ -15,9 +15,8 @@ Lead cherry-picks clusters into job plans.
 | OP-01 | doc | Document `save-path-repair` operation in RUNBOOK (no safe command sequence exists) | 2026-05-20 |
 | OP-02 | doc | Document canonical tree repair execution protocol in RUNBOOK (taxonomy exists, steps don't) | 2026-05-20 |
 | OP-03 | doc | Add external repo dependency map to AGENTS.md (traktor registry, rt-tracker-manual-report, qbm config, cross-seed config, sys/docker repo) | 2026-05-20 |
-| OP-04 | bug | `save_path_inference.py` SYSTEM_TAGS hardcoded — new tracker names added without consulting registry | 2026-05-20 |
-| OP-05 | bug | `save-path-repair` patches qB fastresume when 0 files moved → `missingFiles` on restart | 2026-05-20 |
-| OP-06 | bug | `save-path-repair` ambiguous prefix match in `_resolve_full_hash()` — short hash matches multiple torrents, picks wrong item | 2026-05-20 |
+| OP-04 | bug | `save_path_inference.py` SYSTEM_TAGS hardcoded — fix scope: (1) current SYSTEM_TAGS = {private, cross-seed, ~noHL, needs_rehome, other, public, _movie, aither-like, speed, stoppeddl_not_recoverable, rehome, rehome_verify_ok, rehome_cleanup_source_required, rehome_from_stash, rehome_to_pool}; (2) `_load_tracker_registry()` in `client_drift.py:957` provides registry-based tracker names via `tracker-registry.yml`; (3) one-line fix: at startup call `_load_tracker_registry()`, keep non-tracker system tags as a static exclusion set, and remove tracker alias entries (e.g., `speed`) from SYSTEM_TAGS since the registry handles them | 2026-05-20 |
+
 | OP-07 | doc | Fix SPRINT.md slice 12a description — Class 4 repairs had 3 groups (A=data movement, B=empty deletion, C=nested staging), not uniform repoint | 2026-05-20 |
 | OP-08 | doc | Slice 12b policy review — "legacy prefix removal" description is stale; REQUIREMENTS.md §4.4 confirms cross-seed/<tracker>/ IS canonical. Superseded unless operator reauthorizes with revised transform. | 2026-05-26 |
 | OP-09 | reliability | Execute slice 12c — 10 `cross-seed/<hash>/` items: resolve tracker → rename dir → repoint RT+qB | 2026-05-26 |
@@ -27,7 +26,7 @@ Lead cherry-picks clusters into job plans.
 | OP-13 | doc | Rename `TRK_WARN_SCRIPT` → `TRACKER_ISSUE_SCRIPT` in Makefile after docker repo rename; add one-cycle compatibility alias | 2026-06-16 |
 | OP-14 | reliability | Merge hashall CR branch to main — j05 (--repair) and j06 (--escalating-search) Makefile fixes pending | 2026-06-16 |
 | OP-15 | doc | Audit all cross-seed folder references across repo (src/, docs/, scripts/, Makefile, SPRINT.md, RUNBOOK.md, AGENTS.md) — ensure all are aligned with §4.4 policy: cross-seed/<prowlarr-tracker-name>/ is canonical; no "prefix removal" framing anywhere | 2026-06-17 |
-| OP-16 | bug | `save_path_inference.py` line 223 policy inversion — `derive_policy_base_save_path` returns bare `<tracker>/` for cross-seed category items instead of `cross-seed/<tracker>/`; ~2000 items mutated to wrong paths by rogue code; fix: add `cross-seed/` prefix on line 223 + update 3 affected tests | 2026-06-17 |
+
 | OP-17 | reliability | Migrate ~2000 cross-seed items from bare `<tracker>/` back to `cross-seed/<tracker>/` — consequence of OP-16 rogue mutation; requires OP-16 code fix first, then 4-gate validated migration (rename dir + repoint RT + repoint qB per item) | 2026-06-17 |
 | OP-18 | reliability | EXPLORE: unified single-pass placement+path tool for all ~4k RT items — two broken tools (rehome planner: WHERE stash/pool; save_path_inference: WHAT PATH category formula) have each caused mass damage when run independently; explore building one validated tool that resolves both dimensions per item (placement policy → seeding-root, category → path formula → full target path, diff vs actual, migrate if needed, sync qB); NO further mutations from rehome or save_path_inference until this exploration is complete and 4-gate validated | 2026-06-17 |
 | OP-19 | bug | Spurious subdirectory around bare single-file torrents — RT creates a release-name folder even when the torrent defines no internal folder; canonical form is `<root>/<cat>/<filename>` with no subdirectory; scope unknown, needs audit | 2026-06-17 |
@@ -81,6 +80,9 @@ Lead cherry-picks clusters into job plans.
 | OP-32 | bug | RCCA documented in docs/RCCA-MAIN-MERGE-INCIDENT.md; process fix in place. | lead |
 | OP-46 | bug | RT Docker path (/stash/media→/data/media) documented in INIT.md; all briefs updated to use /data/ paths. | lead |
 | OP-48 | bug | OPS.md migrated from docs/OPS.md to repo root; docs/OPS.md is now a redirect stub; broken refs in BACKLOG.md + AGENT-MASTERY.md fixed; opscan open=32. | lead |
+| OP-05 | bug | Fixed: should_apply guard skips fastresume patch when files_moved=0 and qB not at staging dir. | j09 |
+| OP-06 | bug | Fixed in j09/j10: _resolve_full_hash() raises ValueError on ambiguous prefix match. | j10 |
+| OP-16 | bug | Fixed in j14: derive_policy_base_save_path() returns cross-seed/{provider} correctly; 3 tests updated. | j14 |
 
 ---
 
