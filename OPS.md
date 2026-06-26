@@ -9,6 +9,7 @@ Lead cherry-picks clusters into job plans.
 ---
 
 ## Open
+| OP-44 | bug | `chatrap job --name` consumes job counter even on failed/rolled-back attempts — during j33 setup, two prior attempts (intended j31, j32) were rolled back by chatrap but their job numbers were not reclaimed; actual repair job landed at j33 instead of j31; job numbers are non-contiguous in git log; fix: chatrap job rollback should decrement the job counter, or the counter should be derived from the highest successfully merged job rather than a monotonic increment *(merged: OP-49 evidence: 2026-06-26)* | 2026-06-25 |
 
 | ID | Type | Title | Observed |
 |----|------|-------|----------|
@@ -35,9 +36,7 @@ Lead cherry-picks clusters into job plans.
 | OP-26 | reliability | Lane 2 execution strategy decision needed — 1030 ROOT_DRIFT + 2361 compound drift items require STASH→POOL cross-device copy; no executor exists yet; 19.4 TB unique data vs ~3.1 TB free on pool; full migration not feasible without storage expansion or phased approach | 2026-06-20 |
 | OP-42 | bug | `chatrap lead after-job` Steps A/B skipped every run because opencode agent task-logs are written to the opencode run log (`<job-wt>/.agent/logs/<job>/<job>-tNN-opencode.log`) but NOT to the chatrap artifact directory (`<job-wt>/.agent/artifacts/.../`); after-job scans only the artifact dir so task-log friction, ops_closed entries, and file-change reports are never surfaced to the lead; `ops_closed=` lines in task-logs are silently ignored, preventing automatic OP closure; fix: after-job should also scan opencode logs in `.agent/logs/` for task-log blocks, OR the dispatch wrapper should copy/mirror the task-log block into the artifact dir on agent completion | 2026-06-25 |
 | OP-43 | reliability | 4 items seeding at 99.9x% with complete=0 after j33 repair — River Monsters S07 (127C3834, 99.92%), Transformers (96D896CA, 99.99%), Dexter.S02.720p 245F2BCE (99.97%), Dexter.S07.720p E36553B1 (99.96%). Root cause: nested subfolder content was missing last piece of E01 episode + .nfo file (zero-byte in nested = skip_nested_also_zero); hardlink repair applied for all other pieces; items are seeding and downloading missing pieces from peers. Monitor: if any remain complete=0 after 48h, locate missing E01 data on disk and investigate | 2026-06-25 |
-| OP-44 | bug | `chatrap job --name` consumes job counter even on failed/rolled-back attempts — during j33 setup, two prior attempts (intended j31, j32) were rolled back by chatrap but their job numbers were not reclaimed; actual repair job landed at j33 instead of j31; job numbers are non-contiguous in git log; fix: chatrap job rollback should decrement the job counter, or the counter should be derived from the highest successfully merged job rather than a monotonic increment | 2026-06-25 |
 | OP-45 | reliability | j33 opencode agent ran out-of-scope `d.check_hash` on Diary of Teenage Girl (5CACA88D) — agent included Diary in its hash-check loop despite it not being a target item in the brief; Diary was left at state=0 complete=0 98.42% (2 files genuinely missing, confirmed by hash-check); no new damage (was already broken per OP-36), but agent scope violation confirms agents will act on any stopped torrent visible in RT without explicit filtering; briefs must explicitly state excluded hashes or use --limit with explicit hash list only | 2026-06-25 |
-| OP-49 | bug | `chatrap job --name` requires `--bypass-mastery` post-clear — cross-ref chatrap OP-307 (j42). Root causes: (A) missing pre-clear proof save → gate_missing; (B) bootstrap commits advance HEAD past stored proof → head_mismatch (OP-250); (C) `ack lead --mastery-gate` does not auto-save to SESSION.md (OP-283). Fix plan in chatrap: auto-save proof in INIT Step 2, relax head_mismatch to ancestor-HEAD validity, add prepare-clear mastery gate. Workaround: `--bypass-mastery` or manual `ack lead --mastery-gate` + `session save --mastery-proof` | 2026-06-26 |
 | OP-47 | bug | RCCA: Beetlejuice (E04E524750C999AC) and UEFA (3E82F6F7A3A5ADAE) had RT d.directory pointing to `/pool/media/torrents/seeding/FileList.io/<name>/<name>` — path missing `cross-seed/` prefix, directory did not exist on disk; both stuck state=0 complete=0 (0%); content was actually at `cross-seed/FileList.io/<name>/<name>/` all along; fix applied manually (repoint + hash-check → both now state=1 complete=1). Root cause unknown — need RCCA: (1) identify what process wrote these paths (cross-seed injection? rehome apply? set_location?); (2) inspect cross-seed config save_path for FileList.io tracker — should be `cross-seed/FileList.io/` not `FileList.io/`; (3) check if other FileList.io cross-seed items are similarly broken; (4) add pre-repoint path-exists validation to `rt_apply_directory_repoint()` so broken paths are caught before being written to session; (5) add post-inject RT path audit step to cross-seed/rehome workflows | 2026-06-26 |
 
 ---
@@ -51,6 +50,7 @@ Lead cherry-picks clusters into job plans.
 ---
 
 ## Closed
+| OP-49 | superseded | superseded:OP-44 | closed:auto-combine |
 
 | ID | Type | Title | Closed |
 |----|------|-------|--------|
