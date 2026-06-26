@@ -13,7 +13,7 @@ qB/RT save-path drift to zero; preserve placement policy.
 | Slice | Goal | Status |
 |---|---|---|
 | 0–11 | Housekeeping, pilots, doc review, code fixes, refresh, watchdog, canonical report | ✅ done |
-| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — 376 dirs cleared | ✅ done |
+| 12a | Class 4 repairs: `_rehome-unique/<hash>/` — 376 dirs cleared (3 groups: A=data movement, B=empty deletion, C=nested staging) | ✅ done |
 | 12b | `cross-seed/<tracker>/` legacy prefix removal — ~2125 items: rename dir + repoint both clients | ⏳ pending |
 | 12c | Class 1 repairs: `cross-seed/<hash>/` — resolve tracker → rename → repoint (10 items) | ⏳ pending |
 | 12d | Class 3 repairs: `cross-seed/_<name>/` | ✅ done (0 items) |
