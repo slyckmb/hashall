@@ -3,7 +3,7 @@
 Last updated: 2026-06-16
 Status: reference
 
-> **Live issue tracker has moved to `docs/OPS.md`.**
+> **Live issue tracker is at `OPS.md` (repo root).**
 > Open gaps from this file are captured there as OP-04 through OP-09.
 > This file is retained as reference context for the gap descriptions and history.
 

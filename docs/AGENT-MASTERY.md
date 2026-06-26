@@ -31,7 +31,7 @@ docs/
   REQUIREMENTS.md         Full system requirements and architecture (authoritative)
   RT-QB-STATE-POLICY.md  Client state policy and repair decision trees
   SPRINT.md              Active sprint slices and evidence baseline
-  OPS.md                 Live issue tracker (47 open items as of 2026-06-17)
+  OPS.md                 → moved to repo root OPS.md (31 open items as of 2026-06-26)
   RUNBOOK.md             Canonical repair procedures
   review/R1-R5-*.md      j09 cold-read audit findings for all 5 mutation tools
 
