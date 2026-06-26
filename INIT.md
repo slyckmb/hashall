@@ -55,8 +55,8 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j36 — close-resolved**
-OPs: OP-29,OP-32,OP-46,OP-48
+**Next job: j37 — code-bug-fix**
+OPs: OP-04,OP-05,OP-06,OP-16
 Goal: Close 4 OPs whose issues are fully resolved — update OPS.md Open→Closed for each.
 
 Items to close:
@@ -78,7 +78,7 @@ Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
-JOB=j36
+JOB=j37
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
 ```
 

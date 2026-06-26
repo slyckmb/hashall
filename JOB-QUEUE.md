@@ -11,7 +11,7 @@ updated: 2026-06-26
 
 | Job | Slug | OPs |
 |-----|------|-----|
-| j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 |
+| j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 | Merged to CR. merge(cr/hashall-20260530-000517-claude__j36). 
 | j37 | code-bug-fix | OP-04,OP-05,OP-06,OP-16 |
 | j38 | rcca-and-audit | OP-19,OP-24,OP-47 |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17 |
