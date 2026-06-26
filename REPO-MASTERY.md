@@ -48,7 +48,7 @@ See JOB-QUEUE.md for the authoritative completed-job list.
 
 ## Open OPs
 
-(none)
+31 open OPs, all slotted in JOB-QUEUE.md. Next dispatchable job: j40 docs-batch.
 
 ## High-Risk Areas
 
@@ -87,20 +87,10 @@ Before operating as lead after /clear, answer these without more browsing:
 ## Recent Changes
 
 ```
-eae0556 merge(cr/hashall-20260530-000517-claude__j29)
-f8293ed fix(rtorrent): OP-37 final-read after poll timeout + OP-31 check_before_start on 8 callers
-M	src/hashall/__init__.py
-M	src/hashall/cli.py
-M	src/hashall/hitchhiker_split.py
-M	src/hashall/nested_folder_repair.py
-M	src/hashall/rtorrent.py
-M	src/hashall/save_path_recovery.py
-M	src/hashall/save_path_repair.py
-M	tests/test_rtorrent_safe_start.py
-4efdb62 docs(ops): close OP-33 — Snowfall S05 pool copy repaired by j28 batch, now seeding
-M	docs/OPS.md
-d490b67 docs(ops): full RCCA for all 20 remaining stopped items — add OP-38..41, update OP-29/34/35/36
-M	docs/OPS.md
-f46d796 docs(ops): add OP-37 — rt_check_and_conditionally_start leaves stoppedUL on hash-check timeout
-M	docs/OPS.md
+1e8494c chore: regen QUICKSTART + REPO-MASTERY (after-job j38)
+986cc36 lead: after-job post-merge j38 — OP closure + JOB-QUEUE replan + INIT advance
+9652d01 lead: advance closeout to j40 docs batch
+7037f25 merge(cr/hashall-20260530-000517-claude__j38)
+6324c06 fix(j38-t02): validate RT repoint targets before writes
+7184d79 docs(j38-t01): add path audit RCCA for OP-19 OP-24 OP-47
 ```

@@ -9,24 +9,24 @@ Agent: claude
 - chat_id: `hashall-20260530-000517-claude`
 - branch: `cr/hashall-20260530-000517-claude`
 - worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude`
-- current CR head at refresh: `986cc36`
+- current CR head at refresh: `1e8494c`
 
 ## Current Goal
 
-Post-12b repair: T1 operator review, then T2a-T2e path repairs toward zero mismatches
+Code bug fixes + RCCA + cross-seed repair + docs toward CR→main merge (j37–j45)
 
 ## Current Step
 
-j29 merged: OP-37 (rt_check_and_conditionally_start final-read fix) + OP-31 (8 callers check_before_start=True); 6 tests pass; next: j30 remove-leeching-started (Coursera, Domestika x2, Priscilla)
+j38 merged: RCCA path audit added, RT repoint target-exists guard implemented, version 0.8.69. OP-19/24/47 follow-ups moved to j39. Next dispatch: j40-t01 docs-batch audit/plan.
 
 ## Recent Commits (last 5)
 
 ```
-eae0556 merge(cr/hashall-20260530-000517-claude__j29)
-f8293ed fix(rtorrent): OP-37 final-read after poll timeout + OP-31 check_before_start on 8 callers
-4efdb62 docs(ops): close OP-33 — Snowfall S05 pool copy repaired by j28 batch, now seeding
-d490b67 docs(ops): full RCCA for all 20 remaining stopped items — add OP-38..41, update OP-29/34/35/36
-f46d796 docs(ops): add OP-37 — rt_check_and_conditionally_start leaves stoppedUL on hash-check timeout
+1e8494c chore: regen QUICKSTART + REPO-MASTERY (after-job j38)
+986cc36 lead: after-job post-merge j38 — OP closure + JOB-QUEUE replan + INIT advance
+9652d01 lead: advance closeout to j40 docs batch
+7037f25 merge(cr/hashall-20260530-000517-claude__j38)
+6324c06 fix(j38-t02): validate RT repoint targets before writes
 ```
 
 ## Next Work
@@ -37,7 +37,7 @@ See JOB-QUEUE.md for full task breakdown.
 
 ## Open OPs (summary)
 
-(none)
+31 open OPs; all are slotted in JOB-QUEUE.md. j40 is next per run order.
 
 ## Current State
 
