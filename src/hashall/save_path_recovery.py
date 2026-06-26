@@ -449,6 +449,7 @@ def execute_recovery(
                 rpc_url=rpc_url,
                 restart=True,
                 check_before_start=True,
+                validate_target_exists=True,
             )
             if result_for_hash:
                 result_for_hash.rt_repointed = True

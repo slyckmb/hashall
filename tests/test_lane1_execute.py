@@ -120,7 +120,7 @@ class TestExecuteLane1GroupAtomic:
              patch("os.makedirs") as mock_mkdir, \
              patch("os.path.isdir", return_value=True), \
              patch("os.path.exists", return_value=False), \
-             patches[0], patches[1], patches[2], patches[3], patches[4]:
+             patches[0], patches[1], patches[2] as mock_rt, patches[3], patches[4]:
             result = execute_lane1_group_atomic(items, dry_run=False, qb_client=qb)
 
         assert result["rename_done"] is True
@@ -131,6 +131,10 @@ class TestExecuteLane1GroupAtomic:
         assert result["items"][0]["qb"] == "ok"
         assert result["items"][1]["rt"] == "ok"
         assert result["items"][1]["qb"] == "ok"
+        for call_args, call_kwargs in mock_rt.call_args_list:
+            assert call_kwargs.get("validate_target_exists") is True, (
+                f"expected validate_target_exists=True, got {call_kwargs}"
+            )
 
     def test_rt_failure_continues(self):
         """RT repoint fails: rename done, item logged, continue to next."""

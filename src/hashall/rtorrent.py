@@ -540,8 +540,15 @@ def rt_apply_directory_repoint(
     rpc_url: str = DEFAULT_RT_RPC_URL,
     restart: bool = True,
     check_before_start: bool = False,
+    validate_target_exists: bool = False,
     timeout: int = 60,
 ) -> list[str]:
+    if validate_target_exists:
+        if not target_directory or not Path(target_directory).exists():
+            raise FileNotFoundError(
+                f"rt_apply_directory_repoint target does not exist: hash={torrent_hash} "
+                f"target={target_directory!r}"
+            )
     calls: list[tuple] = [
         ("d.stop", torrent_hash),
         ("d.close", torrent_hash),
