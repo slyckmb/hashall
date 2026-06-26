@@ -55,8 +55,8 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j38 — rcca-and-audit**
-OPs: OP-19,OP-24,OP-47
+**Next job: j36 — close-resolved**
+OPs: OP-29,OP-32,OP-46,OP-48
 Goal: RCCA and audit for outstanding reliability OPs.
 
 Tasks: TBD — author briefs after ack init.
@@ -72,7 +72,7 @@ Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
-JOB=j38
+JOB=j36
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
 ```
 
