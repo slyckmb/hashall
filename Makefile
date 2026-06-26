@@ -2,10 +2,23 @@
 # The original 927-line Makefile is archived at bin/archive/Makefile.archived
 # Rebuild from scratch once the simplified CLI stabilizes.
 
-TRK_WARN_SCRIPT := $(HOME)/dev/sys/docker/gluetun_qbit/rtorrent_vpn/bin/rt-tracker-manual-report.py
+# Canonical name — docker repo will rename rt-tracker-manual-report.py to match
+TRACKER_ISSUE_SCRIPT ?= $(TRK_WARN_SCRIPT)
+# Deprecated alias — remove after docker repo renames the script
+TRK_WARN_SCRIPT ?= $(HOME)/dev/sys/docker/gluetun_qbit/rtorrent_vpn/bin/rt-tracker-manual-report.py
 HASHALL_CLI := python3 -m hashall.cli
 REHOME_CLI := python3 -m rehome.cli
 CATALOG ?= $(HOME)/.hashall/catalog.db
+
+# Gate: abort if hashall editable install does not point to current worktree
+define _pip-gate
+	@PIP_LOC=$$(pip show hashall 2>/dev/null | grep "Editable project location:" | sed 's/^Editable project location: *//'); \
+	CURR_DIR=$$(pwd); \
+	if [ "$$PIP_LOC" != "$$CURR_DIR" ]; then \
+		echo "ABORT: hashall editable install is at $$PIP_LOC, not $$CURR_DIR. Run: pip install -e ."; \
+		exit 1; \
+	fi
+endef
 
 .PHONY: help test db-refresh db-refresh-verbose db-refresh-fast db-refresh-maintenance db-refresh-integrity \
 	db-refresh-fast-gated db-refresh-fast-parallel db-refresh-fast-gated-parallel \
@@ -130,6 +143,7 @@ rt-qb-mirror-drift:
 	@python3 -m hashall.cli rt-qb-mirror sync --limit $${LIMIT:-0} --sleep-row 0
 
 rt-qb-mirror-apply:
+	$(call _pip-gate)
 	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; \
 	if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; \
 	FORCE_OPT=""; if [ "$${FORCE:-0}" = "1" ]; then FORCE_OPT="--force"; fi; \
@@ -139,6 +153,7 @@ rt-qb-mirror-pause-seeding:
 	@python3 scripts/pause_mirror_seeders.py
 
 rt-qb-mirror-queue-apply:
+	$(call _pip-gate)
 	@MONITOR_OPTS="--monitor --monitor-timeout $${MONITOR_TIMEOUT:-900} --monitor-interval $${MONITOR_INTERVAL:-10}"; \
 	if [ "$${NO_MONITOR:-0}" = "1" ]; then MONITOR_OPTS="--no-monitor"; fi; \
 	FORCE_OPT=""; if [ "$${FORCE:-0}" = "1" ]; then FORCE_OPT="--force"; fi; \
@@ -160,24 +175,28 @@ client-drift-rt-to-qb-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_rt_to_qb_path --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-0} --journal "$${JOURNAL:-out/client-drift/path-drift-rt-to-qb.jsonl}"
 
 client-drift-rt-to-qb-apply:
+	$(call _pip-gate)
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_rt_to_qb_path --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-5} --journal "$${JOURNAL:-out/client-drift/path-drift-rt-to-qb.jsonl}" --apply
 
 client-drift-qb-to-rt-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_qb_to_rt_path --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-0} --journal "$${JOURNAL:-out/client-drift/path-drift-qb-to-rt.jsonl}"
 
 client-drift-qb-to-rt-apply:
+	$(call _pip-gate)
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_qb_to_rt_path --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-5} --journal "$${JOURNAL:-out/client-drift/path-drift-qb-to-rt.jsonl}" --apply
 
 client-drift-both-to-pool-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_both_to_pool --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-0} --journal "$${JOURNAL:-out/client-drift/path-drift-both-to-pool.jsonl}"
 
 client-drift-both-to-pool-apply:
+	$(call _pip-gate)
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift apply --action repoint_both_to_pool --catalog "$(CATALOG)" --hash "$${HASH}" --anchor-scan-max-files $${ANCHOR_SCAN:-200000} --sleep-row $${SLEEP_ROW:-5} --journal "$${JOURNAL:-out/client-drift/path-drift-both-to-pool.jsonl}" --apply
 
 client-drift-nested-repair-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift nested-folder-repair "$${HASH}"
 
 client-drift-nested-repair-apply:
+	$(call _pip-gate)
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift nested-folder-repair "$${HASH}" --apply
 
 client-drift-nested-folder-scan:
@@ -196,12 +215,14 @@ rt-repoint-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}"
 
 rt-repoint-apply:
+	$(call _pip-gate)
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}" --apply
 
 cross-seed-normalize-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) payload normalize-cross-seed-link --hash "$${HASH}" $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 cross-seed-normalize-apply:
+	$(call _pip-gate)
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) payload normalize-cross-seed-link --hash "$${HASH}" --apply $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 hitchhiker-audit:
@@ -214,6 +235,7 @@ hitchhiker-split-dry:
 	@SEL_OPTS=""; if [ -n "$${HASH:-}" ]; then SEL_OPTS="$$SEL_OPTS --hash $${HASH}"; fi; if [ -n "$${PAYLOAD_ID:-}" ]; then SEL_OPTS="$$SEL_OPTS --payload-id $${PAYLOAD_ID}"; fi; [ -n "$$SEL_OPTS" ] || { echo "HASH or PAYLOAD_ID is required"; exit 2; }; $(HASHALL_CLI) payload hitchhiker-split $$SEL_OPTS --dry-run $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 hitchhiker-split-apply:
+	$(call _pip-gate)
 	@SEL_OPTS=""; if [ -n "$${HASH:-}" ]; then SEL_OPTS="$$SEL_OPTS --hash $${HASH}"; fi; if [ -n "$${PAYLOAD_ID:-}" ]; then SEL_OPTS="$$SEL_OPTS --payload-id $${PAYLOAD_ID}"; fi; [ -n "$$SEL_OPTS" ] || { echo "HASH or PAYLOAD_ID is required"; exit 2; }; $(HASHALL_CLI) payload hitchhiker-split $$SEL_OPTS --execute $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 save-path-audit:
@@ -223,12 +245,14 @@ save-path-repair-dry:
 	@$(HASHALL_CLI) payload save-path-repair --dry-run --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 save-path-repair-apply:
+	$(call _pip-gate)
 	@$(HASHALL_CLI) payload save-path-repair --execute --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 save-path-recover-dry:
 	@$(HASHALL_CLI) payload save-path-recover --dry-run --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 save-path-recover-apply:
+	$(call _pip-gate)
 	@$(HASHALL_CLI) payload save-path-recover --execute --limit $${LIMIT:-0} $$([ "$${JSON:-0}" = "1" ] && echo "--json-output")
 
 payload-show:
@@ -241,6 +265,7 @@ rehome-auto-dry:
 	@[ -n "$${PLAN:-}" ] || { echo "PLAN is required"; exit 2; }; $(REHOME_CLI) apply "$${PLAN}" --dryrun
 
 rehome-auto-apply:
+	$(call _pip-gate)
 	@[ -n "$${PLAN:-}" ] || { echo "PLAN is required"; exit 2; }; $(REHOME_CLI) apply "$${PLAN}" --force
 
 rehome-relocate-plan:
@@ -259,6 +284,7 @@ qb-missing-remediate-dry:
 	@[ -n "$${SOURCE_ROOT:-}" ] || { echo "SOURCE_ROOT is required"; exit 2; }; [ -n "$${TARGET_ROOT:-}" ] || { echo "TARGET_ROOT is required"; exit 2; }; $(REHOME_CLI) qb-missing-remediate --catalog "$(CATALOG)" --source-root "$${SOURCE_ROOT}" --target-root "$${TARGET_ROOT}" --dryrun --limit $${LIMIT:-0} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${OUTPUT:-}" ] && echo "--output $${OUTPUT}")
 
 qb-missing-remediate-apply:
+	$(call _pip-gate)
 	@[ -n "$${SOURCE_ROOT:-}" ] || { echo "SOURCE_ROOT is required"; exit 2; }; [ -n "$${TARGET_ROOT:-}" ] || { echo "TARGET_ROOT is required"; exit 2; }; $(REHOME_CLI) qb-missing-remediate --catalog "$(CATALOG)" --source-root "$${SOURCE_ROOT}" --target-root "$${TARGET_ROOT}" --apply --limit $${LIMIT:-0} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${OUTPUT:-}" ] && echo "--output $${OUTPUT}")
 
 trk-warn:
@@ -271,12 +297,15 @@ trk-warn-dry:
 	@python3 $(TRK_WARN_SCRIPT) --dryrun --prowlarr --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-cleanup:
+	$(call _pip-gate)
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-upgrade-packs:
+	$(call _pip-gate)
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --upgrade-season-packs --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-replace-individual:
+	$(call _pip-gate)
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --escalating-search --replace-individual --bucket $${BUCKET:-deleted,auth_err} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-fix-multi-loc:
