@@ -14,9 +14,9 @@ updated: 2026-06-26
 | j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 | Merged to CR. merge(cr/hashall-20260530-000517-claude__j36). |
 | j37 | code-bug-fix | OP-04,OP-05,OP-06,OP-16 | Merged to CR. merge(cr/hashall-20260530-000517-claude__j37). |
 | j38 | rcca-and-audit | RCCA/audit complete; follow-ups moved forward | Merged to CR. merge(cr/hashall-20260530-000517-claude__j38). |
-| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j40 | docs-batch | OP-01,OP-02,OP-03,OP-07,OP-08,OP-11,OP-12,OP-13,OP-25 |
 | j41 | explore-unified-tool | OP-18 |
+| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j42 | lane2-strategy | OP-23,OP-26 |
 | j43 | rt-state-monitor | OP-10,OP-43 |
 | j44 | chatrap-infra | OP-42,OP-44,OP-45,OP-49 |
