@@ -55,30 +55,26 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j36 — close-resolved**
-OPs: OP-29,OP-32,OP-46,OP-48
-Goal: Close 4 OPs whose issues are fully resolved — update OPS.md Open→Closed for each.
+**Next job: j37 — code-bug-fix**
+OPs: OP-04,OP-05,OP-06,OP-16
+Goal: Audit 4 open code bugs; close those already fixed; fix any still open.
 
-Items to close:
-- **OP-29**: All 80 stopped torrents resolved (0 remaining). Beetlejuice+UEFA repointed to cross-seed/FileList.io/ + hash-checked → state=1 complete=1 on 2026-06-26.
-- **OP-32**: Main merge incident fully documented in `docs/RCCA-MAIN-MERGE-INCIDENT.md`; workaround in place; no further action needed.
-- **OP-46**: RT Docker path (/stash→/data) documented in INIT.md + OP-46 text; all subsequent briefs use /data/ paths; no code change needed.
-- **OP-48**: OPS.md migrated to repo root on 2026-06-26; chatrap opscan returns open=32; broken refs fixed.
+Tasks:
+- **j37-t01** (discovery): Verify OP-05/06/16 status in current code; close confirmed-fixed OPs; document OP-04 fix scope
+- **j37-t02** (implementation): Fix OP-04 SYSTEM_TAGS registry integration (scoped after t01)
 
 **Session state as of 2026-06-26:**
-- Merged: j28–j35 (all repair jobs complete)
+- Merged: j28–j36 (j36 closed OP-29,32,46,48)
 - RT stopped: 0 (all 80 resolved)
 - RT seeding at 99.9x% (OP-43): River Monsters 127C3834, Transformers 96D896CA, Dexter S02 245F2BCE, Dexter S07 E36553B1 — check complete=1 by 2026-06-27
-- qB: Novitiate stoppedUP 100%, How.Its.Made stoppedUP 100%, Dexter E56E8C57 stoppedUP 100%
 - Version: 0.8.67
-- Open OPs: 32 (all slotted j36–j45 per JOB-QUEUE.md)
-- job counter note (OP-44): chatrap counter may be at 36+ due to prior rollbacks; use `chatrap job --name close-resolved` and verify actual job number
+- Open OPs: 28 (all slotted j37–j45 per JOB-QUEUE.md)
 
 Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
-JOB=j36
+JOB=j37
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
 ```
 
