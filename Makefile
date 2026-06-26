@@ -25,7 +25,7 @@ CATALOG ?= $(HOME)/.hashall/catalog.db
         rehome-auto-dry rehome-auto-apply rehome-relocate-plan rehome-normalize-plan rehome-drift-audit \
         qb-missing-audit qb-missing-remediate-dry qb-missing-remediate-apply \
         payload-show payload-siblings \
-        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs trk-warn-replace-individual \
+        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs trk-warn-replace-individual trk-fix-multi-loc \
         canonical-tree-report
 
 help:
@@ -88,7 +88,8 @@ help:
 	@echo "  make qb-missing-remediate-dry SOURCE_ROOT=<old> TARGET_ROOT=<new> — dry-run qB missing remediation"
 	@echo ""
 	@echo "  make trk-warn                — list RT tracker-warning items (deleted/auth_err/other)"
-	@echo "  make trk-warn-prowlarr       — same, with Prowlarr replacement search"
+	@echo "  make trk-warn-prowlarr       — same, with Prowlarr search + verbose hit list"
+	@echo "  make trk-fix-multi-loc       — stop/start multi_loc items to clear VPN IP-rotation errors"
 	@echo "  make trk-warn-dry            — dry-run: plan removes + season-pack upgrades for deleted+other"
 	@echo "  make trk-warn-cleanup        — execute cleanup: remove deleted+other (no upgrades), sync to qB"
 	@echo "  make trk-warn-upgrade-packs  — season pack upgrades: erase individual eps, add pack, sync to qB"
@@ -264,7 +265,7 @@ trk-warn:
 	@python3 $(TRK_WARN_SCRIPT) --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
 
 trk-warn-prowlarr:
-	@python3 $(TRK_WARN_SCRIPT) --prowlarr --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
+	@python3 $(TRK_WARN_SCRIPT) --prowlarr --verbose-prowlarr --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
 
 trk-warn-dry:
 	@python3 $(TRK_WARN_SCRIPT) --dryrun --prowlarr --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
@@ -276,7 +277,10 @@ trk-warn-upgrade-packs:
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --upgrade-season-packs --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
 
 trk-warn-replace-individual:
-	@python3 $(TRK_WARN_SCRIPT) --cleanup --prowlarr --replace-individual --bucket $${BUCKET:-deleted} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --escalating-search --replace-individual --bucket $${BUCKET:-deleted,auth_err} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+
+trk-fix-multi-loc:
+	@python3 $(TRK_WARN_SCRIPT) --fix-multi-loc
 
 canonical-tree-report:
 	@python3 scripts/canonical-tree-report.py $(if $(FULL),--full,) --db "$(CATALOG)"

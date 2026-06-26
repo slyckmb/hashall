@@ -47,6 +47,12 @@ class FakeQbitClient:
         self.info_calls += 1
         return self.torrent_info.get(torrent_hash)
 
+    def pause_torrent(self, torrent_hash: str) -> bool:
+        return True
+
+    def resume_torrent(self, torrent_hash: str) -> bool:
+        return True
+
     def add_tags(self, torrent_hash: str, tags):
         self.add_calls.append((torrent_hash, tuple(tags)))
         return True

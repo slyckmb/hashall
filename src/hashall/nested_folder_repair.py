@@ -522,6 +522,7 @@ def execute_nested_folder_repair(
                         rt_new_dir,
                         rpc_url=rpc_url,
                         restart=True,
+                        check_before_start=True,
                     )
                     result.rt_repointed = True
                     result.notes.append(f"RT repointed → {rt_new_dir}")

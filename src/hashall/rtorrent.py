@@ -539,8 +539,16 @@ def rt_apply_directory_repoint(
     *,
     rpc_url: str = DEFAULT_RT_RPC_URL,
     restart: bool = True,
+    check_before_start: bool = False,
+    validate_target_exists: bool = False,
     timeout: int = 60,
 ) -> list[str]:
+    if validate_target_exists:
+        if not target_directory or not Path(target_directory).exists():
+            raise FileNotFoundError(
+                f"rt_apply_directory_repoint target does not exist: hash={torrent_hash} "
+                f"target={target_directory!r}"
+            )
     calls: list[tuple] = [
         ("d.stop", torrent_hash),
         ("d.close", torrent_hash),
@@ -549,10 +557,10 @@ def rt_apply_directory_repoint(
         ("session.save",),
         ("d.open", torrent_hash),
     ]
-    if restart:
+    if restart and not check_before_start:
         calls.append(("d.start", torrent_hash))
     try:
-        return rt_xmlrpc_multicall(calls, rpc_url=rpc_url, timeout=timeout)
+        result = rt_xmlrpc_multicall(calls, rpc_url=rpc_url, timeout=timeout)
     except Exception:
         if restart:
             try:
@@ -560,12 +568,20 @@ def rt_apply_directory_repoint(
                     "d.directory", torrent_hash, rpc_url=rpc_url, timeout=20
                 )
                 if _xmlrpc_scalar_text(current_dir).rstrip("/") == target_directory.rstrip("/"):
-                    rt_xmlrpc_call(
-                        "d.start", torrent_hash, rpc_url=rpc_url, timeout=20
-                    )
+                    if not check_before_start:
+                        rt_xmlrpc_call(
+                            "d.start", torrent_hash, rpc_url=rpc_url, timeout=20
+                        )
             except Exception:
                 pass
         raise
+    if restart and check_before_start:
+        safe_result = rt_check_and_conditionally_start(torrent_hash, rpc_url=rpc_url)
+        if safe_result.get("started"):
+            result.append("check_and_start:started")
+        else:
+            result.append("check_and_start:skipped")
+    return result
 
 
 def rt_recheck_torrent(
@@ -579,17 +595,70 @@ def rt_recheck_torrent(
         ("d.close", torrent_hash),
         ("d.check_hash", torrent_hash),
         ("d.open", torrent_hash),
-        ("d.start", torrent_hash),
     ]
     try:
-        return rt_xmlrpc_multicall(calls, rpc_url=rpc_url, timeout=timeout)
+        result = rt_xmlrpc_multicall(calls, rpc_url=rpc_url, timeout=timeout)
     except Exception:
         try:
             rt_xmlrpc_call("d.check_hash", torrent_hash, rpc_url=rpc_url, timeout=20)
-            rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=20)
+            rt_check_and_conditionally_start(torrent_hash, rpc_url=rpc_url)
         except Exception:
             pass
         raise
+    rt_check_and_conditionally_start(torrent_hash, rpc_url=rpc_url)
+    return result
+
+
+def rt_check_and_conditionally_start(
+    torrent_hash: str,
+    *,
+    rpc_url: str = DEFAULT_RT_RPC_URL,
+    poll_secs: float = 120.0,
+    timeout: int = 60,
+) -> dict:
+    rt_xmlrpc_call("d.check_hash", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+    deadline = time.monotonic() + poll_secs
+    while time.monotonic() < deadline:
+        hashing_xml = rt_xmlrpc_call("d.hashing", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+        hashing = int(_xmlrpc_scalar_text(hashing_xml))
+        if hashing == 0:
+            break
+        time.sleep(1)
+    else:
+        hashing_xml = rt_xmlrpc_call("d.hashing", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+        hashing = int(_xmlrpc_scalar_text(hashing_xml))
+        complete_xml = rt_xmlrpc_call("d.complete", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+        complete = int(_xmlrpc_scalar_text(complete_xml))
+        if complete == 1:
+            rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+            return {
+                "started": True,
+                "complete": 1,
+                "hashing": hashing,
+                "note": "started after poll timeout final check",
+            }
+        return {
+            "started": False,
+            "complete": -1,
+            "hashing": hashing,
+            "note": "hash check timed out",
+        }
+    complete_xml = rt_xmlrpc_call("d.complete", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+    complete = int(_xmlrpc_scalar_text(complete_xml))
+    if complete == 1:
+        rt_xmlrpc_call("d.start", torrent_hash, rpc_url=rpc_url, timeout=timeout)
+        return {
+            "started": True,
+            "complete": 1,
+            "hashing": 0,
+            "note": "torrent complete, started",
+        }
+    return {
+        "started": False,
+        "complete": 0,
+        "hashing": 0,
+        "note": "torrent incomplete, start skipped",
+    }
 
 
 def rt_wait_for_hash_present(
