@@ -99,7 +99,7 @@ Then dispatch t01 immediately:
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-t01.md"
 LOG="${CR_WORKTREE}/.agent/logs/hashall-20260530-000517-claude/${JOB}/${JOB}-t01-opencode.log"
 mkdir -p "$(dirname "$LOG")"
-(cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode-go/deepseek-v4-flash \
+(cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode/nemotron-3-ultra-free \
   opencode run "Read and execute $BRIEF. Follow it literally. Emit the required task-log." \
   2>&1 | tee "$LOG")
 ```
@@ -119,7 +119,7 @@ For every task after t01:
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-tNN.md"
 LOG="${CR_WORKTREE}/.agent/logs/hashall-20260530-000517-claude/${JOB}/${JOB}-tNN-opencode.log"
 mkdir -p "$(dirname "$LOG")"
-(cd ${JOB_WORKTREE} && OPENCODE_MODEL=<model> \
+(cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode-go/minimax-m3 \
   opencode run "Read and execute $BRIEF. Follow it literally. Emit the required task-log." \
   2>&1 | tee "$LOG")
 ```
