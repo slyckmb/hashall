@@ -237,6 +237,7 @@ def execute_lane1_group_atomic(
                 rt_apply_directory_repoint(
                     h, canonical_path,
                     rpc_url=rt_rpc_url, restart=True, check_before_start=True,
+                    validate_target_exists=True,
                 )
                 # Verify RT directory
                 rt_dir_xml = rt_xmlrpc_call("d.directory", h, rpc_url=rt_rpc_url)
@@ -515,6 +516,7 @@ def execute_lane1b_merge_group(
                 rt_apply_directory_repoint(
                     h, canonical_path,
                     rpc_url=rt_rpc_url, restart=True, check_before_start=True,
+                    validate_target_exists=True,
                 )
                 rt_dir_xml = rt_xmlrpc_call("d.directory", h, rpc_url=rt_rpc_url)
                 rt_dir = _xmlrpc_scalar_text(rt_dir_xml).rstrip("/")

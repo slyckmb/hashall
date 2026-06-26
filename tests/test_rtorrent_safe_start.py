@@ -150,3 +150,33 @@ class TestApplyDirectoryRepoint:
         assert ("d.start", HASH) not in multicall_calls
         mock_safe.assert_called_once_with(HASH, rpc_url=RPC)
         assert "check_and_start:started" in result
+
+    def test_validate_target_exists_true_missing_path(self):
+        """validate_target_exists=True with missing target raises FileNotFoundError."""
+        with patch("hashall.rtorrent.Path.exists", return_value=False):
+            with pytest.raises(FileNotFoundError) as exc:
+                rt_apply_directory_repoint(
+                    HASH, "/nonexistent/target", rpc_url=RPC,
+                    restart=True, check_before_start=False,
+                    validate_target_exists=True,
+                )
+        assert "/nonexistent/target" in str(exc.value)
+
+    def test_validate_target_exists_true_existing_path(self):
+        """validate_target_exists=True with existing target proceeds normally."""
+        multicall_calls = []
+
+        def fake_multicall(calls, rpc_url=RPC, timeout=60):
+            multicall_calls.extend(calls)
+            return [c[0] for c in calls]
+
+        with patch("hashall.rtorrent.Path.exists", return_value=True), \
+             patch("hashall.rtorrent.rt_xmlrpc_multicall", side_effect=fake_multicall):
+            result = rt_apply_directory_repoint(
+                HASH, "/data/target", rpc_url=RPC,
+                restart=True, check_before_start=False,
+                validate_target_exists=True,
+            )
+
+        assert ("d.stop", HASH) in multicall_calls
+        assert "d.stop" in result

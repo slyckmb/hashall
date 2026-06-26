@@ -611,6 +611,7 @@ def execute_repair(
                             rpc_url=rpc_url,
                             restart=True,
                             check_before_start=True,
+                            validate_target_exists=True,
                         )
                         result.notes.append(f"RT repointed → {rt_target_dir}")
                     except Exception as rt_exc:
