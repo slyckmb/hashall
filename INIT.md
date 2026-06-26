@@ -55,26 +55,24 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j37 — code-bug-fix**
-OPs: OP-04,OP-05,OP-06,OP-16
-Goal: Audit 4 open code bugs; close those already fixed; fix any still open.
+**Next job: j38 — rcca-and-audit**
+OPs: OP-19,OP-24,OP-47
+Goal: RCCA and audit for outstanding reliability OPs.
 
-Tasks:
-- **j37-t01** (discovery): Verify OP-05/06/16 status in current code; close confirmed-fixed OPs; document OP-04 fix scope
-- **j37-t02** (implementation): Fix OP-04 SYSTEM_TAGS registry integration (scoped after t01)
+Tasks: TBD — author briefs after ack init.
 
 **Session state as of 2026-06-26:**
-- Merged: j28–j36 (j36 closed OP-29,32,46,48)
+- Merged: j28–j37 (j37 closed OP-04,OP-05,OP-06,OP-16)
 - RT stopped: 0 (all 80 resolved)
 - RT seeding at 99.9x% (OP-43): River Monsters 127C3834, Transformers 96D896CA, Dexter S02 245F2BCE, Dexter S07 E36553B1 — check complete=1 by 2026-06-27
-- Version: 0.8.67
-- Open OPs: 28 (all slotted j37–j45 per JOB-QUEUE.md)
+- Version: 0.8.68
+- Open OPs: 24 (slotted j38–j45 per JOB-QUEUE.md)
 
 Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
-JOB=j37
+JOB=j38
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
 ```
 
@@ -93,13 +91,13 @@ mkdir -p ${JOB_WORKTREE}/comms/briefs
 cp ${CR_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-*.md ${JOB_WORKTREE}/comms/briefs/
 ```
 
-Then dispatch t01 immediately:
+Then dispatch t01 immediately (standard model — j38 briefs not yet authored, author them first):
 
 ```bash
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-t01.md"
 LOG="${CR_WORKTREE}/.agent/logs/hashall-20260530-000517-claude/${JOB}/${JOB}-t01-opencode.log"
 mkdir -p "$(dirname "$LOG")"
-(cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode/nemotron-3-ultra-free \
+(cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode-go/deepseek-v4-flash \
   opencode run "Read and execute $BRIEF. Follow it literally. Emit the required task-log." \
   2>&1 | tee "$LOG")
 ```

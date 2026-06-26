@@ -15,7 +15,6 @@ Lead cherry-picks clusters into job plans.
 | OP-01 | doc | Document `save-path-repair` operation in RUNBOOK (no safe command sequence exists) | 2026-05-20 |
 | OP-02 | doc | Document canonical tree repair execution protocol in RUNBOOK (taxonomy exists, steps don't) | 2026-05-20 |
 | OP-03 | doc | Add external repo dependency map to AGENTS.md (traktor registry, rt-tracker-manual-report, qbm config, cross-seed config, sys/docker repo) | 2026-05-20 |
-| OP-04 | bug | `save_path_inference.py` SYSTEM_TAGS hardcoded — fix scope: (1) current SYSTEM_TAGS = {private, cross-seed, ~noHL, needs_rehome, other, public, _movie, aither-like, speed, stoppeddl_not_recoverable, rehome, rehome_verify_ok, rehome_cleanup_source_required, rehome_from_stash, rehome_to_pool}; (2) `_load_tracker_registry()` in `client_drift.py:957` provides registry-based tracker names via `tracker-registry.yml`; (3) one-line fix: at startup call `_load_tracker_registry()`, keep non-tracker system tags as a static exclusion set, and remove tracker alias entries (e.g., `speed`) from SYSTEM_TAGS since the registry handles them | 2026-05-20 |
 
 | OP-07 | doc | Fix SPRINT.md slice 12a description — Class 4 repairs had 3 groups (A=data movement, B=empty deletion, C=nested staging), not uniform repoint | 2026-05-20 |
 | OP-08 | doc | Slice 12b policy review — "legacy prefix removal" description is stale; REQUIREMENTS.md §4.4 confirms cross-seed/<tracker>/ IS canonical. Superseded unless operator reauthorizes with revised transform. | 2026-05-26 |
@@ -80,6 +79,7 @@ Lead cherry-picks clusters into job plans.
 | OP-32 | bug | RCCA documented in docs/RCCA-MAIN-MERGE-INCIDENT.md; process fix in place. | lead |
 | OP-46 | bug | RT Docker path (/stash/media→/data/media) documented in INIT.md; all briefs updated to use /data/ paths. | lead |
 | OP-48 | bug | OPS.md migrated from docs/OPS.md to repo root; docs/OPS.md is now a redirect stub; broken refs in BACKLOG.md + AGENT-MASTERY.md fixed; opscan open=32. | lead |
+| OP-04 | bug | Fixed in j37: _load_tracker_registry_keys() added to save_path_inference.py; "speed" alias removed from SYSTEM_TAGS; tag selection now prefers canonical registry keys. Version → 0.8.68. | j37 |
 | OP-05 | bug | Fixed: should_apply guard skips fastresume patch when files_moved=0 and qB not at staging dir. | j09 |
 | OP-06 | bug | Fixed in j09/j10: _resolve_full_hash() raises ValueError on ambiguous prefix match. | j10 |
 | OP-16 | bug | Fixed in j14: derive_policy_base_save_path() returns cross-seed/{provider} correctly; 3 tests updated. | j14 |

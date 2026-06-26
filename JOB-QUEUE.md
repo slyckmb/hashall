@@ -12,7 +12,7 @@ updated: 2026-06-26
 | Job | Slug | OPs |
 |-----|------|-----|
 | j36 | close-resolved | OP-29,OP-32,OP-46,OP-48 | done |
-| j37 | code-bug-fix | OP-04,OP-05,OP-06,OP-16 |
+| j37 | code-bug-fix | OP-04,OP-05,OP-06,OP-16 | done |
 | j38 | rcca-and-audit | OP-19,OP-24,OP-47 |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17 |
 | j40 | docs-batch | OP-01,OP-02,OP-03,OP-07,OP-08,OP-11,OP-12,OP-13,OP-25 |
@@ -63,4 +63,4 @@ Notes:
 
 JOB-QUEUE.md written 2026-06-26 by lead after opscan showed 32 unslotted OPs.
 All 32 open OPs now slotted across 10 planned jobs.
-Next job to dispatch: j36 (close-resolved).
+Next job to dispatch: j38 (rcca-and-audit).
