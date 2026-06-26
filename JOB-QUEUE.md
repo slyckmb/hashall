@@ -19,7 +19,7 @@ updated: 2026-06-26
 | j41 | explore-unified-tool | OP-18 |
 | j42 | lane2-strategy | OP-23,OP-26 |
 | j43 | rt-state-monitor | OP-10,OP-43 |
-| j44 | chatrap-infra | OP-42,OP-44,OP-45 |
+| j44 | chatrap-infra | OP-42,OP-44,OP-45,OP-49 |
 | j45 | cr-to-main | OP-14 |
 
 ---
