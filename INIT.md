@@ -55,35 +55,30 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j35 — `partial-content-triage`**
-OPs: OP-36
-Goal: Remove 2 unfixable stopped torrents from RT and delete their nlinks=1 (unshared) partial data on disk.
+**Next job: j36 — `close-resolved`**
+OPs: OP-29, OP-32, OP-46, OP-48
+Goal: Close 4 OPs whose issues are fully resolved — update OPS.md Open→Closed for each.
 
-Items (both state=0 complete=0 in RT):
-- EGB Boot Camp (4BF5C39FEA1A33415C47170FDBC4E4DA41BDB383): 24 MP3 stubs, no source — cannot hardlink. `d.erase` + delete nlinks=1 files.
-- Diary of Teenage Girl (5CACA88D29E64DE495A47B53A466F7CADCB3CE02): 2 files missing (.nfo + Sample.mkv), 98.42% complete. `d.erase` + delete nlinks=1 files.
+Items to close:
+- **OP-29**: All 80 stopped torrents resolved (0 remaining). Beetlejuice+UEFA repointed to cross-seed/FileList.io/ + hash-checked → state=1 complete=1 on 2026-06-26.
+- **OP-32**: Main merge incident fully documented in `docs/RCCA-MAIN-MERGE-INCIDENT.md`; workaround in place; no further action needed.
+- **OP-46**: RT Docker path (/stash→/data) documented in INIT.md + OP-46 text; all subsequent briefs use /data/ paths; no code change needed.
+- **OP-48**: OPS.md migrated to repo root on 2026-06-26; chatrap opscan returns open=32; broken refs fixed.
 
-EXCLUDED (DO NOT TOUCH — OP-24/OP-45):
-- E04E5247... (Beetlejuice) — anomalous paths, human inspection required
-- 3E82F6F7... (UEFA) — anomalous paths, human inspection required
-
-**Approach:** Use `s.d.erase(hash)` via xmlrpc.client after first recording the `d.directory` for disk cleanup. Then find nlinks=1 files under that directory and delete. DO NOT delete nlinks>1 files.
-
-**RT Docker path note (OP-46):** RT container sees /data/media/ not /stash/media/. When reading d.directory from RT, the path returned will be /data/media/... — map to /stash/media/... for disk operations on the host.
-
-**Session state as of 2026-06-25:**
-- Merged: j28 (stub repair batch), j29 (OP-31+37), j30 (4 leeching removals), j33 (8 stubs), j34 (4 path-broken repointed)
-- RT stopped: 4 (Beetlejuice+UEFA OP-24 human-inspect, EGB Boot Camp + Diary → j35 removes these)
+**Session state as of 2026-06-26:**
+- Merged: j28–j35 (all repair jobs complete)
+- RT stopped: 0 (all 80 resolved)
 - RT seeding at 99.9x% (OP-43): River Monsters 127C3834, Transformers 96D896CA, Dexter S02 245F2BCE, Dexter S07 E36553B1 — check complete=1 by 2026-06-27
+- qB: Novitiate stoppedUP 100%, How.Its.Made stoppedUP 100%, Dexter E56E8C57 stoppedUP 100%
 - Version: 0.8.67
-- Open OPs relevant: OP-36 (j35), OP-43 (monitor), OP-46 (RT Docker path)
-- job counter note (OP-44): chatrap counter is at 35 (j31/j32/j34 incremented; actual j35 may land at higher number if prior rollbacks consumed slots)
+- Open OPs: 32 (all slotted j36–j45 per JOB-QUEUE.md)
+- job counter note (OP-44): chatrap counter may be at 36+ due to prior rollbacks; use `chatrap job --name close-resolved` and verify actual job number
 
 Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
-JOB=j35
+JOB=j36
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
 ```
 
