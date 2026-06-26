@@ -3,7 +3,7 @@
 Session: `hashall-20260530-000517-claude`
 Branch: `cr/hashall-20260530-000517-claude`
 Worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude`
-Updated: 2026-06-24
+Updated: 2026-06-25
 
 ---
 
@@ -55,15 +55,35 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: TBD — TBD**
-OPs: TBD
+**Next job: j34 — `repoint-wrong-paths`**
+OPs: OP-39, OP-40
+Goal: Repoint 4 path-broken stopped torrents in RT to their actual content locations. No code changes — `rt_apply_directory_repoint(..., check_before_start=True)` per item + hash-check + start.
+
+Items (all state=0 complete=0 in RT):
+- M3GAN.2.0.2025 (2796E137): RT→`/pool/media/torrents/seeding/movies` (category root). Content at `/stash/media/torrents/seeding/movies/M3GAN.2.0.2025.Unrated.1080p.BluRAY.REMUX.AVC.TrueHD.7.1.Atmos-STATiK.mkv` (30.6 GB, nlinks=11). Repoint to `/stash/media/torrents/seeding/movies/`.
+- Novitiate.2017 (FADBA92E): RT→`/pool/media/torrents/seeding/torrentleech/Novitiate...` (wrong pool, wrong tracker case). Content at `/stash/media/torrents/seeding/darkpeers/Novitiate.2017.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR.mkv`. Repoint to `/stash/media/torrents/seeding/darkpeers/`.
+- West.Wing.S02 (71CDD51D): RT→`/pool/media/torrents/seeding/hawke-uno/_rehome-unique/71cdd51.../The.West.Wing.S02...` (staging path cleaned up). Locate S02 content on disk and repoint.
+- English.Teacher.S01 (90C8E73D): RT→`/pool/media/torrents/seeding/tv/English.Teacher...` (`pool/tv/` does not exist). Locate content on disk and repoint.
+
+EXCLUDED: Beetlejuice (E04E5247) and UEFA (3E82F6F7) — OP-24 anomalous paths, require human inspection first.
+
+**After j34: j35 — `partial-content-triage`** (OP-36)
+Remove EGB Boot Camp (4BF5C39, no MP3 source) and Diary of Teenage Girl (5CACA88D, 2 files missing); d.erase + delete nlinks=1 data.
+
+**Session state as of 2026-06-25:**
+- Merged: j28 (stub repair batch + check_before_start), j29 (OP-37 + OP-31), j30 (4 leeching removals), j33 (8 missed stubs repaired)
+- RT stopped: 8 (5 path-broken, 2 partial-content, 1 Diary confirmed unfixable)
+- RT seeding at 99.9x% (OP-43): River Monsters 127C3834, Transformers 96D896CA, Dexter S02 245F2BCE, Dexter S07 E36553B1 — monitor 48h for peer completion
+- Version: 0.8.67
+- Open OPs relevant to next jobs: OP-39, OP-40, OP-36, OP-43, OP-45
+- job counter note (OP-44): chatrap counter is at 34 (j31/j32 consumed by rollbacks); use `--bypass-mastery` flag
 
 Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
-JOB=TBD
-JOB_WORKTREE=${CR_WORKTREE}/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
+JOB=j34
+JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
 ```
 
 Create the worktree (use absolute path to avoid nesting — j22 lesson):
@@ -128,13 +148,10 @@ Agent-Model: <model>
 Agent-Model-Slug: <slug>"
 ```
 
-S05 check after every commit:
+S05 check after every commit (run from INSIDE the job worktree):
 
 ```bash
-GIT_AUTHOR_NAME=codex GIT_AUTHOR_EMAIL=codex@chatrap.local \
-  ${JOB_WORKTREE}/bin/chatrap \
-  ack commit HEAD \
-  --repo-root ${JOB_WORKTREE}
+cd ${JOB_WORKTREE} && chatrap ack commit HEAD
 ```
 
 ---
