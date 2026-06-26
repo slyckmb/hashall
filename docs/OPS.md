@@ -34,8 +34,8 @@ Lead cherry-picks clusters into job plans.
 | ~~OP-27~~ | ~~bug~~ | ~~j20 MISSING_DATA false-negative audit~~ | ~~closed:j25~~ |
 | ~~OP-28~~ | ~~reliability~~ | ~~11 missingFiles after qB restart — 4 patterns: double-nested (4), deadpool-hardlink (1), FileList.io root (2), stash-pointer (2), displaced (2); all set_location+recheck; missingFiles: 11→0~~ | ~~closed:j27~~ |
 | OP-18 | reliability | EXPLORE: unified single-pass placement+path tool for all ~4k RT items — two broken tools (rehome planner: WHERE stash/pool; save_path_inference: WHAT PATH category formula) have each caused mass damage when run independently; explore building one validated tool that resolves both dimensions per item (placement policy → seeding-root, category → path formula → full target path, diff vs actual, migrate if needed, sync qB); NO further mutations from rehome or save_path_inference until this exploration is complete and 4-gate validated | 2026-06-17 |
-| OP-29 | reliability | **UPDATED post-j34** — 80→4 truly stopped (state=0). j30: removed 4 leeching; j33: repaired 8 stubs; j34: repointed 4 path-broken (M3GAN, Novitiate, WestWing.S02, English.Teacher.S01 — all state=1 complete=1). Remaining 4 stopped: (B) path-broken 2 — Beetlejuice+UEFA (OP-24 anomalous paths, human inspection required); (C) partial content 2 — EGB Boot Camp 4BF5C39 (24 mp3 stubs, no source), Diary of Teenage Girl 5CACA88D (2 files missing, 98.42%); j35 to handle partial content pair. | 2026-06-25 |
-| OP-36 | reliability | **UPDATED post-j33**: (1) EGB Boot Camp (4BF5C39): 24 MP3 stubs, no source — zero-byte in nested, cannot hardlink; likely remove. (2) Diary of Teenage Girl (5CACA88D): hash-check confirmed 98.42% complete (2 files missing — .nfo 0/1 chunk + Sample.mkv 0/1 chunk — zero-byte in nested); state=0 complete=0; 2 files genuinely missing from all known locations; options: remove torrent or locate source for missing files. | 2026-06-25 |
+| OP-29 | reliability | **UPDATED post-j35** — 80→2 truly stopped (state=0). j30: removed 4 leeching; j33: repaired 8 stubs; j34: repointed 4 path-broken; j35: erased EGB Boot Camp + Diary. Remaining 2 stopped: Beetlejuice (E04E5247) + UEFA (3E82F6F7) — OP-24 anomalous FileList.io paths, human inspection required. No further automated repair possible until OP-24 resolved. | 2026-06-25 |
+| ~~OP-36~~ | ~~reliability~~ | ~~EGB Boot Camp erased from RT; 24 MP3 stub files (nlinks=1) deleted. Diary of Teenage Girl erased from RT; Sample.mkv + .nfo (nlinks=1, 374MB total) deleted. 26 stub files removed total. Main content files (nlinks≥2) preserved.~~ | ~~closed:j35~~ |
 | ~~OP-30~~ | ~~bug~~ | ~~`rt_apply_directory_repoint(..., restart=True)` unconditional `d.start` — fixed: `check_before_start` param added; `rt_recheck_torrent` fixed; `lane1_execute.py` updated; 5 new tests; see `docs/RCCA-RT-LEECHING-INCIDENT.md`~~ | ~~closed:j28~~ |
 | ~~OP-31~~ | ~~reliability~~ | ~~All mutation callers of `rt_apply_directory_repoint` must use `check_before_start=True`; all 8 callers updated in j29~~ | ~~closed:j29~~ |
 | ~~OP-33~~ | ~~reliability~~ | ~~Snowfall S05 pool copy damaged — E01 downloaded (nlinks=1) + E02-E10 zero stubs; j28 batch repair hardlinked stubs from nested; hash-check passed complete=1; item now seeding; E01 downloaded copy verified correct by hash; no repoint needed~~ | ~~closed:j28~~ |
@@ -62,7 +62,7 @@ Lead cherry-picks clusters into job plans.
 
 | ID | Type | Title | Job |
 |----|------|-------|-----|
-| OP-36 | reliability | Partial-content triage: EGB Boot Camp + Diary of Teenage Girl — erase + delete nlinks=1 | j35 |
+| | | | |
 
 ---
 
@@ -87,6 +87,7 @@ Lead cherry-picks clusters into job plans.
 | OP-37 | bug | `rt_check_and_conditionally_start()` final `d.complete` read after poll timeout — if complete=1, start torrent; prevents stoppedUL stalls on large multi-episode seasons; fixed in j29; after-job A/B skipped (OP-42) so closure recorded here. | j29 |
 | OP-39 | reliability | M3GAN repointed to /data/media/torrents/seeding/movies (30.6GB, state=1 complete=1); Novitiate subfolder created + hardlinked + repointed to /data/.../darkpeers/Novitiate.2017.../; West.Wing.S02 repointed to /data/.../hawke-uno/The.West.Wing.S02... (71GB, 22ep); all seeding. | j34 |
 | OP-40 | reliability | English.Teacher.S01 located at stash/PrivateHD/ (nlinks=19, all ep present); repointed to /data/.../PrivateHD/English.Teacher.S01... (7.7GB, state=1 complete=1). Beetlejuice+UEFA remain OP-24 scope (human inspection required, not touched). | j34 |
+| OP-36 | reliability | EGB Boot Camp erased from RT; 24 MP3 stub files (nlinks=1) deleted. Diary of Teenage Girl erased from RT; Sample.mkv (374MB, nlinks=1) + .nfo (nlinks=1) deleted. 26 unshared stub files removed. Main .mkv (nlinks=5) + .srt×4 (nlinks=4) preserved. RT stopped count: 80→2. | j35 |
 
 ---
 
