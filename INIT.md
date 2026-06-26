@@ -3,7 +3,7 @@
 Session: `hashall-20260530-000517-claude`
 Branch: `cr/hashall-20260530-000517-claude`
 Worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude`
-Updated: 2026-06-25
+Updated: 2026-06-26
 
 ---
 
@@ -55,34 +55,35 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j34 — `repoint-wrong-paths`**
-OPs: OP-39, OP-40
-Goal: Repoint 4 path-broken stopped torrents in RT to their actual content locations. No code changes — `rt_apply_directory_repoint(..., check_before_start=True)` per item + hash-check + start.
+**Next job: j35 — `partial-content-triage`**
+OPs: OP-36
+Goal: Remove 2 unfixable stopped torrents from RT and delete their nlinks=1 (unshared) partial data on disk.
 
-Items (all state=0 complete=0 in RT):
-- M3GAN.2.0.2025 (2796E137): RT→`/pool/media/torrents/seeding/movies` (category root). Content at `/stash/media/torrents/seeding/movies/M3GAN.2.0.2025.Unrated.1080p.BluRAY.REMUX.AVC.TrueHD.7.1.Atmos-STATiK.mkv` (30.6 GB, nlinks=11). Repoint to `/stash/media/torrents/seeding/movies/`.
-- Novitiate.2017 (FADBA92E): RT→`/pool/media/torrents/seeding/torrentleech/Novitiate...` (wrong pool, wrong tracker case). Content at `/stash/media/torrents/seeding/darkpeers/Novitiate.2017.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR.mkv`. Repoint to `/stash/media/torrents/seeding/darkpeers/`.
-- West.Wing.S02 (71CDD51D): RT→`/pool/media/torrents/seeding/hawke-uno/_rehome-unique/71cdd51.../The.West.Wing.S02...` (staging path cleaned up). Locate S02 content on disk and repoint.
-- English.Teacher.S01 (90C8E73D): RT→`/pool/media/torrents/seeding/tv/English.Teacher...` (`pool/tv/` does not exist). Locate content on disk and repoint.
+Items (both state=0 complete=0 in RT):
+- EGB Boot Camp (4BF5C39FEA1A33415C47170FDBC4E4DA41BDB383): 24 MP3 stubs, no source — cannot hardlink. `d.erase` + delete nlinks=1 files.
+- Diary of Teenage Girl (5CACA88D29E64DE495A47B53A466F7CADCB3CE02): 2 files missing (.nfo + Sample.mkv), 98.42% complete. `d.erase` + delete nlinks=1 files.
 
-EXCLUDED: Beetlejuice (E04E5247) and UEFA (3E82F6F7) — OP-24 anomalous paths, require human inspection first.
+EXCLUDED (DO NOT TOUCH — OP-24/OP-45):
+- E04E5247... (Beetlejuice) — anomalous paths, human inspection required
+- 3E82F6F7... (UEFA) — anomalous paths, human inspection required
 
-**After j34: j35 — `partial-content-triage`** (OP-36)
-Remove EGB Boot Camp (4BF5C39, no MP3 source) and Diary of Teenage Girl (5CACA88D, 2 files missing); d.erase + delete nlinks=1 data.
+**Approach:** Use `s.d.erase(hash)` via xmlrpc.client after first recording the `d.directory` for disk cleanup. Then find nlinks=1 files under that directory and delete. DO NOT delete nlinks>1 files.
+
+**RT Docker path note (OP-46):** RT container sees /data/media/ not /stash/media/. When reading d.directory from RT, the path returned will be /data/media/... — map to /stash/media/... for disk operations on the host.
 
 **Session state as of 2026-06-25:**
-- Merged: j28 (stub repair batch + check_before_start), j29 (OP-37 + OP-31), j30 (4 leeching removals), j33 (8 missed stubs repaired)
-- RT stopped: 8 (5 path-broken, 2 partial-content, 1 Diary confirmed unfixable)
-- RT seeding at 99.9x% (OP-43): River Monsters 127C3834, Transformers 96D896CA, Dexter S02 245F2BCE, Dexter S07 E36553B1 — monitor 48h for peer completion
+- Merged: j28 (stub repair batch), j29 (OP-31+37), j30 (4 leeching removals), j33 (8 stubs), j34 (4 path-broken repointed)
+- RT stopped: 4 (Beetlejuice+UEFA OP-24 human-inspect, EGB Boot Camp + Diary → j35 removes these)
+- RT seeding at 99.9x% (OP-43): River Monsters 127C3834, Transformers 96D896CA, Dexter S02 245F2BCE, Dexter S07 E36553B1 — check complete=1 by 2026-06-27
 - Version: 0.8.67
-- Open OPs relevant to next jobs: OP-39, OP-40, OP-36, OP-43, OP-45
-- job counter note (OP-44): chatrap counter is at 34 (j31/j32 consumed by rollbacks); use `--bypass-mastery` flag
+- Open OPs relevant: OP-36 (j35), OP-43 (monitor), OP-46 (RT Docker path)
+- job counter note (OP-44): chatrap counter is at 35 (j31/j32/j34 incremented; actual j35 may land at higher number if prior rollbacks consumed slots)
 
 Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude
-JOB=j34
+JOB=j35
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude__${JOB}
 ```
 
