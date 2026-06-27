@@ -55,8 +55,8 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j46 — build-canonicalize-tool**
-OPs: OP-50
+**Next job: j47 — canonicalize-execute**
+OPs: OP-51
 Goal: Build unified single-pass placement+path orchestrator (`src/hashall/canonicalize.py`); wire `_detect_external_consumers` + `infer_canonical_save_path`; add CLI; pilot-verify; lift mutation block.
 
 Tasks: j46-t01 through j46-t05 briefs authored in comms/briefs/.
@@ -72,7 +72,7 @@ Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
-JOB=j46
+JOB=j47
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__${JOB}
 ```
 
