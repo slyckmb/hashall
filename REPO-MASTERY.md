@@ -65,6 +65,10 @@ See JOB-QUEUE.md for the authoritative completed-job list.
 - Run GIT_AUTHOR_NAME=codex GIT_AUTHOR_EMAIL=codex@chatrap.local chatrap ack commit HEAD before reporting any commit done
 - After merging prompt changes: run ./bin/chatrap regen-shared (worktree binary)
 
+## Key Process Protocols
+
+- [4-Gate Mutation Protocol](docs/4-GATE-MUTATION-PROTOCOL.md) — required before any mass RT/qB state mutation
+
 ## Useful Commands
 
   chatrap lead status          — role + location + next job + first action (step 0 post-clear)
