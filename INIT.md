@@ -55,8 +55,8 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j41 — explore-unified-tool**
-OPs: OP-18
+**Next job: j39 — cross-seed-repair**
+OPs: OP-09,OP-15,OP-17,OP-19,OP-24,OP-47
 Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
 
 Tasks: j40-t01 docs audit/plan brief authored.
@@ -72,7 +72,7 @@ Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
-JOB=j41
+JOB=j39
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__${JOB}
 ```
 
