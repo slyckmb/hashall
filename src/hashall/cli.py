@@ -9059,14 +9059,14 @@ def canonicalize_batch_cmd(drifted_only, limit, json_output, db, rt_session_dir)
 
 @cli.command("canonicalize-apply")
 @click.argument("torrent_hash")
-@click.option("--dry-run", "dry_run", is_flag=True, default=True, help="Simulate actions (default).")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Simulate actions (no mutations).")
 @click.option("--force", "force_mode", is_flag=True, default=False, help="Live execution (mutually exclusive with --dry-run).")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
 def canonicalize_apply_cmd(torrent_hash, dry_run, force_mode, db, rt_session_dir):
     """Apply a canonicalize repair plan for a single torrent.
 
-    Defaults to --dry-run (no mutations). Use --force for live execution.
+    Defaults to safe mode (no mutations). Pass --dry-run to simulate, --force to execute live.
     """
     from dataclasses import asdict
     from hashall.canonicalize import (
@@ -9170,7 +9170,7 @@ def canonicalize_apply_cmd(torrent_hash, dry_run, force_mode, db, rt_session_dir
 
 
 @cli.command("canonicalize-apply-batch")
-@click.option("--dry-run", "dry_run", is_flag=True, default=True, help="Simulate actions (default).")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Simulate actions (no mutations).")
 @click.option("--force", "force_mode", is_flag=True, default=False, help="Live execution (mutually exclusive with --dry-run).")
 @click.option("--limit", type=int, default=0, show_default=True, help="Max items to process; 0 means no limit.")
 @click.option("--plan-type", "plan_type_filter", type=str, default="", help="Filter: fix_path_only | fix_placement_only | fix_both")
@@ -9180,7 +9180,7 @@ def canonicalize_apply_cmd(torrent_hash, dry_run, force_mode, db, rt_session_dir
 def canonicalize_apply_batch_cmd(dry_run, force_mode, limit, plan_type_filter, json_output, db, rt_session_dir):
     """Apply canonicalize repair plans for all RT inventory torrents.
 
-    Defaults to --dry-run. Use --force for live execution.
+    Defaults to safe mode (no mutations). Pass --dry-run to simulate, --force to execute live.
     Aborts on first failure when --force is active.
     """
     from dataclasses import asdict

@@ -712,12 +712,15 @@ def _execute_fix_placement(
             notes.append(f"could not check disk space for {target_parent}: {e}")
 
     # --- Rsync ---
-    os.makedirs(tgt, exist_ok=True)
+    src_is_file = os.path.isfile(src)
+    if src_is_file:
+        os.makedirs(os.path.dirname(tgt), exist_ok=True)
+        rsync_args = [src, tgt]
+    else:
+        os.makedirs(tgt, exist_ok=True)
+        rsync_args = [f"{src}/", f"{tgt}/"]
     try:
-        rsync_cmd = [
-            "rsync", "-a", "--hard-links",
-            f"{src}/", f"{tgt}/",
-        ]
+        rsync_cmd = ["rsync", "-a", "--hard-links"] + rsync_args
         notes.append(f"rsync: {' '.join(rsync_cmd)}")
         result = subprocess.run(
             rsync_cmd, capture_output=True, text=True, timeout=86400,
@@ -730,7 +733,7 @@ def _execute_fix_placement(
                 post_state=None, error=f"rsync failed (exit={result.returncode}): {stderr}",
                 notes=notes,
             )
-        notes.append(f"rsync completed: {src}/ -> {tgt}/")
+        notes.append(f"rsync completed: {src} -> {tgt}")
     except subprocess.TimeoutExpired:
         return ApplyResult(
             torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
@@ -771,6 +774,14 @@ def _execute_fix_placement(
             if success:
                 qb_ok = True
                 notes.append(f"qB set_location -> {tgt}")
+                # Trigger recheck so qB verifies the file at new location and returns to stoppedUP.
+                # Without recheck, qB may remain stoppedDL after cross-device set_location.
+                try:
+                    qb_client.recheck_torrent(plan.torrent_hash)
+                    time.sleep(5)
+                    notes.append("qB recheck triggered post-set_location")
+                except Exception as e:
+                    notes.append(f"qB recheck failed (non-fatal): {e}")
             else:
                 notes.append("qB set_location returned False")
         except Exception as e:
