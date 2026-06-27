@@ -279,8 +279,6 @@ def canonicalize_torrent(
             qbm_config_path=config.qbm_config_path,
         )
 
-        inferred_path = Path(inferred.canonical_save_path.rstrip("/"))
-        canonical_seeding_root = str(inferred_path.parent)
         canonical_subdir = inferred.subdir
 
         if inference_reliability is None:
@@ -302,10 +300,12 @@ def canonicalize_torrent(
         if inference_reliability is None:
             inference_reliability = "ambiguous"
 
-    if not canonical_seeding_root:
-        canonical_seeding_root = (
-            _STASH_SEEDING_ROOT if canonical_device == "stash" else _POOL_SEEDING_ROOT
-        )
+    # Seeding root is determined by canonical device (Step 2), not path inference.
+    # infer_canonical_save_path uses the RT container-view stash prefix (/data/media/);
+    # we always use real paths (/stash/media/, /pool/media/) in verdicts and repair plans.
+    canonical_seeding_root = (
+        _STASH_SEEDING_ROOT if canonical_device == "stash" else _POOL_SEEDING_ROOT
+    )
 
     # --- Step 4: Build canonical path ---
     item_name = (
