@@ -9174,14 +9174,16 @@ def canonicalize_apply_cmd(torrent_hash, dry_run, force_mode, db, rt_session_dir
 @click.option("--force", "force_mode", is_flag=True, default=False, help="Live execution (mutually exclusive with --dry-run).")
 @click.option("--limit", type=int, default=0, show_default=True, help="Max items to process; 0 means no limit.")
 @click.option("--plan-type", "plan_type_filter", type=str, default="", help="Filter: fix_path_only | fix_placement_only | fix_both")
+@click.option("--abort-on-failure/--no-abort-on-failure", "abort_on_soft_failure", default=False, help="Abort on first soft failure (default: continue).")
 @click.option("--json", "json_output", is_flag=True, help="NDJSON output (one ApplyResult per line).")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
-def canonicalize_apply_batch_cmd(dry_run, force_mode, limit, plan_type_filter, json_output, db, rt_session_dir):
+def canonicalize_apply_batch_cmd(dry_run, force_mode, limit, plan_type_filter, abort_on_soft_failure, json_output, db, rt_session_dir):
     """Apply canonicalize repair plans for all RT inventory torrents.
 
     Defaults to safe mode (no mutations). Pass --dry-run to simulate, --force to execute live.
-    Aborts on first failure when --force is active.
+    In live mode, continues on soft failures (e.g. qB not found) unless --abort-on-failure is set.
+    Hard errors (exceptions) always abort.
     """
     from dataclasses import asdict
     from hashall.canonicalize import (
@@ -9238,7 +9240,8 @@ def canonicalize_apply_batch_cmd(dry_run, force_mode, limit, plan_type_filter, j
     processed = 0
     results: list = []
     error_count = 0
-    abort_on_failure = live_execution
+    abort_on_hard_error = live_execution
+    abort_on_failure = live_execution and abort_on_soft_failure
 
     for rt_row in rt_rows:
         if limit > 0 and processed >= limit:
@@ -9263,7 +9266,7 @@ def canonicalize_apply_batch_cmd(dry_run, force_mode, limit, plan_type_filter, j
                 click.echo(json.dumps({"hash": rt_row.torrent_hash, "error": str(exc)}))
             else:
                 click.echo(f"{rt_row.torrent_hash[:16]}  error  {exc}", err=True)
-            if abort_on_failure:
+            if abort_on_hard_error:
                 conn.close()
                 raise click.Abort()
             processed += 1
@@ -9287,7 +9290,7 @@ def canonicalize_apply_batch_cmd(dry_run, force_mode, limit, plan_type_filter, j
                 click.echo(json.dumps({"hash": rt_row.torrent_hash, "error": str(exc)}))
             else:
                 click.echo(f"{rt_row.torrent_hash[:16]}  error  {exc}", err=True)
-            if abort_on_failure:
+            if abort_on_hard_error:
                 conn.close()
                 raise click.Abort()
             processed += 1

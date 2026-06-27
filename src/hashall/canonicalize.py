@@ -602,15 +602,18 @@ def _execute_fix_path_only(
         )
 
     # --- Repoint RT ---
+    # RT appends info_name internally for multi-file torrents (d.directory.set semantics),
+    # so we must pass the PARENT of the content path, not the content path itself.
+    rt_target = os.path.dirname(tgt)
     rt_ok = False
     try:
         rt_apply_directory_repoint(
-            plan.torrent_hash, tgt,
+            plan.torrent_hash, rt_target,
             rpc_url=rt_rpc_url, restart=True, check_before_start=True,
             validate_target_exists=True,
         )
         rt_ok = True
-        notes.append(f"RT repointed to {tgt}")
+        notes.append(f"RT repointed to {rt_target}")
     except Exception as e:
         notes.append(f"RT repoint failed: {e}")
 
@@ -754,15 +757,18 @@ def _execute_fix_placement(
         )
 
     # --- Repoint RT ---
+    # RT appends info_name internally for multi-file torrents (d.directory.set semantics),
+    # so we must pass the PARENT of the content path, not the content path itself.
+    rt_target = os.path.dirname(tgt)
     rt_ok = False
     try:
         rt_apply_directory_repoint(
-            plan.torrent_hash, tgt,
+            plan.torrent_hash, rt_target,
             rpc_url=rt_rpc_url, restart=True, check_before_start=True,
             validate_target_exists=True,
         )
         rt_ok = True
-        notes.append(f"RT repointed to {tgt}")
+        notes.append(f"RT repointed to {rt_target}")
     except Exception as e:
         notes.append(f"RT repoint failed: {e}")
 
@@ -819,17 +825,17 @@ def _execute_fix_placement(
     except OSError as e:
         notes.append(f"staging source failed (non-fatal): {e}")
 
-    if not rt_ok or (qb_client and not qb_ok):
-        error_parts = []
-        if not rt_ok:
-            error_parts.append("RT repoint failed")
-        if qb_client and not qb_ok:
-            error_parts.append("qB repoint failed")
+    if not rt_ok:
         return ApplyResult(
             torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
             dry_run=False, success=False, pre_state=pre_state,
-            post_state=None, error="; ".join(error_parts), notes=notes,
+            post_state=None, error="RT repoint failed", notes=notes,
         )
+
+    # qB update is best-effort: cross-device set_location is blocked (qB would physically copy).
+    # RT is the authority; qB debt tracked in notes for follow-up via rehome/fastresume.
+    if qb_client and not qb_ok:
+        notes.append("qB debt: update qB path via rehome after Gate 4")
 
     post_state = _capture_pre_state(plan.torrent_hash, qb_client, rt_rpc_url)
     return ApplyResult(
