@@ -17,6 +17,7 @@ updated: 2026-06-26
 | j40 | docs-batch | OP-01,OP-02,OP-03,OP-07,OP-08,OP-11,OP-12,OP-13,OP-25 | Merged to CR. merge(cr/hashall-20260626-151456__j40). 
 | j41 | explore-unified-tool | OP-18 | Merged to CR. merge(cr/hashall-20260626-151456__j41). 
 | j46 | build-canonicalize-tool | OP-50 |
+| j47 | canonicalize-execute | OP-51 |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j42 | lane2-strategy | OP-23,OP-26 |
 | j43 | rt-state-monitor | OP-10,OP-43 |
@@ -28,7 +29,8 @@ updated: 2026-06-26
 ## Dependencies
 
 - j39 (cross-seed-repair) requires j37 (code-bug-fix) — must fix OP-16 before migrating ~2000 items
-- j39 (cross-seed-repair) requires j46 (build-canonicalize-tool) — unified tool must exist and pilot-verified before any path migration
+- j47 (canonicalize-execute) requires j46 (build-canonicalize-tool) — executor gates on j46-t05 LIFT verdict
+- j39 (cross-seed-repair) requires j47 (canonicalize-execute) — all drift items must be corrected before cross-seed migration begins
 - j42 (lane2-strategy) benefits from j46 (build-canonicalize-tool) — canonicalize batch output quantifies Lane 2 scope precisely
 - j45 (cr-to-main) is last — merge only after all planned repair jobs complete
 
@@ -36,7 +38,7 @@ updated: 2026-06-26
 
 ## Run Order
 
-j36 → j37 → j38 → j40 → j41 → j46 → j39 → j42 → j43 → j44 → j45
+j36 → j37 → j38 → j40 → j41 → j46 → j47 → j39 → j42 → j43 → j44 → j45
 
 Notes:
 - j40 (docs) is independent and can be interleaved
@@ -91,6 +93,26 @@ Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
 | j46-t03 | implementation | Add `hashall canonicalize` and `hashall canonicalize-batch` CLI entry points to `src/hashall/cli.py`; bump version |
 | j46-t04 | testing | Write `tests/test_canonicalize.py`; all 6 gate scenarios must pass |
 | j46-t05 | verification | Pilot run `hashall canonicalize-batch --drifted-only --limit 50`; inspect for false positives; write `docs/CANONICALIZE-PILOT-RESULTS.md`; recommend lift/hold on mutation block |
+
+---
+
+## j47 — canonicalize-execute
+
+**Slug:** canonicalize-execute
+**OPs:** OP-51
+**Goal:** Build the `hashall canonicalize-apply` executor; formalize the 4-gate mutation protocol as an institutional doc; run all four gates against the live inventory to correct placement and path drift across ~4k RT items. Mutation block on rehome/save_path_inference fully lifted only after Gate 4 batch completes with stoppedDL delta=0.
+**Gates on:** j46-t05 LIFT verdict (false positive rate ≤ 5%)
+
+### Tasks
+
+| Task | Type | Goal |
+|------|------|------|
+| j47-t01 | doc | Write `docs/4-GATE-MUTATION-PROTOCOL.md` — canonical protocol reference; update REPO-MASTERY.md |
+| j47-t02 | implementation | Build `apply_repair_plan()` + `hashall canonicalize-apply` and `hashall canonicalize-apply-batch` CLI; default dry-run, require --force to mutate |
+| j47-t03 | verification | Gate 0+1: catalog freshness, stoppedDL baseline, editable install, test suite green, qB state snapshot; write `docs/CANONICALIZE-PREFLIGHT.md`; PASS required before Gate 2 |
+| j47-t04 | verification | Gate 2: dry-run all drifted items via `canonicalize-apply-batch --dry-run`; write `docs/CANONICALIZE-REPAIR-MANIFEST.md`; operator review required before Gate 3 |
+| j47-t05 | verification | Gate 3: single fix_path_only item live pilot; record pre/post RT+qB state; 60s re-check; write `docs/CANONICALIZE-GATE3-PILOT.md`; PASS = stoppedUP at canonical path, zero new stoppedDL |
+| j47-t06 | implementation | Gate 4: gated batch — fix_path_only first, then fix_placement_only, then fix_both if storage permits; ≤5 items per batch, state check after each; write `docs/CANONICALIZE-GATE4-PROGRESS.md` |
 
 ---
 
