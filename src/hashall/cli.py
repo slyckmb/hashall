@@ -8832,10 +8832,233 @@ def devices_preferred_mount(device, mount_point, db):
     conn.close()
 
 
+@cli.command("canonicalize")
+@click.argument("torrent_hash")
+@click.option("--detail", is_flag=True, help="Include inference_notes and external_consumers in output.")
+@click.option("--json", "json_output", is_flag=True, help="Output CanonicalizeVerdict as JSON.")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+def canonicalize_cmd(torrent_hash, detail, json_output, db, rt_session_dir):
+    """Canonicalize a single torrent: determine canonical device, path, and drift status."""
+    from dataclasses import asdict
+    from hashall.canonicalize import (
+        canonicalize_torrent,
+        CanonicalizeRequest,
+        CanonicalizeConfig,
+        generate_repair_plan,
+    )
+    from hashall.client_drift import default_policy
+    from hashall.device import resolve_device_id
+    from hashall.model import connect_db
+    from hashall.rtorrent import load_rt_inventory_rows
+    from rehome.planner import DemotionPlanner
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    try:
+        stash_device = resolve_device_id(conn, "stash")
+        pool_device = resolve_device_id(conn, "pool")
+    except ValueError:
+        click.echo("Could not resolve stash/pool device IDs. Ensure devices are registered.", err=True)
+        conn.close()
+        raise click.Abort()
+
+    planner = DemotionPlanner(
+        catalog_path=Path(db),
+        seeding_roots=["/pool/media/torrents/seeding", "/stash/media/torrents/seeding"],
+        library_roots=[],
+        stash_device=stash_device,
+        pool_device=pool_device,
+        stash_seeding_root="/stash/media/torrents/seeding",
+        pool_seeding_root="/pool/media/torrents/seeding",
+        pool_payload_root="/pool/media/torrents/seeding",
+    )
+    policy = default_policy()
+    config = CanonicalizeConfig(planner=planner, policy=policy)
+
+    rt_rows = {r.torrent_hash.lower(): r for r in load_rt_inventory_rows(Path(rt_session_dir))}
+    rt_row = rt_rows.get(torrent_hash.lower())
+    if rt_row is None:
+        click.echo(f"Torrent not found in RT inventory: {torrent_hash}")
+        conn.close()
+        return
+
+    request = CanonicalizeRequest(
+        torrent_hash=torrent_hash,
+        category="",
+        tags="",
+        save_path=rt_row.save_path,
+        content_path=rt_row.content_path,
+        rt_directory=rt_row.content_path,
+        state="completed",
+    )
+
+    verdict = canonicalize_torrent(request, conn, config)
+    plan = generate_repair_plan(verdict)
+    conn.close()
+
+    if json_output:
+        click.echo(json.dumps(asdict(verdict), indent=2))
+        return
+
+    device_status = "DRIFT" if verdict.placement_drift else "✓"
+    path_status = "DRIFT" if verdict.full_path_drift else "✓"
+    current_path = request.content_path or request.save_path
+
+    drift_parts = []
+    if verdict.placement_drift:
+        drift_parts.append("placement")
+    if verdict.path_structure_drift:
+        drift_parts.append("path_structure")
+    drift_label = " + ".join(drift_parts) if drift_parts else "none"
+
+    action_label = plan.plan_type
+    action_parts = [action_label]
+    if plan.move_required:
+        action_parts.append("(move required)")
+
+    click.echo(f"hash:      {verdict.torrent_hash}")
+    click.echo(f"device:    {verdict.canonical_device}  (canonical: {verdict.canonical_device})  {device_status}")
+    click.echo(f"path:      {current_path}")
+    click.echo(f"canonical: {verdict.canonical_path}  {path_status}")
+    click.echo(f"drift:     {drift_label}")
+    click.echo(f"action:    {' '.join(action_parts)}")
+
+    if detail:
+        if verdict.inference_notes:
+            click.echo(f"inference_notes:")
+            for note in verdict.inference_notes:
+                click.echo(f"  {note}")
+        if verdict.external_consumers:
+            click.echo(f"external_consumers:")
+            for ec in verdict.external_consumers:
+                click.echo(f"  path={ec.path} domain={ec.domain}")
+
+
+@cli.command("canonicalize-batch")
+@click.option("--drifted-only", is_flag=True, help="Only show items with placement_drift or path_structure_drift.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Max items to process; 0 means no limit.")
+@click.option("--json", "json_output", is_flag=True, help="Output NDJSON (one JSON object per line).")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+def canonicalize_batch_cmd(drifted_only, limit, json_output, db, rt_session_dir):
+    """Canonicalize all RT inventory torrents in batch. Read-only."""
+    from dataclasses import asdict
+    from hashall.canonicalize import (
+        canonicalize_torrent,
+        CanonicalizeRequest,
+        CanonicalizeConfig,
+        generate_repair_plan,
+    )
+    from hashall.client_drift import default_policy
+    from hashall.device import resolve_device_id
+    from hashall.model import connect_db
+    from hashall.rtorrent import load_rt_inventory_rows
+    from rehome.planner import DemotionPlanner
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    try:
+        stash_device = resolve_device_id(conn, "stash")
+        pool_device = resolve_device_id(conn, "pool")
+    except ValueError:
+        click.echo("Could not resolve stash/pool device IDs. Ensure devices are registered.", err=True)
+        conn.close()
+        raise click.Abort()
+
+    planner = DemotionPlanner(
+        catalog_path=Path(db),
+        seeding_roots=["/pool/media/torrents/seeding", "/stash/media/torrents/seeding"],
+        library_roots=[],
+        stash_device=stash_device,
+        pool_device=pool_device,
+        stash_seeding_root="/stash/media/torrents/seeding",
+        pool_seeding_root="/pool/media/torrents/seeding",
+        pool_payload_root="/pool/media/torrents/seeding",
+    )
+    policy = default_policy()
+    config = CanonicalizeConfig(planner=planner, policy=policy)
+
+    rt_rows = load_rt_inventory_rows(Path(rt_session_dir))
+    total = len(rt_rows)
+    processed = 0
+    results = []
+    error_count = 0
+
+    for rt_row in rt_rows:
+        if limit > 0 and processed >= limit:
+            break
+        request = CanonicalizeRequest(
+            torrent_hash=rt_row.torrent_hash,
+            category="",
+            tags="",
+            save_path=rt_row.save_path,
+            content_path=rt_row.content_path,
+            rt_directory=rt_row.content_path,
+            state="completed",
+        )
+        try:
+            verdict = canonicalize_torrent(request, conn, config)
+            plan = generate_repair_plan(verdict)
+        except Exception as exc:
+            error_count += 1
+            if json_output:
+                click.echo(json.dumps({"hash": rt_row.torrent_hash, "error": str(exc)}))
+            else:
+                click.echo(f"{rt_row.torrent_hash[:16]}  error  {exc}", err=True)
+            processed += 1
+            continue
+
+        has_drift = verdict.placement_drift or verdict.path_structure_drift
+        if drifted_only and not has_drift:
+            processed += 1
+            continue
+
+        if json_output:
+            payload = asdict(verdict)
+            payload["plan_type"] = plan.plan_type
+            payload["move_required"] = plan.move_required
+            click.echo(json.dumps(payload))
+        else:
+            drift_summary = plan.plan_type
+            current_path = request.content_path or request.save_path
+            detail_parts = []
+            if verdict.placement_drift or verdict.path_structure_drift:
+                path_short = str(Path(current_path).parent)
+                canon_short = str(Path(verdict.canonical_path).parent)
+                detail_parts.append(f"{path_short} → {canon_short}")
+            if plan.move_required:
+                detail_parts.append("(move required)")
+            detail_str = "  " + "  ".join(detail_parts) if detail_parts else ""
+            click.echo(f"{rt_row.torrent_hash[:16]}  {drift_summary}{detail_str}")
+
+        results.append((verdict, plan))
+        processed += 1
+
+    conn.close()
+
+    if not json_output:
+        totals = {"ok": 0, "fix_path_only": 0, "fix_placement_only": 0, "fix_both": 0, "blocked": 0, "ambiguous": 0}
+        for _, plan in results:
+            pt = plan.plan_type
+            if pt in totals:
+                totals[pt] += 1
+            else:
+                totals["ambiguous"] += 1
+        total_ok = totals.pop("ok", 0)
+        click.echo(
+            f"total={processed}  ok={total_ok}  "
+            f"fix_path={totals.get('fix_path_only', 0)}  "
+            f"fix_placement={totals.get('fix_placement_only', 0)}  "
+            f"fix_both={totals.get('fix_both', 0)}  "
+            f"blocked={totals.get('blocked', 0)}  "
+            f"ambiguous={totals.get('ambiguous', 0)}  "
+            f"errors={error_count}"
+        )
+
+
 # Canonical CLI surface:
 # - `hashall rehome ...` exposes the full rehome command tree
 # - `hashall refresh` is a direct top-level alias for the rehome refresh flow
-# - `hashall refresh-dashboard` exposes the refresh task status view directly
+# - `hashall refresh-dashboard` exposes the refresh task status display
 from rehome.cli import (
     cli as rehome_cli,
     refresh_cmd as rehome_refresh_cmd,
