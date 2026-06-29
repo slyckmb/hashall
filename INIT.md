@@ -56,7 +56,7 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 ## STEP 3 — Next job (execute immediately after gate passes)
 
 **Next job: j47 — canonicalize-execute**
-OPs: OP-51
+OPs: OP-51,OP-52,OP-54
 Goal: Build unified single-pass placement+path orchestrator (`src/hashall/canonicalize.py`); wire `_detect_external_consumers` + `infer_canonical_save_path`; add CLI; pilot-verify; lift mutation block.
 
 Tasks: j46-t01 through j46-t05 briefs authored in comms/briefs/.
