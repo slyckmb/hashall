@@ -8893,7 +8893,8 @@ def canonicalize_cmd(torrent_hash, detail, json_output, db, rt_session_dir):
     )
 
     verdict = canonicalize_torrent(request, conn, config)
-    plan = generate_repair_plan(verdict)
+    current_path = request.content_path or request.save_path
+    plan = generate_repair_plan(verdict, current_path=current_path)
     conn.close()
 
     if json_output:
@@ -8997,7 +8998,8 @@ def canonicalize_batch_cmd(drifted_only, limit, json_output, db, rt_session_dir)
         )
         try:
             verdict = canonicalize_torrent(request, conn, config)
-            plan = generate_repair_plan(verdict)
+            current_path = request.content_path or request.save_path
+            plan = generate_repair_plan(verdict, current_path=current_path)
         except Exception as exc:
             error_count += 1
             if json_output:
@@ -9052,6 +9054,274 @@ def canonicalize_batch_cmd(drifted_only, limit, json_output, db, rt_session_dir)
             f"blocked={totals.get('blocked', 0)}  "
             f"ambiguous={totals.get('ambiguous', 0)}  "
             f"errors={error_count}"
+        )
+
+
+@cli.command("canonicalize-apply")
+@click.argument("torrent_hash")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Simulate actions (no mutations).")
+@click.option("--force", "force_mode", is_flag=True, default=False, help="Live execution (mutually exclusive with --dry-run).")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+def canonicalize_apply_cmd(torrent_hash, dry_run, force_mode, db, rt_session_dir):
+    """Apply a canonicalize repair plan for a single torrent.
+
+    Defaults to safe mode (no mutations). Pass --dry-run to simulate, --force to execute live.
+    """
+    from dataclasses import asdict
+    from hashall.canonicalize import (
+        canonicalize_torrent,
+        apply_repair_plan,
+        CanonicalizeRequest,
+        CanonicalizeConfig,
+        generate_repair_plan,
+    )
+    from hashall.client_drift import default_policy
+    from hashall.device import resolve_device_id
+    from hashall.model import connect_db
+    from hashall.qbittorrent import QBittorrentClient
+    from hashall.rtorrent import load_rt_inventory_rows
+    from rehome.planner import DemotionPlanner
+
+    if dry_run and force_mode:
+        click.echo("Error: --dry-run and --force are mutually exclusive.", err=True)
+        raise click.Abort()
+
+    live_execution = force_mode
+    if not dry_run and not force_mode:
+        live_execution = False
+
+    conn = connect_db(Path(db), read_only=False, apply_migrations=False)
+    try:
+        stash_device = resolve_device_id(conn, "stash")
+        pool_device = resolve_device_id(conn, "pool")
+    except ValueError:
+        click.echo("Could not resolve stash/pool device IDs.", err=True)
+        conn.close()
+        raise click.Abort()
+
+    planner = DemotionPlanner(
+        catalog_path=Path(db),
+        seeding_roots=["/pool/media/torrents/seeding", "/stash/media/torrents/seeding"],
+        library_roots=[],
+        stash_device=stash_device,
+        pool_device=pool_device,
+        stash_seeding_root="/stash/media/torrents/seeding",
+        pool_seeding_root="/pool/media/torrents/seeding",
+        pool_payload_root="/pool/media/torrents/seeding",
+    )
+    policy = default_policy()
+    config = CanonicalizeConfig(planner=planner, policy=policy)
+
+    rt_rows = {r.torrent_hash.lower(): r for r in load_rt_inventory_rows(Path(rt_session_dir))}
+    rt_row = rt_rows.get(torrent_hash.lower())
+    if rt_row is None:
+        click.echo(f"Torrent not found in RT inventory: {torrent_hash}")
+        conn.close()
+        return
+
+    request = CanonicalizeRequest(
+        torrent_hash=torrent_hash,
+        category="",
+        tags="",
+        save_path=rt_row.save_path,
+        content_path=rt_row.content_path,
+        rt_directory=rt_row.content_path,
+        state="completed",
+    )
+
+    verdict = canonicalize_torrent(request, conn, config)
+    current_path = request.content_path or request.save_path
+    plan = generate_repair_plan(verdict, current_path=current_path)
+
+    click.echo(f"hash:       {verdict.torrent_hash}")
+    click.echo(f"plan_type:  {plan.plan_type}")
+    click.echo(f"source:     {plan.source_path}")
+    click.echo(f"target:     {plan.target_path}")
+    click.echo(f"mode:       {'LIVE' if live_execution else 'DRY-RUN'}")
+
+    qb_client = QBittorrentClient() if live_execution else None
+
+    result = apply_repair_plan(
+        plan=plan,
+        db_session=conn,
+        config=config,
+        dry_run=not live_execution,
+        qb_client=qb_client,
+    )
+
+    click.echo(f"success:    {result.success}")
+    if result.error:
+        click.echo(f"error:      {result.error}")
+    if result.pre_state:
+        click.echo("pre_state:")
+        for k, v in result.pre_state.items():
+            click.echo(f"  {k}: {v}")
+    if result.post_state:
+        click.echo("post_state:")
+        for k, v in result.post_state.items():
+            click.echo(f"  {k}: {v}")
+    if result.notes:
+        click.echo("notes:")
+        for note in result.notes:
+            click.echo(f"  {note}")
+
+    conn.close()
+
+
+@cli.command("canonicalize-apply-batch")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Simulate actions (no mutations).")
+@click.option("--force", "force_mode", is_flag=True, default=False, help="Live execution (mutually exclusive with --dry-run).")
+@click.option("--limit", type=int, default=0, show_default=True, help="Max items to process; 0 means no limit.")
+@click.option("--plan-type", "plan_type_filter", type=str, default="", help="Filter: fix_path_only | fix_placement_only | fix_both")
+@click.option("--abort-on-failure/--no-abort-on-failure", "abort_on_soft_failure", default=False, help="Abort on first soft failure (default: continue).")
+@click.option("--json", "json_output", is_flag=True, help="NDJSON output (one ApplyResult per line).")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+def canonicalize_apply_batch_cmd(dry_run, force_mode, limit, plan_type_filter, abort_on_soft_failure, json_output, db, rt_session_dir):
+    """Apply canonicalize repair plans for all RT inventory torrents.
+
+    Defaults to safe mode (no mutations). Pass --dry-run to simulate, --force to execute live.
+    In live mode, continues on soft failures (e.g. qB not found) unless --abort-on-failure is set.
+    Hard errors (exceptions) always abort.
+    """
+    from dataclasses import asdict
+    from hashall.canonicalize import (
+        canonicalize_torrent,
+        apply_repair_plan,
+        CanonicalizeRequest,
+        CanonicalizeConfig,
+        generate_repair_plan,
+    )
+    from hashall.client_drift import default_policy
+    from hashall.device import resolve_device_id
+    from hashall.model import connect_db
+    from hashall.qbittorrent import QBittorrentClient
+    from hashall.rtorrent import load_rt_inventory_rows
+    from rehome.planner import DemotionPlanner
+
+    if dry_run and force_mode:
+        click.echo("Error: --dry-run and --force are mutually exclusive.", err=True)
+        raise click.Abort()
+
+    live_execution = force_mode
+
+    valid_types = {"fix_path_only", "fix_placement_only", "fix_both"}
+    if plan_type_filter and plan_type_filter not in valid_types:
+        click.echo(f"Error: --plan-type must be one of {valid_types}", err=True)
+        raise click.Abort()
+
+    conn = connect_db(Path(db), read_only=False, apply_migrations=False)
+    try:
+        stash_device = resolve_device_id(conn, "stash")
+        pool_device = resolve_device_id(conn, "pool")
+    except ValueError:
+        click.echo("Could not resolve stash/pool device IDs.", err=True)
+        conn.close()
+        raise click.Abort()
+
+    planner = DemotionPlanner(
+        catalog_path=Path(db),
+        seeding_roots=["/pool/media/torrents/seeding", "/stash/media/torrents/seeding"],
+        library_roots=[],
+        stash_device=stash_device,
+        pool_device=pool_device,
+        stash_seeding_root="/stash/media/torrents/seeding",
+        pool_seeding_root="/pool/media/torrents/seeding",
+        pool_payload_root="/pool/media/torrents/seeding",
+    )
+    policy = default_policy()
+    config = CanonicalizeConfig(planner=planner, policy=policy)
+
+    qb_client = QBittorrentClient() if live_execution else None
+
+    rt_rows = load_rt_inventory_rows(Path(rt_session_dir))
+    total = len(rt_rows)
+    processed = 0
+    results: list = []
+    error_count = 0
+    abort_on_hard_error = live_execution
+    abort_on_failure = live_execution and abort_on_soft_failure
+
+    for rt_row in rt_rows:
+        if limit > 0 and processed >= limit:
+            break
+
+        request = CanonicalizeRequest(
+            torrent_hash=rt_row.torrent_hash,
+            category="",
+            tags="",
+            save_path=rt_row.save_path,
+            content_path=rt_row.content_path,
+            rt_directory=rt_row.content_path,
+            state="completed",
+        )
+        try:
+            verdict = canonicalize_torrent(request, conn, config)
+            current_path = request.content_path or request.save_path
+            plan = generate_repair_plan(verdict, current_path=current_path)
+        except Exception as exc:
+            error_count += 1
+            if json_output:
+                click.echo(json.dumps({"hash": rt_row.torrent_hash, "error": str(exc)}))
+            else:
+                click.echo(f"{rt_row.torrent_hash[:16]}  error  {exc}", err=True)
+            if abort_on_hard_error:
+                conn.close()
+                raise click.Abort()
+            processed += 1
+            continue
+
+        if plan_type_filter and plan.plan_type != plan_type_filter:
+            processed += 1
+            continue
+
+        try:
+            result = apply_repair_plan(
+                plan=plan,
+                db_session=conn,
+                config=config,
+                dry_run=not live_execution,
+                qb_client=qb_client,
+            )
+        except Exception as exc:
+            error_count += 1
+            if json_output:
+                click.echo(json.dumps({"hash": rt_row.torrent_hash, "error": str(exc)}))
+            else:
+                click.echo(f"{rt_row.torrent_hash[:16]}  error  {exc}", err=True)
+            if abort_on_hard_error:
+                conn.close()
+                raise click.Abort()
+            processed += 1
+            continue
+
+        if json_output:
+            click.echo(json.dumps(asdict(result)))
+        else:
+            status = "✓" if result.success else "✗"
+            plan_label = result.plan_type
+            mode_label = "DRY" if result.dry_run else "LIVE"
+            click.echo(f"{rt_row.torrent_hash[:16]}  {status}  {plan_label}  {mode_label}")
+            if result.error:
+                click.echo(f"  error: {result.error}", err=True)
+
+        results.append(result)
+        processed += 1
+
+        if abort_on_failure and not result.success:
+            click.echo(f"Aborting on first failure: {result.error}", err=True)
+            conn.close()
+            raise click.Abort()
+
+    conn.close()
+
+    if not json_output:
+        success_count = sum(1 for r in results if r.success)
+        fail_count = sum(1 for r in results if not r.success)
+        click.echo(
+            f"total={processed}  success={success_count}  fail={fail_count}  "
+            f"errors={error_count}  mode={'LIVE' if live_execution else 'DRY-RUN'}"
         )
 
 

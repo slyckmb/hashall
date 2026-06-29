@@ -12,10 +12,25 @@ Pipeline:
   5. Cross-validate: drift dimensions + reuse + move_required
 """
 
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hashall.qbittorrent import QBittorrentClient
+
+from hashall.rtorrent import (
+    DEFAULT_RT_RPC_URL,
+    rt_xmlrpc_call,
+    _xmlrpc_scalar_text,
+)
 
 from hashall.client_drift import ClientDriftPolicy, _placement_kind
 from hashall.payload import get_torrent_instance, get_payload_by_id, get_payloads_by_hash
@@ -77,6 +92,19 @@ class RepairPlan:
     move_required: bool
     reuse_possible: bool
     notes: List[str]
+
+
+@dataclass
+class ApplyResult:
+    """Result of applying a repair plan."""
+    torrent_hash: str
+    plan_type: str
+    dry_run: bool
+    success: bool
+    pre_state: dict
+    post_state: dict | None
+    error: str | None
+    notes: list[str]
 
 
 @dataclass
@@ -372,13 +400,26 @@ def canonicalize_torrent(
     )
 
 
-def generate_repair_plan(verdict: CanonicalizeVerdict) -> RepairPlan:
-    """Generate a repair plan from a canonicalize verdict."""
+def generate_repair_plan(
+    verdict: CanonicalizeVerdict,
+    current_path: str = "",
+) -> RepairPlan:
+    """Generate a repair plan from a canonicalize verdict.
+
+    Args:
+        verdict: The canonicalize verdict from canonicalize_torrent().
+        current_path: The actual current path of the torrent data (source).
+            If empty, falls back to canonical_path for both source and target
+            (backward compat with tests that don't assert paths).
+    """
+    src = current_path if current_path else verdict.canonical_path
+    tgt = verdict.canonical_path
+
     if verdict.blocked:
         return RepairPlan(
             torrent_hash=verdict.torrent_hash,
             plan_type="blocked",
-            source_path=verdict.canonical_path,
+            source_path=src,
             target_path="",
             move_required=False,
             reuse_possible=False,
@@ -390,8 +431,8 @@ def generate_repair_plan(verdict: CanonicalizeVerdict) -> RepairPlan:
         return RepairPlan(
             torrent_hash=verdict.torrent_hash,
             plan_type="ok",
-            source_path=verdict.canonical_path,
-            target_path=verdict.canonical_path,
+            source_path=src,
+            target_path=tgt,
             move_required=False,
             reuse_possible=True,
             notes=verdict.inference_notes + ["already canonical"],
@@ -404,8 +445,8 @@ def generate_repair_plan(verdict: CanonicalizeVerdict) -> RepairPlan:
         return RepairPlan(
             torrent_hash=verdict.torrent_hash,
             plan_type="fix_both",
-            source_path=verdict.canonical_path,
-            target_path=verdict.canonical_path,
+            source_path=src,
+            target_path=tgt,
             move_required=move_required,
             reuse_possible=reuse_possible,
             notes=verdict.inference_notes
@@ -416,8 +457,8 @@ def generate_repair_plan(verdict: CanonicalizeVerdict) -> RepairPlan:
         return RepairPlan(
             torrent_hash=verdict.torrent_hash,
             plan_type="fix_placement_only",
-            source_path=verdict.canonical_path,
-            target_path=verdict.canonical_path,
+            source_path=src,
+            target_path=tgt,
             move_required=move_required,
             reuse_possible=reuse_possible,
             notes=verdict.inference_notes + ["placement drift only"],
@@ -426,9 +467,478 @@ def generate_repair_plan(verdict: CanonicalizeVerdict) -> RepairPlan:
     return RepairPlan(
         torrent_hash=verdict.torrent_hash,
         plan_type="fix_path_only",
-        source_path=verdict.canonical_path,
-        target_path=verdict.canonical_path,
+        source_path=src,
+        target_path=tgt,
         move_required=False,
         reuse_possible=True,
         notes=verdict.inference_notes + ["path structure drift only"],
     )
+
+
+def _capture_rt_state(torrent_hash: str, rt_rpc_url: str) -> dict:
+    """Read-only RT state snapshot."""
+    result: dict = {"rt_directory": "", "rt_complete": -1}
+    try:
+        dir_xml = rt_xmlrpc_call("d.directory", torrent_hash, rpc_url=rt_rpc_url)
+        result["rt_directory"] = _xmlrpc_scalar_text(dir_xml).rstrip("/")
+    except Exception as e:
+        result["rt_directory"] = f"<error: {e}>"
+    try:
+        comp_xml = rt_xmlrpc_call("d.complete", torrent_hash, rpc_url=rt_rpc_url)
+        result["rt_complete"] = int(_xmlrpc_scalar_text(comp_xml).strip())
+    except Exception as e:
+        result["rt_complete"] = -1
+    try:
+        down_xml = rt_xmlrpc_call("d.down.rate", torrent_hash, rpc_url=rt_rpc_url)
+        result["rt_down_rate"] = int(_xmlrpc_scalar_text(down_xml).strip())
+    except Exception as e:
+        result["rt_down_rate"] = -1
+    return result
+
+
+def _capture_qb_state(torrent_hash: str, qb_client: Optional[QBittorrentClient]) -> dict:
+    """Read-only qB state snapshot. Returns empty dict if no client or lookup fails."""
+    result: dict = {"qb_save_path": "", "qb_state": ""}
+    if qb_client is None:
+        result["qb_save_path"] = "<no-client>"
+        result["qb_state"] = "<no-client>"
+        return result
+    try:
+        info = qb_client.get_torrent_info(torrent_hash)
+        if info:
+            result["qb_save_path"] = info.save_path
+            result["qb_state"] = info.state
+        else:
+            result["qb_save_path"] = "<not-found>"
+            result["qb_state"] = "<not-found>"
+    except Exception as e:
+        result["qb_save_path"] = f"<error: {e}>"
+        result["qb_state"] = f"<error: {e}>"
+    return result
+
+
+def _capture_pre_state(
+    torrent_hash: str,
+    qb_client: Optional[QBittorrentClient],
+    rt_rpc_url: str,
+) -> dict:
+    """Capture combined pre-mutation state from RT and qB."""
+    state = {}
+    state.update(_capture_rt_state(torrent_hash, rt_rpc_url))
+    state.update(_capture_qb_state(torrent_hash, qb_client))
+    return state
+
+
+def _get_payload_size_bytes(db_session: sqlite3.Connection, torrent_hash: str) -> int:
+    """Look up total payload bytes for a torrent from catalog."""
+    from hashall.payload import get_torrent_instance, get_payload_by_id
+    try:
+        torrent = get_torrent_instance(db_session, torrent_hash)
+        if torrent and torrent.payload_id is not None:
+            payload = get_payload_by_id(db_session, torrent.payload_id)
+            if payload:
+                return payload.total_bytes or 0
+        return 0
+    except Exception:
+        return 0
+
+
+def _execute_fix_path_only(
+    plan: RepairPlan,
+    db_session: sqlite3.Connection,
+    config: CanonicalizeConfig,
+    qb_client: Optional[QBittorrentClient],
+    rt_rpc_url: str,
+    pre_state: dict,
+) -> ApplyResult:
+    """Rename source dir to canonical path + repoint both clients."""
+    from hashall.rtorrent import rt_apply_directory_repoint
+
+    notes = list(plan.notes)
+    src = plan.source_path.rstrip("/")
+    tgt = plan.target_path.rstrip("/")
+
+    if not src:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="source_path is empty", notes=notes,
+        )
+    if not tgt:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="target_path is empty", notes=notes,
+        )
+
+    if not os.path.exists(src):
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error=f"source path does not exist: {src}",
+            notes=notes,
+        )
+
+    if os.path.exists(tgt):
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error=f"target path already exists: {tgt}",
+            notes=notes,
+        )
+
+    # --- Rename ---
+    try:
+        parent = os.path.dirname(tgt)
+        os.makedirs(parent, exist_ok=True)
+        os.rename(src, tgt)
+        renamed_ok = True
+        notes.append(f"rename: {src} -> {tgt}")
+    except OSError as e:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error=f"rename failed: {e}", notes=notes,
+        )
+
+    # --- Repoint RT ---
+    # RT appends info_name internally for multi-file torrents (d.directory.set semantics),
+    # so we must pass the PARENT of the content path, not the content path itself.
+    rt_target = os.path.dirname(tgt)
+    rt_ok = False
+    try:
+        rt_apply_directory_repoint(
+            plan.torrent_hash, rt_target,
+            rpc_url=rt_rpc_url, restart=True, check_before_start=True,
+            validate_target_exists=True,
+        )
+        rt_ok = True
+        notes.append(f"RT repointed to {rt_target}")
+    except Exception as e:
+        notes.append(f"RT repoint failed: {e}")
+
+    # --- Repoint qB ---
+    qb_ok = False
+    if qb_client:
+        try:
+            success = qb_client.set_location(plan.torrent_hash, tgt, resume_after=False)
+            if success:
+                qb_ok = True
+                notes.append(f"qB set_location -> {tgt}")
+            else:
+                notes.append(f"qB set_location returned False")
+        except Exception as e:
+            notes.append(f"qB repoint error: {e}")
+    else:
+        notes.append("no qB client available — qB not repointed")
+
+    # --- Rollback if either repoint failed ---
+    if not rt_ok or (qb_client and not qb_ok):
+        try:
+            os.rename(tgt, src)
+            notes.append(f"rollback rename: {tgt} -> {src}")
+        except OSError as e:
+            notes.append(f"rollback rename failed: {e}")
+
+        error_parts = []
+        if not rt_ok:
+            error_parts.append("RT repoint failed")
+        if qb_client and not qb_ok:
+            error_parts.append("qB repoint failed")
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="; ".join(error_parts), notes=notes,
+        )
+
+    post_state = _capture_pre_state(plan.torrent_hash, qb_client, rt_rpc_url)
+    return ApplyResult(
+        torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+        dry_run=False, success=True, pre_state=pre_state,
+        post_state=post_state, error=None, notes=notes,
+    )
+
+
+def _execute_fix_placement(
+    plan: RepairPlan,
+    db_session: sqlite3.Connection,
+    config: CanonicalizeConfig,
+    qb_client: Optional[QBittorrentClient],
+    rt_rpc_url: str,
+    pre_state: dict,
+) -> ApplyResult:
+    """Rsync source to canonical device+path + repoint both clients + stage source."""
+    from hashall.rtorrent import rt_apply_directory_repoint
+
+    notes = list(plan.notes)
+    src = plan.source_path.rstrip("/")
+    tgt = plan.target_path.rstrip("/")
+
+    if not src:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="source_path is empty", notes=notes,
+        )
+    if not tgt:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="target_path is empty", notes=notes,
+        )
+
+    if not os.path.exists(src):
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error=f"source path does not exist: {src}",
+            notes=notes,
+        )
+
+    # --- Validate pool free space ---
+    payload_size = _get_payload_size_bytes(db_session, plan.torrent_hash)
+    target_parent = os.path.dirname(tgt)
+    if payload_size > 0:
+        try:
+            usage = shutil.disk_usage(target_parent)
+            if usage.free < payload_size:
+                return ApplyResult(
+                    torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+                    dry_run=False, success=False, pre_state=pre_state,
+                    post_state=None,
+                    error=f"insufficient space on target device: free={usage.free} < "
+                          f"required={payload_size}",
+                    notes=notes,
+                )
+            notes.append(f"space ok: free={usage.free} >= required={payload_size}")
+        except OSError as e:
+            notes.append(f"could not check disk space for {target_parent}: {e}")
+
+    # --- Rsync ---
+    src_is_file = os.path.isfile(src)
+    if src_is_file:
+        os.makedirs(os.path.dirname(tgt), exist_ok=True)
+        rsync_args = [src, tgt]
+    else:
+        os.makedirs(tgt, exist_ok=True)
+        rsync_args = [f"{src}/", f"{tgt}/"]
+    try:
+        rsync_cmd = ["rsync", "-a", "--hard-links"] + rsync_args
+        notes.append(f"rsync: {' '.join(rsync_cmd)}")
+        result = subprocess.run(
+            rsync_cmd, capture_output=True, text=True, timeout=86400,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or "unknown rsync error"
+            return ApplyResult(
+                torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+                dry_run=False, success=False, pre_state=pre_state,
+                post_state=None, error=f"rsync failed (exit={result.returncode}): {stderr}",
+                notes=notes,
+            )
+        notes.append(f"rsync completed: {src} -> {tgt}")
+    except subprocess.TimeoutExpired:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="rsync timed out after 24h", notes=notes,
+        )
+    except FileNotFoundError:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="rsync not found on PATH", notes=notes,
+        )
+    except OSError as e:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error=f"rsync exec error: {e}", notes=notes,
+        )
+
+    # --- Repoint RT ---
+    # RT appends info_name internally for multi-file torrents (d.directory.set semantics),
+    # so we must pass the PARENT of the content path, not the content path itself.
+    rt_target = os.path.dirname(tgt)
+    rt_ok = False
+    try:
+        rt_apply_directory_repoint(
+            plan.torrent_hash, rt_target,
+            rpc_url=rt_rpc_url, restart=True, check_before_start=True,
+            validate_target_exists=True,
+        )
+        rt_ok = True
+        notes.append(f"RT repointed to {rt_target}")
+    except Exception as e:
+        notes.append(f"RT repoint failed: {e}")
+
+    # --- Repoint qB ---
+    qb_ok = False
+    if qb_client:
+        try:
+            success = qb_client.set_location(plan.torrent_hash, tgt, resume_after=False)
+            if success:
+                qb_ok = True
+                notes.append(f"qB set_location -> {tgt}")
+                # Trigger recheck so qB verifies the file at new location and returns to stoppedUP.
+                # Without recheck, qB may remain stoppedDL after cross-device set_location.
+                try:
+                    qb_client.recheck_torrent(plan.torrent_hash)
+                    time.sleep(5)
+                    notes.append("qB recheck triggered post-set_location")
+                except Exception as e:
+                    notes.append(f"qB recheck failed (non-fatal): {e}")
+            else:
+                notes.append("qB set_location returned False")
+        except Exception as e:
+            notes.append(f"qB repoint error: {e}")
+    else:
+        notes.append("no qB client available — qB not repointed")
+
+    # --- Verify RT seeding state ---
+    rt_seeding_ok = False
+    if rt_ok:
+        try:
+            time.sleep(1)
+            health = _capture_rt_state(plan.torrent_hash, rt_rpc_url)
+            rt_complete = health.get("rt_complete", -1)
+            rt_down = health.get("rt_down_rate", -1)
+            if rt_complete == 1 and rt_down == 0:
+                rt_seeding_ok = True
+                notes.append(f"RT seeding ok: complete={rt_complete} down_rate={rt_down}")
+            else:
+                notes.append(f"RT state post-repoint: complete={rt_complete} down_rate={rt_down}")
+        except Exception as e:
+            notes.append(f"RT state check error: {e}")
+
+    # --- Stage source for deferred cleanup ---
+    try:
+        stage_base = os.path.join(
+            os.path.dirname(src),
+            ".rehome-cleanup-stage",
+            plan.torrent_hash,
+        )
+        os.makedirs(stage_base, exist_ok=True)
+        staged_path = os.path.join(stage_base, os.path.basename(src))
+        os.rename(src, staged_path)
+        notes.append(f"staged source: {src} -> {staged_path}")
+    except OSError as e:
+        notes.append(f"staging source failed (non-fatal): {e}")
+
+    if not rt_ok:
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="RT repoint failed", notes=notes,
+        )
+
+    # qB update is best-effort: cross-device set_location is blocked (qB would physically copy).
+    # RT is the authority; qB debt tracked in notes for follow-up via rehome/fastresume.
+    if qb_client and not qb_ok:
+        notes.append("qB debt: update qB path via rehome after Gate 4")
+
+    post_state = _capture_pre_state(plan.torrent_hash, qb_client, rt_rpc_url)
+    return ApplyResult(
+        torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+        dry_run=False, success=True, pre_state=pre_state,
+        post_state=post_state, error=None, notes=notes,
+    )
+
+
+def apply_repair_plan(
+    plan: RepairPlan,
+    db_session: sqlite3.Connection,
+    config: CanonicalizeConfig,
+    dry_run: bool = True,
+    qb_client: Optional[QBittorrentClient] = None,
+    rt_rpc_url: str = DEFAULT_RT_RPC_URL,
+) -> ApplyResult:
+    """
+    Apply a repair plan. Default is dry-run (no mutations).
+
+    Args:
+        plan: The repair plan to execute.
+        db_session: Open catalog database connection.
+        config: Shared canonicalize context.
+        dry_run: If True, simulate all actions without mutation.
+        qb_client: Optional qB client for live operations.
+            Required when dry_run=False.
+        rt_rpc_url: rTorrent XMLRPC endpoint.
+
+    Returns:
+        ApplyResult with pre/post state, success flag, and notes.
+    """
+    notes = list(plan.notes)
+
+    # --- Capture pre-state (read-only, safe in dry-run) ---
+    pre_state = _capture_pre_state(plan.torrent_hash, qb_client, rt_rpc_url)
+
+    if dry_run:
+        notes.append("dry-run: no mutations performed")
+        if plan.plan_type == "blocked":
+            return ApplyResult(
+                torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+                dry_run=True, success=False, pre_state=pre_state,
+                post_state=None, error="blocked by external consumer", notes=notes,
+            )
+        if plan.plan_type == "ok":
+            return ApplyResult(
+                torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+                dry_run=True, success=True, pre_state=pre_state,
+                post_state=None, error=None, notes=notes,
+            )
+
+        src = plan.source_path.rstrip("/")
+        tgt = plan.target_path.rstrip("/")
+        notes.append(f"would rename: {src} -> {tgt}") if plan.plan_type == "fix_path_only" else None
+        notes.append(f"would rsync: {src}/ -> {tgt}/") if plan.plan_type in ("fix_placement_only", "fix_both") else None
+        notes.append(f"would repoint RT to {tgt}")
+        notes.append(f"would set qB location to {tgt}")
+
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=True, success=True, pre_state=pre_state,
+            post_state=None, error=None, notes=notes,
+        )
+
+    # --- Live execution ---
+    if plan.plan_type == "blocked":
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error="blocked by external consumer", notes=notes,
+        )
+
+    if plan.plan_type == "ok":
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=True, pre_state=pre_state,
+            post_state=None, error=None, notes=notes,
+        )
+
+    if qb_client is None:
+        notes.append("No qB client provided — qB will not be repointed")
+
+    try:
+        if plan.plan_type == "fix_path_only":
+            return _execute_fix_path_only(
+                plan, db_session, config, qb_client, rt_rpc_url, pre_state,
+            )
+        elif plan.plan_type in ("fix_placement_only", "fix_both"):
+            return _execute_fix_placement(
+                plan, db_session, config, qb_client, rt_rpc_url, pre_state,
+            )
+        else:
+            return ApplyResult(
+                torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+                dry_run=False, success=False, pre_state=pre_state,
+                post_state=None,
+                error=f"unknown plan_type: {plan.plan_type}", notes=notes,
+            )
+    except Exception as e:
+        notes.append(f"unexpected error: {e}")
+        return ApplyResult(
+            torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,
+            dry_run=False, success=False, pre_state=pre_state,
+            post_state=None, error=str(e), notes=notes,
+        )
