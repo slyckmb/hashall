@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import sqlite3
@@ -1880,3 +1881,569 @@ def test_rt_qb_mirror_process_queue_matches_hash_prefix_to_selected_row(tmp_path
     assert "dry-run would_remove_queue" in result.output
     assert "queued_not_ready_for_mirror" not in result.output
     assert queue_file.exists()
+
+
+def test_rank_output_includes_library_dupe_flag(tmp_path: Path) -> None:
+    pool_seed = tmp_path / "pool" / "torrents" / "seeding" / "site"
+    stash_seed = tmp_path / "stash" / "torrents" / "seeding" / "site"
+    qb_content = pool_seed / "Release.One"
+    rt_content = stash_seed / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    (rt_content / "file.bin").write_text("payload", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.executescript("""
+        CREATE TABLE files_fs_zfs_123 (
+            path TEXT PRIMARY KEY,
+            size INTEGER NOT NULL,
+            sha256 TEXT,
+            status TEXT DEFAULT 'active'
+        );
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT,
+            file_count INTEGER,
+            total_bytes INTEGER,
+            status TEXT
+        );
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER,
+            save_path TEXT
+        );
+    """)
+    payload_sha = hashlib.sha256(b"payload").hexdigest()
+    torrent_hash = "aaa111"
+    conn.execute(
+        "INSERT INTO files_fs_zfs_123 (path, size, sha256, status) VALUES (?, ?, ?, 'active')",
+        (str(qb_content / "file.bin"), 7, payload_sha),
+    )
+    conn.execute(
+        "INSERT INTO files_fs_zfs_123 (path, size, sha256, status) VALUES (?, ?, ?, 'active')",
+        (str(library_root / "Release.One.bin"), 7, payload_sha),
+    )
+    conn.execute(
+        "INSERT INTO payloads VALUES (1, ? , 1, ?, 1, 7, 'complete')",
+        (payload_sha, str(qb_content)),
+    )
+    conn.execute(
+        "INSERT INTO torrent_instances VALUES (?, 1, ?)",
+        (torrent_hash, str(pool_seed)),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    report = build_path_drift_rank_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        catalog_path=catalog,
+        policy=ClientDriftPolicy(
+            pool_roots=(str(tmp_path / "pool" / "torrents" / "seeding"),),
+            stash_roots=(str(tmp_path / "stash" / "torrents" / "seeding"),),
+            arr_library_roots=(str(library_root),),
+            anchor_scan_max_files=1000,
+        ),
+    )
+
+    assert report["summary"]["path_drift"] >= 1
+    item = report["items"][0]
+    assert item["library_dupe"] is True
+    assert item["arr_anchor_source"] == "sha256_dupe"
+    assert item["arr_status"] == "linked_to_arr"
+
+
+def test_apply_repoint_both_to_stash_dry_run_does_not_mutate(tmp_path: Path, monkeypatch) -> None:
+    pool_seed_qb = tmp_path / "pool" / "torrents" / "seeding" / "site1"
+    pool_seed_rt = tmp_path / "pool" / "torrents" / "seeding" / "site2"
+    qb_content = pool_seed_qb / "Release.One"
+    rt_content = pool_seed_rt / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    (rt_content / "file.bin").write_text("payload", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.executescript("""
+        CREATE TABLE files_fs_zfs_123 (
+            path TEXT PRIMARY KEY,
+            size INTEGER NOT NULL,
+            sha256 TEXT,
+            status TEXT DEFAULT 'active'
+        );
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT,
+            file_count INTEGER,
+            total_bytes INTEGER,
+            status TEXT
+        );
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER,
+            save_path TEXT
+        );
+    """)
+    payload_sha = hashlib.sha256(b"payload").hexdigest()
+    torrent_hash = "aaa111"
+    conn.execute(
+        "INSERT INTO files_fs_zfs_123 (path, size, sha256, status) VALUES (?, ?, ?, 'active')",
+        (str(rt_content / "file.bin"), 7, payload_sha),
+    )
+    conn.execute(
+        "INSERT INTO files_fs_zfs_123 (path, size, sha256, status) VALUES (?, ?, ?, 'active')",
+        (str(library_root / "Release.One.bin"), 7, payload_sha),
+    )
+    conn.execute(
+        "INSERT INTO payloads VALUES (1, ?, 1, ?, 1, 7, 'complete')",
+        (payload_sha, str(rt_content)),
+    )
+    conn.execute(
+        "INSERT INTO torrent_instances VALUES (?, 1, ?)",
+        (torrent_hash, str(rt_content)),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed_qb),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps(
+            {
+                "pool_roots": [str(tmp_path / "pool" / "torrents" / "seeding")],
+                "stash_roots": [str(tmp_path / "stash" / "torrents" / "seeding")],
+                "arr_library_roots": [str(library_root)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_client():
+        raise AssertionError("dry-run must not construct qB client")
+
+    def fail_rt(*args, **kwargs):
+        raise AssertionError("dry-run must not repoint RT")
+
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", fail_client)
+    monkeypatch.setattr("hashall.rtorrent.rt_apply_directory_repoint", fail_rt)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "client-drift",
+            "apply",
+            "--action",
+            "repoint_both_to_stash",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--anchor-scan-max-files",
+            "1000",
+            "--catalog",
+            str(catalog),
+            "--hash",
+            torrent_hash,
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "repoint_both_to_stash" in result.output
+
+
+def test_apply_repoint_both_to_stash_live_repoints_and_rechecks(tmp_path: Path, monkeypatch) -> None:
+    import hashlib as _hashlib
+
+    pool_seed_qb = tmp_path / "pool" / "torrents" / "seeding" / "site1"
+    pool_seed_rt = tmp_path / "pool" / "torrents" / "seeding" / "site2"
+    stash_root = tmp_path / "stash" / "torrents" / "seeding"
+    qb_content = pool_seed_qb / "Release.One"
+    rt_content = pool_seed_rt / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    (rt_content / "file.bin").write_text("payload", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.executescript("""
+        CREATE TABLE files_fs_zfs_123 (
+            path TEXT PRIMARY KEY,
+            size INTEGER NOT NULL,
+            sha256 TEXT,
+            status TEXT DEFAULT 'active'
+        );
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT,
+            file_count INTEGER,
+            total_bytes INTEGER,
+            status TEXT
+        );
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER,
+            save_path TEXT
+        );
+    """)
+    payload_sha = _hashlib.sha256(b"payload").hexdigest()
+    torrent_hash = "aaa111"
+    conn.execute(
+        "INSERT INTO files_fs_zfs_123 (path, size, sha256, status) VALUES (?, ?, ?, 'active')",
+        (str(rt_content / "file.bin"), 7, payload_sha),
+    )
+    conn.execute(
+        "INSERT INTO files_fs_zfs_123 (path, size, sha256, status) VALUES (?, ?, ?, 'active')",
+        (str(library_root / "Release.One.bin"), 7, payload_sha),
+    )
+    conn.execute(
+        "INSERT INTO payloads VALUES (1, ?, 1, ?, 1, 7, 'complete')",
+        (payload_sha, str(rt_content)),
+    )
+    conn.execute(
+        "INSERT INTO torrent_instances VALUES (?, 1, ?)",
+        (torrent_hash, str(rt_content)),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed_qb),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps(
+            {
+                "pool_roots": [str(tmp_path / "pool" / "torrents" / "seeding")],
+                "stash_roots": [str(stash_root)],
+                "arr_library_roots": [str(library_root)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeQbit:
+        last_error = None
+
+        def __init__(self) -> None:
+            self.locations: list[tuple[str, str]] = []
+            self.rechecked: list[str] = []
+            self.paused: list[str] = []
+
+        def set_location(self, torrent_hash: str, target: str) -> bool:
+            self.locations.append((torrent_hash, target))
+            return True
+
+        def recheck_torrent(self, torrent_hash: str) -> bool:
+            self.rechecked.append(torrent_hash)
+            return True
+
+        def pause_torrent(self, torrent_hash: str) -> bool:
+            self.paused.append(torrent_hash)
+            return True
+
+    fake = FakeQbit()
+    rt_log: list[dict] = []
+
+    def fake_rt_repoint(torrent_hash, target, *, rpc_url=None, restart=True,
+                        check_before_start=True, validate_target_exists=True):
+        rt_log.append({"hash": torrent_hash, "target": target})
+        return {"calls": 1}
+
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", lambda: fake)
+    monkeypatch.setattr("hashall.rtorrent.rt_apply_directory_repoint", fake_rt_repoint)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "client-drift",
+            "apply",
+            "--action",
+            "repoint_both_to_stash",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--anchor-scan-max-files",
+            "1000",
+            "--catalog",
+            str(catalog),
+            "--hash",
+            torrent_hash,
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+            "--sleep-row",
+            "0",
+            "--apply",
+        ],
+    )
+
+    assert result.exit_code == 0
+    expected_stash_path = str(stash_root / "cross-seed" / "Release.One")
+    assert fake.locations == [(torrent_hash, expected_stash_path)]
+    assert fake.rechecked == [torrent_hash]
+    assert rt_log == [{"hash": torrent_hash, "target": expected_stash_path}]
+    assert "recheck_started" in result.output
+
+
+def test_apply_repoint_both_to_stash_creates_hardlinks_and_removes_pool(tmp_path: Path, monkeypatch) -> None:
+    import hashlib as _hashlib
+
+    pool_seed_qb = tmp_path / "pool" / "torrents" / "seeding" / "site1"
+    pool_seed_rt = tmp_path / "pool" / "torrents" / "seeding" / "site2"
+    stash_root = tmp_path / "stash" / "torrents" / "seeding"
+    qb_content = pool_seed_qb / "Release.One"
+    rt_content = pool_seed_rt / "Release.One"
+    library_root = tmp_path / "library" / "movies"
+    torrent_hash = "aaa111"
+    for path in (qb_content, rt_content, library_root):
+        path.mkdir(parents=True)
+    (qb_content / "file.bin").write_text("payload", encoding="utf-8")
+    (rt_content / "file.bin").write_text("payload", encoding="utf-8")
+    (library_root / "Release.One.bin").write_text("payload", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.executescript("""
+        CREATE TABLE files_fs_zfs_123 (
+            path TEXT PRIMARY KEY,
+            size INTEGER NOT NULL,
+            sha256 TEXT,
+            status TEXT DEFAULT 'active'
+        );
+        CREATE TABLE payloads (
+            payload_id INTEGER PRIMARY KEY,
+            payload_hash TEXT,
+            device_id INTEGER,
+            root_path TEXT,
+            file_count INTEGER,
+            total_bytes INTEGER,
+            status TEXT
+        );
+        CREATE TABLE torrent_instances (
+            torrent_hash TEXT PRIMARY KEY,
+            payload_id INTEGER,
+            save_path TEXT
+        );
+    """)
+    payload_sha = _hashlib.sha256(b"payload").hexdigest()
+    conn.execute(
+        "INSERT INTO files_fs_zfs_123 (path, size, sha256, status) VALUES (?, ?, ?, 'active')",
+        (str(rt_content / "file.bin"), 7, payload_sha),
+    )
+    conn.execute(
+        "INSERT INTO files_fs_zfs_123 (path, size, sha256, status) VALUES (?, ?, ?, 'active')",
+        (str(library_root / "Release.One.bin"), 7, payload_sha),
+    )
+    conn.execute(
+        "INSERT INTO payloads VALUES (1, ?, 1, ?, 1, 7, 'complete')",
+        (payload_sha, str(rt_content)),
+    )
+    conn.execute(
+        "INSERT INTO torrent_instances VALUES (?, 1, ?)",
+        (torrent_hash, str(rt_content)),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    policy = tmp_path / "policy.json"
+    _write_rt_session(session_dir, torrent_hash, rt_content)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(pool_seed_qb),
+                "content_path": str(qb_content),
+                "state": "stoppedUP",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(rt_content),
+                "state": "stalledUP",
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    policy.write_text(
+        json.dumps(
+            {
+                "pool_roots": [str(tmp_path / "pool" / "torrents" / "seeding")],
+                "stash_roots": [str(stash_root)],
+                "arr_library_roots": [str(library_root)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeQbit:
+        last_error = None
+
+        def __init__(self) -> None:
+            self.locations: list[tuple[str, str]] = []
+
+        def set_location(self, torrent_hash: str, target: str) -> bool:
+            self.locations.append((torrent_hash, target))
+            return True
+
+        def recheck_torrent(self, torrent_hash: str) -> bool:
+            return True
+
+        def pause_torrent(self, torrent_hash: str) -> bool:
+            return True
+
+    fake = FakeQbit()
+    rt_log: list[dict] = []
+
+    def fake_rt_repoint(torrent_hash, target, *, rpc_url=None, restart=True,
+                        check_before_start=True, validate_target_exists=True):
+        rt_log.append({"hash": torrent_hash, "target": target})
+        return {"calls": 1}
+
+    monkeypatch.setattr("hashall.qbittorrent.get_qbittorrent_client", lambda: fake)
+    monkeypatch.setattr("hashall.rtorrent.rt_apply_directory_repoint", fake_rt_repoint)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "client-drift",
+            "apply",
+            "--action",
+            "repoint_both_to_stash",
+            "--qb-cache-file",
+            str(qb_cache),
+            "--rt-cache-file",
+            str(rt_cache),
+            "--rt-session-dir",
+            str(session_dir),
+            "--policy",
+            str(policy),
+            "--anchor-scan-max-files",
+            "1000",
+            "--catalog",
+            str(catalog),
+            "--hash",
+            torrent_hash,
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+            "--sleep-row",
+            "0",
+            "--apply",
+        ],
+    )
+
+    assert result.exit_code == 0
+    expected_stash_path = stash_root / "cross-seed" / "Release.One"
+    assert expected_stash_path.exists(), f"Expected stash path {expected_stash_path} to exist"
+    stash_files = list(expected_stash_path.iterdir())
+    assert len(stash_files) >= 1, f"Expected at least 1 file in {expected_stash_path}"
+    # Pool content should be removed
+    assert not qb_content.exists(), f"Expected pool path {qb_content} to be removed"
+    assert "hardlinks_created" in result.output
