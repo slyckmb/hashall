@@ -11,6 +11,7 @@ Lead cherry-picks clusters into job plans.
 ## Open
 | OP-44 | bug | `chatrap job --name` consumes job counter even on failed/rolled-back attempts — during j33 setup, two prior attempts (intended j31, j32) were rolled back by chatrap but their job numbers were not reclaimed; actual repair job landed at j33 instead of j31; job numbers are non-contiguous in git log; fix: chatrap job rollback should decrement the job counter, or the counter should be derived from the highest successfully merged job rather than a monotonic increment *(merged: OP-49 evidence: 2026-06-26)* | 2026-06-25 |
 
+
 | ID | Type | Title | Observed |
 |----|------|-------|----------|
 
@@ -39,7 +40,7 @@ Lead cherry-picks clusters into job plans.
 
 | ID | Type | Title | Job |
 |----|------|-------|-----|
-| | | | |
+| OP-53 | reliability | SHA256 library content anchor — canonical-path resolver cannot detect library-content duplicates across filesystems; see docs/OP-53-PLAN.md | j48 |
 
 ---
 

@@ -18,6 +18,7 @@ updated: 2026-06-26
 | j41 | explore-unified-tool | OP-18 | Merged to CR. merge(cr/hashall-20260626-151456__j41). 
 | j46 | build-canonicalize-tool | OP-50 | Merged to CR. merge(cr/hashall-20260626-151456__j46). 
 | j47 | canonicalize-execute | OP-51 |
+| j48 | sha256-content-anchor | OP-53 |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j42 | lane2-strategy | OP-23,OP-26 |
 | j43 | rt-state-monitor | OP-10,OP-43 |
@@ -32,6 +33,7 @@ updated: 2026-06-26
 - j47 (canonicalize-execute) requires j46 (build-canonicalize-tool) — executor gates on j46-t05 LIFT verdict
 - j39 (cross-seed-repair) requires j47 (canonicalize-execute) — all drift items must be corrected before cross-seed migration begins
 - j42 (lane2-strategy) benefits from j46 (build-canonicalize-tool) — canonicalize batch output quantifies Lane 2 scope precisely
+- j48 (sha256-content-anchor) requires OP-53 Phase 1 SHA256 backfill before Phases 2-4 can be tested with real data
 - j45 (cr-to-main) is last — merge only after all planned repair jobs complete
 
 ---
