@@ -131,11 +131,11 @@ Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
 
 ### Tasks
 
-| Task | Type | Status | Goal |
-|------|------|--------|------|
-| j48-t02 | implementation | planned | Phase 1: SHA256 backfill on pool seeding roots. Phase 2: `_Sha256ContentMatcher` class in `client_drift.py` for cross-device content matching |
-| j48-t03 | implementation | planned | Phase 3: Wire `library_dupe` parameter into `classify_seeding_device()` + `resolve_canonical_path()` + CLI `--library-dupe` flag |
-| j48-t04 | implementation | planned | Phase 4: Extend client-drift rank/apply for SHA256-dupe; add `repoint_both_to_stash` action; fix OP-56 qB recheck gap |
+| Task | Status | Goal |
+|------|--------|------|
+| j48-t02 | planned | Phase 1: SHA256 backfill on pool seeding roots. Phase 2: `_Sha256ContentMatcher` class in `client_drift.py` for cross-device content matching |
+| j48-t03 | planned | Phase 3: Wire `library_dupe` parameter into `classify_seeding_device()` + `resolve_canonical_path()` + CLI `--library-dupe` flag |
+| j48-t04 | planned | Phase 4: Extend client-drift rank/apply for SHA256-dupe; add `repoint_both_to_stash` action; fix OP-56 qB recheck gap |
 
 ---
 
