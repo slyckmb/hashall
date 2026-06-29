@@ -41,16 +41,16 @@ updated: 2026-06-26
 
 ## Run Order
 
-j48 → j39 → j42 → j43 → j44 → j49 → j45
+j48 → j42 → j39 → j43 → j44 → j45 → j49
 
 Notes:
-- j48 (sha256-content-anchor) runs first — Phase 1 SHA256 backfill gates Phases 2-4; OP-55 (83 blocked FPs) and OP-56 (qB recheck gap) both tie to canonicalize pipeline
-- j39 (cross-seed-repair) requires canonicalize drift items corrected (j46+j47 done); gate on j48 for OP-55 resolution
-- j42 (lane2-strategy) quantifies Lane 2 scope; benefits from canonicalize batch output
-- j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40, not closed by j40)
-- j44 (chatrap infra) — upstream fixes; OP-44 moved to closed (superseded by OP-49), OP-49 removed (already closed)
-- j49 (orphan-migration-guard) — OP-57 hardlink guard for orphan offload
-- j45 (cr-to-main) last — merge only after all planned repair jobs complete
+- j48 (sha256-content-anchor) done — SHA256 backfill + _Sha256ContentMatcher + repoint_both_to_stash delivered; 83 blocked FPs resolvable
+- j42 (lane2-strategy) next — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
+- j39 (cross-seed-repair) requires canonicalize drift items corrected (j46+j47+j48 done); gate on j42 output for POOL capacity planning
+- j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40)
+- j44 (chatrap infra) — upstream fixes
+- j45 (cr-to-main) — merge CR to main after all repair jobs done
+- j49 (orphan-migration-guard) — OP-57 hardlink guard; deferred until after main merge
 
 ---
 
