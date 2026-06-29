@@ -119,6 +119,23 @@ Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
 
 ---
 
+## j48 — sha256-content-anchor
+
+**Slug:** sha256-content-anchor
+**OPs:** OP-53, OP-55, OP-56
+**Goal:** Add SHA256-based cross-device content matching to canonicalize pipeline so items with library copies on different filesystems are correctly classified as STASH candidates. Resolves 83 blocked FP items from Gate 2 dry-run (OP-55). Fixes qB recheck gap post-set_location (OP-56).
+**Prerequisites:** Phase 1 SHA256 backfill scan on `/pool/media/torrents/seeding` must complete before Phases 2-4 can be tested with real data.
+
+### Tasks
+
+| Task | Type | Goal |
+|------|------|------|
+| j48-t02 | implementation | Phase 1: SHA256 backfill on pool seeding roots. Phase 2: `_Sha256ContentMatcher` class in `client_drift.py` for cross-device content matching |
+| j48-t03 | implementation | Phase 3: Wire `library_dupe` parameter into `classify_seeding_device()` + `resolve_canonical_path()` + CLI `--library-dupe` flag |
+| j48-t04 | implementation | Phase 4: Extend client-drift rank/apply for SHA256-dupe; add `repoint_both_to_stash` action; fix OP-56 qB recheck gap |
+
+---
+
 ## Queue State Notes
 
 JOB-QUEUE.md written 2026-06-26 by lead after opscan showed 32 unslotted OPs.
