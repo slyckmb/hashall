@@ -19,11 +19,11 @@ updated: 2026-06-26
 | j46 | build-canonicalize-tool | OP-50 | Merged to CR. merge(cr/hashall-20260626-151456__j46). 
 | j47 | canonicalize-execute | OP-51,OP-52,OP-54 | Merged to CR. merge(cr/hashall-20260626-151456__j47). |
 | j48 | sha256-content-anchor | OP-53,OP-55,OP-56 | Merged to CR. merge(cr/hashall-20260626-151456__j48). |
-| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
+| j49 | orphan-migration-guard | OP-57 |
 | j42 | lane2-strategy | OP-23,OP-26 |
+| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j43 | rt-state-monitor | OP-10,OP-12 |
 | j44 | chatrap-infra | OP-42,OP-45 |
-| j49 | orphan-migration-guard | OP-57 |
 | j45 | cr-to-main | OP-14 |
 
 ---
@@ -41,16 +41,16 @@ updated: 2026-06-26
 
 ## Run Order
 
-j48 → j42 → j39 → j43 → j44 → j45 → j49
+j48 → j49 → j42 → j39 → j43 → j44 → j45
 
 Notes:
 - j48 (sha256-content-anchor) done — SHA256 backfill + _Sha256ContentMatcher + repoint_both_to_stash delivered; 83 blocked FPs resolvable
-- j42 (lane2-strategy) next — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
-- j39 (cross-seed-repair) requires canonicalize drift items corrected (j46+j47+j48 done); gate on j42 output for POOL capacity planning
+- j49 (orphan-migration-guard) next — OP-57 hardlink guard for orphan offload. Immediate safeguard after j47 orphan migration showed hardlinked orphans inflating storage when migrated to external filesystem. Scans orphans for inode/dev overlap with seeding content before migration
+- j42 (lane2-strategy) after j49 — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
+- j39 (cross-seed-repair) requires canonicalize drift items corrected (j46+j47+j48 done)
 - j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40)
 - j44 (chatrap infra) — upstream fixes
 - j45 (cr-to-main) — merge CR to main after all repair jobs done
-- j49 (orphan-migration-guard) — OP-57 hardlink guard; deferred until after main merge
 
 ---
 
@@ -139,6 +139,23 @@ Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
 
 ---
 
+---
+
+## j49 — orphan-migration-guard
+
+**Slug:** orphan-migration-guard
+**OPs:** OP-57
+**Goal:** Add hardlink-inode guard to orphan migration so files hardlinked to actively-seeding content are not migrated to an external filesystem. Prevents storage bloat (inode duplication), transfer-size inflation, and hardlink breakage seen during the WD6TB orphan offload run (j47-era).
+**Trigger:** Recent WD6TB orphan offload rsync'd hardlinked orphan files to an external fs, breaking inode-level hardlinks and duplicating stored data — `du` showed 3.9T but rsync transferred ~8T.
+
+### Tasks
+
+| Task | Status | Goal |
+|------|--------|------|
+| j49-t01 | planned | Scan orphans for inode/device_id overlap with active seeding content; only migrate nlinks=1 orphans or orphans where all links are within the orphan dir. Implement as `hashall orphan-validate --hardlink-guard` and integrate into migration workflow |
+
+---
+
 ## Queue State Notes
 
 JOB-QUEUE.md written 2026-06-26 by lead after opscan showed 32 unslotted OPs.
@@ -146,4 +163,4 @@ Replanned 2026-06-29 (j48-replan): all 17 open OPs now properly slotted in In-Jo
 Closed OP-43 (no action required) and OP-44 (superseded by OP-49).
 Re-slotted OP-12 (orphaned from merged j40) → j43.
 Removed OP-49 from j44 (already closed).
-Next job to dispatch: j48 (sha256-content-anchor), per run order.
+Run order re-ordered 2026-06-29: j49 moved to next after j48 (safeguard for POOL data migration).
