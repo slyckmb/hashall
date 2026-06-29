@@ -21,8 +21,8 @@ updated: 2026-06-26
 | j48 | sha256-content-anchor | OP-53,OP-55,OP-56 |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j42 | lane2-strategy | OP-23,OP-26 |
-| j43 | rt-state-monitor | OP-10 |
-| j44 | chatrap-infra | OP-42,OP-44,OP-45,OP-49 |
+| j43 | rt-state-monitor | OP-10,OP-12 |
+| j44 | chatrap-infra | OP-42,OP-45 |
 | j49 | orphan-migration-guard | OP-57 |
 | j45 | cr-to-main | OP-14 |
 
@@ -41,13 +41,16 @@ updated: 2026-06-26
 
 ## Run Order
 
-j36 → j37 → j38 → j40 → j41 → j46 → j47 → j39 → j42 → j43 → j44 → j45
+j48 → j39 → j42 → j43 → j44 → j49 → j45
 
 Notes:
-- j40 (docs) is independent and can be interleaved
-- j43 (monitoring) should run promptly — OP-43 items have a 48h check window
-- j44 (chatrap infra) is upstream work; file issues with chatrap maintainers, not code in this repo
-- j36 first to clear resolved OPs and keep opscan count accurate
+- j48 (sha256-content-anchor) runs first — Phase 1 SHA256 backfill gates Phases 2-4; OP-55 (83 blocked FPs) and OP-56 (qB recheck gap) both tie to canonicalize pipeline
+- j39 (cross-seed-repair) requires canonicalize drift items corrected (j46+j47 done); gate on j48 for OP-55 resolution
+- j42 (lane2-strategy) quantifies Lane 2 scope; benefits from canonicalize batch output
+- j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40, not closed by j40)
+- j44 (chatrap infra) — upstream fixes; OP-44 moved to closed (superseded by OP-49), OP-49 removed (already closed)
+- j49 (orphan-migration-guard) — OP-57 hardlink guard for orphan offload
+- j45 (cr-to-main) last — merge only after all planned repair jobs complete
 
 ---
 
@@ -139,6 +142,8 @@ Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
 ## Queue State Notes
 
 JOB-QUEUE.md written 2026-06-26 by lead after opscan showed 32 unslotted OPs.
-All 32 open OPs now slotted across 10 planned jobs.
-After j38 RCCA, OP-19/24/47 remain open and are re-slotted to j39 for follow-up repair/audit.
-Next job to dispatch: j40 (docs-batch), per run order.
+Replanned 2026-06-29 (j48-replan): all 17 open OPs now properly slotted in In-Job section.
+Closed OP-43 (no action required) and OP-44 (superseded by OP-49).
+Re-slotted OP-12 (orphaned from merged j40) → j43.
+Removed OP-49 from j44 (already closed).
+Next job to dispatch: j48 (sha256-content-anchor), per run order.
