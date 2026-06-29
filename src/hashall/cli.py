@@ -2464,7 +2464,8 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
 @click.option("--hash", "hash_filter", default=None, help="Audit a single torrent by hash.")
 @click.option("--drifted-only", is_flag=True, help="Show only items not at canonical path.")
 @click.option("--needs-review", is_flag=True, help="Show only items flagged for human review.")
-def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
+@click.option("--library-dupe", is_flag=True, default=False, help="Force SHA256-matched CROSS_SEED items with no ~noHL tag to STASH.")
+def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review, library_dupe):
     """
     Audit canonical paths for all managed torrents.
 
@@ -2536,7 +2537,7 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
         )
 
         try:
-            res = resolve_canonical_path(qb_row, rt_path)
+            res = resolve_canonical_path(qb_row, rt_path, library_dupe=library_dupe)
         except Exception as e:
             click.echo(f"Error resolving {tor_hash[:16]}: {e}", err=True)
             continue
@@ -2612,7 +2613,8 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
 @click.option("--hash", "hash_filter", default=None, help="Plan a single torrent by hash.")
 @click.option("--safe-only", is_flag=True, default=True, help="Show only safe-to-rename items (default: on).")
 @click.option("--show-unsafe", is_flag=True, help="Also show unsafe items (source missing, target exists, cross-device).")
-def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe):
+@click.option("--library-dupe", is_flag=True, default=False, help="Force SHA256-matched CROSS_SEED items with no ~noHL tag to STASH.")
+def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe, library_dupe):
     """
     Dry-run rename plan for Lane 1 (CATEGORY_DRIFT) items.
 
@@ -2686,7 +2688,7 @@ def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe):
         )
 
         try:
-            res = resolve_canonical_path(qb_row, rt_path)
+            res = resolve_canonical_path(qb_row, rt_path, library_dupe=library_dupe)
         except Exception:
             continue
 
