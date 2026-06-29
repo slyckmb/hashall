@@ -572,10 +572,169 @@ class _AnchorScanResult:
         }
 
 
+class _Sha256ContentMatcher:
+    """Match payload files to ARR library files by SHA256 content identity.
+
+    Queries the local device files_fs_* table for sha256 of each payload file,
+    then joins against other device files_fs_* tables for the same sha256+size
+    under ARR library roots.  Uses the cross-device UNION ALL pattern from
+    link_analysis.analyze_cross_device() as reference.
+    """
+
+    def __init__(self, policy: ClientDriftPolicy, *, catalog_path: Path | None = None) -> None:
+        self.policy = policy
+        self.catalog_path = catalog_path
+
+    def find_sha256_anchors(self, paths: Iterable[str]) -> _AnchorScanResult:
+        if self.catalog_path is None:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=["sha256_matcher_catalog_not_configured"],
+            )
+
+        catalog_path = self.catalog_path.expanduser()
+        if not catalog_path.exists():
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=["sha256_matcher_catalog_not_found"],
+            )
+
+        if not self.policy.arr_library_roots:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=["arr_library_roots_not_configured"],
+            )
+
+        raw_paths = tuple(str(p or "").strip() for p in paths if str(p or "").strip())
+        if not raw_paths:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=["sha256_matcher_no_payload_paths"],
+            )
+
+        try:
+            conn = sqlite3.connect(f"file:{catalog_path.resolve()}?mode=ro", uri=True)
+            try:
+                tables = self._files_tables(conn)
+                if not tables:
+                    return _AnchorScanResult(
+                        has_arr_anchor=None,
+                        source="sha256_dupe",
+                        blockers=["sha256_matcher_no_files_tables"],
+                    )
+
+                sha256_map: dict[str, tuple[str, int]] = {}
+                for raw_path in raw_paths:
+                    sha256_val, size_val = self._lookup_file_sha256(conn, tables, raw_path)
+                    if sha256_val:
+                        sha256_map[raw_path] = (sha256_val, size_val)
+
+                if not sha256_map:
+                    return _AnchorScanResult(
+                        has_arr_anchor=False,
+                        source="sha256_dupe",
+                        payload_files_checked=len(raw_paths),
+                        blockers=["sha256_matcher_no_sha256_for_payloads"],
+                    )
+
+                anchor_paths: list[str] = []
+                unique_pairs = set(sha256_map.values())
+                for sha256_val, size_val in unique_pairs:
+                    for anchor in self._find_library_matches(conn, tables, sha256_val, size_val):
+                        if anchor not in anchor_paths:
+                            anchor_paths.append(anchor)
+
+                if anchor_paths:
+                    return _AnchorScanResult(
+                        has_arr_anchor=True,
+                        source="sha256_dupe",
+                        anchor_paths=anchor_paths,
+                        payload_files_checked=len(sha256_map),
+                    )
+
+                return _AnchorScanResult(
+                    has_arr_anchor=False,
+                    source="sha256_dupe",
+                    payload_files_checked=len(sha256_map),
+                )
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=[f"sha256_matcher_error:{exc}"],
+            )
+
+    @staticmethod
+    def _files_tables(conn: sqlite3.Connection) -> list[str]:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'files_%' ORDER BY name"
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    @staticmethod
+    def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+        return any(str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+    @staticmethod
+    def _lookup_file_sha256(conn: sqlite3.Connection, tables: list[str], path: str) -> tuple[str | None, int]:
+        for table in tables:
+            if not _Sha256ContentMatcher._table_has_column(conn, table, "sha256"):
+                continue
+            if not _Sha256ContentMatcher._table_has_column(conn, table, "path"):
+                continue
+            row = conn.execute(
+                f'SELECT sha256, size FROM "{table}" WHERE status = ? AND path = ?',
+                ("active", path),
+            ).fetchone()
+            if row and row[0] is not None:
+                return (str(row[0]), int(row[1] or 0))
+            row = conn.execute(
+                f'SELECT sha256, size FROM "{table}" WHERE status = ? AND (path = ? OR path LIKE ?)',
+                ("active", path, f"{path}/%"),
+            ).fetchone()
+            if row and row[0] is not None:
+                return (str(row[0]), int(row[1] or 0))
+        return (None, 0)
+
+    def _find_library_matches(self, conn: sqlite3.Connection, tables: list[str], sha256_val: str, size_val: int) -> list[str]:
+        matches: list[str] = []
+        for table in tables:
+            if not self._table_has_column(conn, table, "sha256"):
+                continue
+            if not self._table_has_column(conn, table, "path"):
+                continue
+            rows = conn.execute(
+                f'SELECT path FROM "{table}" WHERE status = ? AND sha256 = ? AND size = ?',
+                ("active", sha256_val, size_val),
+            ).fetchall()
+            for (path,) in rows:
+                path_str = str(path or "")
+                if self._under_library_root(path_str) and path_str not in matches:
+                    matches.append(path_str)
+        return matches
+
+    def _under_library_root(self, path: str) -> bool:
+        candidate = str(path or "").rstrip("/")
+        if not candidate:
+            return False
+        for root in self.policy.arr_library_roots:
+            r = str(root or "").rstrip("/")
+            if r and (candidate == r or candidate.startswith(r + "/")):
+                return True
+        return False
+
+
 class _PlacementAnchorScanner:
     def __init__(self, policy: ClientDriftPolicy, *, catalog_path: Path | None = None) -> None:
         self.policy = policy
         self.catalog_path = catalog_path
+        self._sha256_matcher = _Sha256ContentMatcher(policy, catalog_path=catalog_path)
         self._library_index: dict[tuple[int, int], list[str]] | None = None
         self._library_files_checked = 0
         self._library_scan_truncated = False
@@ -652,6 +811,18 @@ class _PlacementAnchorScanner:
                 library_scan_truncated=self._library_scan_truncated,
                 blockers=fs_blockers,
             )
+
+        sha256_result = self._sha256_matcher.find_sha256_anchors(path_tuple)
+        if sha256_result.has_arr_anchor is True:
+            return sha256_result
+        if sha256_result.has_arr_anchor is False:
+            return _AnchorScanResult(
+                has_arr_anchor=False,
+                source="sha256_dupe",
+                payload_files_checked=sha256_result.payload_files_checked,
+                blockers=[*fs_blockers, *sha256_result.blockers],
+            )
+
         if payload_scan_truncated or self._library_scan_truncated:
             blockers = [*catalog_blockers, *fs_blockers, "arr_anchor_scan_incomplete"]
             return _AnchorScanResult(
