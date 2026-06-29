@@ -116,6 +116,21 @@ class TestClassifySeedingDevice:
             ItemType.CROSS_SEED, "private", catalog_nlinks=3
         ) == SeedingDevice.STASH
 
+    def test_library_dupe_cross_seed_no_nohl(self):
+        assert classify_seeding_device(
+            ItemType.CROSS_SEED, "private", library_dupe=True
+        ) == SeedingDevice.STASH
+
+    def test_library_dupe_cross_seed_with_nohl_still_pool(self):
+        assert classify_seeding_device(
+            ItemType.CROSS_SEED, "~noHL,private", library_dupe=True
+        ) == SeedingDevice.POOL
+
+    def test_library_dupe_arr_post_unaffected(self):
+        assert classify_seeding_device(
+            ItemType.ARR_POST_IMPORT, "private", library_dupe=True
+        ) == SeedingDevice.STASH
+
     def test_arr_post_with_nohl(self):
         assert classify_seeding_device(ItemType.ARR_POST_IMPORT, "~noHL,private") == SeedingDevice.POOL
 
@@ -412,3 +427,47 @@ class TestResolveCanonicalPath:
         res = resolve_canonical_path(qb, rt)
         assert res.rt_diff.drift_type == DriftType.ROOT_DRIFT
         assert res.qb_diff.drift_type == DriftType.ROOT_DRIFT
+
+    def test_library_dupe_forces_cross_seed_to_stash(self):
+        qb = ClientTorrentRow(
+            client="qb",
+            torrent_hash="f" * 40,
+            name="SomeRelease",
+            save_path=f"{POOL}/darkpeers",
+            content_path=f"{POOL}/darkpeers",
+            category="cross-seed",
+            tags="darkpeers,private",
+        )
+        rt = f"{POOL}/darkpeers"
+        res = resolve_canonical_path(qb, rt, library_dupe=True)
+        assert res.canonical.seeding_device == SeedingDevice.STASH
+        assert res.canonical.canonical_path.startswith(STASH)
+
+    def test_library_dupe_with_nohl_stays_pool(self):
+        qb = ClientTorrentRow(
+            client="qb",
+            torrent_hash="f" * 40,
+            name="SomeRelease",
+            save_path=f"{POOL}/cross-seed/darkpeers",
+            content_path=f"{POOL}/cross-seed/darkpeers",
+            category="cross-seed",
+            tags="darkpeers,private,~noHL",
+        )
+        rt = f"{POOL}/cross-seed/darkpeers"
+        res = resolve_canonical_path(qb, rt, library_dupe=True)
+        assert res.canonical.seeding_device == SeedingDevice.POOL
+        assert res.canonical.canonical_path.startswith(POOL)
+
+    def test_library_dupe_false_defaults_to_pool(self):
+        qb = ClientTorrentRow(
+            client="qb",
+            torrent_hash="f" * 40,
+            name="SomeRelease",
+            save_path=f"{POOL}/darkpeers",
+            content_path=f"{POOL}/darkpeers",
+            category="cross-seed",
+            tags="darkpeers,private",
+        )
+        rt = f"{POOL}/darkpeers"
+        res = resolve_canonical_path(qb, rt, library_dupe=False)
+        assert res.canonical.seeding_device == SeedingDevice.POOL

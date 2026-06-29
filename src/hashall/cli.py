@@ -2464,7 +2464,8 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
 @click.option("--hash", "hash_filter", default=None, help="Audit a single torrent by hash.")
 @click.option("--drifted-only", is_flag=True, help="Show only items not at canonical path.")
 @click.option("--needs-review", is_flag=True, help="Show only items flagged for human review.")
-def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
+@click.option("--library-dupe", is_flag=True, default=False, help="Force SHA256-matched CROSS_SEED items with no ~noHL tag to STASH.")
+def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review, library_dupe):
     """
     Audit canonical paths for all managed torrents.
 
@@ -2536,7 +2537,7 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
         )
 
         try:
-            res = resolve_canonical_path(qb_row, rt_path)
+            res = resolve_canonical_path(qb_row, rt_path, library_dupe=library_dupe)
         except Exception as e:
             click.echo(f"Error resolving {tor_hash[:16]}: {e}", err=True)
             continue
@@ -2612,7 +2613,8 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
 @click.option("--hash", "hash_filter", default=None, help="Plan a single torrent by hash.")
 @click.option("--safe-only", is_flag=True, default=True, help="Show only safe-to-rename items (default: on).")
 @click.option("--show-unsafe", is_flag=True, help="Also show unsafe items (source missing, target exists, cross-device).")
-def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe):
+@click.option("--library-dupe", is_flag=True, default=False, help="Force SHA256-matched CROSS_SEED items with no ~noHL tag to STASH.")
+def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe, library_dupe):
     """
     Dry-run rename plan for Lane 1 (CATEGORY_DRIFT) items.
 
@@ -2686,7 +2688,7 @@ def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe):
         )
 
         try:
-            res = resolve_canonical_path(qb_row, rt_path)
+            res = resolve_canonical_path(qb_row, rt_path, library_dupe=library_dupe)
         except Exception:
             continue
 
@@ -3498,6 +3500,10 @@ def _print_rt_qb_event_status(event: dict) -> None:
     print(f"      status: {_rt_qb_style(status, fg=status_color, bold=True)}")
     if "recheck_started" in event:
         print(f"      recheck_started: {_rt_qb_bool(bool(event['recheck_started']))}")
+    if "hardlinks_created" in event:
+        print(f"      hardlinks_created: {event['hardlinks_created']}")
+    if "pool_removed" in event:
+        print(f"      pool_removed: {event['pool_removed']}")
     if "verify" in event:
         verify = event["verify"]
         if isinstance(verify, dict) and verify.get("ok") is True:
@@ -3922,6 +3928,14 @@ def _print_client_drift_path_candidate(row: dict, *, index: int | None = None, a
     if placement.get("proposed_rt_repoint_target") or placement.get("proposed_rt_directory"):
         target = placement.get("proposed_rt_repoint_target") or placement.get("proposed_rt_directory")
         print("     " + _rt_qb_style("set RT: ", fg="bright_black") + target)
+    if placement.get("stash_sibling_root"):
+        print("     " + _rt_qb_style("stash_root: ", fg="bright_black") + placement.get("stash_sibling_root"))
+
+    # Library dupe indicator
+    arr_anchor_source = (placement.get("anchor_scan") or {}).get("source") or ""
+    arr_has_anchor = (placement.get("anchor_scan") or {}).get("has_arr_anchor")
+    if arr_anchor_source == "sha256_dupe" and arr_has_anchor is True:
+        print("     " + _rt_qb_style("library_dupe", fg="green", bold=True))
 
     # Reasons (key decision factors) with checkmark
     for reason in reasons[:5]:
@@ -3947,7 +3961,7 @@ def _apply_client_drift_path_rows(
     completed_hashes: frozenset[str] = frozenset(),
 ) -> list[dict]:
     events: list[dict] = []
-    if do_apply and action in ("repoint_qb_to_rt_path", "repoint_both_to_pool") and qbit is None:
+    if do_apply and action in ("repoint_qb_to_rt_path", "repoint_both_to_pool", "repoint_both_to_stash") and qbit is None:
         from hashall.qbittorrent import get_qbittorrent_client
 
         qbit = get_qbittorrent_client()
@@ -4066,6 +4080,122 @@ def _apply_client_drift_path_rows(
                             qbit.pause_torrent(torrent_hash)
                         except Exception:
                             event["pause_after_recheck_failed"] = str(getattr(qbit, "last_error", "unknown"))
+        elif action == "repoint_both_to_stash":
+            if qbit is None:
+                raise click.ClickException("qB client not initialized")
+            from hashall.rtorrent import rt_apply_directory_repoint
+
+            target = str(placement.get("proposed_qb_save_path") or "").strip()
+            anchor = placement.get("anchor_scan") or {}
+            anchor_paths = list(row.get("arr_anchor_paths") or anchor.get("anchor_paths") or [])
+            qb_content = str(placement.get("qb_content_path") or "").strip()
+
+            if not target:
+                event["error"] = "missing_proposed_qb_save_path"
+            elif not anchor_paths:
+                event["error"] = "missing_arr_anchor_paths_for_hardlink"
+            elif not qb_content:
+                event["error"] = "missing_qb_content_path"
+            else:
+                # Create target directory
+                target_path = Path(target)
+                target_path.mkdir(parents=True, exist_ok=True)
+
+                # a. Create hardlinks from library file(s) to stash seeding path
+                event["hardlinks_created"] = 0
+                for anchor_src in anchor_paths:
+                    src = Path(anchor_src)
+                    if not src.exists():
+                        continue
+                    dst = target_path / src.name
+                    if not dst.exists():
+                        try:
+                            os.link(src, dst)
+                            event["hardlinks_created"] += 1
+                        except OSError as exc:
+                            event["error"] = f"hardlink_failed:{anchor_src}->{dst}:{exc}"
+                            _append_client_drift_journal(journal, event)
+                            raise click.ClickException(
+                                f"client drift apply failed hash={torrent_hash}: {event['error']}"
+                            )
+                    # Also hardlink siblings in same directory as anchor
+                    if src.parent.is_dir():
+                        for sibling in src.parent.iterdir():
+                            if sibling.is_file() and sibling.name != src.name:
+                                dst_sib = target_path / sibling.name
+                                if not dst_sib.exists():
+                                    try:
+                                        os.link(sibling, dst_sib)
+                                        event["hardlinks_created"] += 1
+                                    except OSError:
+                                        pass
+
+                # b. Remove pool copy (all hardlinks) — unlink pool content
+                pool_path = Path(qb_content)
+                if pool_path.exists():
+                    event["pool_removed"] = 0
+                    if pool_path.is_dir():
+                        for f in pool_path.iterdir():
+                            if f.is_file():
+                                try:
+                                    f.unlink()
+                                    event["pool_removed"] += 1
+                                except OSError:
+                                    pass
+                        try:
+                            pool_path.rmdir()
+                            event["pool_removed"] += 1
+                        except OSError:
+                            pass
+                    elif pool_path.is_file():
+                        try:
+                            pool_path.unlink()
+                            event["pool_removed"] += 1
+                        except OSError:
+                            pass
+
+                event["save_path"] = target
+
+                # c. Repoint RT via rt_apply_directory_repoint(check_before_start=True)
+                _rt_qb_progress("repointing RT to stash path")
+                try:
+                    rt_completed = rt_apply_directory_repoint(
+                        torrent_hash,
+                        target,
+                        rpc_url=rt_rpc_url,
+                        restart=True,
+                        check_before_start=True,
+                        validate_target_exists=True,
+                    )
+                    event["rt_calls"] = rt_completed
+                except Exception:
+                    event["status"] = "error"
+                    event["error"] = "rt_repoint_failed"
+                    _append_client_drift_journal(journal, event)
+                    raise
+
+                # d. Repoint qB via set_location + explicit recheck
+                _rt_qb_progress("setting qB save path to stash path")
+                ok = qbit.set_location(torrent_hash, target)
+                if not ok:
+                    event["status"] = "error"
+                    event["error"] = str(qbit.last_error or "qbit_set_location_failed")
+                    _append_client_drift_journal(journal, event)
+                    raise click.ClickException(
+                        f"client drift apply failed hash={torrent_hash}: {event['error']}"
+                    )
+                event["qbit_done"] = True
+
+                # OP-56: explicit qB recheck after set_location
+                _rt_qb_progress("starting qB recheck to verify files at new stash location")
+                event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
+                if event["recheck_started"]:
+                    try:
+                        qbit.pause_torrent(torrent_hash)
+                    except Exception:
+                        event["pause_after_recheck_failed"] = str(getattr(qbit, "last_error", "unknown"))
+                event["status"] = "ok"
+                event["error"] = ""
         else:
             event["error"] = f"unsupported_path_drift_action:{action}"
 
@@ -4322,7 +4452,7 @@ def client_drift_rank_cmd(
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
 @click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
 @click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
-@click.option("--action", type=click.Choice(["mirror_rt_to_qb", "repoint_rt_to_qb_path", "repoint_qb_to_rt_path", "repoint_both_to_pool"]), default="mirror_rt_to_qb", show_default=True, help="Action class to apply.")
+@click.option("--action", type=click.Choice(["mirror_rt_to_qb", "repoint_rt_to_qb_path", "repoint_qb_to_rt_path", "repoint_both_to_pool", "repoint_both_to_stash"]), default="mirror_rt_to_qb", show_default=True, help="Action class to apply.")
 @click.option("--hash", "hash_filters", multiple=True, help="Restrict apply to specific torrent hash(es). Prefixes are accepted.")
 @click.option("--anchor-scan-max-files", type=int, default=None, help="Override policy anchor scan limit for selected path-drift pilots. Default uses policy.")
 @click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), help="Optional read-only catalog DB for hardlink-anchor evidence.")

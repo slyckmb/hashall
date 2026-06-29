@@ -572,10 +572,169 @@ class _AnchorScanResult:
         }
 
 
+class _Sha256ContentMatcher:
+    """Match payload files to ARR library files by SHA256 content identity.
+
+    Queries the local device files_fs_* table for sha256 of each payload file,
+    then joins against other device files_fs_* tables for the same sha256+size
+    under ARR library roots.  Uses the cross-device UNION ALL pattern from
+    link_analysis.analyze_cross_device() as reference.
+    """
+
+    def __init__(self, policy: ClientDriftPolicy, *, catalog_path: Path | None = None) -> None:
+        self.policy = policy
+        self.catalog_path = catalog_path
+
+    def find_sha256_anchors(self, paths: Iterable[str]) -> _AnchorScanResult:
+        if self.catalog_path is None:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=["sha256_matcher_catalog_not_configured"],
+            )
+
+        catalog_path = self.catalog_path.expanduser()
+        if not catalog_path.exists():
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=["sha256_matcher_catalog_not_found"],
+            )
+
+        if not self.policy.arr_library_roots:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=["arr_library_roots_not_configured"],
+            )
+
+        raw_paths = tuple(str(p or "").strip() for p in paths if str(p or "").strip())
+        if not raw_paths:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=["sha256_matcher_no_payload_paths"],
+            )
+
+        try:
+            conn = sqlite3.connect(f"file:{catalog_path.resolve()}?mode=ro", uri=True)
+            try:
+                tables = self._files_tables(conn)
+                if not tables:
+                    return _AnchorScanResult(
+                        has_arr_anchor=None,
+                        source="sha256_dupe",
+                        blockers=["sha256_matcher_no_files_tables"],
+                    )
+
+                sha256_map: dict[str, tuple[str, int]] = {}
+                for raw_path in raw_paths:
+                    sha256_val, size_val = self._lookup_file_sha256(conn, tables, raw_path)
+                    if sha256_val:
+                        sha256_map[raw_path] = (sha256_val, size_val)
+
+                if not sha256_map:
+                    return _AnchorScanResult(
+                        has_arr_anchor=False,
+                        source="sha256_dupe",
+                        payload_files_checked=len(raw_paths),
+                        blockers=["sha256_matcher_no_sha256_for_payloads"],
+                    )
+
+                anchor_paths: list[str] = []
+                unique_pairs = set(sha256_map.values())
+                for sha256_val, size_val in unique_pairs:
+                    for anchor in self._find_library_matches(conn, tables, sha256_val, size_val):
+                        if anchor not in anchor_paths:
+                            anchor_paths.append(anchor)
+
+                if anchor_paths:
+                    return _AnchorScanResult(
+                        has_arr_anchor=True,
+                        source="sha256_dupe",
+                        anchor_paths=anchor_paths,
+                        payload_files_checked=len(sha256_map),
+                    )
+
+                return _AnchorScanResult(
+                    has_arr_anchor=False,
+                    source="sha256_dupe",
+                    payload_files_checked=len(sha256_map),
+                )
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            return _AnchorScanResult(
+                has_arr_anchor=None,
+                source="sha256_dupe",
+                blockers=[f"sha256_matcher_error:{exc}"],
+            )
+
+    @staticmethod
+    def _files_tables(conn: sqlite3.Connection) -> list[str]:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'files_%' ORDER BY name"
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    @staticmethod
+    def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+        return any(str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+    @staticmethod
+    def _lookup_file_sha256(conn: sqlite3.Connection, tables: list[str], path: str) -> tuple[str | None, int]:
+        for table in tables:
+            if not _Sha256ContentMatcher._table_has_column(conn, table, "sha256"):
+                continue
+            if not _Sha256ContentMatcher._table_has_column(conn, table, "path"):
+                continue
+            row = conn.execute(
+                f'SELECT sha256, size FROM "{table}" WHERE status = ? AND path = ?',
+                ("active", path),
+            ).fetchone()
+            if row and row[0] is not None:
+                return (str(row[0]), int(row[1] or 0))
+            row = conn.execute(
+                f'SELECT sha256, size FROM "{table}" WHERE status = ? AND (path = ? OR path LIKE ?)',
+                ("active", path, f"{path}/%"),
+            ).fetchone()
+            if row and row[0] is not None:
+                return (str(row[0]), int(row[1] or 0))
+        return (None, 0)
+
+    def _find_library_matches(self, conn: sqlite3.Connection, tables: list[str], sha256_val: str, size_val: int) -> list[str]:
+        matches: list[str] = []
+        for table in tables:
+            if not self._table_has_column(conn, table, "sha256"):
+                continue
+            if not self._table_has_column(conn, table, "path"):
+                continue
+            rows = conn.execute(
+                f'SELECT path FROM "{table}" WHERE status = ? AND sha256 = ? AND size = ?',
+                ("active", sha256_val, size_val),
+            ).fetchall()
+            for (path,) in rows:
+                path_str = str(path or "")
+                if self._under_library_root(path_str) and path_str not in matches:
+                    matches.append(path_str)
+        return matches
+
+    def _under_library_root(self, path: str) -> bool:
+        candidate = str(path or "").rstrip("/")
+        if not candidate:
+            return False
+        for root in self.policy.arr_library_roots:
+            r = str(root or "").rstrip("/")
+            if r and (candidate == r or candidate.startswith(r + "/")):
+                return True
+        return False
+
+
 class _PlacementAnchorScanner:
     def __init__(self, policy: ClientDriftPolicy, *, catalog_path: Path | None = None) -> None:
         self.policy = policy
         self.catalog_path = catalog_path
+        self._sha256_matcher = _Sha256ContentMatcher(policy, catalog_path=catalog_path)
         self._library_index: dict[tuple[int, int], list[str]] | None = None
         self._library_files_checked = 0
         self._library_scan_truncated = False
@@ -652,6 +811,18 @@ class _PlacementAnchorScanner:
                 library_scan_truncated=self._library_scan_truncated,
                 blockers=fs_blockers,
             )
+
+        sha256_result = self._sha256_matcher.find_sha256_anchors(path_tuple)
+        if sha256_result.has_arr_anchor is True:
+            return sha256_result
+        if sha256_result.has_arr_anchor is False:
+            return _AnchorScanResult(
+                has_arr_anchor=False,
+                source="sha256_dupe",
+                payload_files_checked=sha256_result.payload_files_checked,
+                blockers=[*fs_blockers, *sha256_result.blockers],
+            )
+
         if payload_scan_truncated or self._library_scan_truncated:
             blockers = [*catalog_blockers, *fs_blockers, "arr_anchor_scan_incomplete"]
             return _AnchorScanResult(
@@ -1108,6 +1279,35 @@ def _find_pool_sibling_path(
     return best[0], best[1]
 
 
+def _find_stash_sibling_path(
+    policy: "ClientDriftPolicy",
+    anchor_paths: list[str],
+    name: str,
+    *,
+    qb_tracker_key: str = "",
+    rt_tracker_key: str = "",
+) -> tuple[str, str] | None:
+    """Construct a stash seeding path from a library anchor path.
+
+    Returns (stash_seeding_save_path, stash_root_path) or None.
+    Uses the first usable stash_root and derives the seeding subcategory from
+    the torrent name and tracker key.
+    """
+    if not anchor_paths or not name:
+        return None
+    stash_roots = policy.stash_roots
+    if not stash_roots:
+        return None
+    for stash_root in stash_roots:
+        r = str(stash_root or "").rstrip("/")
+        if not r:
+            continue
+        tracker_part = qb_tracker_key or rt_tracker_key or "cross-seed"
+        dest = Path(r) / tracker_part / name
+        return str(dest), str(dest)
+    return None
+
+
 def _detect_nested_folder(root_path: str, item_name: str, file_count: int) -> bool:
     """True when a sibling catalog root is a directory named after the torrent (errant nested folder).
 
@@ -1478,6 +1678,30 @@ def build_client_drift_report(
                     p["proposed_rt_directory"] = pool_save_path
                     p["pool_sibling_root"] = pool_root
 
+        # Dual-repoint upgrade: resolve no_client_on_required_stash_placement → repoint_both_to_stash
+        # when anchor_scan is a sha256 library dupe.
+        _stash_blocker = "no_client_on_required_stash_placement"
+        stash_needs = [r for r in drift_rows if _stash_blocker in (r.get("blockers") or [])]
+        for row in stash_needs:
+            p = row["placement"]
+            anchor = p.get("anchor_scan") or {}
+            if anchor.get("source") == "sha256_dupe" and anchor.get("has_arr_anchor") is True:
+                anchor_paths = anchor.get("anchor_paths") or []
+                stash_cand = _find_stash_sibling_path(
+                    active_policy,
+                    anchor_paths,
+                    str(row.get("name") or ""),
+                    qb_tracker_key=str(p.get("qb_tracker_key") or ""),
+                    rt_tracker_key=str(p.get("rt_tracker_key") or ""),
+                )
+                if stash_cand:
+                    stash_save_path, stash_root = stash_cand
+                    row["blockers"] = [b for b in row["blockers"] if b != _stash_blocker]
+                    row["action"] = "repoint_both_to_stash"
+                    p["proposed_qb_save_path"] = stash_save_path
+                    p["proposed_rt_directory"] = stash_save_path
+                    p["stash_sibling_root"] = stash_root
+
     action_counts = Counter(str(row["action"]) for row in drift_rows)
     side_counts = Counter(str(row["side"]) for row in drift_rows)
     summary = {
@@ -1730,6 +1954,9 @@ def build_path_drift_rank_report(
         anchor = placement.get("anchor_scan") or {}
         catalog = catalog_by_hash.get(torrent_hash, {})
         difficulty, difficulty_reasons = _difficulty_for_path_drift(row, catalog)
+        library_dupe = bool(
+            anchor.get("source") == "sha256_dupe" and anchor.get("has_arr_anchor") is True
+        )
         item: dict[str, Any] = {
             "hash": torrent_hash,
             "name": row.get("name") or "",
@@ -1740,6 +1967,7 @@ def build_path_drift_rank_report(
             "arr_status": _arr_status_from_anchor(anchor),
             "arr_anchor_source": anchor.get("source") or "",
             "arr_anchor_paths": anchor.get("anchor_paths") or [],
+            "library_dupe": library_dupe,
             "qb_nohl": bool(placement.get("qb_has_nohl_tag")),
             "qb_root_kind": placement.get("qb_kind") or "",
             "rt_root_kind": placement.get("rt_kind") or "",
@@ -1754,6 +1982,7 @@ def build_path_drift_rank_report(
             "placement_reasons": list(row.get("reasons") or []),
             "proposed_qb_save_path": placement.get("proposed_qb_save_path") or "",
             "proposed_rt_directory": placement.get("proposed_rt_directory") or "",
+            "stash_sibling_root": placement.get("stash_sibling_root") or "",
             "pool_sibling_root": placement.get("pool_sibling_root") or "",
             "qb_tracker_url": placement.get("qb_tracker_url") or "",
             "qb_tracker_key": placement.get("qb_tracker_key") or "",
@@ -1790,6 +2019,29 @@ def build_path_drift_rank_report(
             item["difficulty"] = "medium"
             item["difficulty_reasons"] = list(item.get("difficulty_reasons") or []) + [
                 "pool_sibling_exists:dual_repoint"
+            ]
+
+        # Dual-repoint: resolve no_client_on_required_stash_placement → repoint_both_to_stash
+        # when anchor_scan is a sha256 library dupe.
+        if "no_client_on_required_stash_placement" in item["blockers"] and item.get("library_dupe"):
+            stash_cand = _find_stash_sibling_path(
+                active_policy,
+                item.get("arr_anchor_paths") or [],
+                str(item.get("name") or ""),
+                qb_tracker_key=str(item.get("qb_tracker_key") or ""),
+                rt_tracker_key=str(item.get("rt_tracker_key") or ""),
+            )
+            if stash_cand:
+                stash_save_path, stash_root = stash_cand
+                item["blockers"] = [b for b in item["blockers"] if b != "no_client_on_required_stash_placement"]
+                item["action"] = "repoint_both_to_stash"
+                item["proposed_qb_save_path"] = stash_save_path
+                item["proposed_rt_directory"] = stash_save_path
+                item["stash_sibling_root"] = stash_root
+        if item.get("action") == "repoint_both_to_stash" and item.get("stash_sibling_root") and not item["blockers"]:
+            item["difficulty"] = "medium"
+            item["difficulty_reasons"] = list(item.get("difficulty_reasons") or []) + [
+                "stash_dupe_library_match:dual_repoint"
             ]
 
         items.append(item)
@@ -1877,6 +2129,7 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
         "repoint_qb_to_rt_path": "green",
         "repoint_rt_to_qb_path": "cyan",
         "repoint_both_to_pool": "bold cyan",
+        "repoint_both_to_stash": "bold green",
         "mirror_rt_to_qb": "cyan",
         "manual_review": "yellow",
     }
@@ -2042,7 +2295,14 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
             # ── Proposed paths for dual-repoint actions
             proposed_qb = item.get("proposed_qb_save_path") or ""
             proposed_rt = item.get("proposed_rt_directory") or ""
-            if proposed_qb and item.get("action") == "repoint_both_to_pool":
+            if proposed_qb and item.get("action") == "repoint_both_to_stash":
+                console.print(Text.assemble(
+                    ("    → both  ", "bold green"), (proposed_qb, "green"),
+                ))
+                stash_root = item.get("stash_sibling_root") or ""
+                if stash_root:
+                    console.print(Text.assemble(("    stash_root  ", "dim"), (stash_root, "dim green")))
+            elif proposed_qb and item.get("action") == "repoint_both_to_pool":
                 console.print(Text.assemble(
                     ("    → both  ", "bold cyan"), (proposed_qb, "cyan"),
                 ))
@@ -2054,6 +2314,10 @@ def format_path_drift_rank_report(report: dict[str, Any], *, json_output: bool =
                 console.print(Text.assemble(
                     ("    → rt    ", "dim bold"), (proposed_rt, "cyan"),
                 ))
+
+            # ── Library dupe indicator
+            if item.get("library_dupe"):
+                console.print(Text.assemble(("    library_dupe", "bold green")))
 
             # ── Blockers + context / reasons
             _BOILERPLATE = frozenset({

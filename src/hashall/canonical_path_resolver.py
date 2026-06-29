@@ -200,11 +200,13 @@ def classify_seeding_device(
     catalog_nlinks: Optional[int] = None,
     full_scan: bool = False,
     payload_paths: Optional[list[str]] = None,
+    library_dupe: bool = False,
 ) -> SeedingDevice:
     """
     Default mode: use ~noHL tag + catalog_nlinks as proxy.
     full_scan mode: not implemented — raises NotImplementedError.
     CROSS_SEED defaults to POOL.
+    library_dupe=True forces SHA256-matched CROSS_SEED items with no ~noHL tag to STASH.
     """
     if full_scan:
         raise NotImplementedError(
@@ -215,6 +217,8 @@ def classify_seeding_device(
     has_nohl = _has_no_hardlinks_tag(tags)
 
     if item_type == ItemType.CROSS_SEED:
+        if library_dupe and not has_nohl:
+            return SeedingDevice.STASH
         if has_nohl:
             return SeedingDevice.POOL
         if catalog_nlinks is not None and catalog_nlinks > 1:
@@ -466,6 +470,7 @@ def resolve_canonical_path(
     catalog_nlinks: Optional[int] = None,
     qbm_config_path: Optional[str] = None,
     full_scan: bool = False,
+    library_dupe: bool = False,
 ) -> ItemResolution:
     """
     Run Steps 0-5 for one item. Returns ItemResolution.
@@ -476,6 +481,7 @@ def resolve_canonical_path(
         catalog_nlinks: hardlink count from catalog DB (default scan mode)
         qbm_config_path: path to qbit_manage config.yml for tracker resolution
         full_scan: if True, raises NotImplementedError (see classify_seeding_device)
+        library_dupe: if True, forces SHA256-matched CROSS_SEED items with no ~noHL tag to STASH
     """
     # Step 0: Pre-screen
     staging_found = False
@@ -494,6 +500,7 @@ def resolve_canonical_path(
         item_type, qb_row.tags,
         catalog_nlinks=catalog_nlinks,
         full_scan=full_scan,
+        library_dupe=library_dupe,
     )
 
     # Step 3: Category subdirectory
