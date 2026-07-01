@@ -20,6 +20,7 @@ updated: 2026-06-26
 | j47 | canonicalize-execute | OP-51,OP-52,OP-54 | Merged to CR. merge(cr/hashall-20260626-151456__j47). |
 | j48 | sha256-content-anchor | OP-53,OP-55,OP-56 | Merged to CR. merge(cr/hashall-20260626-151456__j48). |
 | j49 | orphan-migration-guard | OP-57 |
+| j50 | quick-hash-dedupe | OP-60 |
 | j42 | lane2-strategy | OP-23,OP-26 |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
 | j43 | rt-state-monitor | OP-10,OP-12 |
