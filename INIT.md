@@ -55,11 +55,11 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j48 — sha256-content-anchor**
-OPs: OP-53,OP-55,OP-56
-Goal: Build unified single-pass placement+path orchestrator (`src/hashall/canonicalize.py`); wire `_detect_external_consumers` + `infer_canonical_save_path`; add CLI; pilot-verify; lift mutation block.
+**Next job: j50 — pool-orphan-dedupe**
+OPs: OP-57, OP-60, OP-61
+Goal: Execute full orphan dedupe pipeline per ORPHAN-MIGRATION-PROCESS.md — hardlink-guard classify, repoint active orphans, delete/dedupe, rsync unique to temp, recover ~2.2 TB on pool.
 
-Tasks: j46-t01 through j46-t05 briefs authored in comms/briefs/.
+Tasks: j50-t01 (hardlink guard) code written by agent, uncommitted, ported from former j49 worktree. j50-t02 through j50-t04 briefs to be authored.
 
 **Session state as of 2026-06-26:**
 - Merged: j28–j38 (j38 added RCCA path audit and RT repoint target validation; OP-19/24/47 follow-ups moved to j39)
@@ -72,7 +72,7 @@ Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
-JOB=j48
+JOB=j49
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__${JOB}
 ```
 

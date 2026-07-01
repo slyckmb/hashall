@@ -1,6 +1,6 @@
 # Orphan Migration Process Spec
 
-**OP-57 / j49** — Migrate orphan data from pool to external storage with hardlink guards and client repointing.
+**OP-57, OP-60, OP-61 / j50** — Migrate orphan data from pool to external storage with hardlink guards, cross-device dedupe, and client repointing.
 
 ## Current State
 
