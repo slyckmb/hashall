@@ -797,6 +797,62 @@ def doctor_repair_identity(db, apply, max_actions, allow_bind_alias, report_json
                 f"path={item.get('path')}"
             )
 
+@cli.command("orphan-validate")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--hardlink-guard", is_flag=True, help="Check for hardlinks to actively-seeding content.")
+@click.argument("orphan_dir", type=click.Path(exists=True, file_okay=False))
+def orphan_validate_cmd(db, hardlink_guard, orphan_dir):
+    """Validate orphan directory before migration.
+
+    Scans all files under ORPHAN_DIR and checks for hardlink references to
+    actively-seeding torrent content in the catalog. When --hardlink-guard
+    is passed, files hardlinked to seeding content are reported so they can
+    be excluded from migration.
+    """
+    from hashall.model import connect_db
+    from hashall.orphan_sweep import validate_orphan_hardlinks
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+
+    device_registry: dict[str, int] = {}
+    try:
+        for row in conn.execute(
+            "SELECT mount_point, device_id FROM devices"
+        ).fetchall():
+            device_registry[str(row[0])] = int(row[1])
+    except Exception:
+        pass
+
+    safe, skipped = validate_orphan_hardlinks(
+        orphan_dir=orphan_dir,
+        conn=conn,
+        device_registry=device_registry,
+    )
+    conn.close()
+
+    total = len(safe) + len(skipped)
+    safe_size = sum(s.get("size", 0) or 0 for s in safe)
+    skipped_size = sum(s.get("size", 0) or 0 for s in skipped)
+    total_size = safe_size + skipped_size
+
+    print(f"orphan_validate hardlink_guard={str(hardlink_guard).lower()}")
+    print(f"  orphan_dir={orphan_dir}")
+    print(f"  total_orphan_files={total}")
+    print(f"  files_safe_to_migrate={len(safe)}")
+    print(f"  files_skipped_hardlinked={len(skipped)}")
+    print(f"  estimated_transfer_size_safe={safe_size}")
+    print(f"  estimated_transfer_size_total={total_size}")
+
+    if skipped:
+        print()
+        print("Files skipped (hardlinked to seeding content):")
+        for item in skipped:
+            print(f"  {item['path']}")
+            if item.get("seeding_paths"):
+                for sp in item["seeding_paths"]:
+                    print(f"    hardlinked_to: {sp}")
+
+
 # Payload command group
 @cli.group()
 def payload():
