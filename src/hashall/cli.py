@@ -853,6 +853,59 @@ def orphan_validate_cmd(db, hardlink_guard, orphan_dir):
                     print(f"    hardlinked_to: {sp}")
 
 
+@cli.group()
+def orphan():
+    """Orphan directory management commands."""
+    pass
+
+
+@orphan.command("repoint")
+@click.option("--dry-run", is_flag=True, default=True, help="Report what would change without mutating.")
+@click.option("--execute", is_flag=True, help="Actually apply repoints (overrides --dry-run).")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+@click.option("--qb-cache", type=click.Path(), default=None, help="qB cache file path.")
+@click.option("--rt-rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC URL.")
+def orphan_repoint_cmd(dry_run, execute, rt_session_dir, qb_cache, rt_rpc_url):
+    """Scan RT and qB for torrents pointing at the orphan directory and repoint to canonical paths.
+
+    Dry-run by default. Pass --execute to apply repoints.
+    """
+    from hashall.orphan_repoint import run_orphan_repoint
+
+    really_dry_run = not execute
+
+    summary = run_orphan_repoint(
+        dry_run=really_dry_run,
+        rt_session_dir=Path(rt_session_dir),
+        qb_cache_path=Path(qb_cache) if qb_cache else None,
+        rt_rpc_url=rt_rpc_url,
+    )
+
+    mode = "DRY-RUN" if really_dry_run else "EXECUTION"
+    print(f"orphan-repoint mode={mode}")
+    print(f"  Scanning RT session dirs... found {summary['rt_scanned']} torrents")
+    print(f"  Scanning qB cache... found {summary['qb_scanned']} torrents")
+    print(f"  Orphan-path references found: {summary['total_orphan_refs']}")
+
+    for r in summary["results"]:
+        arrow = "→" if r.get("canonical_path") else "→ (no canonical path found — needs manual review)"
+        canonical = r.get("canonical_path") or ""
+        print(f"    {r['torrent_hash']} ({r['name']})  {r['source']}  {r['current_path']}  {arrow}  {canonical}")
+
+    if not really_dry_run:
+        print(f"  RT repointed: {summary['rt_repointed']}")
+        print(f"  qB repointed: {summary['qb_repointed']}")
+        if summary["failed"]:
+            print(f"  Failed: {summary['failed']}")
+
+    if really_dry_run and not execute:
+        print()
+        print("  (dry-run — pass --execute to apply)")
+
+    if not summary["total_orphan_refs"]:
+        print("  All clear — no orphan-path references found.")
+
+
 # Payload command group
 @cli.group()
 def payload():
