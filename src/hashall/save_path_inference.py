@@ -197,17 +197,29 @@ _STAGING_DIRS = frozenset({
     "_rehome-unique", "_qb-finish", "_qb-unique-repair", "_qb-repair-v2",
 })
 
+_ORPHAN_DIR_PREFIXES = (
+    "/pool/media/torrents/orphans/",
+    "/data/media/torrents/orphans/",
+)
+
 
 def extract_cross_seed_provider_name(*paths: str) -> str | None:
-    """Extract tracker name from cross-seed path.
+    """Extract the prowlarr-tracker-name from a cross-seed torrent's path.
 
-    Canonical: /seeding/<tracker>/...  → returns <tracker>
-    Legacy:    /seeding/cross-seed/<tracker>/...  → returns <tracker>
+    Tries in order:
+    1. Canonical seeding roots (APPROVED_SAVE_ROOTS):
+        /seeding/<tracker>/...        → returns <tracker>
+        /seeding/cross-seed/<tracker>/...  → returns <tracker>
+    2. Orphan roots (for items stranded under orphans/):
+        /orphans/<tracker>/...        → returns <tracker>
+        /orphans/<tracker>/<staging>/<hash>/<name>  → returns <tracker>
+    Returns None if no tracker can be extracted.
     """
     for candidate in paths:
         normalized = normalize_cross_seed_refactor_path(candidate, "cross-seed")
         if not normalized:
             continue
+        # Pass 1 — canonical seeding roots
         for root in APPROVED_SAVE_ROOTS:
             if not (normalized == root or normalized.startswith(root + "/")):
                 continue
@@ -215,18 +227,29 @@ def extract_cross_seed_provider_name(*paths: str) -> str | None:
             parts = Path(rel).parts if rel else ()
             if not parts:
                 continue
-            # Skip staging directories — not tracker names
             if parts[0] in _STAGING_DIRS:
                 continue
-            # Canonical: first component is the tracker name
             if parts[0] != "cross-seed":
                 return parts[0]
-            # Legacy: /seeding/cross-seed/<tracker>/...
-            # Skip if item is staged inside the tracker dir (tracker/_rehome-unique/...)
             if len(parts) > 1 and parts[1] not in _STAGING_DIRS:
                 if len(parts) > 2 and parts[2] in _STAGING_DIRS:
                     continue
                 return parts[1]
+        # Pass 2 — orphan roots (stranded items whose path preserves the tracker dir)
+        for orphan_root in _ORPHAN_DIR_PREFIXES:
+            if not (normalized == orphan_root or normalized.startswith(orphan_root)):
+                continue
+            rel = normalized[len(orphan_root):].lstrip("/")
+            parts = Path(rel).parts if rel else ()
+            if not parts:
+                continue
+            # First component is typically the prowlarr-tracker-name
+            if parts[0] in _STAGING_DIRS:
+                # Tracker-less orphan staging — skip staging, look one deeper
+                if len(parts) > 1 and parts[1] not in _STAGING_DIRS:
+                    return parts[1]
+                continue
+            return parts[0]
     return None
 
 
