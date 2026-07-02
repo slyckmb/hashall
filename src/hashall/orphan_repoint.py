@@ -220,16 +220,16 @@ def run_orphan_repoint(
     rt_session_dir: Path = DEFAULT_RT_SESSION_DIR,
     qb_cache_path: Path | None = None,
     rt_rpc_url: str = DEFAULT_RT_RPC_URL,
-    db_sync: bool = False,
+    auto_scan: bool = True,
 ) -> dict:
     """Orchestrate orphan repoint scan + resolution + optional execution.
 
     Returns a summary dict with scan results and per-item outcomes.
 
-    If db_sync=True, triggers a hashall scan of the orphan directory tree
-    after all repoints to sync the catalog with disk state (detect deletions
-    from rm/mv operations, update metadata). Recommended for post-op use;
-    skip for bulk/rapid sequencing where a single final sync suffices.
+    If auto_scan=True (default), triggers a hashall scan of the orphan directory
+    tree after all repoints to sync the catalog with disk state (detect deletions
+    from rm/mv operations, update metadata). Pass auto_scan=False when
+    sequencing multiple ops where a single final sync suffices.
     """
     qb_lookup = build_qb_lookup(cache_path=qb_cache_path)
 
@@ -293,7 +293,7 @@ def run_orphan_repoint(
 
         results.append(entry)
 
-    if db_sync and not dry_run:
+    if auto_scan and not dry_run:
         try:
             from pathlib import Path as _P
             _db = _P.home() / ".hashall" / "catalog.db"
