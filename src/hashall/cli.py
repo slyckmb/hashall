@@ -865,10 +865,14 @@ def orphan():
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
 @click.option("--qb-cache", type=click.Path(), default=None, help="qB cache file path.")
 @click.option("--rt-rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC URL.")
-def orphan_repoint_cmd(dry_run, execute, rt_session_dir, qb_cache, rt_rpc_url):
+@click.option("--db-sync/--no-db-sync", default=True, help="After repoint, re-scan orphan dir to sync catalog with disk state (rm/mv detection). Recommended unless sequencing multiple ops with a final sync.")
+def orphan_repoint_cmd(dry_run, execute, rt_session_dir, qb_cache, rt_rpc_url, db_sync):
     """Scan RT and qB for torrents pointing at the orphan directory and repoint to canonical paths.
 
     Dry-run by default. Pass --execute to apply repoints.
+
+    Use --no-db-sync when running multiple repoints in rapid succession;
+    run a final scan sync separately.
     """
     from hashall.orphan_repoint import run_orphan_repoint
 
@@ -879,6 +883,7 @@ def orphan_repoint_cmd(dry_run, execute, rt_session_dir, qb_cache, rt_rpc_url):
         rt_session_dir=Path(rt_session_dir),
         qb_cache_path=Path(qb_cache) if qb_cache else None,
         rt_rpc_url=rt_rpc_url,
+        db_sync=db_sync,
     )
 
     mode = "DRY-RUN" if really_dry_run else "EXECUTION"
