@@ -21,6 +21,7 @@ updated: 2026-07-01
 | j48 | sha256-content-anchor | OP-53,OP-55,OP-56 | Merged to CR. merge(cr/hashall-20260626-151456__j48). |
 | j49 | orphan-migration-guard | OP-57 | OBE — merged into j50 (pool-orphan-dedupe). Branch deleted, worktree removed. |
 | j50 | pool-orphan-dedupe | OP-57,OP-60,OP-61 |
+| j53 | repo-mastery-docs | OP-64 |
 | j51 | missingFiles-repair | OP-62 |
 | j52 | rt-qb-mirror-race | OP-58,OP-59 |
 | j42 | lane2-strategy | OP-23,OP-26 |
@@ -44,11 +45,12 @@ updated: 2026-07-01
 
 ## Run Order
 
-j48 → j50 → j51 → j42 → j39 → j52 → j43 → j44 → j45
+j48 → j50 → j53 → j51 → j42 → j39 → j52 → j43 → j44 → j45
 
 Notes:
 - j48 (sha256-content-anchor) done — SHA256 backfill + _Sha256ContentMatcher + repoint_both_to_stash delivered; 83 blocked FPs resolvable
-- j50 (pool-orphan-dedupe) next — consolidated job: OP-57 hardlink guard (code done, uncommitted), OP-60 quick_hash mode for cross-device matching, OP-61 execute SHA256-confirmed orphan dedupe. Full pipeline per ORPHAN-MIGRATION-PROCESS.md: hardlink classify → repoint active items → delete Class A/B → rsync Class C → cleanup. SHA256 scan complete (21,943 files, 19,370 updated, 810G free).
+- j50 (pool-orphan-dedupe) current — consolidated job: OP-57 hardlink guard (code done, uncommitted), OP-60 quick_hash mode for cross-device matching, OP-61 execute SHA256-confirmed orphan dedupe. Class B complete (6,208 files, 2.7 TB recovered). t06 (Class C rsync) + t07 (wrap) pending.
+- j53 (repo-mastery-docs) next — OP-64 full audit of repo mastery documentation. Trigger: agent proposed rehome-rule violation because mastery self-check didn't test the pattern. Tasks: audit REQUIREMENTS.md, AGENT-MASTERY.md, ARCHITECTURE.md for untested principles; write new self-check questions; end-to-end verify. ORDERED NEXT.
 - j51 (missingFiles-repair) urgent — 440 qB torrents at missingFiles 0% because save_path points to stale stash paths. Batch set_location to pool + recheck per OP-62. Single-file items allow fast fix; multi-file need dir move
 - j42 (lane2-strategy) after j50 — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
 - j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled
@@ -211,8 +213,28 @@ Tasks ordered working **backwards from the original goal** — simplest, highest
 
 ---
 
+## j53 — repo-mastery-docs
+
+**Slug:** repo-mastery-docs
+**OPs:** OP-64
+**Goal:** Full audit of all repo mastery documentation. Catalog every documented principle, rule, and invariant across REQUIREMENTS.md, AGENT-MASTERY.md, ARCHITECTURE.md, and related docs. Map existing mastery self-check questions to source principles. Write new questions for every gap. Verify every question has a correct, referenced answer. Target: every §1–§7 principle has at least one matching mastery self-check question. No undocumented gaps between stated policy and tested knowledge.
+**Trigger:** j50-t06 planning — agent proposed repointing 55a3df42 to ef1071a1's stash path (violates §1.4 per-item payload invariant) because the mastery self-check (§8) had no question testing rehome payload-tree patterns (§5.3, §6.3). The pattern is fully documented in REQUIREMENTS.md but the agent lacked skill because the mastery check doesn't test it.
+
+### Tasks
+
+| Task | Status | Goal |
+|------|--------|------|
+| j53-t01 | planned | **Audit REQUIREMENTS.md** — catalog every principle, rule, invariant, constraint, and requirement. Group by section. For each: extract the canonical statement, note which AGENT-MASTERY.md question (if any) tests it. Output: master principle catalog with coverage gaps. |
+| j53-t02 | planned | **Audit AGENT-MASTERY.md** — map existing self-check questions (Q1–Q8, now 8 total) to source principles. Audit the document body (sections 1–7) for every documented behavior/testable statement. Identify statements with no matching self-check question. Output: gap list of untested principles. |
+| j53-t03 | planned | **Audit ARCHITECTURE.md and supporting docs** — scan ARCHITECTURE.md, REPO-MASTERY.md, CANONICALIZE-INTERFACE-MAP.md, 4-GATE-MUTATION-PROTOCOL.md, ORPHAN-MIGRATION-PROCESS.md for any principles not covered by REQUIREMENTS.md or AGENT-MASTERY.md. Output: supplementary principle list with source references. |
+| j53-t04 | planned | **Write new self-check questions** — for every gap found in t01–t03, write a complete Q+N question and its answer. Each question must: (a) reference the source doc section, (b) test understanding of the principle not just memory, (c) have an answer that cites the source. Insert into AGENT-MASTERY.md §8. Update the "Answer all N" counters. |
+| j53-t05 | planned | **Integration and end-to-end verify** — update all cross-references, section numbers, and question counts in AGENT-MASTERY.md. Run through all questions sequentially to verify each has a correct, reachable answer in the linked docs. Confirm no orphan references, broken section links, or stale counts. |
+
+---
+
 ## Queue State Notes
 
 JOB-QUEUE.md written 2026-06-26 by lead after opscan showed 32 unslotted OPs.
 Replanned 2026-06-29 (j48-replan): all 17 open OPs now properly slotted in In-Job section.
 Replanned 2026-07-01: slotted OP-61→j50, OP-62→j51, OP-58+OP-59→j52. Consolidated j49 into j50 — all 3 pool-dedupe OPs (OP-57, OP-60, OP-61) under one job per ORPHAN-MIGRATION-PROCESS.md. j49 marked OBE, branch deleted, worktree removed. Run order: j50→j51→j42→j39→j52→j43→j44→j45. j50-t01 code done (uncommitted, ported from j49 worktree). j52 parallel-eligible with j39.
+Replanned 2026-07-02: added j53 (repo-mastery-docs, OP-64). Ordered next after j50. Trigger: agent proposed hitchhiker violation during j50-t06 planning because mastery self-check didn't test §1.4/§5.3/§6.3 rehome payload-tree invariant. Full doc audit briefed. AGENT-MASTERY.md Q8 + answer added as immediate hotfix.

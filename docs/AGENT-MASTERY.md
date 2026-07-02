@@ -282,6 +282,23 @@ make trk-warn-dry BUCKET=deleted
 make trk-warn-replace-individual BUCKET=deleted
 ```
 
+### Auto-Scan After File Operations
+
+Every `rm`/`mv`/`rsync` operation on a tracked path makes the hashall catalog stale.
+Always re-scan the affected path afterward so the catalog reflects disk state:
+
+```bash
+# Fast scan — detects deletions, no rehashing
+hashall scan /pool/media/torrents/orphans --hash-mode fast
+
+# Orphan repoint includes --auto-scan (default on). Use --no-auto-scan
+# when sequencing multiple operations with a final sync planned.
+hashall orphan repoint --execute           # syncs automatically
+hashall orphan repoint --execute --no-auto-scan  # skip, final sync later
+```
+
+**Rule of thumb:** Always use `--auto-scan` (default) unless batching multiple rm/mv calls where one final scan at the end is cheaper. The scan is lightweight (`--hash-mode fast` only checks quick_hash, no full SHA256 recomputation) and marks missing files as `status=deleted` in the catalog.
+
 ---
 
 ## 5. High-Risk Files
@@ -385,7 +402,7 @@ make trk-warn-replace-individual BUCKET=deleted
 
 ## 8. Mastery Self-Check
 
-Answer all 7 before dispatching any task. Answers come from this document only.
+Answer all 8 before dispatching any task. Answers come from this document only.
 
 **Q1.** A torrent's MKV file is hardlinked to `/stash/media/movies/`. Where should it live and why — and is this a hard rule or a preference?
 
@@ -401,6 +418,23 @@ Answer all 7 before dispatching any task. Answers come from this document only.
 
 **Q7.** The drift audit default runs with `ANCHOR_SCAN=0`. Why is that wrong, and what value should you use?
 
+**Q8.** Two RT torrents — ef1071a1 and 55a3df42 — are both for Elemental.2023. ef1071a1 is on stash at `/data/media/torrents/seeding/movies/Elemental...` (ARR-managed, Plex hardlinked, nlink=2). 55a3df42 is on pool at `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)/Elemental...` (injected by cross-seed, nlink=2). They share the same SHA256 content but different inodes on different filesystems. You propose repointing 55a3df42 to ef1071a1's path and deleting the pool file. What principle does this violate, and what should you do instead?
+
 ---
 
-*Answers to all 8 questions are contained in sections 1–7 above. If you cannot answer a question without opening another file, re-read the relevant section before proceeding.*
+*Answers to all 8 questions are contained in sections 1–7 above and §8 below. If you cannot answer a question without opening another file, re-read the relevant section before proceeding.*
+
+---
+
+### §8 — Q8 Answer: Rehome Payload-Tree Invariant
+
+Repointing 55a3df42 to ef1071a1's path violates **§1.4/§5.3 per-item payload invariant** — each torrent must have its own unique path tree. Pointing two torrents at one tree creates a hitchhiker (§6.3 anti-pattern): deleting one torrent's tree would break the other.
+
+**Correct approach** — rehome 55a3df42 from pool to stash (§5.3):
+
+1. Build 55a3df42's unique payload tree on stash at its canonical path: `/data/media/torrents/seeding/cross-seed/DigitalCore (API)/Elemental.../<filename>`
+2. Hardlink ef1071a1's existing MKV inode into that tree — same bytes, different path (§1.4)
+3. Repoint RT 55a3df42 to its new stash path, recheck (same content → complete)
+4. Delete pool copy (inode 3265) — pool space recovered
+
+Result: two distinct path trees on stash, backed by the same inode. No hitchhiker (different directories), no cross-filesystem violation (donor ef1071a1 and target 55a3df42 are both on stash per §6.3).

@@ -55,11 +55,13 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j50 — pool-orphan-dedupe**
-OPs: OP-57, OP-60, OP-61
-Goal: Execute full orphan dedupe pipeline per ORPHAN-MIGRATION-PROCESS.md — hardlink-guard classify, repoint active orphans, delete/dedupe, rsync unique to temp, recover ~2.2 TB on pool.
+**Next job: j53 — repo-mastery-docs**
+OPs: OP-64
+Goal: Full audit of all repo mastery docs. Catalog every principle, write new mastery self-check questions for every gap. End-to-end verify.
 
-Tasks: j50-t01 (hardlink guard) code written by agent, uncommitted, ported from former j49 worktree. j50-t02 through j50-t04 briefs to be authored.
+Tasks: j53-t01 through j53-t05 briefs authored. Dispatch to opencode-go/deepseek-v4-pro.
+
+**Previous: j50 — pool-orphan-dedupe** (paused at t06 — Class C rsync pending)
 
 **Session state as of 2026-06-26:**
 - Merged: j28–j38 (j38 added RCCA path audit and RT repoint target validation; OP-19/24/47 follow-ups moved to j39)
