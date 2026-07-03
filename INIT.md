@@ -3,7 +3,7 @@
 Session: `hashall-20260626-151456`
 Branch: `cr/hashall-20260626-151456`
 Worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456`
-Updated: 2026-06-26
+Updated: 2026-07-03
 
 ---
 
@@ -55,13 +55,15 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j51 — missingFiles-repair**
-OPs: OP-62
-Goal: Fix 440 qB torrents at missingFiles 0% — batch set_location from stale stash paths to pool + recheck per OP-62.
+**Next job: j50 — pool-orphan-dedupe**
+OPs: OP-57, OP-60, OP-61, OP-63
+Goal: Resume the active j50 job branch, review unmerged j50 commits, and either close/merge j50 or explicitly pause it before dispatching j51.
 
-Tasks: TBD — briefs not yet written. Single-file items (265) fast fix via setLocation; multi-file (177) need dir move.
+Tasks: j50-t01 and j50-t02 are implemented on the j50 job branch; remaining scope is review/closeout or a deliberate pause with handoff.
 
-**Previous: j50 — pool-orphan-dedupe** (paused at t06 — Class C rsync pending)
+**Previous completed: j54 — stoppeddl-tooling** (merged to CR; OP-66 closed)
+**Superseded: j49 — orphan-migration-guard** (OP-57 consolidated into j50; do not dispatch j49)
+**Next after j50: j51 — missingFiles-repair** (OP-62, OP-65)
 
 **Session state as of 2026-06-26:**
 - Merged: j28–j38 (j38 added RCCA path audit and RT repoint target validation; OP-19/24/47 follow-ups moved to j39)
@@ -74,7 +76,7 @@ Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
-JOB=j49
+JOB=j50
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__${JOB}
 ```
 

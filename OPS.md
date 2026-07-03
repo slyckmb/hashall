@@ -23,10 +23,6 @@ _(all other OPs are slotted — see In-Job below)_
 ## In-Job
 
 | ID | Type | Title | Job |
-| OP-53 | reliability | SHA256 library content anchor — canonical-path resolver cannot detect library-content duplicates across filesystems; see docs/OP-53-PLAN.md | j48 |
-| OP-55 | bug | 83 blocked (FP) items in Gate 2 canonicalize dry-run — `hashall canonicalize-apply-batch --dry-run` produced 83 plan_type=blocked (false positives) out of 1437 total items. These appeared as fix_placement_only drift but were blocked. Root cause unknown — may be catalog staleness, canonical_device detection edge case, or transient state mismatch. Need RCCA before next canonicalize batch or these items will be repeatedly mis-classified | j48 |
-| OP-56 | reliability | qB `set_location` does not trigger auto-recheck in canonicalize workflow — Gate 3 pilot and Gate 4 batch both require manual qB recheck after `set_location` to update stoppedDL state. If recheck is omitted, items may appear incorrectly after relocation. Workaround: explicit recheck step in apply executor (partially addressed in j47-t05/qB best-effort). Full fix requires either qB API call or fastresume-edit path for cross-device moves | j48 |
-| OP-64 | doc | AGENT-MASTERY.md mastery self-check (§8) does not cover rehome payload-tree invariant — during j50-t06 planning, agent proposed repointing 55a3df42 to ef1071a1's path and deleting the pool copy, which violates §1.4 per-item payload invariant (each torrent must have its own unique path tree). The correct rehome pattern (§5.3: build target payload tree, hardlink donor inode, repoint, delete source) is fully documented in REQUIREMENTS.md §1.4/§5.3/§6.3 but the agent had poor signal by design — the mastery self-check's 7 questions don't test any rehome payload-tree or hitchhiker concepts. Full audit needed: review all repo mastery documentation (AGENT-MASTERY.md, REPO-MASTERY.md, ARCHITECTURE.md, REQUIREMENTS.md) for gaps between documented patterns and tested knowledge. Ensure all §1–§7 principles have at least one matching mastery self-check question. | j53 |
 | OP-09 | reliability | Execute slice 12c — 10 `cross-seed/<hash>/` items: resolve tracker → rename dir → repoint RT+qB | j39 |
 | OP-15 | doc | Audit all cross-seed folder references across repo (src/, docs/, scripts/, Makefile, SPRINT.md, RUNBOOK.md, AGENTS.md) — ensure all are aligned with §4.4 policy: cross-seed/<prowlarr-tracker-name>/ is canonical; no "prefix removal" framing anywhere | j39 |
 | OP-17 | reliability | Migrate ~2000 cross-seed items from bare `<tracker>/` back to `cross-seed/<tracker>/` — consequence of OP-16 rogue mutation; requires OP-16 code fix first, then 4-gate validated migration (rename dir + repoint RT + repoint qB per item) | j39 |
@@ -58,6 +54,10 @@ _(all other OPs are slotted — see In-Job below)_
 
 | ID | Type | Title | Closed |
 |----|------|-------|--------|
+| OP-53 | reliability | SHA256 library content anchor — `_Sha256ContentMatcher` added for cross-device content matching; library-dupe flow wired through j48. | j48 |
+| OP-55 | bug | 83 blocked Gate 2 false positives — j48 SHA256/library-dupe work made the blocked FP class resolvable. | j48 |
+| OP-56 | reliability | qB recheck gap after `set_location` — j48 extended apply/rank flow with explicit recheck handling. | j48 |
+| OP-64 | doc | Repo mastery doc audit delivered; AGENT-MASTERY coverage expanded and gaps documented. | j53 |
 | OP-11 | doc | config/healthchecks.json stub created; operator must register and fill UUID | j40-t05 |
 | OP-13 | doc | TRACKER_ISSUE_SCRIPT alias added to Makefile; TRK_WARN_SCRIPT kept as compat alias | j40-t05 |
 | OP-25 | reliability | pip editable install gate added to Makefile mutation targets | j40-t04 |
