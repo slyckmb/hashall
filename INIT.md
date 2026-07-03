@@ -55,9 +55,9 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j53 — repo-mastery-docs**
-OPs: OP-64
-Goal: Full audit of all repo mastery docs. Catalog every principle, write new mastery self-check questions for every gap. End-to-end verify.
+**Next job: j54 — stoppeddl-tooling**
+OPs: OP-66
+Goal: Close 6 stoppedDL pipeline tooling gaps per STOPPEDDL-SOP.md. Harden bucket→drain→apply→roundloop pipeline.
 
 Tasks: j53-t01 through j53-t05 briefs authored. Dispatch to opencode-go/deepseek-v4-pro.
 
