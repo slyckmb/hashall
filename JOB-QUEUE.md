@@ -20,47 +20,65 @@ updated: 2026-07-03
 | j47 | canonicalize-execute | OP-51,OP-52,OP-54 | Merged to CR. merge(cr/hashall-20260626-151456__j47). |
 | j48 | sha256-content-anchor | OP-53,OP-55,OP-56 | Merged to CR. merge(cr/hashall-20260626-151456__j48). |
 | j49 | orphan-migration-guard | OP-57 | Merged to CR as superseded planning. OP-57 consolidated into j50; do not dispatch j49. |
-| j50 | pool-orphan-dedupe | OP-57,OP-60,OP-61,OP-63 | Active/paused. Job branch is rebased onto the current CR tip; review/closeout before starting j51. |
 | j53 | repo-mastery-docs | OP-64 | Merged to CR. commit 23d000c. |
 | j54 | stoppeddl-tooling | OP-66 | Merged to CR. merge(cr/hashall-20260626-151456__j54). 
-| j51 | missingFiles-repair | OP-62 |
-| j52 | rt-qb-mirror-race | OP-58,OP-59 |
-| j42 | lane2-strategy | OP-23,OP-26 |
-| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 |
-| j43 | rt-state-monitor | OP-10,OP-12 |
-| j44 | chatrap-infra | OP-42,OP-45 |
-| j45 | cr-to-main | OP-14 |
+| j50 | orphan-safety-tooling-closeout | OP-57 | Active. Rebased job branch has only tooling/tests; review and merge/close before new repair work. |
+| j51 | qb-stoppeddl-recovery | OP-62 | Planned next. Recover qB missingFiles/stoppedDL fallout using j54 hardened tooling. |
+| j52 | mirror-placement-anomalies | OP-58,OP-59,OP-63 | Planned. Surgical mirror/rehome fixes for known small anomaly set. |
+| j55 | pool-orphan-dedupe-gated | OP-60,OP-61 | Planned. Dry-run/classify first; live deletion/rsync requires explicit operator approval. |
+| j42 | lane2-strategy | OP-23,OP-26 | Planned after immediate qB/orphan blockers. |
+| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47 | Planned after lane strategy. |
+| j43 | rt-state-monitor | OP-10,OP-12 | Planned infrastructure/state work. |
+| j44 | chatrap-infra | OP-42,OP-45 | Planned orchestration reliability work. |
+| j56 | link-plan-ux | OP-65 | Planned low-risk UX cleanup. |
+| j45 | cr-to-main | OP-14 | Final merge only. |
 
 ---
 
 ## Dependencies
 
-- j39 (cross-seed-repair) requires j37 (code-bug-fix) — must fix OP-16 before migrating ~2000 items
-- j47 (canonicalize-execute) requires j46 (build-canonicalize-tool) — executor gates on j46-t05 LIFT verdict
-- j39 (cross-seed-repair) requires j47 (canonicalize-execute) — all drift items must be corrected before cross-seed migration begins
-- j42 (lane2-strategy) benefits from j46 (build-canonicalize-tool) — canonicalize batch output quantifies Lane 2 scope precisely
-- j48 (sha256-content-anchor) requires OP-53 Phase 1 SHA256 backfill before Phases 2-4 can be tested with real data
-- j45 (cr-to-main) is last — merge only after all planned repair jobs complete
-- j54 (stoppeddl-tooling) should run before j51 (missingFiles-repair) — j51 benefits from hardened pipeline tools (watchdog, persistence verifier, download-state enforcement)
+- j50 is a code/tooling closeout only. Do not run live orphan deletion or rsync in j50.
+- j51 requires j54 tooling to be merged; this is satisfied. Run qB recovery before broader storage/canonicalize work because active qB state is the highest operational risk.
+- j52 should run after j51 so qB passive-state enforcement is already hardened; it handles a tiny known anomaly set (TorrentDay mirror race + Elemental duplicate).
+- j55 must not mutate live storage until its dry-run/classification output is reviewed. Live deletion/rsync requires explicit operator approval.
+- j42 and j39 remain downstream of immediate safety repairs and storage feasibility decisions.
+- j45 is last — merge only after planned repair jobs complete.
 
 ---
 
 ## Run Order
 
-j48 → j50 → j53 → j54 → j51 → j42 → j39 → j52 → j43 → j44 → j45
+j50 → j51 → j52 → j55 → j42 → j39 → j43 → j44 → j56 → j45
 
 Notes:
 - j48 (sha256-content-anchor) done — SHA256 backfill + _Sha256ContentMatcher + repoint_both_to_stash delivered; 83 blocked FPs resolvable
-- j50 (pool-orphan-dedupe) active/paused — consolidated job: OP-57 hardlink guard, OP-60 quick_hash mode for cross-device matching, OP-61 execute SHA256-confirmed orphan dedupe, OP-63 rehome pool cross-seed duplicate. Job branch `cr/hashall-20260626-151456__j50` is rebased onto the current CR tip; review and closeout/pause this branch before dispatching j51.
+- j50 (orphan-safety-tooling-closeout) active — job branch `cr/hashall-20260626-151456__j50` is rebased and tested. It contains orphan hardlink guard + orphan repoint tooling only. Merge/close it, then move on.
 - j53 (repo-mastery-docs) done — OP-64 full audit delivered. 203 principles cataloged, 62 tested by Q1-Q8, 141 untested. 10 high-severity gaps identified.
 - j54 (stoppeddl-tooling) done — OP-66 closed. 6 gaps fixed: pause_mirror_seeders extended, watchdog built, 4-Gate protocol updated, --extra-root-file added, --restore-from-backup added, verify-persistence.sh built. Hardened pipeline ready for j51 safety gate.
-- j51 (missingFiles-repair) next after j50 closeout/pause — OP-62: 440 qB torrents at missingFiles 0% because save_path points to stale stash paths. Exploratory j51 briefs/logs exist outside tracked docs; formal tracked briefs still need to be authored before dispatch. Slotted: OP-65 (link show-plan UX labels).
-- j42 (lane2-strategy) after j50 — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
+- j51 (qb-stoppeddl-recovery) next after j50 closeout — OP-62 started as 440 missingFiles. Session evidence now says missingFiles reached 0 and hundreds transitioned to stoppedDL/checking. Replan focus: verify current qB state, drain/checking, and use j54 `bucket → drain → apply → roundloop` tooling safely.
+- j52 (mirror-placement-anomalies) groups the small known mirror/rehome anomalies before broad strategy work: OP-58/59 TorrentDay race plus OP-63 Elemental pool→stash hardlink payload rehome.
+- j55 (pool-orphan-dedupe-gated) holds the high-risk pool orphan deletion/rsync work. It starts with dry-run/classification and stops for operator approval before deletion.
+- j42 (lane2-strategy) after immediate blockers — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
 - j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled
-- j52 (rt-qb-mirror-race) — OP-58/OP-59 investigate mirror flow share-limit race that left 2 TorrentDay cross-seed items stalledUP in qB + PU in RT. Can run in parallel with j39 since it's a different subsystem
 - j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40)
 - j44 (chatrap infra) — upstream fixes
+- j56 (link-plan-ux) — low-risk UX cleanup for hardlink plan labels; can run whenever operational jobs are paused
 - j45 (cr-to-main) — merge CR to main after all repair jobs done
+
+## Brief Status
+
+- Reusable existing briefs:
+  - `comms/briefs/TASK-BRIEF-j50-t01.md`
+  - `comms/briefs/TASK-BRIEF-j50-t02.md`
+  - `comms/briefs/j51-t01-deep-dive.md`
+  - `comms/briefs/j51-t02-stoppeddl-sop.md`
+  - `comms/briefs/TASK-BRIEF-j54-t01.md` through `TASK-BRIEF-j54-t06.md` (already executed/merged)
+- Briefs to write before dispatch:
+  - `j51-t03` formal qB recovery current-state audit
+  - `j51-t04` guarded qB recovery execution
+  - `j52-t01` mirror/rehome anomaly investigation
+  - `j55-t01` orphan dry-run/classification
+  - `j55-t02+` live deletion/rsync briefs only after operator approval
 
 ---
 
@@ -151,11 +169,11 @@ Goal: Batch documentation/runbook cleanup for known process and dependency gaps.
 
 ---
 
-## j50 — pool-orphan-dedupe
+## j50 — orphan-safety-tooling-closeout
 
-**Slug:** pool-orphan-dedupe
-**OPs:** OP-57, OP-60, OP-61, OP-63
-**Goal:** Clear the pool space wall so the original canonicalize pipeline (Gate 4 batch, OP-51) can resume. Recover ~2.2 TB on pool by deleting orphan files whose content is confirmed safe elsewhere — no data copy needed.
+**Slug:** orphan-safety-tooling-closeout
+**OPs:** OP-57
+**Goal:** Close the already-built orphan safety tooling branch. This job is code/tooling only: hardlink guard + orphan-path repoint tooling + tests. It must not delete, rsync, or mutate live storage.
 
 ### Why we're here (the chain back to the original goal)
 
@@ -165,25 +183,17 @@ The pool was full because `/pool/media/torrents/orphans/` was hoarding **3.9 TB*
 
 **Strategy pivot:** Instead of migrating orphans off pool (which requires matching storage), dedupe them: find orphan files whose content exists on stash library, hotspare, or WD6TB via cross-device SHA256 matching, and delete the pool copy. Zero data transfer.
 
-The SHA256 upgrade scan just completed (21,943 files, 19,370 updated). Pool snapshot + pilot deletion freed ~875 GB. Pool now has 810G free. j50 runs the dedupe pipeline.
+The SHA256 upgrade scan completed (21,943 files, 19,370 updated). Pool snapshot + pilot deletion freed ~875 GB. Pool had 810G free at that checkpoint. The live dedupe pipeline is now scheduled in j55, not j50.
 
-**After j50 frees ~2.2 TB:** Gate 4 batch resumes (OP-51) → canonicalize finishes → j42 Lane 2 strategy begins for 1030 ROOT_DRIFT + 2361 compound drift items. The canonicalize pipeline was suspended mid-Gate-4 for this dedupe detour; j50 is the wall we knock down to get back on track.
+The original broad j50 mixed tooling, live deletion, rsync, and rehome work. This replan splits those apart. j50 now only closes the rebased tooling branch. Live orphan dedupe moved to j55; mirror/rehome anomalies moved to j52.
 
 ### Tasks
-
-Tasks ordered working **backwards from the original goal** — simplest, highest-impact wins first:
 
 | Task | Status | Goal |
 |------|--------|------|
 | j50-t01 | done (job branch) | Build hardlink-guard tool: `validate_orphan_hardlinks()` in `orphan_sweep.py` + `hashall orphan-validate --hardlink-guard` CLI + tests on the rebased `cr/hashall-20260626-151456__j50` branch. |
 | j50-t02 | done (job branch) | **Repoint active clients referencing orphan paths** (known: f37b9983 `His.Three.Daughters.2024`). Tooling and tests completed on the rebased `cr/hashall-20260626-151456__j50` branch. |
-| j50-t03 | planned | **Run hardlink-guard classification** via `hashall orphan-validate --hardlink-guard /pool/media/torrents/orphans/`. Output three-class report: Class A (hardlinked to seeder — safe to delete orphan link), Class B (unique orphans with SHA256 match on stash/hotspare/WD6TB — zero-copy delete), Class C (unique orphans with no cross-device match — requires rsync to hotspare first). |
-| j50-t04 | planned | **Verify SHA256 coverage** — confirm hotspare has full SHA256 for cross-device matching. Already at 99.9% (39,320/39,347 files). If any gaps remain, run targeted `hashall scan --hash-mode upgrade` on the hotspare orphan_data subtree. WD6TB is intentionally excluded from dedupe — it was the failed offload target (incomplete partial copy, 0% SHA256, no authoritative value for matching). |
-| j50-t05 | planned | **Delete Class A** — orphan files hardlinked to seeding content. `rm` the orphan-dir entries; seeder's hardlink retains data. No pool space recovered (seeder still holds the inode) but orphan dir shrinks. Run per ORPHAN-MIGRATION-PROCESS.md Step 2. |
-| j50-t06 | planned | **Delete Class B** — unique orphans with SHA256-confirmed matches on hotspare (99.9% covered) or stash/media (79.2% covered). Zero-copy space recovery — the pure win. Query catalog for SHA256 matches across devices. Run per ORPHAN-MIGRATION-PROCESS.md Step 3. Expected recovery: ~1.2 TB from hotspare matches alone. |
-| j50-t07 | planned | **Rsync Class C + verify + delete** — unique orphans with no cross-device match. `rsync -aH` to hotspare with hardlink preservation, verify with `rsync -aH --dry-run --delete --itemize-changes`, then delete from pool. Blocked if hotspare lacks capacity (741G free). Run per ORPHAN-MIGRATION-PROCESS.md Steps 4-5. |
-| j50-t08 | planned | **Report and unblock** — document pool free space delta; confirm Gate 4 batch can resume (OP-51, ~237 remaining fix_placement_only items). Update JOB-QUEUE.md run order to advance j42. Close OP-57, OP-60, OP-61. Archive ORPHAN-MIGRATION-PROCESS.md as completed spec. |
-| j50-t09 | planned | **Report and unblock** — document pool free space delta; confirm Gate 4 batch can resume (OP-51, ~237 remaining fix_placement_only items). Update JOB-QUEUE.md run order to advance j42. Close OP-57, OP-60, OP-61, OP-63 as appropriate. Archive ORPHAN-MIGRATION-PROCESS.md as completed spec. |
+| j50-t03 | planned | Lead review of the rebased j50 diff, confirm focused tests and S05 checks, then close/merge j50. |
 
 ---
 
@@ -225,12 +235,12 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 
 ---
 
-## j51 — missingFiles-repair
+## j51 — qb-stoppeddl-recovery
 
-**Slug:** missingFiles-repair
-**OPs:** OP-62, OP-65
-**Goal:** Fix 440 qB torrents at missingFiles (0%) caused by stale save_path pointing to stash paths after rehome migration. Batch `set_location` to pool path + recheck. 265 single-file (fast fix: set_location to target file), 177 multi-file (need set_location to parent dir + recheck).
-**Urgency:** High — missingFiles items cannot seed or be started.
+**Slug:** qb-stoppeddl-recovery
+**OPs:** OP-62
+**Goal:** Recover the qB mirror fallout from the stale save_path repair. Current evidence says the original 440 missingFiles count reached 0, but many items transitioned into stoppedDL/checking and require the hardened j54 stoppedDL pipeline. Keep qB passive: zero active downloads/uploads/stalledUP.
+**Urgency:** High — qB mirror state is operationally noisy and can regress if not drained with the hardened tools.
 
 ### Tasks
 
@@ -238,22 +248,61 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 |------|--------|------|
 | j51-t01 | done (exploratory) | Analyze missingFiles repair options. Recommended COA: offline fastresume batch patch from RT session directory mapping, then qB recheck with rollback via `.fastresume.bak-j51`. Log: `.agent/logs/hashall-20260626-151456/j51/j51-t01-opencode.log`. |
 | j51-t02 | done (exploratory/spec) | Document stoppedDL SOP/tooling for the observed missingFiles→stoppedDL fallout. j54 implemented the six tooling gaps from this spec. Log: `.agent/logs/hashall-20260626-151456/j51/j51-t02-opencode.log`. |
-| j51-t03 | planned | Author formal tracked dispatch brief(s) for j51 repair using j54-hardened tooling: bucket → drain → apply → roundloop, with watchdog, passive-state enforcement, rollback, and persistence verification. |
-| j51-t04 | planned | Execute the approved missingFiles/stoppedDL repair in guarded batches; verify zero active qB downloads/uploads and record final qB state. |
+| j51-t03 | planned | Current-state audit: qB state counts, checking drain status, stoppedDL bucket size, active state enforcement, rollback inventory, and persistence verifier readiness. Write formal dispatch brief from current data. |
+| j51-t04 | planned | Dry-run stoppedDL recovery: bucket → drain with `--extra-root-file` support where needed; classify A/B/C/D and stop before mutation. |
+| j51-t05 | planned | Guarded recovery execution: apply only verified Class A items in small batches with watchdog, `pause_mirror_seeders.py`, rollback ledger, and persistence verification. |
 
 ---
 
 ## j52 — rt-qb-mirror-race
 
-**Slug:** rt-qb-mirror-race
-**OPs:** OP-58, OP-59
-**Goal:** Investigate and fix the RT→qB mirror share-limit race that left 2 TorrentDay cross-seed items (Cold Case Files 2017 S01 a98fc34, The Bear S04 acb52ed) stalledUP in qB and PU in RT. Stop both in qB, repoint to pool path per `~noHL` tag, harden mirror workflow to prevent recurrence.
+**Slug:** mirror-placement-anomalies
+**OPs:** OP-58, OP-59, OP-63
+**Goal:** Resolve the small known mirror/rehome anomaly set before broad drift work: two TorrentDay mirror race items and one Elemental pool→stash duplicate. Keep scope narrow and explicit.
 
 ### Tasks
 
 | Task | Status | Goal |
 |------|--------|------|
-| j52-t01 | planned | Investigate mirror flow; identify share-limit race or missed stop signal; stop both items in qB, repoint to pool path; harden `client-drift` mirror handler |
+| j52-t01 | planned | Investigate RT/qB state for the two TorrentDay hashes; stop any qB active states; identify mirror share-limit race or missed stop signal. |
+| j52-t02 | planned | Repoint the two TorrentDay items to their correct pool path per `~noHL`, with RT/qB post-checks and no broad scan. |
+| j52-t03 | planned | Rehome Elemental.2023 pool duplicate to stash with unique payload tree and hardlink payload per REQUIREMENTS §1.4/§5.3/§6.3. |
+| j52-t04 | planned | Harden the mirror workflow or write a precise follow-up OP if root cause is outside this narrow fix scope. |
+
+---
+
+## j55 — pool-orphan-dedupe-gated
+
+**Slug:** pool-orphan-dedupe-gated
+**OPs:** OP-60, OP-61
+**Goal:** Resume pool orphan dedupe safely after immediate qB/mirror blockers are handled. This job is explicitly gated: dry-run/classification first, then stop for operator approval before any deletion or rsync.
+
+### Tasks
+
+| Task | Status | Goal |
+|------|--------|------|
+| j55-t01 | planned | Add or verify quick-hash cross-device analysis path for orphan dedupe. If already implemented, document the exact command and evidence. |
+| j55-t02 | planned | Run read-only hardlink-guard/classification against `/pool/media/torrents/orphans/`: Class A hardlinked orphan links, Class B cross-device confirmed duplicates, Class C no confirmed duplicate. |
+| j55-t03 | planned | Produce deletion/rsync manifest with byte counts, source-of-truth evidence, rollback constraints, and pool free-space forecast. No mutation. |
+| j55-t04 | approval gate | Stop for explicit operator approval before any `rm`, `rsync --remove-source-files`, `mv`, or live client mutation. |
+| j55-t05 | planned after approval | Execute approved Class A/Class B deletion in small batches with pre/post catalog scan and pool free-space report. |
+| j55-t06 | planned after approval | Execute Class C rsync only if capacity and dry-run verification pass; use `rsync -aH`, verify, then delete source only after proof. |
+
+---
+
+## j56 — link-plan-ux
+
+**Slug:** link-plan-ux
+**OPs:** OP-65
+**Goal:** Make hardlink-plan output labels less misleading. This is low-risk code/UX work and can run when operational jobs are paused.
+
+### Tasks
+
+| Task | Status | Goal |
+|------|--------|------|
+| j56-t01 | planned | Audit `hashall link show-plan` and `link execute --dry-run` output labels for directional wording. |
+| j56-t02 | planned | Replace misleading "Keep"/"Replace" language or add a clear note that hardlinks are non-directional and all paths to the same inode are equal. |
+| j56-t03 | planned | Add/adjust focused output tests. |
 
 ---
 
@@ -263,16 +312,17 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 **OPs:** OP-64
 **Goal:** Full audit of all repo mastery documentation. Catalog every documented principle, rule, and invariant across REQUIREMENTS.md, AGENT-MASTERY.md, ARCHITECTURE.md, and related docs. Map existing mastery self-check questions to source principles. Write new questions for every gap. Verify every question has a correct, referenced answer. Target: every §1–§7 principle has at least one matching mastery self-check question. No undocumented gaps between stated policy and tested knowledge.
 **Trigger:** j50-t06 planning — agent proposed repointing 55a3df42 to ef1071a1's stash path (violates §1.4 per-item payload invariant) because the mastery self-check (§8) had no question testing rehome payload-tree patterns (§5.3, §6.3). The pattern is fully documented in REQUIREMENTS.md but the agent lacked skill because the mastery check doesn't test it.
+**Status:** Merged to CR in `23d000c`.
 
 ### Tasks
 
 | Task | Status | Goal |
 |------|--------|------|
-| j53-t01 | planned | **Audit REQUIREMENTS.md** — catalog every principle, rule, invariant, constraint, and requirement. Group by section. For each: extract the canonical statement, note which AGENT-MASTERY.md question (if any) tests it. Output: master principle catalog with coverage gaps. |
-| j53-t02 | planned | **Audit AGENT-MASTERY.md** — map existing self-check questions (Q1–Q8, now 8 total) to source principles. Audit the document body (sections 1–7) for every documented behavior/testable statement. Identify statements with no matching self-check question. Output: gap list of untested principles. |
-| j53-t03 | planned | **Audit ARCHITECTURE.md and supporting docs** — scan ARCHITECTURE.md, REPO-MASTERY.md, CANONICALIZE-INTERFACE-MAP.md, 4-GATE-MUTATION-PROTOCOL.md, ORPHAN-MIGRATION-PROCESS.md for any principles not covered by REQUIREMENTS.md or AGENT-MASTERY.md. Output: supplementary principle list with source references. |
-| j53-t04 | planned | **Write new self-check questions** — for every gap found in t01–t03, write a complete Q+N question and its answer. Each question must: (a) reference the source doc section, (b) test understanding of the principle not just memory, (c) have an answer that cites the source. Insert into AGENT-MASTERY.md §8. Update the "Answer all N" counters. |
-| j53-t05 | planned | **Integration and end-to-end verify** — update all cross-references, section numbers, and question counts in AGENT-MASTERY.md. Run through all questions sequentially to verify each has a correct, reachable answer in the linked docs. Confirm no orphan references, broken section links, or stale counts. |
+| j53-t01 | done | Audit REQUIREMENTS.md and produce principle coverage catalog. |
+| j53-t02 | done | Audit AGENT-MASTERY.md and map self-check coverage. |
+| j53-t03 | done | Audit supporting docs and supplementary principles. |
+| j53-t04 | done | Write/integrate mastery coverage updates. |
+| j53-t05 | done | Integration and end-to-end verify. |
 
 ---
 
@@ -283,3 +333,4 @@ Replanned 2026-06-29 (j48-replan): all 17 open OPs now properly slotted in In-Jo
 Replanned 2026-07-01: slotted OP-61→j50, OP-62→j51, OP-58+OP-59→j52. Consolidated j49 into j50 — all 3 pool-dedupe OPs (OP-57, OP-60, OP-61) under one job per ORPHAN-MIGRATION-PROCESS.md. j49 marked OBE, branch deleted, worktree removed. Run order: j50→j51→j42→j39→j52→j43→j44→j45. j50-t01 code done (uncommitted, ported from j49 worktree). j52 parallel-eligible with j39.
 Replanned 2026-07-02: added j53 (repo-mastery-docs, OP-64). Ordered next after j50. Trigger: agent proposed hitchhiker violation during j50-t06 planning because mastery self-check didn't test §1.4/§5.3/§6.3 rehome payload-tree invariant. Full doc audit briefed. AGENT-MASTERY.md Q8 + answer added as immediate hotfix.
 Replanned 2026-07-03: added j54 (stoppeddl-tooling, OP-66). Ordered after j53, before j51. Trigger: 425 qB stoppedDL-at-0% torrents accumulated after ad-hoc repair bypassed pipeline. DSV4 Pro identified 6 tooling gaps in STOPPEDDL-SOP.md. 6 task briefs written in comms/briefs/TASK-BRIEF-j54-t0*.md. Run order: j53→j54→j51. All 6 tasks fully briefed and ready for dispatch.
+Replanned 2026-07-03 (logical safety replan): split j50 into tooling-only closeout (OP-57), j51 qB stoppedDL recovery (OP-62), j52 mirror/rehome anomaly fixes (OP-58/59/63), j55 gated orphan dedupe (OP-60/61, approval before live deletion/rsync), and j56 low-risk link-plan UX (OP-65). Run order: j50→j51→j52→j55→j42→j39→j43→j44→j56→j45.

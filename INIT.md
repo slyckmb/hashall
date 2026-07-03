@@ -55,15 +55,15 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j50 — pool-orphan-dedupe**
-OPs: OP-57, OP-60, OP-61, OP-63
-Goal: Resume the active j50 job branch, review unmerged j50 commits, and either close/merge j50 or explicitly pause it before dispatching j51.
+**Next job: j50 — orphan-safety-tooling-closeout**
+OPs: OP-57
+Goal: Review and close the rebased j50 tooling branch. This is code/tooling only: do not run live orphan deletion or rsync in j50.
 
-Tasks: j50-t01 and j50-t02 are implemented on the j50 job branch; remaining scope is review/closeout or a deliberate pause with handoff.
+Tasks: j50-t01 and j50-t02 are implemented on the j50 job branch; remaining scope is lead review and closeout/merge.
 
 **Previous completed: j54 — stoppeddl-tooling** (merged to CR; OP-66 closed)
 **Superseded: j49 — orphan-migration-guard** (OP-57 consolidated into j50; do not dispatch j49)
-**Next after j50: j51 — missingFiles-repair** (OP-62, OP-65)
+**Next after j50: j51 — qb-stoppeddl-recovery** (OP-62)
 
 **Session state as of 2026-06-26:**
 - Merged: j28–j38 (j38 added RCCA path audit and RT repoint target validation; OP-19/24/47 follow-ups moved to j39)
