@@ -3,7 +3,7 @@
 session: hashall-20260626-151456
 branch: cr/hashall-20260626-151456
 worktree: /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
-updated: 2026-07-01
+updated: 2026-07-03
 
 ---
 
@@ -22,6 +22,7 @@ updated: 2026-07-01
 | j49 | orphan-migration-guard | OP-57 | OBE — merged into j50 (pool-orphan-dedupe). Branch deleted, worktree removed. |
 | j50 | pool-orphan-dedupe | OP-57,OP-60,OP-61 |
 | j53 | repo-mastery-docs | OP-64 |
+| j54 | stoppeddl-tooling | OP-66 |
 | j51 | missingFiles-repair | OP-62 |
 | j52 | rt-qb-mirror-race | OP-58,OP-59 |
 | j42 | lane2-strategy | OP-23,OP-26 |
@@ -40,17 +41,19 @@ updated: 2026-07-01
 - j42 (lane2-strategy) benefits from j46 (build-canonicalize-tool) — canonicalize batch output quantifies Lane 2 scope precisely
 - j48 (sha256-content-anchor) requires OP-53 Phase 1 SHA256 backfill before Phases 2-4 can be tested with real data
 - j45 (cr-to-main) is last — merge only after all planned repair jobs complete
+- j54 (stoppeddl-tooling) should run before j51 (missingFiles-repair) — j51 benefits from hardened pipeline tools (watchdog, persistence verifier, download-state enforcement)
 
 ---
 
 ## Run Order
 
-j48 → j50 → j53 → j51 → j42 → j39 → j52 → j43 → j44 → j45
+j48 → j50 → j53 → j54 → j51 → j42 → j39 → j52 → j43 → j44 → j45
 
 Notes:
 - j48 (sha256-content-anchor) done — SHA256 backfill + _Sha256ContentMatcher + repoint_both_to_stash delivered; 83 blocked FPs resolvable
 - j50 (pool-orphan-dedupe) current — consolidated job: OP-57 hardlink guard (code done, uncommitted), OP-60 quick_hash mode for cross-device matching, OP-61 execute SHA256-confirmed orphan dedupe. Class B complete (6,208 files, 2.7 TB recovered). t06 (Class C rsync) + t07 (wrap) pending.
 - j53 (repo-mastery-docs) next — OP-64 full audit of repo mastery documentation. Trigger: agent proposed rehome-rule violation because mastery self-check didn't test the pattern. Tasks: audit REQUIREMENTS.md, AGENT-MASTERY.md, ARCHITECTURE.md for untested principles; write new self-check questions; end-to-end verify. ORDERED NEXT.
+- j54 (stoppeddl-tooling) after j53 — OP-66: close 6 stoppedDL pipeline tooling gaps per STOPPEDDL-SOP.md. 6 tasks: extend pause_mirror_seeders.py (t01), build watchdog (t02), update 4-Gate protocol (t03), add --extra-root-file to drain (t04), add --restore-from-backup to rollback (t05), build verify-persistence.sh (t06). Briefed 2026-07-03. Run BEFORE j51 — hardened pipeline is safety gate for j51 missingFiles repair.
 - j51 (missingFiles-repair) urgent — 440 qB torrents at missingFiles 0% because save_path points to stale stash paths. Batch set_location to pool + recheck per OP-62. Single-file items allow fast fix; multi-file need dir move
 - j42 (lane2-strategy) after j50 — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
 - j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled
@@ -184,6 +187,44 @@ Tasks ordered working **backwards from the original goal** — simplest, highest
 
 ---
 
+## j54 — stoppeddl-tooling
+
+**Slug:** stoppeddl-tooling
+**OPs:** OP-66
+**Goal:** Close 6 stoppedDL pipeline tooling gaps identified by DSV4 Pro analysis in `comms/docs/STOPPEDDL-SOP.md`. Harden the `bucket→drain→apply→roundloop` pipeline so that 425 stoppedDL-at-0% torrents never recur after ad-hoc repair. Build the missing tools: watchdog, persistence verifier, and mass-backup rollback. Extend existing tools for download-state coverage and curated candidate paths. Update 4-Gate protocol to mandate pause_mirror_seeders.py enforcement.
+
+### Why this matters
+
+425 qB torrents accumulated at stoppedDL 0% because the pipeline was bypassed during ad-hoc repair. Active downloads re-emerged post-stop. The 6 gaps are:
+
+| Gap | Tool | Issue |
+|-----|------|-------|
+| GAP-1 | `scripts/pause_mirror_seeders.py` | Only handles upload states — download states (stalledDL, downloading, forcedDL) go undetected |
+| GAP-2 | **NEW** `bin/qb-stoppeddl-watchdog.py` | No post-mutation guard that detects emergent stoppedDL during active repair |
+| GAP-3 | `docs/4-GATE-MUTATION-PROTOCOL.md` | Gate 4 doesn't mandate pause_mirror_seeders.py enforcement |
+| GAP-4 | `bin/qb-stoppeddl-drain.py` | Missing `--extra-root-file` for curated candidate path lists |
+| GAP-5 | `bin/qb-stoppeddl-rollback.py` | No mass restore-from-backup for catastrophic fastresume corruption |
+| GAP-6 | **NEW** `bin/qb-stoppeddl-verify-persistence.sh` | No tool validates repaired torrents survive qB restart (Feb-2026 disaster: 2103 reverted to stoppedDL) |
+
+### Tasks
+
+| Task | Type | Goal |
+|------|------|------|
+| j54-t01 | implementation | GAP-1: Extend `scripts/pause_mirror_seeders.py` to detect download states (stalledDL, downloading, forcedDL) in addition to upload states; add --dry-run, --states override, --report-json. Brief: TASK-BRIEF-j54-t01-pause-mirror-download-states.md |
+| j54-t02 | implementation | GAP-2: Build NEW `bin/qb-stoppeddl-watchdog.py` — poll qB for emergent stoppedDL during mutation; pause on detection; optional --auto-repair triggers drain+apply; JSONL journal. Brief: TASK-BRIEF-j54-t02-stoppeddl-watchdog.md |
+| j54-t03 | implementation | GAP-3: Update `docs/4-GATE-MUTATION-PROTOCOL.md` Gate 4 to mandate pause_mirror_seeders.py before/after each batch; bump to v1.1.0. Brief: TASK-BRIEF-j54-t03-gate4-pause-mirror-enforcement.md |
+| j54-t04 | implementation | GAP-4: Add `--extra-root-file` flag to `bin/qb-stoppeddl-drain.py` (reads candidate paths from file, one per line, # comments); bump to 0.1.25. Brief: TASK-BRIEF-j54-t04-drain-extra-root-file.md |
+| j54-t05 | implementation | GAP-5: Add `--restore-from-backup` mode to `bin/qb-stoppeddl-rollback.py` — stop qB, mass-restore .fastresume.bak files, restart; bump to 0.1.2. Brief: TASK-BRIEF-j54-t05-rollback-restore-from-backup.md |
+| j54-t06 | implementation | GAP-6: Build NEW `bin/qb-stoppeddl-verify-persistence.sh` — take pre/post restart state snapshots, flag reverted-to-stoppedDL hashes, investigate qBt-downloadPath. Brief: TASK-BRIEF-j54-t06-verify-persistence-restart.md |
+
+### Task ordering
+
+t01 (GAP-1) → t03 (GAP-3, depends on t01 tool existing) → t02 (GAP-2, watchdog can reference t01 output format).
+t04, t05, t06 are independent and can run in parallel with t01–t03.
+Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
+
+---
+
 ## j51 — missingFiles-repair
 
 **Slug:** missingFiles-repair
@@ -238,3 +279,4 @@ JOB-QUEUE.md written 2026-06-26 by lead after opscan showed 32 unslotted OPs.
 Replanned 2026-06-29 (j48-replan): all 17 open OPs now properly slotted in In-Job section.
 Replanned 2026-07-01: slotted OP-61→j50, OP-62→j51, OP-58+OP-59→j52. Consolidated j49 into j50 — all 3 pool-dedupe OPs (OP-57, OP-60, OP-61) under one job per ORPHAN-MIGRATION-PROCESS.md. j49 marked OBE, branch deleted, worktree removed. Run order: j50→j51→j42→j39→j52→j43→j44→j45. j50-t01 code done (uncommitted, ported from j49 worktree). j52 parallel-eligible with j39.
 Replanned 2026-07-02: added j53 (repo-mastery-docs, OP-64). Ordered next after j50. Trigger: agent proposed hitchhiker violation during j50-t06 planning because mastery self-check didn't test §1.4/§5.3/§6.3 rehome payload-tree invariant. Full doc audit briefed. AGENT-MASTERY.md Q8 + answer added as immediate hotfix.
+Replanned 2026-07-03: added j54 (stoppeddl-tooling, OP-66). Ordered after j53, before j51. Trigger: 425 qB stoppedDL-at-0% torrents accumulated after ad-hoc repair bypassed pipeline. DSV4 Pro identified 6 tooling gaps in STOPPEDDL-SOP.md. 6 task briefs written in comms/briefs/TASK-BRIEF-j54-t0*.md. Run order: j53→j54→j51. All 6 tasks fully briefed and ready for dispatch.
