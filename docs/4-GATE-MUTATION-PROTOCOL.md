@@ -1,6 +1,6 @@
 # 4-Gate Mutation Protocol
 
-**Version:** 1.0
+**Version:** 1.1.0
 **Status:** Active — required before any mass RT/qB state mutation
 **Source:** Consolidated from LANE1-PILOT-RCCA.md, GATE0-STOPPDL-AUDIT.md, gate3-drift-pilot-results.md, REQUIREMENTS.md
 **Applies to:** All hashall CLI mutations touching torrent state on RT or qB
@@ -170,8 +170,11 @@ Execute remaining items in small batches with full state verification after each
 | Aspect | Detail |
 |--------|--------|
 | **What it checks** | Batch execution safety: stoppedDL delta=0, stalledUP=0, checkingUP=0 after each batch |
-| **Required commands** | Mutation command on ≤5 items per batch; full state check after each |
-| **Pass criteria** | All items stoppedUP at canonical path; stoppedDL delta=0 throughout; stalledUP=0; checkingUP=0 |
+| **Required commands** | 1. `python3 scripts/pause_mirror_seeders.py --dry-run` (pre-batch: preview leaked seeders)
+2. Mutation command on ≤5 items per batch
+3. `python3 scripts/pause_mirror_seeders.py` (post-batch: quiesce any leaked seeders/downloaders)
+4. Full state check: stoppedDL delta, stalledUP, checkingUP |
+| **Pass criteria** | All items stoppedUP at canonical path; stoppedDL delta=0 throughout; stalledUP=0; checkingUP=0; pause_mirror_seeders confirms zero non-acceptable states |
 | **Fail criteria** | Any stoppedDL increase → pause all further batches; diagnose; escalate |
 | **Abort action** | Halt all remaining batches. Do NOT mass-pause checkingUP. Wait for natural resolution. Escalate. |
 
@@ -184,12 +187,19 @@ Execute remaining items in small batches with full state verification after each
 < total `fix_both` payload size. Calculate total before the first `fix_both`
 batch.
 
+**pause_mirror_seeders enforcement (added v1.1.0):** After each batch completes and before
+the state check, run `python3 scripts/pause_mirror_seeders.py` to quiesce any mirror items
+that entered upload or download states during mutation. Per `docs/RT-QB-STATE-POLICY.md` §3
+and `comms/docs/STOPPEDDL-SOP.md` §4.2, qB must never be in active upload/download states.
+The `--dry-run` variant before the batch previews what would be affected without mutating.
+
 **Human sign-off:** After each batch, write batch results (items, outcomes,
 state delta) to the progress doc and stop. Wait for human review and explicit
 go-ahead before the next batch. Do NOT chain batches automatically.
 
 **Full state check after EACH batch:**
 ```
+python3 scripts/pause_mirror_seeders.py              # quiesce leaked seeders
 stoppedDL delta = 0?     → continue (or stop if done)
 stalledUP = 0?           → continue
 checkingUP = 0?          → continue
@@ -264,3 +274,12 @@ All five process change items from the Lane 1 RCCA are addressed in this protoco
 *This document is canonical. Future leads should refer here before any mutation
 operation. If protocol changes are needed, update this document and increment
 the version number, recording the change in the version history.*
+
+---
+
+## 6. Version History
+
+| Version | Date | Change |
+|---------|------|--------|
+| 1.1.0 | 2026-07-03 | Gate 4: added mandatory pause_mirror_seeders.py enforcement before/after each batch per STOPPEDDL-SOP.md §5.3 |
+| 1.0 | 2026-06-22 | Initial release from Lane 1 pilot RCCA |

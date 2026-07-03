@@ -25,7 +25,7 @@ if str(SRC_DIR) not in sys.path:
 from hashall.qbittorrent import QBittorrentClient, QBitTorrent, get_qbittorrent_client, get_torrents_from_cache
 from rehome.seed_state import SEED_ROOT_STATE_PATH, validate_seed_root_state
 
-SEMVER = "0.1.24"
+SEMVER = "0.1.25"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_ALLOWED_SAVE_ROOTS = "/pool/media,/pool/data"
 DEFAULT_FORBID_SAVE_ROOTS = "/data/media,/stash/media"
@@ -259,6 +259,20 @@ def read_hash_file(path: str) -> List[str]:
         if line.strip() and not line.strip().startswith("#")
     ]
     return parse_hash_tokens(" ".join(lines))
+
+
+def read_path_file(path: str) -> List[str]:
+    """Read paths from a file, one per line. Skip blank lines and # comments."""
+    if not path:
+        return []
+    p = Path(path).expanduser()
+    if not p.exists():
+        return []
+    return [
+        line.strip()
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
 
 
 def canonical_alias(path: str) -> str:
@@ -1004,6 +1018,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra root path to test for each hash (repeatable)",
     )
     p.add_argument(
+        "--extra-root-file",
+        action="append",
+        default=[],
+        help="File containing extra root paths to test (one per line, # comments allowed; repeatable)",
+    )
+    p.add_argument(
         "--scan-db-global",
         dest="scan_db_global",
         action="store_true",
@@ -1646,6 +1666,23 @@ def main() -> int:
                     25.0,
                     "user extra root + torrent name",
                 )
+
+        for root_file in args.extra_root_file:
+            file_roots = read_path_file(root_file)
+            source_tag = f"extra_root_file:{Path(root_file).name}"
+            for root in file_roots:
+                root = str(root or "").strip()
+                if not root:
+                    continue
+                add_candidate(cands, root, source_tag, 20.0, f"extra root from {root_file}")
+                if name:
+                    add_candidate(
+                        cands,
+                        str(Path(root) / name),
+                        f"{source_tag}_plus_name",
+                        25.0,
+                        f"extra root from {root_file} + torrent name",
+                    )
 
         if global_db_index is not None and name:
             added_global = add_global_db_candidates(
