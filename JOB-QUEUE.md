@@ -22,7 +22,7 @@ updated: 2026-07-03
 | j49 | orphan-migration-guard | OP-57 | Merged to CR as superseded planning. OP-57 consolidated into j50; do not dispatch j49. |
 | j53 | repo-mastery-docs | OP-64 | Merged to CR. commit 23d000c. |
 | j54 | stoppeddl-tooling | OP-66 | Merged to CR. merge(cr/hashall-20260626-151456__j54). 
-| j50 | orphan-safety-tooling-closeout | OP-57 | Active. Rebased job branch has only tooling/tests; review and merge/close before new repair work. |
+| j50 | orphan-safety-tooling-closeout | OP-57 | Merged to CR. merge(cr/hashall-20260626-151456__j50). |
 | j51 | qb-stoppeddl-recovery | OP-62 | Planned next. Recover qB missingFiles/stoppedDL fallout using j54 hardened tooling. |
 | j52 | mirror-placement-anomalies | OP-58,OP-59,OP-63 | Planned. Surgical mirror/rehome fixes for known small anomaly set. |
 | j55 | pool-orphan-dedupe-gated | OP-60,OP-61 | Planned. Dry-run/classify first; live deletion/rsync requires explicit operator approval. |

@@ -55,8 +55,8 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j50 — orphan-safety-tooling-closeout**
-OPs: OP-57
+**Next job: j51 — qb-stoppeddl-recovery**
+OPs: OP-62
 Goal: Review and close the rebased j50 tooling branch. This is code/tooling only: do not run live orphan deletion or rsync in j50.
 
 Tasks: j50-t01 and j50-t02 are implemented on the j50 job branch; remaining scope is lead review and closeout/merge.
@@ -76,7 +76,7 @@ Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
-JOB=j50
+JOB=j51
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__${JOB}
 ```
 
