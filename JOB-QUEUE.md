@@ -73,9 +73,14 @@ Notes:
   - `comms/briefs/j51-t01-deep-dive.md`
   - `comms/briefs/j51-t02-stoppeddl-sop.md`
   - `comms/briefs/TASK-BRIEF-j54-t01.md` through `TASK-BRIEF-j54-t06.md` (already executed/merged)
-- Briefs to write before dispatch:
-  - `j51-t03` formal qB recovery current-state audit
-  - `j51-t04` guarded qB recovery execution
+- Staged current j51 briefs:
+  - `j51-t04` state refresh only (weak-model slice)
+  - `j51-t05` tool/readiness audit only (weak-model slice)
+  - `j51-t06` bucket sync only
+  - `j51-t07` tiny drain pilot
+  - `j51-t08` full read-only drain only after gates pass
+  - `j51-t09` execution-plan synthesis
+  - `j51-t10` live execution only after explicit operator approval
   - `j52-t01` mirror/rehome anomaly investigation
   - `j55-t01` orphan dry-run/classification
   - `j55-t02+` live deletion/rsync briefs only after operator approval
@@ -248,9 +253,14 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 |------|--------|------|
 | j51-t01 | done (exploratory) | Analyze missingFiles repair options. Recommended COA: offline fastresume batch patch from RT session directory mapping, then qB recheck with rollback via `.fastresume.bak-j51`. Log: `.agent/logs/hashall-20260626-151456/j51/j51-t01-opencode.log`. |
 | j51-t02 | done (exploratory/spec) | Document stoppedDL SOP/tooling for the observed missingFiles→stoppedDL fallout. j54 implemented the six tooling gaps from this spec. Log: `.agent/logs/hashall-20260626-151456/j51/j51-t02-opencode.log`. |
-| j51-t03 | planned | Current-state audit: qB state counts, checking drain status, stoppedDL bucket size, active state enforcement, rollback inventory, and persistence verifier readiness. Write formal dispatch brief from current data. |
-| j51-t04 | planned | Dry-run stoppedDL recovery: bucket → drain with `--extra-root-file` support where needed; classify A/B/C/D and stop before mutation. |
-| j51-t05 | planned | Guarded recovery execution: apply only verified Class A items in small batches with watchdog, `pause_mirror_seeders.py`, rollback ledger, and persistence verification. |
+| j51-t03 | blocked (audit) | Current-state audit completed enough to block mutation: qB reachable; counts were `checkingDL=4`, `checkingUP=3080`, `stoppedDL=432`, `stoppedUP=1394`, `missingFiles=0`. Report: `comms/reports/J51-T03-CURRENT-STATE-AUDIT.md` in the j51 worktree. |
+| j51-t04 | planned | Tiny state refresh only: recheck qB counts and stop if `checkingUP + checkingDL` is materially above zero. No bucket/drain. |
+| j51-t05 | planned | Tool/readiness audit only: confirm rollback, persistence verifier, pause enforcement, and report paths. No qB state mutation and no drain. |
+| j51-t06 | planned | Bucket sync only: export current `stoppedDL` hashes and verify bucket artifacts. No drain. |
+| j51-t07 | planned | Drain pilot on a tiny explicit sample (max 10 hashes) to validate candidate policy and command shape. Stop after report. |
+| j51-t08 | planned | Full read-only drain/classification only if t04 shows checking has drained and t07 pilot is sane. Stop before mutation. |
+| j51-t09 | planned | Execution plan synthesis: exact Class A hash list, batch sizing, rollback ledger, watchdog/pause/persistence sequence, and operator approval request. |
+| j51-t10 | approval-gated | Guarded recovery execution: apply only explicitly approved Class A hashes in small batches with watchdog, `pause_mirror_seeders.py`, rollback ledger, and persistence verification. |
 
 ---
 
@@ -334,3 +344,5 @@ Replanned 2026-07-01: slotted OP-61→j50, OP-62→j51, OP-58+OP-59→j52. Conso
 Replanned 2026-07-02: added j53 (repo-mastery-docs, OP-64). Ordered next after j50. Trigger: agent proposed hitchhiker violation during j50-t06 planning because mastery self-check didn't test §1.4/§5.3/§6.3 rehome payload-tree invariant. Full doc audit briefed. AGENT-MASTERY.md Q8 + answer added as immediate hotfix.
 Replanned 2026-07-03: added j54 (stoppeddl-tooling, OP-66). Ordered after j53, before j51. Trigger: 425 qB stoppedDL-at-0% torrents accumulated after ad-hoc repair bypassed pipeline. DSV4 Pro identified 6 tooling gaps in STOPPEDDL-SOP.md. 6 task briefs written in comms/briefs/TASK-BRIEF-j54-t0*.md. Run order: j53→j54→j51. All 6 tasks fully briefed and ready for dispatch.
 Replanned 2026-07-03 (logical safety replan): split j50 into tooling-only closeout (OP-57), j51 qB stoppedDL recovery (OP-62), j52 mirror/rehome anomaly fixes (OP-58/59/63), j55 gated orphan dedupe (OP-60/61, approval before live deletion/rsync), and j56 low-risk link-plan UX (OP-65). Run order: j50→j51→j52→j55→j42→j39→j43→j44→j56→j45.
+
+Replanned 2026-07-03 (weak-model j51 split): j51-t03 audit blocked mutation because qB still had `checkingUP=3080` and `checkingDL=4`. Split broad recovery work into smaller dispatch slices: t04 state refresh only, t05 tool readiness only, t06 bucket sync only, t07 tiny drain pilot, t08 full read-only drain, t09 execution-plan synthesis, t10 approval-gated live execution. This avoids asking weak/free models to reason over qB state, tool readiness, drain policy, and mutation planning in one task.
