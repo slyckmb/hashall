@@ -20,7 +20,7 @@ updated: 2026-07-03
 | j47 | canonicalize-execute | OP-51,OP-52,OP-54 | Merged to CR. merge(cr/hashall-20260626-151456__j47). |
 | j48 | sha256-content-anchor | OP-53,OP-55,OP-56 | Merged to CR. merge(cr/hashall-20260626-151456__j48). |
 | j49 | orphan-migration-guard | OP-57 | Merged to CR as superseded planning. OP-57 consolidated into j50; do not dispatch j49. |
-| j50 | pool-orphan-dedupe | OP-57,OP-60,OP-61,OP-63 | Active/paused. Job branch has unmerged commits through `2aca5d0`; review/closeout before starting j51. |
+| j50 | pool-orphan-dedupe | OP-57,OP-60,OP-61,OP-63 | Active/paused. Job branch is rebased onto the current CR tip; review/closeout before starting j51. |
 | j53 | repo-mastery-docs | OP-64 | Merged to CR. commit 23d000c. |
 | j54 | stoppeddl-tooling | OP-66 | Merged to CR. merge(cr/hashall-20260626-151456__j54). 
 | j51 | missingFiles-repair | OP-62 |
@@ -51,7 +51,7 @@ j48 → j50 → j53 → j54 → j51 → j42 → j39 → j52 → j43 → j44 → 
 
 Notes:
 - j48 (sha256-content-anchor) done — SHA256 backfill + _Sha256ContentMatcher + repoint_both_to_stash delivered; 83 blocked FPs resolvable
-- j50 (pool-orphan-dedupe) active/paused — consolidated job: OP-57 hardlink guard, OP-60 quick_hash mode for cross-device matching, OP-61 execute SHA256-confirmed orphan dedupe, OP-63 rehome pool cross-seed duplicate. Job branch `cr/hashall-20260626-151456__j50` has unmerged commits through `2aca5d0`; review and closeout/pause this branch before dispatching j51.
+- j50 (pool-orphan-dedupe) active/paused — consolidated job: OP-57 hardlink guard, OP-60 quick_hash mode for cross-device matching, OP-61 execute SHA256-confirmed orphan dedupe, OP-63 rehome pool cross-seed duplicate. Job branch `cr/hashall-20260626-151456__j50` is rebased onto the current CR tip; review and closeout/pause this branch before dispatching j51.
 - j53 (repo-mastery-docs) done — OP-64 full audit delivered. 203 principles cataloged, 62 tested by Q1-Q8, 141 untested. 10 high-severity gaps identified.
 - j54 (stoppeddl-tooling) done — OP-66 closed. 6 gaps fixed: pause_mirror_seeders extended, watchdog built, 4-Gate protocol updated, --extra-root-file added, --restore-from-backup added, verify-persistence.sh built. Hardened pipeline ready for j51 safety gate.
 - j51 (missingFiles-repair) next after j50 closeout/pause — OP-62: 440 qB torrents at missingFiles 0% because save_path points to stale stash paths. Exploratory j51 briefs/logs exist outside tracked docs; formal tracked briefs still need to be authored before dispatch. Slotted: OP-65 (link show-plan UX labels).
@@ -175,8 +175,8 @@ Tasks ordered working **backwards from the original goal** — simplest, highest
 
 | Task | Status | Goal |
 |------|--------|------|
-| j50-t01 | done (job branch) | Build hardlink-guard tool: `validate_orphan_hardlinks()` in `orphan_sweep.py` + `hashall orphan-validate --hardlink-guard` CLI + tests. Commit `baf2c15` on `cr/hashall-20260626-151456__j50`. |
-| j50-t02 | done (job branch) | **Repoint active clients referencing orphan paths** (known: f37b9983 `His.Three.Daughters.2024`). Tooling and tests completed on j50 branch in commits `cd1fd1f`, `37b6be2`, `f9eb06b`, `2aca5d0`. |
+| j50-t01 | done (job branch) | Build hardlink-guard tool: `validate_orphan_hardlinks()` in `orphan_sweep.py` + `hashall orphan-validate --hardlink-guard` CLI + tests on the rebased `cr/hashall-20260626-151456__j50` branch. |
+| j50-t02 | done (job branch) | **Repoint active clients referencing orphan paths** (known: f37b9983 `His.Three.Daughters.2024`). Tooling and tests completed on the rebased `cr/hashall-20260626-151456__j50` branch. |
 | j50-t03 | planned | **Run hardlink-guard classification** via `hashall orphan-validate --hardlink-guard /pool/media/torrents/orphans/`. Output three-class report: Class A (hardlinked to seeder — safe to delete orphan link), Class B (unique orphans with SHA256 match on stash/hotspare/WD6TB — zero-copy delete), Class C (unique orphans with no cross-device match — requires rsync to hotspare first). |
 | j50-t04 | planned | **Verify SHA256 coverage** — confirm hotspare has full SHA256 for cross-device matching. Already at 99.9% (39,320/39,347 files). If any gaps remain, run targeted `hashall scan --hash-mode upgrade` on the hotspare orphan_data subtree. WD6TB is intentionally excluded from dedupe — it was the failed offload target (incomplete partial copy, 0% SHA256, no authoritative value for matching). |
 | j50-t05 | planned | **Delete Class A** — orphan files hardlinked to seeding content. `rm` the orphan-dir entries; seeder's hardlink retains data. No pool space recovered (seeder still holds the inode) but orphan dir shrinks. Run per ORPHAN-MIGRATION-PROCESS.md Step 2. |
