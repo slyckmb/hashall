@@ -9,7 +9,6 @@ Lead cherry-picks clusters into job plans.
 ---
 
 ## Open
-
 | ID | Type | Title | Observed |
 |----|------|-------|----------|
 _(all OPs are slotted or closed — see In-Job/Closed below)_
@@ -48,6 +47,7 @@ _(all other OPs are slotted — see In-Job below)_
 ---
 
 ## Closed
+| OP-67 | friction | **fix(j50): extract_cross_seed_provider_name handles orphan-root paths** | j50 |
 | OP-49 | superseded | superseded:OP-44 | closed:auto-combine |
 | OP-43 | reliability | 4 items seeding at 99.9x% with complete=0 after j33 repair — confirmed normal stalledDL behavior; no action required | closed:no-action |
 | OP-44 | superseded | job counter consumed on failed/rolled-back attempts — superseded by OP-49 (evidence: 2026-06-26) | closed:superseded |
