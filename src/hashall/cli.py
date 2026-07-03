@@ -797,6 +797,120 @@ def doctor_repair_identity(db, apply, max_actions, allow_bind_alias, report_json
                 f"path={item.get('path')}"
             )
 
+@cli.command("orphan-validate")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--hardlink-guard", is_flag=True, help="Check for hardlinks to actively-seeding content.")
+@click.argument("orphan_dir", type=click.Path(exists=True, file_okay=False))
+def orphan_validate_cmd(db, hardlink_guard, orphan_dir):
+    """Validate orphan directory before migration.
+
+    Scans all files under ORPHAN_DIR and checks for hardlink references to
+    actively-seeding torrent content in the catalog. When --hardlink-guard
+    is passed, files hardlinked to seeding content are reported so they can
+    be excluded from migration.
+    """
+    from hashall.model import connect_db
+    from hashall.orphan_sweep import validate_orphan_hardlinks
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+
+    device_registry: dict[str, int] = {}
+    try:
+        for row in conn.execute(
+            "SELECT mount_point, device_id FROM devices"
+        ).fetchall():
+            device_registry[str(row[0])] = int(row[1])
+    except Exception:
+        pass
+
+    safe, skipped = validate_orphan_hardlinks(
+        orphan_dir=orphan_dir,
+        conn=conn,
+        device_registry=device_registry,
+    )
+    conn.close()
+
+    total = len(safe) + len(skipped)
+    safe_size = sum(s.get("size", 0) or 0 for s in safe)
+    skipped_size = sum(s.get("size", 0) or 0 for s in skipped)
+    total_size = safe_size + skipped_size
+
+    print(f"orphan_validate hardlink_guard={str(hardlink_guard).lower()}")
+    print(f"  orphan_dir={orphan_dir}")
+    print(f"  total_orphan_files={total}")
+    print(f"  files_safe_to_migrate={len(safe)}")
+    print(f"  files_skipped_hardlinked={len(skipped)}")
+    print(f"  estimated_transfer_size_safe={safe_size}")
+    print(f"  estimated_transfer_size_total={total_size}")
+
+    if skipped:
+        print()
+        print("Files skipped (hardlinked to seeding content):")
+        for item in skipped:
+            print(f"  {item['path']}")
+            if item.get("seeding_paths"):
+                for sp in item["seeding_paths"]:
+                    print(f"    hardlinked_to: {sp}")
+
+
+@cli.group()
+def orphan():
+    """Orphan directory management commands."""
+    pass
+
+
+@orphan.command("repoint")
+@click.option("--dry-run", is_flag=True, default=True, help="Report what would change without mutating.")
+@click.option("--execute", is_flag=True, help="Actually apply repoints (overrides --dry-run).")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+@click.option("--qb-cache", type=click.Path(), default=None, help="qB cache file path.")
+@click.option("--rt-rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC URL.")
+@click.option("--auto-scan/--no-auto-scan", default=True, help="After repoint, re-scan orphan dir to sync catalog with disk state (rm/mv detection). Recommended unless sequencing multiple ops with a final sync.")
+def orphan_repoint_cmd(dry_run, execute, rt_session_dir, qb_cache, rt_rpc_url, auto_scan):
+    """Scan RT and qB for torrents pointing at the orphan directory and repoint to canonical paths.
+
+    Dry-run by default. Pass --execute to apply repoints.
+
+    Use --no-auto-scan when running multiple repoints in rapid succession;
+    run a final scan sync separately.
+    """
+    from hashall.orphan_repoint import run_orphan_repoint
+
+    really_dry_run = not execute
+
+    summary = run_orphan_repoint(
+        dry_run=really_dry_run,
+        rt_session_dir=Path(rt_session_dir),
+        qb_cache_path=Path(qb_cache) if qb_cache else None,
+        rt_rpc_url=rt_rpc_url,
+        auto_scan=auto_scan,
+    )
+
+    mode = "DRY-RUN" if really_dry_run else "EXECUTION"
+    print(f"orphan-repoint mode={mode}")
+    print(f"  Scanning RT session dirs... found {summary['rt_scanned']} torrents")
+    print(f"  Scanning qB cache... found {summary['qb_scanned']} torrents")
+    print(f"  Orphan-path references found: {summary['total_orphan_refs']}")
+
+    for r in summary["results"]:
+        arrow = "→" if r.get("canonical_path") else "→ (no canonical path found — needs manual review)"
+        canonical = r.get("canonical_path") or ""
+        print(f"    {r['torrent_hash']} ({r['name']})  {r['source']}  {r['current_path']}  {arrow}  {canonical}")
+
+    if not really_dry_run:
+        print(f"  RT repointed: {summary['rt_repointed']}")
+        print(f"  qB repointed: {summary['qb_repointed']}")
+        if summary["failed"]:
+            print(f"  Failed: {summary['failed']}")
+
+    if really_dry_run and not execute:
+        print()
+        print("  (dry-run — pass --execute to apply)")
+
+    if not summary["total_orphan_refs"]:
+        print("  All clear — no orphan-path references found.")
+
+
 # Payload command group
 @cli.group()
 def payload():

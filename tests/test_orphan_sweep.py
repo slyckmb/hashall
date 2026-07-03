@@ -1,9 +1,11 @@
+import os
+import sqlite3
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from hashall.cli import cli
-from hashall.orphan_sweep import DatasetConfig, run_orphan_sweep
+from hashall.orphan_sweep import DatasetConfig, run_orphan_sweep, validate_orphan_hardlinks
 
 
 def test_run_orphan_sweep_orders_small_first_and_applies_limit(tmp_path: Path, monkeypatch) -> None:
@@ -172,3 +174,104 @@ def test_run_orphan_sweep_limit_applies_to_empty_dir_cleanup(
 
     assert len(summary["items"]) == 1
     assert summary["items"][0].action == "dryrun_delete"
+
+
+def _make_memory_db(files_rows: list[tuple[str, int, int]]) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE files (path TEXT, device_id INTEGER, inode INTEGER)"
+    )
+    for row in files_rows:
+        conn.execute(
+            "INSERT INTO files (path, device_id, inode) VALUES (?, ?, ?)", row
+        )
+    conn.commit()
+    return conn
+
+
+def test_validate_orphan_hardlinks_nlink1_safe(tmp_path: Path) -> None:
+    orphan_dir = tmp_path / "orphans"
+    orphan_dir.mkdir()
+    file1 = orphan_dir / "file1.bin"
+    file1.write_bytes(b"unique content")
+
+    st = os.stat(file1)
+    assert st.st_nlink == 1
+
+    conn = _make_memory_db([])
+    safe, skipped = validate_orphan_hardlinks(str(orphan_dir), conn)
+    conn.close()
+
+    assert len(safe) == 1
+    assert len(skipped) == 0
+    assert safe[0]["path"] == str(file1)
+    assert safe[0]["device_id"] == st.st_dev
+    assert safe[0]["inode"] == st.st_ino
+
+
+def test_validate_orphan_hardlinks_nlink2_external_skipped(tmp_path: Path) -> None:
+    orphan_dir = tmp_path / "orphans"
+    orphan_dir.mkdir()
+    seeding_dir = tmp_path / "seeding"
+    seeding_dir.mkdir()
+
+    orphan_file = orphan_dir / "orphan.bin"
+    orphan_file.write_bytes(b"shared content")
+
+    seeding_file = seeding_dir / "seeding.bin"
+    os.link(orphan_file, seeding_file)
+
+    st = os.stat(orphan_file)
+    assert st.st_nlink == 2
+
+    conn = _make_memory_db([
+        (str(seeding_file), st.st_dev, st.st_ino),
+    ])
+    safe, skipped = validate_orphan_hardlinks(str(orphan_dir), conn)
+    conn.close()
+
+    assert len(safe) == 0
+    assert len(skipped) == 1
+    assert skipped[0]["path"] == str(orphan_file)
+    assert skipped[0]["device_id"] == st.st_dev
+    assert skipped[0]["inode"] == st.st_ino
+    assert any("seeding" in p for p in skipped[0]["seeding_paths"])
+
+
+def test_validate_orphan_hardlinks_nlink3_all_within_safe(tmp_path: Path) -> None:
+    orphan_dir = tmp_path / "orphans"
+    (orphan_dir / "sub").mkdir(parents=True)
+
+    f1 = orphan_dir / "a.bin"
+    f2 = orphan_dir / "b.bin"
+    f3 = orphan_dir / "sub" / "c.bin"
+    f1.write_bytes(b"shared in orphan")
+
+    os.link(f1, f2)
+    os.link(f1, f3)
+
+    st = os.stat(f1)
+    assert st.st_nlink == 3
+
+    conn = _make_memory_db([])
+    safe, skipped = validate_orphan_hardlinks(str(orphan_dir), conn)
+    conn.close()
+
+    assert len(safe) == 3
+    assert len(skipped) == 0
+    safe_paths = {s["path"] for s in safe}
+    assert str(f1) in safe_paths
+    assert str(f2) in safe_paths
+    assert str(f3) in safe_paths
+
+
+def test_validate_orphan_hardlinks_empty_dir(tmp_path: Path) -> None:
+    orphan_dir = tmp_path / "empty_orphans"
+    orphan_dir.mkdir()
+
+    conn = _make_memory_db([])
+    safe, skipped = validate_orphan_hardlinks(str(orphan_dir), conn)
+    conn.close()
+
+    assert len(safe) == 0
+    assert len(skipped) == 0

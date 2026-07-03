@@ -8,6 +8,9 @@ Seeding roots scanned:
   /stash/media/torrents/seeding      → cross-dataset rsync --move to /pool/media/torrents/orphans
 
 RT and qB both report paths under /data/media/... which maps to /stash/media/... on host.
+
+Also provides validate_orphan_hardlinks() to guard against migrating files
+that are hardlinked to actively-seeding content.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Literal
 
+from hashall.device import get_files_table_name
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE, DEFAULT_RT_SHARED_CACHE_META_FILE, load_rt_cache_snapshot
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 
@@ -571,3 +575,184 @@ def run_orphan_sweep(
         "bytes_planned": bytes_planned,
         "bytes_moved": bytes_moved,
     }
+
+
+def _resolve_files_table(conn, device_id: int) -> str | None:
+    """Return the files table name for a device, trying modern then legacy names."""
+    try:
+        name = get_files_table_name(conn.cursor(), device_id=device_id)
+        if name:
+            return name
+    except Exception:
+        pass
+    legacy = f"files_{device_id}"
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (legacy,),
+        ).fetchone()
+        if row:
+            return legacy
+    except Exception:
+        pass
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='files'"
+        ).fetchone()
+        if row:
+            return "files"
+    except Exception:
+        pass
+    return None
+
+
+def _get_device_mount(conn, device_id: int) -> str | None:
+    """Return the mount_point or preferred_mount_point for a device."""
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(preferred_mount_point, mount_point) FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if row:
+            return str(row[0])
+    except Exception:
+        pass
+    return None
+
+
+def validate_orphan_hardlinks(
+    orphan_dir: str,
+    conn,
+    device_registry: dict[str, int] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Scan orphan_dir and classify each file as safe-to-migrate or skipped.
+
+    safe_files: orphan files with no hardlink references outside orphan_dir.
+    skipped_files: orphan files hardlinked to active seeding content (with
+        seeding_paths listing the external paths found in the catalog).
+
+    Classification rules:
+    - st_nlink == 1 → always safe (single reference, no external links)
+    - st_nlink > 1 and all hardlink instances are within orphan_dir → safe
+    - st_nlink > 1 and catalog has matching (device_id, inode) outside
+      orphan_dir → skipped
+
+    The device_registry maps mount_point → device_id. If not provided it is
+    built from the devices table.
+    """
+    root = Path(orphan_dir)
+    if not root.is_dir():
+        raise ValueError(f"orphan_dir does not exist: {orphan_dir}")
+
+    if device_registry is None:
+        device_registry = {}
+        try:
+            for row in conn.execute(
+                "SELECT mount_point, device_id FROM devices"
+            ).fetchall():
+                device_registry[str(row[0])] = int(row[1])
+        except Exception:
+            pass
+
+    inode_map: dict[tuple[int, int], list[Path]] = {}
+    orphan_prefix = str(root.resolve()) + "/"
+
+    for dirpath, _, filenames in os.walk(root):
+        for fname in filenames:
+            fp = Path(dirpath) / fname
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue
+            key = (st.st_dev, st.st_ino)
+            inode_map.setdefault(key, []).append(fp)
+
+    safe_files: list[dict] = []
+    skipped_files: list[dict] = []
+
+    for (dev, ino), paths in inode_map.items():
+        try:
+            st = os.stat(paths[0])
+        except OSError:
+            continue
+        nlink = st.st_nlink
+        orphan_count = len(paths)
+        size = st.st_size
+
+        if nlink == 1 or orphan_count == nlink:
+            for fp in paths:
+                safe_files.append({
+                    "path": str(fp),
+                    "device_id": dev,
+                    "inode": ino,
+                    "size": size,
+                })
+            continue
+
+        # nlink > orphan_count → external hardlinks exist; query catalog
+        table_name = _resolve_files_table(conn, dev)
+        if not table_name:
+            # No table found: can't verify; err on side of skipping
+            for fp in paths:
+                skipped_files.append({
+                    "path": str(fp),
+                    "device_id": dev,
+                    "inode": ino,
+                    "size": size,
+                    "seeding_paths": ["(no catalog table for this device)"],
+                })
+            continue
+
+        mount_point = _get_device_mount(conn, dev)
+
+        if table_name == "files":
+            # Monolithic files table with full paths + device_id column
+            try:
+                rows = conn.execute(
+                    "SELECT path FROM files WHERE device_id = ? AND inode = ? AND path NOT LIKE ?",
+                    (dev, ino, f"{orphan_prefix}%"),
+                ).fetchall()
+            except Exception:
+                rows = []
+        else:
+            try:
+                rows = conn.execute(
+                    f'SELECT path FROM "{table_name}" WHERE inode = ?',
+                    (ino,),
+                ).fetchall()
+            except Exception:
+                rows = []
+
+        external_paths: list[str] = []
+        for row in rows:
+            db_path = str(row[0] or "")
+            if not db_path:
+                continue
+            if mount_point:
+                abs_db_path = str(Path(mount_point) / db_path)
+            else:
+                abs_db_path = db_path
+            abs_db_path = str(Path(abs_db_path).resolve())
+            if abs_db_path.startswith(orphan_prefix):
+                continue
+            external_paths.append(abs_db_path)
+
+        if external_paths:
+            for fp in paths:
+                skipped_files.append({
+                    "path": str(fp),
+                    "device_id": dev,
+                    "inode": ino,
+                    "size": size,
+                    "seeding_paths": sorted(set(external_paths)),
+                })
+        else:
+            for fp in paths:
+                safe_files.append({
+                    "path": str(fp),
+                    "device_id": dev,
+                    "inode": ino,
+                    "size": size,
+                })
+
+    return safe_files, skipped_files
