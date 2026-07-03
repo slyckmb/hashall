@@ -22,7 +22,7 @@ updated: 2026-07-03
 | j49 | orphan-migration-guard | OP-57 | OBE — merged into j50 (pool-orphan-dedupe). Branch deleted, worktree removed. |
 | j50 | pool-orphan-dedupe | OP-57,OP-60,OP-61 |
 | j53 | repo-mastery-docs | OP-64 |
-| j54 | stoppeddl-tooling | OP-66 |
+| j54 | stoppeddl-tooling | OP-66 | Merged to CR. merge(cr/hashall-20260626-151456__j54). 
 | j51 | missingFiles-repair | OP-62 |
 | j52 | rt-qb-mirror-race | OP-58,OP-59 |
 | j42 | lane2-strategy | OP-23,OP-26 |

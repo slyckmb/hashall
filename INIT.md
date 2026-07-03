@@ -55,8 +55,8 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j54 — stoppeddl-tooling**
-OPs: OP-66
+**Next job: j49 — orphan-migration-guard**
+OPs: OP-57
 Goal: Close 6 stoppedDL pipeline tooling gaps per STOPPEDDL-SOP.md. Harden bucket→drain→apply→roundloop pipeline.
 
 Tasks: j53-t01 through j53-t05 briefs authored. Dispatch to opencode-go/deepseek-v4-pro.
