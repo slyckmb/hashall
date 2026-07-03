@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -19,7 +22,7 @@ if str(SRC_DIR) not in sys.path:
 from hashall.qbittorrent import get_qbittorrent_client, get_torrents_from_cache
 
 SCRIPT_NAME = Path(__file__).name
-SEMVER = "0.1.1"
+SEMVER = "0.1.2"
 DEFAULT_LEDGER = "/tmp/qb-stoppeddl-bucket-live/reports/apply-rollback-ledger.jsonl"
 
 
@@ -178,6 +181,89 @@ def load_ledger(path: Path) -> List[RollbackRow]:
     return rows
 
 
+def docker_ctl(action: str, container: str) -> Tuple[bool, str]:
+    if action not in {"start", "stop"}:
+        return False, f"invalid_action:{action}"
+    try:
+        proc = subprocess.run(
+            ["docker", action, container],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return True, (proc.stdout or "").strip() or "ok"
+        msg = ((proc.stderr or "") + " " + (proc.stdout or "")).strip()
+        return False, msg or f"docker_{action}_failed"
+    except Exception as e:
+        return False, str(e)
+
+
+def wait_qb_online(qb: Any, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + max(5.0, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        if qb.test_connection() and qb.login():
+            return True
+        time.sleep(2.0)
+    return False
+
+
+def restore_from_backup(args) -> int:
+    fr_dir = Path(args.fastresume_dir).expanduser()
+    if not fr_dir.exists():
+        print(f"ERROR fastresume_dir_not_found path={fr_dir}")
+        return 2
+
+    bak_files = sorted(fr_dir.glob("*.fastresume.bak"))
+    if not bak_files:
+        print("status no_bak_files_found — nothing to restore")
+        return 0
+
+    print(f"plan restore_from_backup count={len(bak_files)} dry_run={not args.apply}")
+
+    if not args.apply:
+        for bak in bak_files:
+            target = bak.with_name(bak.name.replace(".fastresume.bak", ".fastresume"))
+            print(f"DRY-RUN would restore {bak.name} -> {target.name}")
+        return 0
+
+    if not args.no_restart:
+        ok, msg = docker_ctl("stop", args.qb_container)
+        if not ok:
+            print(f"ERROR docker_stop_failed container={args.qb_container} msg={msg}")
+            return 2
+        print(f"docker stopped container={args.qb_container}")
+
+    restored = 0
+    failed = 0
+    for bak in bak_files:
+        target = bak.with_name(bak.name.replace(".fastresume.bak", ".fastresume"))
+        try:
+            os.replace(str(bak), str(target))
+            restored += 1
+            print(f"restored {bak.name} -> {target.name}")
+        except OSError as e:
+            failed += 1
+            print(f"FAILED {bak.name}: {e}")
+
+    if not args.no_restart:
+        ok, msg = docker_ctl("start", args.qb_container)
+        if not ok:
+            print(f"WARN docker_start_failed container={args.qb_container} msg={msg} — restart manually!")
+            return 1
+        print(f"docker started container={args.qb_container}")
+
+        qb = get_qbittorrent_client()
+        if wait_qb_online(qb, args.restart_timeout):
+            print("qB API is online after restore")
+        else:
+            print(f"WARN qB API not online after {args.restart_timeout}s")
+            return 1
+
+    print(f"summary restored={restored} failed={failed} total_bak={len(bak_files)}")
+    return 0 if failed == 0 else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
@@ -239,6 +325,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=30.0,
         help="Max cache file age in seconds when --cache is set (default: 30)",
     )
+    p.add_argument(
+        "--restore-from-backup",
+        action="store_true",
+        help="Mass restore .fastresume.bak files (emergency break-glass mode). Stops qB, restores, restarts.",
+    )
+    p.add_argument(
+        "--fastresume-dir",
+        default="/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup",
+        help="Directory containing .fastresume and .fastresume.bak files",
+    )
+    p.add_argument(
+        "--qb-container",
+        default="qbittorrent_vpn",
+        help="Docker container name for qB restart",
+    )
+    p.add_argument(
+        "--restart-timeout",
+        type=float,
+        default=180.0,
+        help="Seconds to wait for qB API after restart",
+    )
+    p.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Restore .bak files but skip docker stop/start (operator restarts manually)",
+    )
     return p
 
 
@@ -246,6 +358,9 @@ def main() -> int:
     args = build_parser().parse_args()
     started = ts_iso()
     print(f"start ts={started} script={SCRIPT_NAME} semver={SEMVER}", flush=True)
+
+    if args.restore_from_backup:
+        return restore_from_backup(args)
 
     ledger_path = Path(args.ledger).expanduser()
     report_path = (
