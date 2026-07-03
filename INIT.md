@@ -55,11 +55,11 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j49 — orphan-migration-guard**
-OPs: OP-57
-Goal: Close 6 stoppedDL pipeline tooling gaps per STOPPEDDL-SOP.md. Harden bucket→drain→apply→roundloop pipeline.
+**Next job: j51 — missingFiles-repair**
+OPs: OP-62
+Goal: Fix 440 qB torrents at missingFiles 0% — batch set_location from stale stash paths to pool + recheck per OP-62.
 
-Tasks: j53-t01 through j53-t05 briefs authored. Dispatch to opencode-go/deepseek-v4-pro.
+Tasks: TBD — briefs not yet written. Single-file items (265) fast fix via setLocation; multi-file (177) need dir move.
 
 **Previous: j50 — pool-orphan-dedupe** (paused at t06 — Class C rsync pending)
 
