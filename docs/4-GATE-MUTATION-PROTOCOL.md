@@ -1,9 +1,11 @@
 # 4-Gate Mutation Protocol
 
-**Version:** 1.1.0
-**Status:** Active — required before any mass RT/qB state mutation
+**Version:** 1.2.0
+**Status:** Active — required before any live RT/qB state mutation
 **Source:** Consolidated from LANE1-PILOT-RCCA.md, GATE0-STOPPDL-AUDIT.md, gate3-drift-pilot-results.md, REQUIREMENTS.md
-**Applies to:** All hashall CLI mutations touching torrent state on RT or qB
+**Applies to:** All live mutations touching torrent state on RT or qB, including
+hashall CLI commands, repo scripts, helper functions, XMLRPC calls, qB API calls,
+and ad hoc Python/shell snippets.
 
 ---
 
@@ -22,8 +24,8 @@ verification at each step before the next can proceed.
 
 ### When to Apply
 
-The protocol is required for any operation that mutates RT or qB torrent state
-on ≥1 item:
+The full protocol is required for any broad or batch operation that mutates RT or
+qB torrent state on ≥1 item:
 
 - `hashall set_location` — qB path mutation
 - `hashall repoint` — RT/qB path synchronization
@@ -31,6 +33,22 @@ on ≥1 item:
 - `hashall canonicalize-apply` — path normalization with `--force`
 - Any custom script that calls `setLocation`, `pause_torrents`, `resume_torrents`,
   `recheck_torrent`, or RT `d.directory` on ≥1 item
+
+The surgical mini-gate in §3.5 is required for small explicit-hash repairs
+where the operator is correcting a bounded incident, normally 1-5 hashes. It
+applies to direct helpers too: `rt_apply_directory_repoint()`, `rt_xmlrpc_call()`,
+qB `pause_torrent()`, and similar low-level calls are not exempt just because the
+scope is small.
+
+### Stop-Only Containment Exception
+
+qB stop-only containment is the only allowed live mutation outside a completed
+gate. It may be used when qB is actively uploading or downloading and must be
+returned to passive state immediately. The action must be hash-scoped, must not
+include `setLocation`, `resume`, `recheck`, RT `d.start`, RT `d.directory.set`,
+or filesystem deletion, and must be logged afterward in the current task/session
+notes. If more than stop-only containment is needed, use the surgical mini-gate
+or full protocol.
 
 ### When NOT Required
 
@@ -215,6 +233,36 @@ Any failed item?         → log and examine, but do not stop unless systemic
 
 ---
 
+### Surgical Mini-Gate — Explicit Hash Repair
+
+Use this mini-gate for a small repair set, normally 1-5 explicit hashes. It is
+not a shortcut around verification; it is the smaller version of the same safety
+contract for urgent scoped repairs.
+
+| Step | Required Evidence | Pass Criteria |
+|------|-------------------|---------------|
+| S0 baseline | RT/qB state snapshot before mutation, including qB active states, qB stoppedDL count, qB checking backlog, RT stoppedDL/PD list, and current directories for target hashes | No unexplained new qB active states, qB stoppedDL deltas, or RT stoppedDL/PD items outside the target/allowed exception list |
+| S1 exact scope | Explicit hash list and allowed operations | No broad scan mutation, no wildcard repair, no speculative starts |
+| S2 payload proof | Torrent metadata compared to the candidate payload tree by relative path and size | Every required file exists at the candidate target; missing `.nfo` or sidecar files block start/repoint |
+| S3 dry-run plan | Dry-run/report artifact showing old path, target path, single-file vs multi-file directory semantics, and planned client calls | Plan matches the intended hash list and target paths |
+| S4 live repair | Use the approved wrapper/command for only the explicit hashes | RT starts only after hash-check reports complete; qB is only stopped for containment or changed by an approved qB repair command |
+| S5 post-check | Immediate post-state plus 60-second follow-up | qB active states are zero; qB stoppedDL did not increase except documented target transitions; RT target hashes are complete/seeding or explicitly blocked |
+
+**RT surgical repair rule:** Do not call `d.start` or use
+`rt_apply_directory_repoint(..., restart=True)` directly for manual repairs.
+Use the surgical wrapper so missing files, single-file/multi-file directory
+semantics, hash-check, and start-if-complete behavior are recorded.
+
+**Blocked evidence rule:** If torrent metadata requires a file that is absent
+from the candidate tree, the repair is blocked. Do not treat 100% progress,
+matching large media files, or path existence as enough proof.
+
+**Output artifact:** A JSON or Markdown report containing the target hashes,
+old/new directories, file verification result, client calls, final states, and
+60-second follow-up verdict.
+
+---
+
 ## 4. Abort and Recovery
 
 ### Immediate Abort Triggers
@@ -281,5 +329,6 @@ the version number, recording the change in the version history.*
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.2.0 | 2026-07-05 | Expanded scope to every live RT/qB mutation, added stop-only containment exception and explicit-hash surgical mini-gate |
 | 1.1.0 | 2026-07-03 | Gate 4: added mandatory pause_mirror_seeders.py enforcement before/after each batch per STOPPEDDL-SOP.md §5.3 |
 | 1.0 | 2026-06-22 | Initial release from Lane 1 pilot RCCA |

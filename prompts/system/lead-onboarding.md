@@ -68,6 +68,22 @@ in chatrap sessions. It bypasses task logs, signal files, friction tracking, and
 ops_closed gate. If you catch yourself editing a task's target files directly, stop,
 revert, and dispatch the brief instead.
 
+### RT/qB Live Mutation Contract
+
+Any brief that can mutate live qB or rTorrent state must include:
+
+- `gate_type=full-4-gate|surgical-mini-gate|stop-only-containment`
+- explicit target hashes or an artifact containing the exact hash list
+- allowed client operations and forbidden operations
+- required artifacts: baseline, dry-run, apply report, post-check, and follow-up
+- abort triggers: new qB stoppedDL, qB active state, qB checking backlog growth,
+  new RT stoppedDL/PD, missing payload files, or failed hash-check
+
+Broad/batch repair uses the full 4-Gate protocol. Explicit small repairs use the
+surgical mini-gate. Direct helper/API/XMLRPC mutation is forbidden outside those
+paths. The only exception is hash-scoped qB stop-only containment when qB is
+actively uploading or downloading.
+
 ---
 
 ### Decision Protocol

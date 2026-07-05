@@ -3,7 +3,7 @@
 Session: `hashall-20260626-151456`
 Branch: `cr/hashall-20260626-151456`
 Worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456`
-Updated: 2026-07-03
+Updated: 2026-07-05
 
 ---
 
@@ -55,28 +55,25 @@ If it fails: read `REPO-MASTERY.md`, retry. Do not proceed until it passes.
 
 ## STEP 3 — Next job (execute immediately after gate passes)
 
-**Next job: j51 — qb-stoppeddl-recovery**
-OPs: OP-62
-Goal: Review and close the rebased j50 tooling branch. This is code/tooling only: do not run live orphan deletion or rsync in j50.
+**Next job: j57 — rt-qb-state-guard**
+OPs: OP-69
+Goal: Harden and enforce RT/qB live mutation gates before more repair execution.
 
-Tasks: j50-t01 and j50-t02 are implemented on the j50 job branch; remaining scope is lead review and closeout/merge.
+j57 blocks j51 live qB stoppedDL apply and j39 RT PD repair. j51 read-only
+refresh/bucket/drain planning may continue, but live RT/qB mutation must use the
+full 4-Gate protocol or surgical mini-gate. Direct helper/API/XMLRPC mutation is
+forbidden except hash-scoped qB stop-only containment.
 
-**Previous completed: j54 — stoppeddl-tooling** (merged to CR; OP-66 closed)
-**Superseded: j49 — orphan-migration-guard** (OP-57 consolidated into j50; do not dispatch j49)
-**Next after j50: j51 — qb-stoppeddl-recovery** (OP-62)
-
-**Session state as of 2026-06-26:**
-- Merged: j28–j38 (j38 added RCCA path audit and RT repoint target validation; OP-19/24/47 follow-ups moved to j39)
-- RT stopped: 0 (all 80 resolved)
-- RT seeding at 99.9x% (OP-43): River Monsters 127C3834, Transformers 96D896CA, Dexter S02 245F2BCE, Dexter S07 E36553B1 — check complete=1 by 2026-06-27
-- Version: 0.8.69
-- Open OPs: 24 (slotted j39–j45 per JOB-QUEUE.md)
+**Previous completed:** j50 orphan-safety-tooling-closeout, j54 stoppedDL-tooling.
+**Current operational state:** qB stoppedDL/checking remains noisy; RT has two
+blocked PD holdouts missing required `.nfo` evidence. See OPS.md OP-68/OP-69 and
+JOB-QUEUE.md for current counts and sequencing.
 
 Set path variables (use these everywhere below):
 
 ```bash
 CR_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
-JOB=j51
+JOB=j57
 JOB_WORKTREE=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__${JOB}
 ```
 
