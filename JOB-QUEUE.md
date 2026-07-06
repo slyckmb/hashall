@@ -23,8 +23,8 @@ updated: 2026-07-03
 | j53 | repo-mastery-docs | OP-64 | Merged to CR. commit 23d000c. |
 | j54 | stoppeddl-tooling | OP-66 | Merged to CR. merge(cr/hashall-20260626-151456__j54). 
 | j50 | orphan-safety-tooling-closeout | OP-57 | Merged to CR. merge(cr/hashall-20260626-151456__j50). |
-| j57 | rt-qb-state-guard | OP-69 | Planned next. Harden/enforce RT/qB live mutation gates before more repair execution. |
-| j51 | qb-stoppeddl-recovery | OP-62 | Planned after j57 guard. Recover qB missingFiles/stoppedDL fallout using j54 hardened tooling. |
+| j57 | rt-qb-state-guard | OP-69 | Implemented on CR in `f06e944` with direct-CR workflow caveat. Guard tools/docs/prompts are usable now; root-cause follow-up remains open. |
+| j51 | qb-stoppeddl-recovery | OP-62 | Planned next read-only/planning. Live apply blocked until t09 approval plan and guard pass. |
 | j52 | mirror-placement-anomalies | OP-58,OP-59,OP-63 | Planned. Surgical mirror/rehome fixes for known small anomaly set. |
 | j55 | pool-orphan-dedupe-gated | OP-60,OP-61 | Planned. Dry-run/classify first; live deletion/rsync requires explicit operator approval. |
 | j42 | lane2-strategy | OP-23,OP-26 | Planned after immediate qB/orphan blockers. |
@@ -39,8 +39,8 @@ updated: 2026-07-03
 ## Dependencies
 
 - j50 is a code/tooling closeout only. Do not run live orphan deletion or rsync in j50.
-- j57 blocks any further live RT/qB repair mutation except stop-only containment. It turns the 4-Gate/surgical repair policy into enforced docs, tools, prompts, and brief requirements.
-- j51 requires j54 tooling to be merged and j57 guard/enforcement to exist before live apply; j51 read-only refresh/bucket/drain planning can continue while waiting for checking backlog to drain.
+- j57 guard/enforcement exists and is usable. Any further live RT/qB repair mutation is still blocked unless it uses full 4-Gate or surgical mini-gate; stop-only qB containment remains the only exception.
+- j51 requires j54 tooling and j57 guard/enforcement; both are satisfied. j51 live apply remains blocked until a fresh t09 plan identifies exact hashes/batches, guard artifacts pass, and the operator explicitly approves.
 - j52 should run after j51 so qB passive-state enforcement is already hardened; it handles a tiny known anomaly set (TorrentDay mirror race + Elemental duplicate).
 - j55 must not mutate live storage until its dry-run/classification output is reviewed. Live deletion/rsync requires explicit operator approval.
 - j42 and j39 remain downstream of immediate safety repairs and storage feasibility decisions.
@@ -57,12 +57,12 @@ Notes:
 - j50 (orphan-safety-tooling-closeout) active — job branch `cr/hashall-20260626-151456__j50` is rebased and tested. It contains orphan hardlink guard + orphan repoint tooling only. Merge/close it, then move on.
 - j53 (repo-mastery-docs) done — OP-64 full audit delivered. 203 principles cataloged, 62 tested by Q1-Q8, 141 untested. 10 high-severity gaps identified.
 - j54 (stoppeddl-tooling) done — OP-66 closed. 6 gaps fixed: pause_mirror_seeders extended, watchdog built, 4-Gate protocol updated, --extra-root-file added, --restore-from-backup added, verify-persistence.sh built. Hardened pipeline ready for j51 safety gate.
-- j57 (rt-qb-state-guard) next after j50 closeout — OP-69 hardens the gap exposed by recurring RT/qB state regressions: existing tooling existed but ad hoc live repairs could bypass gate evidence, watchdogs, persistence checks, and prompt/brief enforcement.
-- j51 (qb-stoppeddl-recovery) after j57 guard — OP-62 started as 440 missingFiles. Session evidence now says missingFiles reached 0 and hundreds transitioned to stoppedDL/checking. Replan focus: verify current qB state, drain/checking, and use j54 `bucket → drain → apply → roundloop` tooling safely.
+- j57 (rt-qb-state-guard) implemented in `f06e944` — OP-69 hardens the gap exposed by recurring RT/qB state regressions: existing tooling existed but ad hoc live repairs could bypass gate evidence, watchdogs, persistence checks, and prompt/brief enforcement. `chatrap ack commit HEAD` flags direct-CR workflow, but validation passed and tools are usable.
+- j51 (qb-stoppeddl-recovery) next read-only/planning step — OP-62 started as 440 missingFiles. Current 2026-07-05 refresh: qB `stoppedDL=441`, `stoppedUP=4478`, `checking=0`, active upload/download=0; bucket `/tmp/qb-stoppeddl-bucket-live` has 441 hashes. Next: read-only drain/classification and t09 execution plan; no live apply before approval.
 - j52 (mirror-placement-anomalies) groups the small known mirror/rehome anomalies before broad strategy work: OP-58/59 TorrentDay race plus OP-63 Elemental pool→stash hardlink payload rehome.
 - j55 (pool-orphan-dedupe-gated) holds the high-risk pool orphan deletion/rsync work. It starts with dry-run/classification and stops for operator approval before deletion.
 - j42 (lane2-strategy) after immediate blockers — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
-- j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled; includes OP-68 RT `PD` holdouts/regression for Bandersnatch `e679f7` and Dexter `e56e8c`
+- j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled; includes OP-68 RT `PD` holdouts/regression. 2026-07-05 surgical dry-runs keep `f9389496` and `8685d0e6` blocked because current RT directories lack required payload files.
 - j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40); depends on j57 for RT/qB guard primitives
 - j44 (chatrap infra) — upstream fixes
 - j56 (link-plan-ux) — low-risk UX cleanup for hardlink plan labels; can run whenever operational jobs are paused
@@ -76,11 +76,11 @@ Notes:
   - `comms/briefs/j51-t01-deep-dive.md`
   - `comms/briefs/j51-t02-stoppeddl-sop.md`
   - `comms/briefs/TASK-BRIEF-j54-t01.md` through `TASK-BRIEF-j54-t06.md` (already executed/merged)
-- Staged current j51 briefs:
-  - `j51-t04` state refresh only (weak-model slice)
-  - `j51-t05` tool/readiness audit only (weak-model slice)
-  - `j51-t06` bucket sync only
-  - `j51-t07` tiny drain pilot
+- Current j51 briefs:
+  - `j51-t04` state refresh only — done by lead read-only refresh
+  - `j51-t05` tool/readiness audit only — done by lead read-only refresh
+  - `j51-t06` bucket sync only — done by lead read-only refresh
+  - `j51-t07` tiny drain pilot — next
   - `j51-t08` full read-only drain only after gates pass
   - `j51-t09` execution-plan synthesis
   - `j51-t10` live execution only after explicit operator approval
@@ -101,12 +101,12 @@ Notes:
 
 | Task | Status | Goal |
 |------|--------|------|
-| j57-t01 | planned | Update canonical docs: 4-Gate scope, RT/qB state policy, stoppedDL SOP, and surgical repair runbook. Define stop-only containment, surgical mini-gate artifacts, and abort rules. |
-| j57-t02 | planned | Build `bin/rt-surgical-repair.py`: explicit-hash RT repoint/hash-check/start wrapper that verifies torrent metadata, handles single-file vs multi-file target semantics, blocks missing files, writes reports, and never starts incomplete items. |
-| j57-t03 | planned | Build `bin/rt-qb-state-guard.py`: baseline/check/watch/report for RT non-ideal states, stale/missing directories, qB active upload/download, qB stoppedDL deltas, and checking backlog. |
-| j57-t04 | planned | Update prompts, mastery, INIT/QUICKSTART, and brief guidance so RT/qB mutation briefs must declare gate type, exact hashes, allowed commands, required artifacts, and stop conditions. |
-| j57-t05 | planned | Add focused tests and smoke validation for the surgical wrapper, state guard, qB passive enforcement, and existing safe-start behavior. |
-| j57-t06 | planned | Replan j51/j39 after guard completion: j51 live apply remains blocked until checking backlog and gate artifacts pass; j39 RT PD repairs use the new surgical wrapper only. |
+| j57-t01 | done | Updated canonical docs: 4-Gate scope, RT/qB state policy, stoppedDL SOP, and surgical repair runbook. Defined stop-only containment, surgical mini-gate artifacts, and abort rules. |
+| j57-t02 | done | Built `bin/rt-surgical-repair.py`: explicit-hash RT repoint/hash-check/start wrapper that verifies torrent metadata, handles single-file vs multi-file target semantics, blocks missing files, writes reports, and never starts incomplete items. |
+| j57-t03 | done | Built `bin/rt-qb-state-guard.py`: baseline/check/watch/report for RT non-ideal states, stale/missing directories, qB active upload/download, qB stoppedDL deltas, and checking backlog. |
+| j57-t04 | done | Updated prompts, mastery, INIT/QUICKSTART, and brief guidance so RT/qB mutation briefs must declare gate type, exact hashes, allowed commands, required artifacts, and stop conditions. |
+| j57-t05 | done | Added focused tests and smoke validation for the surgical wrapper, state guard, qB passive enforcement, and existing safe-start behavior. Validation: 28 focused tests passed. |
+| j57-t06 | done | Replanned j51/j39 after guard completion: j51 live apply remains blocked until t09 approval plan and guard artifacts pass; j39 RT PD repairs use the new surgical wrapper only. |
 
 ---
 
@@ -277,13 +277,13 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 | j51-t01 | done (exploratory) | Analyze missingFiles repair options. Recommended COA: offline fastresume batch patch from RT session directory mapping, then qB recheck with rollback via `.fastresume.bak-j51`. Log: `.agent/logs/hashall-20260626-151456/j51/j51-t01-opencode.log`. |
 | j51-t02 | done (exploratory/spec) | Document stoppedDL SOP/tooling for the observed missingFiles→stoppedDL fallout. j54 implemented the six tooling gaps from this spec. Log: `.agent/logs/hashall-20260626-151456/j51/j51-t02-opencode.log`. |
 | j51-t03 | blocked (audit) | Current-state audit completed enough to block mutation: qB reachable; counts were `checkingDL=4`, `checkingUP=3080`, `stoppedDL=432`, `stoppedUP=1394`, `missingFiles=0`. Report: `comms/reports/J51-T03-CURRENT-STATE-AUDIT.md` in the j51 worktree. |
-| j51-t04 | planned | Tiny state refresh only: recheck qB counts and stop if `checkingUP + checkingDL` is materially above zero. No bucket/drain. |
-| j51-t05 | planned | Tool/readiness audit only: confirm rollback, persistence verifier, pause enforcement, and report paths. No qB state mutation and no drain. |
-| j51-t06 | planned | Bucket sync only: export current `stoppedDL` hashes and verify bucket artifacts. No drain. |
-| j51-t07 | planned | Drain pilot on a tiny explicit sample (max 10 hashes) to validate candidate policy and command shape. Stop after report. |
+| j51-t04 | done (lead read-only refresh) | qB refresh 2026-07-05: `stoppedDL=441`, `stoppedUP=4478`, `checking=0`, active upload/download=0. Guard baseline: `.agent/reports/rt-qb-guard-20260705-232752/baseline.json`. |
+| j51-t05 | done (lead read-only refresh) | Tool/readiness refresh passed for rollback, persistence verifier, pause enforcement, watchdog, RT/qB guard, and RT surgical wrapper. Report: `.agent/reports/rt-qb-guard-20260705-232752/j51-tool-readiness-refresh.md`. |
+| j51-t06 | done (lead read-only refresh) | Bucket sync refreshed `/tmp/qb-stoppeddl-bucket-live`: 441 active stoppedDL hashes, 441 index entries, 4 exported, 437 existing, 0 missing/pruned. Report: `/tmp/qb-stoppeddl-bucket-live/reports/sync-20260705-232828.json`. |
+| j51-t07 | planned next | Drain pilot on a tiny explicit sample (max 10 hashes) to validate candidate policy and command shape. Stop after report. |
 | j51-t08 | planned | Full read-only drain/classification only if t04 shows checking has drained and t07 pilot is sane. Stop before mutation. |
 | j51-t09 | planned | Execution plan synthesis: exact Class A hash list, batch sizing, rollback ledger, watchdog/pause/persistence sequence, and operator approval request. |
-| j51-t10 | approval-gated | Guarded recovery execution: apply only explicitly approved Class A hashes in small batches with watchdog, `pause_mirror_seeders.py`, rollback ledger, and persistence verification. |
+| j51-t10 | blocked / approval-gated | Guarded recovery execution: apply only explicitly approved Class A hashes in small batches with watchdog, `pause_mirror_seeders.py`, rollback ledger, persistence verification, and RT/qB state guard. Requires fresh t09 execution plan and explicit operator approval. |
 
 ---
 
