@@ -3,7 +3,7 @@
 session: hashall-20260626-151456
 branch: cr/hashall-20260626-151456
 worktree: /home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456
-updated: 2026-07-03
+updated: 2026-07-07
 
 ---
 
@@ -24,13 +24,13 @@ updated: 2026-07-03
 | j54 | stoppeddl-tooling | OP-66 | Merged to CR. merge(cr/hashall-20260626-151456__j54). 
 | j50 | orphan-safety-tooling-closeout | OP-57 | Merged to CR. merge(cr/hashall-20260626-151456__j50). |
 | j57 | rt-qb-state-guard | OP-69 | Implemented on CR in `f06e944` with direct-CR workflow caveat. Guard tools/docs/prompts are usable now; root-cause follow-up remains open. |
-| j51 | qb-stoppeddl-recovery | OP-62 | Active read-only recovery planning. 2026-07-07 DB refresh/payload sync and t07 pilot complete; live apply blocked until full read-only classification, t09 approval plan, guard pass, and explicit operator approval. |
+| j51 | qb-stoppeddl-recovery | OP-62,OP-70 | Active read-only recovery planning. 2026-07-07 DB refresh/payload sync and RT-first worksheet complete; live apply blocked until t09 approval plan, guard pass, and explicit operator approval. |
 | j52 | mirror-placement-anomalies | OP-58,OP-59,OP-63 | Planned. Surgical mirror/rehome fixes for known small anomaly set. |
 | j55 | pool-orphan-dedupe-gated | OP-60,OP-61 | Planned. Dry-run/classify first; live deletion/rsync requires explicit operator approval. |
 | j42 | lane2-strategy | OP-23,OP-26 | Planned after immediate qB/orphan blockers. |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47,OP-68 | Planned after lane strategy. |
 | j43 | rt-state-monitor | OP-10,OP-12 | Planned infrastructure/state work after j57 guard. |
-| j44 | chatrap-infra | OP-42,OP-45 | Planned orchestration reliability work. |
+| j44 | chatrap-infra | OP-42,OP-45,OP-71,OP-72,OP-73 | Planned orchestration/session/security reliability work. |
 | j56 | link-plan-ux | OP-65 | Planned low-risk UX cleanup. |
 | j45 | cr-to-main | OP-14 | Final merge only. |
 
@@ -40,7 +40,7 @@ updated: 2026-07-03
 
 - j50 is a code/tooling closeout only. Do not run live orphan deletion or rsync in j50.
 - j57 guard/enforcement exists and is usable. Any further live RT/qB repair mutation is still blocked unless it uses full 4-Gate or surgical mini-gate; stop-only qB containment remains the only exception.
-- j51 requires j54 tooling and j57 guard/enforcement; both are satisfied. j51 live apply remains blocked until a fresh t09 plan identifies exact hashes/batches, guard artifacts pass, and the operator explicitly approves.
+- j51 requires j54 tooling and j57 guard/enforcement; both are satisfied. j51 live apply remains blocked until a fresh t09 plan identifies exact hashes/batches, includes the OP-70 RT-first source-of-truth gate, guard artifacts pass, and the operator explicitly approves.
 - j52 should run after j51 so qB passive-state enforcement is already hardened; it handles a tiny known anomaly set (TorrentDay mirror race + Elemental duplicate).
 - j55 must not mutate live storage until its dry-run/classification output is reviewed. Live deletion/rsync requires explicit operator approval.
 - j42 and j39 remain downstream of immediate safety repairs and storage feasibility decisions.
@@ -58,13 +58,13 @@ Notes:
 - j53 (repo-mastery-docs) done — OP-64 full audit delivered. 203 principles cataloged, 62 tested by Q1-Q8, 141 untested. 10 high-severity gaps identified.
 - j54 (stoppeddl-tooling) done — OP-66 closed. 6 gaps fixed: pause_mirror_seeders extended, watchdog built, 4-Gate protocol updated, --extra-root-file added, --restore-from-backup added, verify-persistence.sh built. Hardened pipeline ready for j51 safety gate.
 - j57 (rt-qb-state-guard) implemented in `f06e944` — OP-69 hardens the gap exposed by recurring RT/qB state regressions: existing tooling existed but ad hoc live repairs could bypass gate evidence, watchdogs, persistence checks, and prompt/brief enforcement. `chatrap ack commit HEAD` flags direct-CR workflow, but validation passed and tools are usable.
-- j51 (qb-stoppeddl-recovery) active read-only/planning step — OP-62 started as 440 missingFiles. Current 2026-07-07 refresh: qB `stoppedDL=441`, `stoppedUP=4478`, `checking=0`, active upload/download=0; bucket `/tmp/qb-stoppeddl-bucket-live` has 441 hashes. DB refresh artifacts live under `.agent/reports/db-refresh-j51-20260707-045304/`. Correction after t07: generic catalog-drain policy was the wrong first lens; direct RT session mapping shows all 441 qB stoppedDL hashes are present in rTorrent and all 441 RT paths exist. RT-first worksheet is done: 182 hashes have clean multi-file parent targets; 259 need offline torrent-shape verification before choosing RT directory vs parent as qB save path. Next step is t09 gated batch plan. No live apply before approval.
+- j51 (qb-stoppeddl-recovery, OP-62/OP-70) active read-only/planning step — OP-62 started as 440 missingFiles. Current 2026-07-07 refresh: qB `stoppedDL=441`, `stoppedUP=4478`, `checking=0`, active upload/download=0; bucket `/tmp/qb-stoppeddl-bucket-live` has 441 hashes. DB refresh artifacts live under `.agent/reports/db-refresh-j51-20260707-045304/`. Correction after t07: generic catalog-drain policy was the wrong first lens; direct RT session mapping shows all 441 qB stoppedDL hashes are present in rTorrent and all 441 RT paths exist. RT-first worksheet is done: 182 hashes have clean multi-file parent targets; 259 need offline torrent-shape verification before choosing RT directory vs parent as qB save path. Next step is t09 gated batch plan with explicit RT-first source-of-truth gate. No live apply before approval.
 - j52 (mirror-placement-anomalies) groups the small known mirror/rehome anomalies before broad strategy work: OP-58/59 TorrentDay race plus OP-63 Elemental pool→stash hardlink payload rehome.
 - j55 (pool-orphan-dedupe-gated) holds the high-risk pool orphan deletion/rsync work. It starts with dry-run/classification and stops for operator approval before deletion.
 - j42 (lane2-strategy) after immediate blockers — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
 - j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled; includes OP-68 RT `PD` holdouts/regression. 2026-07-05 surgical dry-runs keep `f9389496` and `8685d0e6` blocked because current RT directories lack required payload files.
 - j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40); depends on j57 for RT/qB guard primitives
-- j44 (chatrap infra) — upstream fixes
+- j44 (chatrap infra) — upstream fixes plus new friction from this session: enforce session goals, eliminate direct-CR S05 failures, and stop secret leakage through process argv/logs.
 - j56 (link-plan-ux) — low-risk UX cleanup for hardlink plan labels; can run whenever operational jobs are paused
 - j45 (cr-to-main) — merge CR to main after all repair jobs done
 
@@ -266,7 +266,7 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 ## j51 — qb-stoppeddl-recovery
 
 **Slug:** qb-stoppeddl-recovery
-**OPs:** OP-62
+**OPs:** OP-62, OP-70
 **Goal:** Recover the qB mirror fallout from the stale save_path repair. Current evidence says the original 440 missingFiles count reached 0, but many items transitioned into stoppedDL/checking and require the hardened j54 stoppedDL pipeline. Keep qB passive: zero active downloads/uploads/stalledUP.
 **Urgency:** High — qB mirror state is operationally noisy and can regress if not drained with the hardened tools.
 
@@ -282,8 +282,26 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 | j51-t06 | done (lead read-only refresh) | Bucket sync refreshed `/tmp/qb-stoppeddl-bucket-live`: 441 active stoppedDL hashes, 441 index entries, 0 missing/pruned. Report: `/tmp/qb-stoppeddl-bucket-live/reports/sync-20260707-051113.json`. |
 | j51-t07 | done (lead read-only pilot) | Tiny generic drain pilot processed 10 hashes after catalog refresh and found no Class A candidates under strict root/filesystem policy. Follow-up direct RT session map supersedes this as the primary repair lens: all 441 qB stoppedDL hashes are present in RT and all 441 RT paths exist. Reports: `.agent/reports/db-refresh-j51-20260707-045304/j51-t07-drain-pilot.json`, `.agent/reports/db-refresh-j51-20260707-045304/j51-rt-qb-session-map.json`. |
 | j51-t08 | done (lead read-only RT worksheet) | RT→qB worksheet built for all 441 hashes. All 441 qB stoppedDL hashes are present in RT and all RT paths exist. Worksheet summary: 182 clean multi-file parent targets; 259 need offline torrent-shape verification before choosing RT directory vs parent as qB save path. Report: `.agent/reports/db-refresh-j51-20260707-045304/j51-rt-qb-repair-worksheet.json`. |
-| j51-t09 | planned next | Execution plan synthesis from t08: exact hash batches, target qB paths derived from RT, explicit handling for the 259 verify-needed items, rollback ledger, watchdog/pause/persistence sequence, guard artifacts, and operator approval request. |
+| j51-t09 | planned next | Execution plan synthesis from t08 plus OP-70 source-of-truth gate: exact hash batches, target qB paths derived from RT, explicit handling for the 259 verify-needed items, rollback ledger, watchdog/pause/persistence sequence, guard artifacts, and operator approval request. The plan must explicitly reject catalog-only/no-candidate conclusions for RT-mirrored qB repairs unless RT/session/runtime evidence was checked. |
 | j51-t10 | blocked / approval-gated | Guarded recovery execution: apply only explicitly approved Class A hashes in small batches with watchdog, `pause_mirror_seeders.py`, rollback ledger, persistence verification, and RT/qB state guard. Requires fresh t09 execution plan and explicit operator approval. |
+
+---
+
+## j44 — chatrap-infra
+
+**Slug:** chatrap-infra
+**OPs:** OP-42, OP-45, OP-71, OP-72, OP-73
+**Goal:** Fix orchestration reliability gaps that hide friction, allow workflow bypass, or leak sensitive runtime data.
+
+### Tasks
+
+| Task | Status | Goal |
+|------|--------|------|
+| j44-t01 | planned | Fix OP-42: make after-job scan opencode/Pi/direct logs and artifact dirs for task-log/friction/ops_closed blocks; preserve logs under `.agent/logs/<session>/<job>/`. |
+| j44-t02 | planned | Fix OP-45 class: enforce explicit hash allowlists/exclusion lists in torrent-state mutation briefs and dispatch wrappers so agents cannot act on visible-but-out-of-scope stopped torrents. |
+| j44-t03 | planned | Fix OP-71: make chatrap session tracking refuse or loudly warn on meaningful work with unset `goal`; provide safe goal recovery from current step/evidence. |
+| j44-t04 | planned | Fix OP-72: hard-block direct-CR project commits or provide an explicit lead tracking-commit path that records equivalent task-log/friction metadata and passes S05. |
+| j44-t05 | planned | Fix OP-73: remove qB password/user from payload-sync argv/logging; use env/config/cookie loading and add a smoke test proving `ps`/logs do not expose qB secrets. |
 
 ---
 
@@ -369,3 +387,4 @@ Replanned 2026-07-03: added j54 (stoppeddl-tooling, OP-66). Ordered after j53, b
 Replanned 2026-07-03 (logical safety replan): split j50 into tooling-only closeout (OP-57), j51 qB stoppedDL recovery (OP-62), j52 mirror/rehome anomaly fixes (OP-58/59/63), j55 gated orphan dedupe (OP-60/61, approval before live deletion/rsync), and j56 low-risk link-plan UX (OP-65). Run order: j50→j51→j52→j55→j42→j39→j43→j44→j56→j45.
 
 Replanned 2026-07-03 (weak-model j51 split): j51-t03 audit blocked mutation because qB still had `checkingUP=3080` and `checkingDL=4`. Split broad recovery work into smaller dispatch slices: t04 state refresh only, t05 tool readiness only, t06 bucket sync only, t07 tiny drain pilot, t08 full read-only drain, t09 execution-plan synthesis, t10 approval-gated live execution. This avoids asking weak/free models to reason over qB state, tool readiness, drain policy, and mutation planning in one task.
+Replanned 2026-07-07 (session-friction capture): added OP-70 to j51 after the lead used the wrong generic catalog-drain lens before checking RT truth; t09 must now include an explicit RT-first source-of-truth gate. Added OP-71/OP-72/OP-73 to j44 for chatrap session goal enforcement, direct-CR S05 failures, and qB secret leakage through payload-sync argv/logging.
