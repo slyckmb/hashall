@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T14:54:06Z"
+    "updated_at": "2026-07-08T16:43:32Z"
   },
   "ops": [
     {
@@ -397,11 +397,15 @@
         "qb-stoppeddl-apply.py",
         "--allow-verified-fastresume-cross-filesystem",
         "setLocation",
-        "same_filesystem_overridden=24",
-        "same_filesystem_overridden=22",
-        "same_filesystem_overridden=24",
-        "same_filesystem_overridden=25",
-        "stoppedDL"
+        "planned=24",
+        "applied=24",
+        "ok=24",
+        "failed=0",
+        "fr_patched=24",
+        "rollback_ledger_written=24",
+        "stoppedUP",
+        "stoppedDL=441\u2192417",
+        "stoppedUP=4475\u21924499"
       ]
     },
     {

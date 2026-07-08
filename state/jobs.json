@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T14:54:06Z",
+    "updated_at": "2026-07-08T16:43:32Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -158,7 +158,7 @@
         "OP-79"
       ],
       "status": "planned",
-      "summary": "Active recovery ready for approval-gated verified-retarget pilots. OP-79 v0.2.14 adds explicit verified fastresume retarget mode. Four batches are prepared: t10=24, t11=22, t12=24, t13=25; all 95 are still live `stoppedDL`."
+      "summary": "Active recovery in progress. t10 live verified-retarget pilot succeeded: qB `stoppedDL` dropped 441\u2192417 and `stoppedUP` rose 4475\u21924499. Next approval-ready batches: t11=22, t12=24, t13=25."
     },
     "j52": {
       "slug": "mirror-placement-anomalies",
