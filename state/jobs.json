@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T16:43:32Z",
+    "updated_at": "2026-07-08T18:38:14Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -158,7 +158,7 @@
         "OP-79"
       ],
       "status": "planned",
-      "summary": "Active recovery in progress. t10 live verified-retarget pilot succeeded: qB `stoppedDL` dropped 441\u2192417 and `stoppedUP` rose 4475\u21924499. Next approval-ready batches: t11=22, t12=24, t13=25."
+      "summary": "Active recovery in progress. t10+t11 live verified-retarget batches succeeded: qB `stoppedDL` dropped 441\u2192395 and `stoppedUP` rose 4475\u21924521. Next approval-ready batches: t12=24, t13=25."
     },
     "j52": {
       "slug": "mirror-placement-anomalies",

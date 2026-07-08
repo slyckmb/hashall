@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T16:43:32Z"
+    "updated_at": "2026-07-08T18:38:14Z"
   },
   "ops": [
     {
@@ -401,11 +401,14 @@
         "applied=24",
         "ok=24",
         "failed=0",
-        "fr_patched=24",
-        "rollback_ledger_written=24",
-        "stoppedUP",
         "stoppedDL=441\u2192417",
-        "stoppedUP=4475\u21924499"
+        "planned=22",
+        "applied=22",
+        "ok=22",
+        "failed=0",
+        "stoppedUP",
+        "stoppedDL=417\u2192395",
+        "stoppedUP=4499\u21924521"
       ]
     },
     {
