@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T13:21:55Z"
+    "updated_at": "2026-07-08T13:28:07Z"
   },
   "ops": [
     {
@@ -393,10 +393,13 @@
         "device_mismatch:49!=45",
         "stoppedDL",
         "qb-stoppeddl-apply.py",
-        "tests/test_qb_stoppeddl_safety.py",
-        "planned=24",
+        "--allow-verified-fastresume-cross-filesystem",
+        "setLocation",
         "blocked=24",
-        "same_filesystem_blocked=24"
+        "same_filesystem_blocked=24",
+        "blocked=0",
+        "same_filesystem_overridden=24",
+        "stoppedDL"
       ]
     },
     {

@@ -191,6 +191,54 @@ def test_apply_fastresume_same_filesystem_gate_records_probe_source() -> None:
     assert item["same_filesystem_gate"]["target_path"] == "/pool/media/torrents/seeding"
 
 
+def test_apply_fastresume_cross_filesystem_override_requires_verified_row() -> None:
+    mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-apply.py", "qb_stoppeddl_apply_mod")
+    row = mod.ApplyRow(
+        torrent_hash="e" * 40,
+        name="Example",
+        classification="a",
+        source="test",
+        recommended_path="/pool/media/torrents/seeding/Example",
+        location="/pool/media/torrents/seeding",
+        verified=True,
+        ratio=1.0,
+    )
+    item = {"fastresume_probe": {"save_path": "/data/media/torrents/seeding/Example"}}
+
+    ok, reason = mod.fastresume_same_filesystem_gate(
+        row,
+        item,
+        enforce=True,
+        allow_verified_cross_filesystem=True,
+    )
+
+    assert ok is True
+    assert reason.startswith("verified_fastresume_retarget:")
+    assert item["same_filesystem_gate"]["overridden"] is True
+    assert item["same_filesystem_gate"]["override_reason"] == "verified_fastresume_retarget"
+
+    unverified = mod.ApplyRow(
+        torrent_hash="f" * 40,
+        name="Example",
+        classification="a",
+        source="test",
+        recommended_path="/pool/media/torrents/seeding/Example",
+        location="/pool/media/torrents/seeding",
+        verified=False,
+        ratio=0.0,
+    )
+    blocked_item = {"fastresume_probe": {"save_path": "/data/media/torrents/seeding/Example"}}
+    blocked_ok, _ = mod.fastresume_same_filesystem_gate(
+        unverified,
+        blocked_item,
+        enforce=True,
+        allow_verified_cross_filesystem=True,
+    )
+
+    assert blocked_ok is False
+    assert blocked_item["same_filesystem_gate"]["overridden"] is False
+
+
 def test_drain_alias_variants_do_not_expand_to_pool_data_from_data_media() -> None:
     mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-drain.py", "qb_stoppeddl_drain_mod")
     variants = mod.alias_variants("/data/media/torrents/seeding/cross-seed/example")

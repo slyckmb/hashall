@@ -22,7 +22,7 @@ if str(SRC_DIR) not in sys.path:
 from hashall.qbittorrent import get_qbittorrent_client
 from rehome.seed_state import SEED_ROOT_STATE_PATH, validate_seed_root_state
 
-SEMVER = "0.2.13"
+SEMVER = "0.2.14"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
@@ -405,19 +405,30 @@ def fastresume_same_filesystem_gate(
     item: Dict[str, Any],
     *,
     enforce: bool,
+    allow_verified_cross_filesystem: bool = False,
 ) -> Tuple[bool, str]:
     if not enforce:
         item["same_filesystem_gate"] = {"enforced": False, "ok": True, "reason": "disabled"}
         return True, "disabled"
     fr_save_path = str(item.get("fastresume_probe", {}).get("save_path") or "")
     same_ok, same_reason = same_filesystem_paths(fr_save_path, row.location)
+    overridden = bool(
+        not same_ok
+        and allow_verified_cross_filesystem
+        and row.verified
+        and float(row.ratio) >= 1.0
+    )
     item["same_filesystem_gate"] = {
         "enforced": True,
         "source_path": fr_save_path,
         "target_path": row.location,
-        "ok": bool(same_ok),
+        "ok": bool(same_ok or overridden),
         "reason": same_reason,
+        "overridden": bool(overridden),
+        "override_reason": "verified_fastresume_retarget" if overridden else "",
     }
+    if overridden:
+        return True, f"verified_fastresume_retarget:{same_reason}"
     return bool(same_ok), same_reason
 
 
@@ -894,6 +905,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(enforce_same_filesystem=True)
     p.add_argument(
+        "--allow-verified-fastresume-cross-filesystem",
+        action="store_true",
+        help=(
+            "Allow fastresume-only retargets across filesystems when the row is independently "
+            "verified at ratio 1.0. Does not affect API setLocation mode."
+        ),
+    )
+    p.add_argument(
         "--ignore-hashes",
         default="",
         help="Optional hashes/prefixes to ignore (pipe/comma/space separated)",
@@ -1295,6 +1314,7 @@ def main() -> int:
                 "failed": 0,
                 "blocked": 0,
                 "same_filesystem_blocked": 0,
+                "same_filesystem_overridden": 0,
                 "recheck_dispatched": 0,
                 "skipped_live_state": 0,
                 "skipped_ignored": int(ignored_plan),
@@ -1385,6 +1405,7 @@ def main() -> int:
         "failed": 0,
         "blocked": 0,
         "same_filesystem_blocked": 0,
+        "same_filesystem_overridden": 0,
         "recheck_dispatched": 0,
         "skipped_live_state": 0,
         "skipped_ignored": int(ignored_plan),
@@ -1408,8 +1429,11 @@ def main() -> int:
                     row,
                     item,
                     enforce=bool(args.enforce_same_filesystem),
+                    allow_verified_cross_filesystem=bool(args.allow_verified_fastresume_cross_filesystem),
                 )
-                if not same_ok:
+                if bool(item.get("same_filesystem_gate", {}).get("overridden")):
+                    counts["same_filesystem_overridden"] += 1
+                elif not same_ok:
                     item["status"] = "blocked"
                     item["detail"] = f"same_filesystem_blocked:{same_reason}"
                     counts["blocked"] += 1
@@ -1422,6 +1446,7 @@ def main() -> int:
             "failed": 0,
             "blocked": int(counts["blocked"]),
             "same_filesystem_blocked": int(counts["same_filesystem_blocked"]),
+            "same_filesystem_overridden": int(counts["same_filesystem_overridden"]),
             "recheck_dispatched": 0,
             "skipped_live_state": 0,
             "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1471,6 +1496,7 @@ def main() -> int:
                 "failed": 0,
                 "blocked": int(counts["blocked"]),
                 "same_filesystem_blocked": int(counts["same_filesystem_blocked"]),
+                "same_filesystem_overridden": int(counts["same_filesystem_overridden"]),
                 "recheck_dispatched": 0,
                 "skipped_live_state": 0,
                 "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1543,8 +1569,15 @@ def main() -> int:
                             row,
                             item,
                             enforce=bool(args.enforce_same_filesystem),
+                            allow_verified_cross_filesystem=bool(args.allow_verified_fastresume_cross_filesystem),
                         )
-                        if not same_ok:
+                        if bool(item.get("same_filesystem_gate", {}).get("overridden")):
+                            counts["same_filesystem_overridden"] += 1
+                            print(
+                                f"  ALLOW verified_fastresume_retarget hash={row.torrent_hash[:12]} {same_reason}",
+                                flush=True,
+                            )
+                        elif not same_ok:
                             item["status"] = "blocked"
                             item["detail"] = f"same_filesystem_blocked:{same_reason}"
                             counts["blocked"] += 1
@@ -1587,8 +1620,11 @@ def main() -> int:
                                     row,
                                     item,
                                     enforce=bool(args.enforce_same_filesystem),
+                                    allow_verified_cross_filesystem=bool(args.allow_verified_fastresume_cross_filesystem),
                                 )
-                                if not same_ok:
+                                if bool(item.get("same_filesystem_gate", {}).get("overridden")):
+                                    print(f"  ALLOW verified_fastresume_retarget {same_reason}", flush=True)
+                                elif not same_ok:
                                     item["status"] = "blocked"
                                     item["detail"] = f"same_filesystem_blocked:{same_reason}"
                                     counts["blocked"] += 1
@@ -1835,6 +1871,7 @@ def main() -> int:
                 "failed": int(counts["failed"]),
                 "blocked": int(counts["blocked"]),
                 "same_filesystem_blocked": int(counts["same_filesystem_blocked"]),
+                "same_filesystem_overridden": int(counts["same_filesystem_overridden"]),
                 "recheck_dispatched": int(counts["recheck_dispatched"]),
                 "skipped_live_state": int(counts["skipped_live_state"]),
                 "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1921,6 +1958,7 @@ def main() -> int:
         f"skipped_ignored={summary.get('skipped_ignored',0)} "
         f"blocked={summary['blocked']} fr_needed={summary.get('fr_needed',0)} "
         f"same_filesystem_blocked={summary.get('same_filesystem_blocked',0)} "
+        f"same_filesystem_overridden={summary.get('same_filesystem_overridden',0)} "
         f"fr_patched={summary.get('fr_patched',0)} fr_patch_failed={summary.get('fr_patch_failed',0)} "
         f"root_policy_rejected={summary.get('root_policy_rejected',0)} "
         f"rollback_ledger_written={summary.get('rollback_ledger_written',0)} "

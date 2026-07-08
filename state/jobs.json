@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T13:21:55Z",
+    "updated_at": "2026-07-08T13:28:07Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -158,7 +158,7 @@
         "OP-79"
       ],
       "status": "planned",
-      "summary": "Active recovery blocked before save-path repair. OP-79 tool fix now makes the verified 24-hash batch dry-run as blocked before service stop (`same_filesystem_blocked=24`). Need a new safe repair strategy for cross-device/stale-save-root rows before any live retry."
+      "summary": "Active recovery ready for an approval-gated verified-retarget pilot. OP-79 tool fix makes the conservative 24-hash dry-run block safely, and v0.2.14 adds an explicit verified fastresume retarget mode that dry-runs `same_filesystem_overridden=24` with all 24 still live `stoppedDL`."
     },
     "j52": {
       "slug": "mirror-placement-anomalies",
