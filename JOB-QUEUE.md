@@ -25,7 +25,7 @@ updated: 2026-07-07
 | j50 | orphan-safety-tooling-closeout | OP-57 | Merged to CR. merge(cr/hashall-20260626-151456__j50). |
 | j57 | rt-qb-state-guard | OP-69 | Implemented on CR in `f06e944` with direct-CR workflow caveat. Guard tools/docs/prompts are usable now; root-cause follow-up remains open. |
 | j51 | qb-stoppeddl-recovery | OP-62,OP-70 | Active read-only recovery planning. 2026-07-07 DB refresh/payload sync and RT-first worksheet complete; live apply blocked until t09 approval plan, guard pass, and explicit operator approval. |
-| j52 | mirror-placement-anomalies | OP-58,OP-59,OP-63 | Planned. Surgical mirror/rehome fixes for known small anomaly set. |
+| j52 | mirror-placement-anomalies | OP-58,OP-59,OP-63,OP-74 | Planned. Surgical mirror/rehome fixes for known small anomaly set plus RT/qB pause-state sync RCCA. |
 | j55 | pool-orphan-dedupe-gated | OP-60,OP-61 | Planned. Dry-run/classify first; live deletion/rsync requires explicit operator approval. |
 | j42 | lane2-strategy | OP-23,OP-26 | Planned after immediate qB/orphan blockers. |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47,OP-68 | Planned after lane strategy. |
@@ -59,7 +59,7 @@ Notes:
 - j54 (stoppeddl-tooling) done — OP-66 closed. 6 gaps fixed: pause_mirror_seeders extended, watchdog built, 4-Gate protocol updated, --extra-root-file added, --restore-from-backup added, verify-persistence.sh built. Hardened pipeline ready for j51 safety gate.
 - j57 (rt-qb-state-guard) implemented in `f06e944` — OP-69 hardens the gap exposed by recurring RT/qB state regressions: existing tooling existed but ad hoc live repairs could bypass gate evidence, watchdogs, persistence checks, and prompt/brief enforcement. `chatrap ack commit HEAD` flags direct-CR workflow, but validation passed and tools are usable.
 - j51 (qb-stoppeddl-recovery, OP-62/OP-70) active read-only/planning step — OP-62 started as 440 missingFiles. Current 2026-07-07 refresh: qB `stoppedDL=441`, `stoppedUP=4478`, `checking=0`, active upload/download=0; bucket `/tmp/qb-stoppeddl-bucket-live` has 441 hashes. DB refresh artifacts live under `.agent/reports/db-refresh-j51-20260707-045304/`. Correction after t07: generic catalog-drain policy was the wrong first lens; direct RT session mapping shows all 441 qB stoppedDL hashes are present in rTorrent and all 441 RT paths exist. RT-first worksheet is done: 182 hashes have clean multi-file parent targets; 259 need offline torrent-shape verification before choosing RT directory vs parent as qB save path. Next step is t09 gated batch plan with explicit RT-first source-of-truth gate. No live apply before approval.
-- j52 (mirror-placement-anomalies) groups the small known mirror/rehome anomalies before broad strategy work: OP-58/59 TorrentDay race plus OP-63 Elemental pool→stash hardlink payload rehome.
+- j52 (mirror-placement-anomalies) groups the small known mirror/rehome anomalies before broad strategy work: OP-58/59 TorrentDay race, OP-63 Elemental pool→stash hardlink payload rehome, and OP-74 RT/qB paused-100 sync mismatch/RCCA.
 - j55 (pool-orphan-dedupe-gated) holds the high-risk pool orphan deletion/rsync work. It starts with dry-run/classification and stops for operator approval before deletion.
 - j42 (lane2-strategy) after immediate blockers — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
 - j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled; includes OP-68 RT `PD` holdouts/regression. 2026-07-05 surgical dry-runs keep `f9389496` and `8685d0e6` blocked because current RT directories lack required payload files.
@@ -308,8 +308,8 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 ## j52 — rt-qb-mirror-race
 
 **Slug:** mirror-placement-anomalies
-**OPs:** OP-58, OP-59, OP-63
-**Goal:** Resolve the small known mirror/rehome anomaly set before broad drift work: two TorrentDay mirror race items and one Elemental pool→stash duplicate. Keep scope narrow and explicit.
+**OPs:** OP-58, OP-59, OP-63, OP-74
+**Goal:** Resolve the small known mirror/rehome anomaly set before broad drift work: two TorrentDay mirror race items, one Elemental pool→stash duplicate, and the new RT paused-100 vs qB not-paused-100 sync mismatch. Keep scope narrow and explicit.
 
 ### Tasks
 
@@ -319,6 +319,7 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 | j52-t02 | planned | Repoint the two TorrentDay items to their correct pool path per `~noHL`, with RT/qB post-checks and no broad scan. |
 | j52-t03 | planned | Rehome Elemental.2023 pool duplicate to stash with unique payload tree and hardlink payload per REQUIREMENTS §1.4/§5.3/§6.3. |
 | j52-t04 | planned | Harden the mirror workflow or write a precise follow-up OP if root cause is outside this narrow fix scope. |
+| j52-t05 | planned | Investigate OP-74: `f4a6a8` / Silo S02 is `PU` 100% in RT but `SU` 100% in qB; audit RT→qB pause/complete state translation for a possible logic flip; add a focused regression test before any live client mutation. |
 
 ---
 
