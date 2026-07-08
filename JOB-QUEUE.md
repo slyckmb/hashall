@@ -319,7 +319,7 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 | j52-t02 | planned | Repoint the two TorrentDay items to their correct pool path per `~noHL`, with RT/qB post-checks and no broad scan. |
 | j52-t03 | planned | Rehome Elemental.2023 pool duplicate to stash with unique payload tree and hardlink payload per REQUIREMENTS §1.4/§5.3/§6.3. |
 | j52-t04 | planned | Harden the mirror workflow or write a precise follow-up OP if root cause is outside this narrow fix scope. |
-| j52-t05 | planned | Investigate OP-74: `f4a6a8` / Silo S02 is `PU` 100% in RT but `SU` 100% in qB; audit RT→qB pause/complete state translation for a possible logic flip; add a focused regression test before any live client mutation. |
+| j52-t05 | partially done | Investigated OP-74: no mirror-add flip found; qB mirror imports are still added stopped. Hardened `scripts/pause_mirror_seeders.py` so legacy `pausedUP` is acceptable and post-stop live qB state is recorded, with focused tests. Remaining: identify why `f4a6a8` drifted before enforcement caught it. |
 
 ---
 

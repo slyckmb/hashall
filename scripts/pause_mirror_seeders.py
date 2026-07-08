@@ -9,7 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.hashall.qbittorrent import get_qbittorrent_client, get_torrents_from_cache
 
-UPLOAD_STATES = {"stalledUP", "uploading", "forcedUP", "queuedUP", "pausedUP"}
+ACCEPTABLE_PAUSED_STATES = {"stoppedUP", "pausedUP"}
+UPLOAD_STATES = {"stalledUP", "uploading", "forcedUP", "queuedUP"}
 DOWNLOAD_STATES = {"downloading", "forcedDL", "stalledDL"}
 ALL_NON_ACCEPTABLE = UPLOAD_STATES | DOWNLOAD_STATES
 MIRROR_TAGS = {"hashall-client-drift", "hashall-rt-qb-mirror"}
@@ -22,6 +23,23 @@ def parse_states(text: str) -> set:
         if s:
             out.add(s)
     return out
+
+
+def is_mirror_item(torrent: dict) -> bool:
+    return any(tag in (torrent.get("tags") or "") for tag in MIRROR_TAGS)
+
+
+def is_non_acceptable_state(state: str, selected_states: set) -> bool:
+    state = str(state or "").strip()
+    return state in selected_states and state not in ACCEPTABLE_PAUSED_STATES
+
+
+def live_state(qb, torrent_hash: str) -> str:
+    try:
+        info = qb.get_torrent_info(torrent_hash)
+    except Exception:
+        return ""
+    return str(getattr(info, "state", "") or "") if info is not None else ""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,8 +71,8 @@ def main() -> int:
 
     targets = [
         t for t in cache
-        if t.get("state") in states
-        and any(tag in (t.get("tags") or "") for tag in MIRROR_TAGS)
+        if is_non_acceptable_state(t.get("state", ""), states)
+        and is_mirror_item(t)
     ]
 
     if not targets:
@@ -92,14 +110,17 @@ def main() -> int:
             action = "dry_run"
         else:
             if qb.pause_torrent(h):
+                verified_state = live_state(qb, h)
                 if is_download:
                     print(f"  WARNING {h[:16]}: {name} state={state} tags={tags}")
                     download_ok += 1
                 else:
-                    print(f"  paused  {h[:16]}: {name[:55]}")
+                    suffix = f" -> {verified_state}" if verified_state else ""
+                    print(f"  paused  {h[:16]}: {name[:55]}{suffix}")
                     upload_ok += 1
                 action = "paused"
             else:
+                verified_state = ""
                 print(f"  FAILED  {h[:16]}: {name}")
                 err += 1
                 action = "failed"
@@ -108,6 +129,7 @@ def main() -> int:
             "hash": h,
             "name": name,
             "state": state,
+            "verified_state": verified_state if not args.dry_run else "",
             "action": action,
         }
         if is_download and action in ("paused", "dry_run"):
