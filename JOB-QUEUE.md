@@ -30,7 +30,7 @@ updated: 2026-07-07
 | j42 | lane2-strategy | OP-23,OP-26 | Planned after immediate qB/orphan blockers. |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47,OP-68 | Planned after lane strategy. |
 | j43 | rt-state-monitor | OP-10,OP-12 | Planned infrastructure/state work after j57 guard. |
-| j44 | chatrap-infra | OP-42,OP-45,OP-71,OP-72,OP-73 | Planned orchestration/session/security reliability work. |
+| j44 | chatrap-infra | OP-42,OP-45,OP-71,OP-72,OP-73,OP-77 | Planned orchestration/session/security reliability work. |
 | j56 | link-plan-ux | OP-65 | Planned low-risk UX cleanup. |
 | j45 | cr-to-main | OP-14 | Final merge only. |
 
@@ -58,13 +58,13 @@ Notes:
 - j53 (repo-mastery-docs) done — OP-64 full audit delivered. 203 principles cataloged, 62 tested by Q1-Q8, 141 untested. 10 high-severity gaps identified.
 - j54 (stoppeddl-tooling) done — OP-66 closed. 6 gaps fixed: pause_mirror_seeders extended, watchdog built, 4-Gate protocol updated, --extra-root-file added, --restore-from-backup added, verify-persistence.sh built. Hardened pipeline ready for j51 safety gate.
 - j57 (rt-qb-state-guard) implemented in `f06e944` — OP-69 hardens the gap exposed by recurring RT/qB state regressions: existing tooling existed but ad hoc live repairs could bypass gate evidence, watchdogs, persistence checks, and prompt/brief enforcement. `chatrap ack commit HEAD` flags direct-CR workflow, but validation passed and tools are usable.
-- j51 (qb-stoppeddl-recovery, OP-62/OP-70) active read-only/planning step — OP-62 started as 440 missingFiles. Current 2026-07-07 refresh: qB `stoppedDL=441`, `stoppedUP=4478`, `checking=0`, active upload/download=0; bucket `/tmp/qb-stoppeddl-bucket-live` has 441 hashes. DB refresh artifacts live under `.agent/reports/db-refresh-j51-20260707-045304/`. Correction after t07: generic catalog-drain policy was the wrong first lens; direct RT session mapping shows all 441 qB stoppedDL hashes are present in rTorrent and all 441 RT paths exist. RT-first worksheet is done: 182 hashes have clean multi-file parent targets; 259 need offline torrent-shape verification before choosing RT directory vs parent as qB save path. Next step is t09 gated batch plan with explicit RT-first source-of-truth gate. No live apply before approval.
+- j51 (qb-stoppeddl-recovery, OP-62/OP-70) active approval-gated recovery planning — OP-62 started as 440 missingFiles. Current 2026-07-07 refresh: qB `stoppedDL=441`, `stoppedUP=4478`, `checking=0`, active upload/download=0; bucket `/tmp/qb-stoppeddl-bucket-live` has 441 hashes. DB refresh artifacts live under `.agent/reports/db-refresh-j51-20260707-045304/`. Correction after t07: generic catalog-drain policy was the wrong first lens; direct RT session mapping shows all 441 qB stoppedDL hashes are present in rTorrent and all 441 RT paths exist. RT-first worksheet is done: 182 hashes have clean multi-file parent targets; 259 need offline torrent-shape verification before choosing RT directory vs parent as qB save path. t09 approval plan is written at `.agent/reports/j51-ship-20260708/J51-T09-EXECUTION-PLAN.md`; t10 is blocked until explicit operator approval for a concrete Class A batch.
 - j52 (mirror-placement-anomalies) groups the small known mirror/rehome anomalies before broad strategy work: OP-58/59 TorrentDay race, OP-63 Elemental pool→stash hardlink payload rehome, and OP-74 RT/qB paused-100 sync mismatch/RCCA.
 - j55 (pool-orphan-dedupe-gated) holds the high-risk pool orphan deletion/rsync work. It starts with dry-run/classification and stops for operator approval before deletion.
 - j42 (lane2-strategy) after immediate blockers — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
 - j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled; includes OP-68 RT `PD` holdouts/regression. 2026-07-05 surgical dry-runs keep `f9389496` and `8685d0e6` blocked because current RT directories lack required payload files.
 - j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40); depends on j57 for RT/qB guard primitives
-- j44 (chatrap infra) — upstream fixes plus new friction from this session: enforce session goals, eliminate direct-CR S05 failures, and stop secret leakage through process argv/logs.
+- j44 (chatrap infra) — upstream fixes plus new friction from this session: enforce session goals, eliminate direct-CR S05 failures, stop secret leakage through process argv/logs, and fix `lead ship`/fallback dispatch false-success issues from OP-77.
 - j56 (link-plan-ux) — low-risk UX cleanup for hardlink plan labels; can run whenever operational jobs are paused
 - j45 (cr-to-main) — merge CR to main after all repair jobs done
 
@@ -82,8 +82,8 @@ Notes:
   - `j51-t06` bucket sync only — done by lead read-only refresh
   - `j51-t07` tiny drain pilot — done by lead read-only refresh; no Class A candidates in first 10
   - `j51-t08` RT→qB repair worksheet — done by lead read-only refresh
-  - `j51-t09` execution-plan synthesis
-  - `j51-t10` live execution only after explicit operator approval
+  - `j51-t09` execution-plan synthesis — done; approval plan copied to `.agent/reports/j51-ship-20260708/`
+  - `j51-t10` live execution — blocked until explicit operator approval for a concrete Class A batch
   - `j52-t01` mirror/rehome anomaly investigation
   - `j55-t01` orphan dry-run/classification
   - `j55-t02+` live deletion/rsync briefs only after operator approval
@@ -282,8 +282,8 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 | j51-t06 | done (lead read-only refresh) | Bucket sync refreshed `/tmp/qb-stoppeddl-bucket-live`: 441 active stoppedDL hashes, 441 index entries, 0 missing/pruned. Report: `/tmp/qb-stoppeddl-bucket-live/reports/sync-20260707-051113.json`. |
 | j51-t07 | done (lead read-only pilot) | Tiny generic drain pilot processed 10 hashes after catalog refresh and found no Class A candidates under strict root/filesystem policy. Follow-up direct RT session map supersedes this as the primary repair lens: all 441 qB stoppedDL hashes are present in RT and all 441 RT paths exist. Reports: `.agent/reports/db-refresh-j51-20260707-045304/j51-t07-drain-pilot.json`, `.agent/reports/db-refresh-j51-20260707-045304/j51-rt-qb-session-map.json`. |
 | j51-t08 | done (lead read-only RT worksheet) | RT→qB worksheet built for all 441 hashes. All 441 qB stoppedDL hashes are present in RT and all RT paths exist. Worksheet summary: 182 clean multi-file parent targets; 259 need offline torrent-shape verification before choosing RT directory vs parent as qB save path. Report: `.agent/reports/db-refresh-j51-20260707-045304/j51-rt-qb-repair-worksheet.json`. |
-| j51-t09 | planned next | Execution plan synthesis from t08 plus OP-70 source-of-truth gate: exact hash batches, target qB paths derived from RT, explicit handling for the 259 verify-needed items, rollback ledger, watchdog/pause/persistence sequence, guard artifacts, and operator approval request. The plan must explicitly reject catalog-only/no-candidate conclusions for RT-mirrored qB repairs unless RT/session/runtime evidence was checked. |
-| j51-t10 | blocked / approval-gated | Guarded recovery execution: apply only explicitly approved Class A hashes in small batches with watchdog, `pause_mirror_seeders.py`, rollback ledger, persistence verification, and RT/qB state guard. Requires fresh t09 execution plan and explicit operator approval. |
+| j51-t09 | done (lead approval plan) | Execution plan synthesis completed from t08 plus OP-70 source-of-truth gate. Plan: 441 total stoppedDL worksheet hashes; 182 Class A `multifile_parent_of_info_name` candidates in `J51-T09-CLASS-A-HASHES.txt`; 259 `directory_as_save_path_needs_verify` items held for offline torrent-shape verification. Batch size: 25. Report copied to `.agent/reports/j51-ship-20260708/J51-T09-EXECUTION-PLAN.md`. |
+| j51-t10 | blocked / approval-gated | Guarded recovery execution did not run because explicit operator approval for a concrete hash list was absent. Blocked report copied to `.agent/reports/j51-ship-20260708/J51-T10-GUARDED-EXECUTION.md`. Next required approval text is in the t09 plan. |
 
 ---
 

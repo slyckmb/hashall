@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T08:51:04Z",
+    "updated_at": "2026-07-08T09:02:07Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -217,7 +217,8 @@
         "OP-45",
         "OP-71",
         "OP-72",
-        "OP-73"
+        "OP-73",
+        "OP-77"
       ],
       "status": "planned",
       "summary": "Planned orchestration/session/security reliability work."
