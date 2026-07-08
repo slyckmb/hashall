@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T13:12:45Z"
+    "updated_at": "2026-07-08T13:21:55Z"
   },
   "ops": [
     {
@@ -373,8 +373,7 @@
         "exact_tree=false",
         "verified=false",
         "/pool/media/torrents/seeding/08 - Bitter Discord [B0BJYX918S]",
-        "/tmp/qb-stoppeddl-bucket-live/reports/j51-t10-verified-first25-drain.json",
-        "fastresume_batch_wait"
+        "/tmp/qb-stoppeddl-bucket-live/reports/j51-t10-verified-first25-drain.json"
       ]
     },
     {
@@ -392,7 +391,12 @@
         "--apply",
         "storage_root_mismatch:other!=pool",
         "device_mismatch:49!=45",
-        "stoppedDL"
+        "stoppedDL",
+        "qb-stoppeddl-apply.py",
+        "tests/test_qb_stoppeddl_safety.py",
+        "planned=24",
+        "blocked=24",
+        "same_filesystem_blocked=24"
       ]
     },
     {

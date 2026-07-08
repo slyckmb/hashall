@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T13:12:45Z",
+    "updated_at": "2026-07-08T13:21:55Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -158,7 +158,7 @@
         "OP-79"
       ],
       "status": "planned",
-      "summary": "Active recovery blocked before save-path repair. Verified 24-hash live attempt stopped/restarted qB but patched 0 because same-filesystem gate blocked all rows after service stop; fix dry-run/live gate mismatch before retry."
+      "summary": "Active recovery blocked before save-path repair. OP-79 tool fix now makes the verified 24-hash batch dry-run as blocked before service stop (`same_filesystem_blocked=24`). Need a new safe repair strategy for cross-device/stale-save-root rows before any live retry."
     },
     "j52": {
       "slug": "mirror-placement-anomalies",

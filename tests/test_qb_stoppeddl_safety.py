@@ -169,6 +169,28 @@ def test_apply_same_filesystem_paths_blocks_cross_storage_root_on_missing_mounts
     assert reason.startswith("storage_root_mismatch:") or reason.startswith("device_mismatch:")
 
 
+def test_apply_fastresume_same_filesystem_gate_records_probe_source() -> None:
+    mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-apply.py", "qb_stoppeddl_apply_mod")
+    row = mod.ApplyRow(
+        torrent_hash="d" * 40,
+        name="Example",
+        classification="a",
+        source="test",
+        recommended_path="/pool/media/torrents/seeding/Example",
+        location="/pool/media/torrents/seeding",
+        verified=True,
+        ratio=1.0,
+    )
+    item = {"fastresume_probe": {"save_path": "/data/media/torrents/seeding/Example"}}
+
+    ok, reason = mod.fastresume_same_filesystem_gate(row, item, enforce=True)
+
+    assert ok is False
+    assert reason.startswith("storage_root_mismatch:") or reason.startswith("device_mismatch:")
+    assert item["same_filesystem_gate"]["source_path"] == "/data/media/torrents/seeding/Example"
+    assert item["same_filesystem_gate"]["target_path"] == "/pool/media/torrents/seeding"
+
+
 def test_drain_alias_variants_do_not_expand_to_pool_data_from_data_media() -> None:
     mod = _load_module(REPO_ROOT / "bin" / "qb-stoppeddl-drain.py", "qb_stoppeddl_drain_mod")
     variants = mod.alias_variants("/data/media/torrents/seeding/cross-seed/example")
