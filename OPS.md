@@ -65,6 +65,7 @@ _(all other OPs are slotted — see In-Job below)_
 | OP-55 | bug | 83 blocked Gate 2 false positives — j48 SHA256/library-dupe work made the blocked FP class resolvable. | j48 |
 | OP-56 | reliability | qB recheck gap after `set_location` — j48 extended apply/rank flow with explicit recheck handling. | j48 |
 | OP-75 | ux | Makefile targets added for RT tracker `conn_err`: `make trk-warn-conn-err` previews suppressed rows with `--restart-conn-err --dryrun`, and `make trk-restart-conn-err` runs the guarded stop/start reannounce path. Verified after live cleanup: preview exits cleanly with 0 rows and restart reports `restarted=0 skipped=0`. | direct-CR |
+| OP-76 | friction | Prep scan duplicate of already-completed commit `2ac0827` (`fix(qb): harden mirror pause enforcement`); no new task needed because OP-74 already carries the remaining broader RCCA. | closed:no-action |
 | OP-64 | doc | Repo mastery doc audit delivered; AGENT-MASTERY coverage expanded and gaps documented. | j53 |
 | OP-11 | doc | config/healthchecks.json stub created; operator must register and fill UUID | j40-t05 |
 | OP-13 | doc | TRACKER_ISSUE_SCRIPT alias added to Makefile; TRK_WARN_SCRIPT kept as compat alias | j40-t05 |

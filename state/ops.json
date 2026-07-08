@@ -1,0 +1,14 @@
+{
+  "open": [],
+  "closed": [
+    {
+      "id": "OP-76",
+      "title": "fix(qb): harden mirror pause enforcement",
+      "status": "closed:no-action",
+      "tags": [
+        "friction",
+        "duplicate"
+      ]
+    }
+  ]
+}
