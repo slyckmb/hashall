@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T11:24:30Z"
+    "updated_at": "2026-07-08T13:12:45Z"
   },
   "ops": [
     {
@@ -375,6 +375,24 @@
         "/pool/media/torrents/seeding/08 - Bitter Discord [B0BJYX918S]",
         "/tmp/qb-stoppeddl-bucket-live/reports/j51-t10-verified-first25-drain.json",
         "fastresume_batch_wait"
+      ]
+    },
+    {
+      "id": "OP-79",
+      "type": "bug",
+      "title": "`qb-stoppeddl-apply.py` dry-run did not faithfully model live fastresume batch blocking",
+      "status": "in-job",
+      "observed": "",
+      "fix_targets": [
+        "qb-stoppeddl-apply.py",
+        "/tmp/qb-stoppeddl-bucket-live/reports/j51-t10-verified-first25-drain.json",
+        "planned=24",
+        "same_filesystem_blocked=0",
+        "root_policy_rejected=0",
+        "--apply",
+        "storage_root_mismatch:other!=pool",
+        "device_mismatch:49!=45",
+        "stoppedDL"
       ]
     },
     {

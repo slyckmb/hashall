@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T11:24:30Z",
+    "updated_at": "2026-07-08T13:12:45Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -154,10 +154,11 @@
       "ops": [
         "OP-62",
         "OP-70",
-        "OP-78"
+        "OP-78",
+        "OP-79"
       ],
       "status": "planned",
-      "summary": "Active recovery planning at approval gate. First approved 25-hash batch was reworked into a verified/apply-compatible 24-hash dry-run plan; live apply still requires fresh explicit approval."
+      "summary": "Active recovery blocked before save-path repair. Verified 24-hash live attempt stopped/restarted qB but patched 0 because same-filesystem gate blocked all rows after service stop; fix dry-run/live gate mismatch before retry."
     },
     "j52": {
       "slug": "mirror-placement-anomalies",
