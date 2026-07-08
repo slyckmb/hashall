@@ -28,7 +28,7 @@ updated: 2026-07-07
 | j52 | mirror-placement-anomalies | OP-58,OP-59,OP-63,OP-74 | Planned. Surgical mirror/rehome fixes for known small anomaly set plus RT/qB pause-state sync RCCA. |
 | j55 | pool-orphan-dedupe-gated | OP-60,OP-61 | Planned. Dry-run/classify first; live deletion/rsync requires explicit operator approval. |
 | j42 | lane2-strategy | OP-23,OP-26 | Planned after immediate qB/orphan blockers. |
-| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47,OP-68,OP-75 | Planned after lane strategy. |
+| j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47,OP-68 | Planned after lane strategy. |
 | j43 | rt-state-monitor | OP-10,OP-12 | Planned infrastructure/state work after j57 guard. |
 | j44 | chatrap-infra | OP-42,OP-45,OP-71,OP-72,OP-73 | Planned orchestration/session/security reliability work. |
 | j56 | link-plan-ux | OP-65 | Planned low-risk UX cleanup. |
@@ -62,7 +62,7 @@ Notes:
 - j52 (mirror-placement-anomalies) groups the small known mirror/rehome anomalies before broad strategy work: OP-58/59 TorrentDay race, OP-63 Elemental pool→stash hardlink payload rehome, and OP-74 RT/qB paused-100 sync mismatch/RCCA.
 - j55 (pool-orphan-dedupe-gated) holds the high-risk pool orphan deletion/rsync work. It starts with dry-run/classification and stops for operator approval before deletion.
 - j42 (lane2-strategy) after immediate blockers — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
-- j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled; includes OP-68 RT `PD` holdouts/regression and OP-75 Makefile UX for suppressed RT `conn_err` listing/restart commands. 2026-07-05 surgical dry-runs keep `f9389496` and `8685d0e6` blocked because current RT directories lack required payload files.
+- j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled; includes OP-68 RT `PD` holdouts/regression. 2026-07-05 surgical dry-runs keep `f9389496` and `8685d0e6` blocked because current RT directories lack required payload files.
 - j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40); depends on j57 for RT/qB guard primitives
 - j44 (chatrap infra) — upstream fixes plus new friction from this session: enforce session goals, eliminate direct-CR S05 failures, and stop secret leakage through process argv/logs.
 - j56 (link-plan-ux) — low-risk UX cleanup for hardlink plan labels; can run whenever operational jobs are paused

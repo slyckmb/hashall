@@ -38,7 +38,7 @@ endef
         rehome-auto-dry rehome-auto-apply rehome-relocate-plan rehome-normalize-plan rehome-drift-audit \
         qb-missing-audit qb-missing-remediate-dry qb-missing-remediate-apply \
         payload-show payload-siblings \
-        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs trk-warn-replace-individual trk-fix-multi-loc \
+        trk-warn trk-warn-prowlarr trk-warn-dry trk-warn-cleanup trk-warn-upgrade-packs trk-warn-replace-individual trk-warn-conn-err trk-restart-conn-err trk-fix-multi-loc \
         canonical-tree-report
 
 help:
@@ -102,6 +102,8 @@ help:
 	@echo ""
 	@echo "  make trk-warn                — list RT tracker-warning items (deleted/auth_err/other)"
 	@echo "  make trk-warn-prowlarr       — same, with Prowlarr search + verbose hit list"
+	@echo "  make trk-warn-conn-err       — dry-run: show RT tracker conn_err items that would be restarted"
+	@echo "  make trk-restart-conn-err    — stop/start RT tracker conn_err items to force re-announce"
 	@echo "  make trk-fix-multi-loc       — stop/start multi_loc items to clear VPN IP-rotation errors"
 	@echo "  make trk-warn-dry            — dry-run: plan removes + season-pack upgrades for deleted+other"
 	@echo "  make trk-warn-cleanup        — execute cleanup: remove deleted+other (no upgrades), sync to qB"
@@ -307,6 +309,12 @@ trk-warn-upgrade-packs:
 trk-warn-replace-individual:
 	$(call _pip-gate)
 	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --escalating-search --replace-individual --bucket $${BUCKET:-deleted,auth_err} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+
+trk-warn-conn-err:
+	@python3 $(TRK_WARN_SCRIPT) --restart-conn-err --dryrun $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
+
+trk-restart-conn-err:
+	@python3 $(TRK_WARN_SCRIPT) --restart-conn-err $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
 
 trk-fix-multi-loc:
 	@python3 $(TRK_WARN_SCRIPT) --fix-multi-loc
