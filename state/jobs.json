@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T09:02:07Z",
+    "updated_at": "2026-07-08T10:30:58Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -153,10 +153,11 @@
       "slug": "qb-stoppeddl-recovery",
       "ops": [
         "OP-62",
-        "OP-70"
+        "OP-70",
+        "OP-78"
       ],
       "status": "planned",
-      "summary": "Active read-only recovery planning. 2026-07-07 DB refresh/payload sync and RT-first worksheet complete; live apply blocked until t09 approval plan, guard pass, and explicit operator approval."
+      "summary": "Active recovery planning blocked before live apply. RT-first worksheet complete, but first approved batch failed pre-apply verification; regenerate apply-compatible verified plan before mutation."
     },
     "j52": {
       "slug": "mirror-placement-anomalies",

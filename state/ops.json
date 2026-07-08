@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T09:02:07Z"
+    "updated_at": "2026-07-08T10:30:58Z"
   },
   "ops": [
     {
@@ -352,6 +352,28 @@
       "observed": "",
       "fix_targets": [
         "qB hash \u2192 RT hash \u2192 RT d.directory"
+      ]
+    },
+    {
+      "id": "OP-78",
+      "type": "bug",
+      "title": "j51-t09 approval plan incorrectly treated RT path-shape evidence (`multifile_parent_of_info_name`) as apply-ready Class A evidence",
+      "status": "in-job",
+      "observed": "",
+      "fix_targets": [
+        "multifile_parent_of_info_name",
+        "qb-stoppeddl-apply.py",
+        "classification",
+        "best_result.verified",
+        "recommended_path",
+        "376c463cd58324cdb1b5645930227055b3053837",
+        "partial_match",
+        "expected_files=3",
+        "actual_files=6",
+        "exact_tree=false",
+        "verified=false",
+        "/pool/media/torrents/seeding/08 - Bitter Discord [B0BJYX918S]",
+        "planned > 0"
       ]
     },
     {
