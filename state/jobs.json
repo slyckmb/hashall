@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T10:30:58Z",
+    "updated_at": "2026-07-08T11:24:30Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -157,7 +157,7 @@
         "OP-78"
       ],
       "status": "planned",
-      "summary": "Active recovery planning blocked before live apply. RT-first worksheet complete, but first approved batch failed pre-apply verification; regenerate apply-compatible verified plan before mutation."
+      "summary": "Active recovery planning at approval gate. First approved 25-hash batch was reworked into a verified/apply-compatible 24-hash dry-run plan; live apply still requires fresh explicit approval."
     },
     "j52": {
       "slug": "mirror-placement-anomalies",
