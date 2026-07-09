@@ -8,6 +8,7 @@ comms/
 .vscode/
 .idea/
 *.code-workspace
+.venv/
 .venv_name
 
 # 🐍 Python Artifacts
