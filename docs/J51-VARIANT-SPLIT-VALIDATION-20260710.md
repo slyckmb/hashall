@@ -146,6 +146,21 @@ path existed, no longer shared an inode, had no nested RT session directory, and
 was not complete before issuing `d.start`. Post-start guard passed with 0 issues,
 and RT entered active download with decreasing `left_bytes`.
 
+Completion validation:
+
+- RT downloaded the new target to `complete=1 left=0`.
+- RT was stopped and force-rechecked; final state was `state=0 complete=1 hashing=0 left=0`.
+- qB was then force-rechecked against the same path and moved from
+  `stoppedDL progress=0.999979... left=524288` to
+  `stoppedUP progress=1.0 left=0`.
+- The quarantined old file and new verified file have the same size
+  (`25389518348`) but different bytes; `cmp` reported the first difference at
+  byte 57. Old inode: `dev=49 ino=65878 nlink=4`; new inode:
+  `dev=49 ino=100413 nlink=1`.
+- Hash-scoped RT payload sync processed the one torrent, recorded one complete
+  payload, skipped orphan prune, and exited cleanly after fixing the
+  `--upgrade-missing` empty-queue summary bug.
+
 Keep the other split rows stopped unless the operator chooses a tracker/source or
 Prowlarr records freeleech proof with viable seeds. After the representative
 verifies, compare quarantined vs new bytes and test other target torrents against

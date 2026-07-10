@@ -1294,6 +1294,7 @@ def payload_sync(
     write_batch_ops = 0
     write_batch_threshold = 400
     upgrade_queue: dict[str, dict] = {}
+    total_upgrade_roots = 0
     upgrade_started = 0
     upgrade_completed = 0
     upgrade_failed = 0

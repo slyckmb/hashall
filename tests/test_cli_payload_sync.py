@@ -1105,6 +1105,7 @@ class TestPayloadSyncCLI(unittest.TestCase):
                     str(self.db_path),
                     "--hash",
                     "bbb",
+                    "--upgrade-missing",
                 ],
             )
 
@@ -1112,6 +1113,7 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertIn("processed: 1", result.output)
         self.assertIn("skipped (hash): 1", result.output)
         self.assertIn("orphan prune skipped: hash-scoped sync", result.output)
+        self.assertIn("upgrade stage: queued=0 started=0 completed=0 failed=0", result.output)
 
     def test_payload_sync_remaps_alternate_mountpoints_for_prefix_filtering(self):
         """
