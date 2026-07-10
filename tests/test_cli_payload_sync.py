@@ -1013,6 +1013,54 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("processed: 1", result.output)
 
+    def test_payload_sync_qb_accepts_hash_filter(self):
+        torrents = [
+            QBitTorrent(
+                hash="aaa111",
+                name="torrent-1",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+            QBitTorrent(
+                hash="bbb222",
+                name="torrent-2",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+
+        runner = CliRunner()
+        with patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--dry-run",
+                    "--hash",
+                    "bbb",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (hash): 1", result.output)
+        self.assertIn("Hash: bbb222", result.output)
+        self.assertNotIn("Hash: aaa111", result.output)
+
     def test_payload_sync_remaps_alternate_mountpoints_for_prefix_filtering(self):
         """
         qBittorrent may report torrent roots under an alternate mount target
@@ -1183,6 +1231,48 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Loaded 1 rTorrent session rows", result.output)
         self.assertIn("processed: 1", result.output)
+
+    def test_payload_sync_rt_accepts_hash_file_filter(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        hashes = [
+            "AAA1110000000000000000000000000000000000",
+            "BBB2220000000000000000000000000000000000",
+        ]
+        for torrent_hash in hashes:
+            (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+                bencode_encode({b"directory": str(self.payload_root).encode("utf-8")})
+            )
+            (session_dir / f"{torrent_hash}.torrent").write_bytes(
+                bencode_encode({b"info": {b"name": b"a.bin"}})
+            )
+        hash_file = self.tmp_path / "hashes.txt"
+        hash_file.write_text("bbb222\n", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "payload",
+                "sync",
+                "--db",
+                str(self.db_path),
+                "--source",
+                "rt",
+                "--rt-session-dir",
+                str(session_dir),
+                "--dry-run",
+                "--hash-file",
+                str(hash_file),
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Loaded 2 rTorrent session rows", result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (hash): 1", result.output)
+        self.assertIn("Hash: bbb2220000000000000000000000000000000000", result.output)
+        self.assertNotIn("Hash: aaa1110000000000000000000000000000000000", result.output)
 
     def test_payload_sync_rt_source_expands_path_prefix_mount_aliases(self):
         """

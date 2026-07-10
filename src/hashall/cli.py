@@ -940,6 +940,18 @@ def payload():
 @click.option("--category", default=None, help="Filter torrents by category")
 @click.option("--tag", default=None, help="Filter torrents by tag")
 @click.option(
+    "--hash",
+    "hash_filters",
+    multiple=True,
+    help="Only process torrent hash prefix(es); repeatable.",
+)
+@click.option(
+    "--hash-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Read additional torrent hash prefixes from a newline-delimited file.",
+)
+@click.option(
     "--path-prefix",
     "path_prefixes",
     multiple=True,
@@ -1007,6 +1019,8 @@ def payload_sync(
     rt_session_dir,
     category,
     tag,
+    hash_filters,
+    hash_file,
     path_prefixes,
     path_prefix_file,
     limit,
@@ -1046,7 +1060,7 @@ def payload_sync(
     _payload_sync_lock_fh = None
     if not dry_run:
         import fcntl as _fcntl
-        _payload_sync_lock_path = Path(db).parent / "payload-sync.lock"
+        _payload_sync_lock_path = Path(f"{db}.payload-sync.lock")
         _payload_sync_lock_fh = _payload_sync_lock_path.open("a+", encoding="utf-8")
         try:
             _fcntl.flock(_payload_sync_lock_fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
@@ -1111,6 +1125,25 @@ def payload_sync(
     if dry_run and upgrade_missing:
         print("⚠️  DRY-RUN: ignoring --upgrade-missing (would modify DB)")
         upgrade_missing = False
+
+    hash_filter_inputs = [str(h).strip().lower() for h in hash_filters if str(h).strip()]
+    if hash_file:
+        for raw in Path(hash_file).read_text(encoding="utf-8").splitlines():
+            cleaned = raw.split("#", 1)[0].strip().lower()
+            if cleaned:
+                hash_filter_inputs.append(cleaned)
+    hash_filter_prefixes: list[str] = []
+    seen_hash_filter_prefixes: set[str] = set()
+    for value in hash_filter_inputs:
+        if value not in seen_hash_filter_prefixes:
+            seen_hash_filter_prefixes.add(value)
+            hash_filter_prefixes.append(value)
+
+    def _hash_matches_filters(torrent_hash: str) -> bool:
+        if not hash_filter_prefixes:
+            return True
+        h = str(torrent_hash or "").strip().lower()
+        return bool(h) and any(h.startswith(prefix) for prefix in hash_filter_prefixes)
 
     prefix_inputs = list(path_prefixes)
     if path_prefix_file:
@@ -1251,6 +1284,7 @@ def payload_sync(
     synced_count = 0
     incomplete_count = 0
     missing_in_catalog = 0
+    skipped_hash = 0
     skipped_prefix = 0
     processed = 0
     checked = 0
@@ -1273,6 +1307,17 @@ def payload_sync(
         for torrent in inventory_rows:
             if limit and processed >= limit:
                 break
+
+            torrent_hash = str(torrent.get("hash") or "").strip()
+            if not _hash_matches_filters(torrent_hash):
+                skipped_hash += 1
+                checked += 1
+                progress.update(
+                    desc=f"hash-filter checked={checked}/{len(inventory_rows)} "
+                         f"processed={processed} skipped_hash={skipped_hash}",
+                    advance=1,
+                )
+                continue
 
             # Get torrent root path
             root_path = str(torrent.get("root_path") or torrent.get("content_path") or "").strip()
@@ -1299,7 +1344,6 @@ def payload_sync(
                 or torrent.get("root_name")
                 or ""
             ).strip()
-            torrent_hash = str(torrent.get("hash") or "").strip()
             if torrent_hash:
                 processed_torrent_hashes.add(torrent_hash)
 
@@ -1656,6 +1700,12 @@ def payload_sync(
     else:
         print(f"\n✅ Sync complete!")
     print(f"   processed: {processed}")
+    if hash_filter_prefixes:
+        print(f"   skipped (hash): {skipped_hash}")
+        if processed == 0 and len(inventory_rows) > 0:
+            sample_hashes = ", ".join(hash_filter_prefixes[:5])
+            print("   ⚠️  no torrents matched current hash filters")
+            print(f"      hashes(sample): {sample_hashes}")
     if prefix_paths:
         print(f"   skipped (path-prefix): {skipped_prefix}")
         if processed == 0 and len(inventory_rows) > 0:
