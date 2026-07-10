@@ -170,6 +170,15 @@ Completion validation:
   and classified the current new variant group as `pool_eligible`. Rerun this
   audit after any additional compatible target torrent is hardlinked into the
   group.
+- The only same-title Spider-Man sibling found in qB/RT was
+  `5c86280a99d1` on Aither. Read-only verification tested the new
+  `5feb771c9b7f` representative file against the Aither `.torrent`; it failed
+  piece verification (`1513/1514` pieces OK, 1 failed), so Aither is not
+  compatible with the new variant and must not be hardlinked/repointed to it.
+  Proposed-member placement audit including the Aither path found media-library
+  anchors under `/data/media/movies` and `/stash/media/movies`, so if any future
+  compatible member from that inode group were proposed, the combined group would
+  be `stash_required`.
 
 Keep the other split rows stopped unless the operator chooses a tracker/source or
 Prowlarr records freeleech proof with viable seeds. After the representative
