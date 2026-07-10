@@ -183,9 +183,13 @@ Plan B split/redownload dry-run:
 Plan B limited live pilot:
 
 ```bash
+.venv/bin/python bin/prowlarr-freeleech-proof.py \
+  --query "Release title" \
+  --output .agent/reports/<run>/HASH-freeleech-proof.json
+
 .venv/bin/python bin/rt-qb-variant-split-redownload.py --apply \
   --allow-start-download \
-  --operator-download-approval \
+  --freeleech-proof .agent/reports/<run>/HASH-freeleech-proof.json \
   --hash HASH \
   --report-json .agent/reports/<run>/HASH-split-pilot-live.json
 ```
@@ -194,10 +198,16 @@ The Plan B tool is intentionally hash-scoped and dry-run first. Live mode stops
 the RT item, renames only that torrent's expected payload path to an
 `.invalid-for-HASH` quarantine name, and runs `d.check_hash`. It starts RT only
 when `--allow-start-download` is explicit and either
-`--operator-download-approval` or `--freeleech-proof` is also present. The
-expected successful pilot symptom is a new target inode with `nlink=1` and RT
-`d.state=1` with either a nonzero download rate or normal stalled-download
-behavior while waiting for seeds.
+`--operator-download-approval` or a JSON `--freeleech-proof` report with
+`freeleech_proven=true` is also present. The expected successful pilot symptom
+is a new target inode with `nlink=1` and RT `d.state=1` with either a nonzero
+download rate or normal stalled-download behavior while waiting for seeds.
+
+`bin/prowlarr-freeleech-proof.py` is read-only. It searches Prowlarr and treats
+freeleech as proven only when Prowlarr returns an explicit zero download-volume
+field (`downloadVolumeFactor=0`, `downloadVolume=0`, or `downloadFactor=0`) or a
+freeleech flag in `indexerFlags`, `flags`, or `releaseFlags`. Seed count,
+tracker name, or title text alone is not proof.
 
 If a multi-file payload root contains another RT session directory below it, do
 not quarantine the whole root. That would break the sibling view. Use a more

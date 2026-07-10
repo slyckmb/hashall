@@ -169,3 +169,15 @@ def test_apply_blocks_nested_session_dir_under_payload(tmp_path, monkeypatch):
 
     assert report["status"] == "blocked"
     assert report["blocked_reason"] == "nested_rt_session_dir_under_payload"
+
+
+def test_validate_freeleech_proof_requires_positive_report(tmp_path):
+    mod = load_module()
+    proof = tmp_path / "proof.json"
+    proof.write_text('{"freeleech_proven": true, "freeleech_hits": 1}', encoding="utf-8")
+
+    assert mod.validate_freeleech_proof(str(proof)) == (True, "ok")
+
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"freeleech_proven": false, "freeleech_hits": 0}', encoding="utf-8")
+    assert mod.validate_freeleech_proof(str(bad))[0] is False

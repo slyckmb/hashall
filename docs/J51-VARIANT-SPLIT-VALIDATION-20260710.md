@@ -109,6 +109,11 @@ The tool was also hardened to block whole-root multi-file quarantine when anothe
 RT session directory is nested under that root. Live evidence showed that this
 can break a healthy sibling view even though the file inodes remain recoverable.
 
+`bin/prowlarr-freeleech-proof.py` was added as a read-only proof helper. It uses
+the same Prowlarr API surface as the tracker-warning flow but preserves explicit
+freeleech evidence from raw release fields before allowing that JSON report to be
+used as `--freeleech-proof`.
+
 ## Batch Split and Containment
 
 After the c5 pilot, the remaining five split-eligible rows were split and then

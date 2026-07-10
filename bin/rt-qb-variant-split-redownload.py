@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--freeleech-proof",
         default="",
-        help="Path or note proving the selected existing torrent/source is freeleech.",
+        help="Path to a JSON proof report with freeleech_proven=true.",
     )
     parser.add_argument("--quarantine-suffix", default="", help="Override quarantine suffix")
     parser.add_argument("--report-json", default="", help="Write JSON report to this path")
@@ -223,6 +223,21 @@ def wait_short_state(torrent_hash: str, *, rpc_url: str, timeout: int, poll_secs
         time.sleep(1)
 
 
+def validate_freeleech_proof(path_text: str) -> tuple[bool, str]:
+    path = Path(path_text).expanduser()
+    if not path.is_file():
+        return False, "freeleech_proof_file_missing"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"freeleech_proof_json_error:{exc}"
+    if not bool(payload.get("freeleech_proven")):
+        return False, "freeleech_not_proven"
+    if int(payload.get("freeleech_hits") or 0) <= 0:
+        return False, "freeleech_hits_zero"
+    return True, "ok"
+
+
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     session_dir = Path(args.session_dir).expanduser()
     torrent_hash = resolve_hash(session_dir, args.hash)
@@ -323,6 +338,11 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if args.allow_start_download and args.freeleech_proof:
+        ok, reason = validate_freeleech_proof(args.freeleech_proof)
+        if not ok:
+            print(f"ERROR invalid --freeleech-proof: {reason}", file=sys.stderr)
+            return 2
     report = build_report(args)
     if args.apply:
         report = apply_report(args, report)
