@@ -181,3 +181,44 @@ def test_validate_freeleech_proof_requires_positive_report(tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text('{"freeleech_proven": false, "freeleech_hits": 0}', encoding="utf-8")
     assert mod.validate_freeleech_proof(str(bad))[0] is False
+
+
+def test_start_existing_split_blocks_shared_inode(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "f" * 40
+    session = tmp_path / "session"
+    save = tmp_path / "save"
+    session.mkdir()
+    save.mkdir()
+    write_single_torrent(session / f"{h.upper()}.torrent", "movie.mkv", 4)
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"data")
+    payload = save / "movie.mkv"
+    payload.hardlink_to(source)
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(save))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=False,
+        apply=True,
+        start_existing_split=True,
+        allow_start_download=True,
+        operator_download_approval=True,
+        freeleech_proof="",
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.start_existing_split(args, mod.build_report(args))
+
+    assert report["status"] == "blocked"
+    assert report["blocked_reason"] == "payload_still_shared_inode"

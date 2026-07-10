@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
     parser.add_argument("--apply", action="store_true", help="Apply filesystem and RT mutations")
     parser.add_argument(
+        "--start-existing-split",
+        action="store_true",
+        help="Start an already-split item after proving its payload path is not shared.",
+    )
+    parser.add_argument(
         "--allow-start-download",
         action="store_true",
         help="After quarantine and hash-check, call d.start so RT can fetch fresh bytes",
@@ -327,6 +332,40 @@ def apply_report(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, 
     return report
 
 
+def start_existing_split(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, Any]:
+    torrent_hash = report["hash"]
+    if not report["payload_stat"].get("exists"):
+        report["status"] = "blocked"
+        report["blocked_reason"] = "payload_path_missing"
+        return report
+    if report.get("shared_inode_detected"):
+        report["status"] = "blocked"
+        report["blocked_reason"] = "payload_still_shared_inode"
+        return report
+    if report.get("nested_session_dirs"):
+        report["status"] = "blocked"
+        report["blocked_reason"] = "nested_rt_session_dir_under_payload"
+        return report
+    if str(report.get("pre_rt", {}).get("complete")) == "1":
+        report["status"] = "blocked"
+        report["blocked_reason"] = "already_complete"
+        return report
+    if not args.apply:
+        report["status"] = "dry_run_ok"
+        report["actions"] = ["d.start"]
+        return report
+    rt_xmlrpc_call("d.start", torrent_hash, rpc_url=args.rpc_url, timeout=args.timeout)
+    report["actions"].append("d.start")
+    report["post_rt"] = wait_short_state(
+        torrent_hash,
+        rpc_url=args.rpc_url,
+        timeout=args.timeout,
+        poll_secs=args.poll_secs,
+    )
+    report["status"] = "applied"
+    return report
+
+
 def main() -> int:
     args = build_parser().parse_args()
     if args.apply and args.dry_run:
@@ -344,7 +383,9 @@ def main() -> int:
             print(f"ERROR invalid --freeleech-proof: {reason}", file=sys.stderr)
             return 2
     report = build_report(args)
-    if args.apply:
+    if args.start_existing_split:
+        report = start_existing_split(args, report)
+    elif args.apply:
         report = apply_report(args, report)
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.report_json:

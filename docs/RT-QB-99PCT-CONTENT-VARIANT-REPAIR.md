@@ -194,6 +194,18 @@ Plan B limited live pilot:
   --report-json .agent/reports/<run>/HASH-split-pilot-live.json
 ```
 
+If the item has already been split and contained/stopped, resume only the
+already-isolated target path instead of quarantining again:
+
+```bash
+.venv/bin/python bin/rt-qb-variant-split-redownload.py --apply \
+  --start-existing-split \
+  --allow-start-download \
+  --freeleech-proof .agent/reports/<run>/HASH-freeleech-proof.json \
+  --hash HASH \
+  --report-json .agent/reports/<run>/HASH-start-existing-split-live.json
+```
+
 The Plan B tool is intentionally hash-scoped and dry-run first. Live mode stops
 the RT item, renames only that torrent's expected payload path to an
 `.invalid-for-HASH` quarantine name, and runs `d.check_hash`. It starts RT only
@@ -202,6 +214,9 @@ when `--allow-start-download` is explicit and either
 `freeleech_proven=true` is also present. The expected successful pilot symptom
 is a new target inode with `nlink=1` and RT `d.state=1` with either a nonzero
 download rate or normal stalled-download behavior while waiting for seeds.
+`--start-existing-split` uses the same start gate but first blocks if the target
+path is missing, still shares an inode, is already complete, or contains another
+RT session directory below it.
 
 `bin/prowlarr-freeleech-proof.py` is read-only. It searches Prowlarr and treats
 freeleech as proven only when Prowlarr returns an explicit zero download-volume

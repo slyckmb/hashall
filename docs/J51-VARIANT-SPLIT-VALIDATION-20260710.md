@@ -139,9 +139,14 @@ now blocks that nested-session shape before mutation.
 
 ## Next
 
-Stop before starting any split item for fresh download. Pick one representative
-per suspected variant group, confirm the desired tracker/source and freeleech
-status with the operator or Prowlarr proof, then resume only that representative.
-After it verifies, compare quarantined vs new bytes and test other target
-torrents against that representative payload before allowing any further
-downloads.
+`5feb771c9b7f` was selected as the first representative because Prowlarr returned
+explicit TorrentLeech freeleech proof and a live seed count. The already-split
+target was started with `--start-existing-split`; the tool confirmed the payload
+path existed, no longer shared an inode, had no nested RT session directory, and
+was not complete before issuing `d.start`. Post-start guard passed with 0 issues,
+and RT entered active download with decreasing `left_bytes`.
+
+Keep the other split rows stopped unless the operator chooses a tracker/source or
+Prowlarr records freeleech proof with viable seeds. After the representative
+verifies, compare quarantined vs new bytes and test other target torrents against
+that representative payload before allowing any further downloads.
