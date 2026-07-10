@@ -11,7 +11,9 @@ match the currently shared payload file.
 Make each 99.* item either:
 
 1. become a verified 100 percent seed in both clients, or
-2. be explicitly classified as not repairable from known sibling bytes.
+2. prove the sibling is a real content variant by splitting the failed torrent
+   away from the sibling inode, redownloading the target bytes, and comparing
+   the resulting files.
 
 Do not let an incomplete torrent write into an inode used by a healthy sibling.
 
@@ -40,6 +42,10 @@ sizes, and byte content. The source bytes must verify against the target
   the same inode and expected size.
 - Never repoint RT or qB until the target tree verifies against the target
   `.torrent` offline.
+- If the sibling/source fails target piece verification, do not stop at
+  classification. That is the trigger to rename the invalid target file/tree out
+  of the expected path, let the failed torrent download fresh target bytes into
+  a unique path, and then compare old vs new bytes.
 - Run `payload sync --hash` after a successful repair, and do not run a
   whole-catalog orphan prune as part of a hash-scoped sync.
 
@@ -57,7 +63,7 @@ For each hash, record:
 - post-recheck RT/qB state;
 - post-sync DB payload status.
 
-## Repair Plan
+## Repair Plan A: Verified Sibling Bytes
 
 1. Refresh the catalog and client state for only the target hash when possible.
 2. Find candidate sibling bytes using the DB, RT/qB state, file size, and
@@ -72,6 +78,35 @@ For each hash, record:
 8. Start RT only if the post-recheck result is complete.
 9. Confirm qB is `stoppedUP` with `progress=1.0` and `amount_left=0`.
 10. Run a hash-scoped DB sync and confirm the DB payload is complete.
+
+## Repair Plan B: Split, Rename, and Redownload
+
+Use this when Plan A proves the sibling/source bytes do not match the failed
+torrent. This was the important E.T. lesson in reverse: E.T. was repaired
+because the seedpool inode verified against the other target torrents; when a
+candidate sibling fails verification, the next valid action is to create room
+for the failed torrent to fetch its own variant bytes.
+
+1. Stop the failed torrent in both clients.
+2. Record every expected target path, inode, size, and hardlink count.
+3. Rename the invalid file or payload tree at the failed torrent's expected path
+   to a quarantine name that includes the target hash, for example
+   `.invalid-for-HASH`.
+4. Confirm the healthy sibling's own path still exists and still points to its
+   original inode. Renaming one hardlink path must not remove the sibling's
+   directory entry.
+5. Start or recheck/resume only the failed torrent, so it writes fresh bytes
+   into the now-empty expected target path.
+6. When the failed torrent reaches 100 percent, stop it and verify it offline
+   against its `.torrent`.
+7. Compare the new verified target file/tree against the renamed invalid source:
+   same bytes means prior client metadata/path state was wrong; different bytes
+   means they are real content variants and must remain separate payloads.
+8. Run hash-scoped DB sync for the failed hash and any affected sibling hash.
+9. Record the final outcome in the validation report and OP/JOB tracking.
+
+Do not delete the renamed invalid file/tree until the comparison is recorded
+and the healthy sibling has been rechecked or otherwise proven unaffected.
 
 ## Tooling
 
@@ -102,8 +137,13 @@ Live repair requires replacing `--dry-run` with `--apply` and should include
 
 - `repaired`: source and target both verify, clients recheck to 100 percent, DB
   sync shows complete payload.
-- `source-not-compatible`: candidate source exists but fails target torrent
-  piece verification.
+- `needs-split-redownload`: candidate source exists but fails target torrent
+  piece verification; next step is Plan B, not terminal classification.
+- `variant-proven`: after Plan B, the newly downloaded verified target bytes
+  differ from the renamed invalid sibling bytes.
+- `duplicate-proven`: after Plan B, the newly downloaded verified target bytes
+  match the renamed invalid bytes; investigate client/fastresume/path metadata
+  before deleting anything.
 - `no-verified-source`: no sibling source can be proven against the target
   torrent.
 - `blocked-existing-target`: target path already contains non-matching files
@@ -116,5 +156,6 @@ Live repair requires replacing `--dry-run` with `--apply` and should include
 
 The active objective is to run this process over the remaining qB 99.* stoppedDL
 set and reduce the actionable content-variant set to zero. Items that cannot be
-repaired from verified sibling bytes must be classified with evidence rather
-than left ambiguous.
+repaired from verified sibling bytes move to Plan B so the system proves whether
+the files are true variants instead of leaving the failed target attached to an
+invalid sibling inode.
