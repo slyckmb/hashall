@@ -41,6 +41,12 @@ a file it previously treated as complete, especially when that file is also a
 hardlinked 100 percent sibling. That is why these cases look like detective work
 instead of an obvious client failure.
 
+A second symptom is that manually triggering `d.start` can appear to do nothing:
+the item remains stopped/paused because it still has no isolated writable target
+for the bytes that differ from its own piece map. The repair is not "start
+harder"; the repair is to split the failed torrent away from the shared inode
+first, then start the split item.
+
 ## Safety Rules
 
 - Never start the 99.* torrent in its current shared-inode location.
@@ -135,7 +141,8 @@ verified"; they did not.
 
 ## Tooling
 
-Use `bin/torrent-sibling-hardlink-repair.py` for this failure mode.
+Use `bin/torrent-sibling-hardlink-repair.py` for Plan A and
+`bin/rt-qb-variant-split-redownload.py` for Plan B.
 
 Single-file source:
 
@@ -157,6 +164,30 @@ Multi-file source:
 
 Live repair requires replacing `--dry-run` with `--apply` and should include
 `--allow-start-if-complete` only after the dry-run source verification is clean.
+
+Plan B split/redownload dry-run:
+
+```bash
+.venv/bin/python bin/rt-qb-variant-split-redownload.py --dry-run \
+  --hash HASH \
+  --report-json .agent/reports/<run>/HASH-split-dryrun.json
+```
+
+Plan B limited live pilot:
+
+```bash
+.venv/bin/python bin/rt-qb-variant-split-redownload.py --apply \
+  --allow-start-download \
+  --hash HASH \
+  --report-json .agent/reports/<run>/HASH-split-pilot-live.json
+```
+
+The Plan B tool is intentionally hash-scoped and dry-run first. Live mode stops
+the RT item, renames only that torrent's expected payload path to an
+`.invalid-for-HASH` quarantine name, runs `d.check_hash`, and starts RT only
+when `--allow-start-download` is explicit. The expected successful pilot symptom
+is a new target inode with `nlink=1` and RT `d.state=1` with either a nonzero
+download rate or normal stalled-download behavior while waiting for seeds.
 
 ## Outcome Classes
 

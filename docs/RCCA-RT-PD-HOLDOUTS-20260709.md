@@ -70,6 +70,13 @@ the live payload for healthy siblings. The visible symptom is a quiet stopped
 near-complete item with a failed-completion hash message, not a normal active
 download waiting for seeds.
 
+The `c5a827e36ebb` limited pilot on 2026-07-10 validated the repair shape:
+before split, RT was stopped with `left_bytes=1048576` and the target file shared
+inode `dev=49 ino=4066 nlink=5`; after the target path was quarantined and RT was
+started, RT transitioned to `state=1` with nonzero download rate, the healthy
+sibling stayed on inode `4066`, and the new target file appeared as isolated
+inode `dev=49 ino=100406 nlink=1`.
+
 ## Correct course of action
 
 Do not issue `d.start` on the five 99% rows in their current payload locations.
