@@ -232,6 +232,13 @@ def _is_relative_to(path: Path, prefix: Path) -> bool:
         return False
 
 
+def _same_path(left: str, right: str) -> bool:
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return Path(left) == Path(right)
+
+
 def path_under_any(path_text: str, prefixes: list[str]) -> bool:
     path = Path(path_text)
     return any(_is_relative_to(path, Path(prefix)) for prefix in prefixes)
@@ -268,6 +275,11 @@ def placement_audit(
 ) -> dict[str, Any]:
     roots = [Path(item).expanduser() for item in (scan_roots or list(DEFAULT_PLACEMENT_SCAN_ROOTS))]
     prefixes = media_prefixes or list(DEFAULT_MEDIA_LIBRARY_PREFIXES)
+    expected_existing_paths = [
+        str(row["path"])
+        for row in report.get("file_stats", [])
+        if row.get("exists") and row.get("path")
+    ]
     wanted = {
         (int(row["dev"]), int(row["inode"]))
         for row in report.get("file_stats", [])
@@ -275,12 +287,22 @@ def placement_audit(
     }
     members, truncated, checked = same_inode_paths(wanted, roots, max_files=max_files) if wanted else ([], False, 0)
     media_members = [path for path in members if path_under_any(path, prefixes)]
-    if truncated:
-        group_home = "unknown_requires_manual_review"
-        reason = "placement_scan_file_limit_reached"
-    elif media_members:
+    found_existing_paths = [
+        path for path in expected_existing_paths if any(_same_path(path, member) for member in members)
+    ]
+    missing_expected_paths = sorted(set(expected_existing_paths) - set(found_existing_paths))
+    if media_members:
         group_home = "stash_required"
         reason = "media_library_member_present"
+    elif not wanted:
+        group_home = "unknown_requires_manual_review"
+        reason = "no_existing_payload_files_to_audit"
+    elif truncated:
+        group_home = "unknown_requires_manual_review"
+        reason = "placement_scan_file_limit_reached"
+    elif missing_expected_paths:
+        group_home = "unknown_requires_manual_review"
+        reason = "payload_files_not_found_in_scan_roots"
     else:
         group_home = "pool_eligible"
         reason = "no_media_library_members_found"
@@ -296,6 +318,8 @@ def placement_audit(
         "media_library_prefixes": prefixes,
         "same_inode_member_paths": members,
         "media_library_member_paths": media_members,
+        "expected_existing_payload_paths": expected_existing_paths,
+        "missing_expected_payload_paths": missing_expected_paths,
         "group_home": group_home,
         "reason": reason,
     }
@@ -500,6 +524,12 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.apply and args.dry_run:
         print("ERROR choose --apply or --dry-run, not both", file=sys.stderr)
+        return 2
+    if args.placement_audit and (args.apply or args.start_existing_split or args.allow_start_download):
+        print(
+            "ERROR --placement-audit is read-only and cannot be combined with mutation/start flags",
+            file=sys.stderr,
+        )
         return 2
     if args.allow_start_download and not (args.operator_download_approval or args.freeleech_proof):
         print(
