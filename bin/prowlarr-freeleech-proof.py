@@ -21,7 +21,7 @@ from hashall.rt_torrent_replace import DEFAULT_PROWLARR_URL, load_prowlarr_api_k
 
 
 SCRIPT_NAME = "prowlarr-freeleech-proof.py"
-SEMVER = "0.1.0"
+SEMVER = "0.2.0"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,6 +35,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--timeout", type=float, default=45.0)
     parser.add_argument("--output", default="", help="Write JSON proof report")
+    parser.add_argument(
+        "--expected-title",
+        default="",
+        help="Only prove freeleech from releases whose normalized title matches this value",
+    )
+    parser.add_argument(
+        "--expected-size",
+        type=int,
+        default=0,
+        help="Only prove freeleech from releases near this byte size",
+    )
+    parser.add_argument(
+        "--size-tolerance-bytes",
+        type=int,
+        default=0,
+        help="Allowed absolute byte difference for --expected-size; default requires exact size",
+    )
     return parser
 
 
@@ -118,6 +135,41 @@ def summarize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalized_title(value: str) -> str:
+    return "".join(ch.lower() for ch in value if ch.isalnum())
+
+
+def proof_match_reason(
+    hit: dict[str, Any],
+    *,
+    expected_title: str = "",
+    expected_size: int = 0,
+    size_tolerance_bytes: int = 0,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    title_ok = True
+    size_ok = True
+    if expected_title:
+        expected_norm = normalized_title(expected_title)
+        hit_norm = normalized_title(str(hit.get("title") or ""))
+        title_ok = hit_norm == expected_norm
+        if title_ok:
+            reasons.append("title_exact_normalized")
+    if expected_size:
+        size = int(hit.get("size") or 0)
+        delta = abs(size - expected_size)
+        size_ok = delta <= size_tolerance_bytes
+        if size_ok:
+            reasons.append(f"size_within_tolerance:{delta}")
+    return {
+        "is_match": title_ok and size_ok,
+        "reasons": reasons,
+        "expected_title": expected_title,
+        "expected_size": expected_size,
+        "size_tolerance_bytes": size_tolerance_bytes,
+    }
+
+
 def main() -> int:
     args = build_parser().parse_args()
     params: list[tuple[str, str]] = [
@@ -136,15 +188,30 @@ def main() -> int:
     )
     hits = payload if isinstance(payload, list) else []
     summaries = [summarize_hit(hit) for hit in hits]
-    freeleech = [row for row in summaries if row["freeleech"]["is_freeleech"]]
+    for row in summaries:
+        row["proof_match"] = proof_match_reason(
+            row,
+            expected_title=args.expected_title,
+            expected_size=args.expected_size,
+            size_tolerance_bytes=args.size_tolerance_bytes,
+        )
+    proof_filter_active = bool(args.expected_title or args.expected_size)
+    eligible = [row for row in summaries if row["proof_match"]["is_match"]]
+    proof_pool = eligible if proof_filter_active else summaries
+    freeleech = [row for row in proof_pool if row["freeleech"]["is_freeleech"]]
     report = {
         "tool": "prowlarr-freeleech-proof",
         "script": SCRIPT_NAME,
         "semver": SEMVER,
         "timestamp": ts(),
         "query": args.query,
+        "expected_title": args.expected_title,
+        "expected_size": args.expected_size,
+        "size_tolerance_bytes": args.size_tolerance_bytes,
+        "proof_filter_active": proof_filter_active,
         "indexer_ids": args.indexer_id,
         "hits": len(summaries),
+        "eligible_hits": len(eligible) if proof_filter_active else len(summaries),
         "freeleech_hits": len(freeleech),
         "freeleech_proven": bool(freeleech),
         "freeleech": freeleech,

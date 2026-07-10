@@ -184,3 +184,26 @@ Keep the other split rows stopped unless the operator chooses a tracker/source o
 Prowlarr records freeleech proof with viable seeds. After the representative
 verifies, compare quarantined vs new bytes and test other target torrents against
 that representative payload before allowing any further downloads.
+
+## Remaining Source Scan
+
+After the Spider-Man representative repair, a read-only Prowlarr scan was run for
+the five remaining split/contained rows. The first pass exposed a proof bug:
+`prowlarr-freeleech-proof.py` could set `freeleech_proven=true` because unrelated
+broad-query results were freeleech. The tool is now v0.2.0 and supports
+`--expected-title`, `--expected-size`, and `--size-tolerance-bytes`; when those
+filters are present, only matching releases can prove freeleech for live Plan B
+start.
+
+Strict source results:
+
+| Hash | Title | Strict freeleech proof | Best strict freeleech hit | Seeders | Recommended action |
+| --- | --- | --- | --- | ---: | --- |
+| `127c38342cfe` | River Monsters S07 NTb | yes | TorrentLeech | 40 | Best next pilot. |
+| `245f2bce6afa` | Dexter S02 ZMNT | yes | TorrentLeech | 10 | Viable next pilot. |
+| `e36553b12dc1` | Dexter S07 ZMNT | yes | TorrentLeech | 11 | Viable next pilot. |
+| `96d896ca35f4` | Transformers TLENC0DE | yes | DigitalCore | 0 | Do not pilot now; proof exists but no current seeders. |
+| `c5a827e36ebb` | Here 2024 FLUX | no | none | 0 | Needs operator approval or a stricter freeleech source before start. |
+
+Strict proof reports are under
+`.agent/reports/j51-variant-source-scan-20260710/*-prowlarr-strict.json`.
