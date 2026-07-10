@@ -24,9 +24,9 @@ lane.
 
 | Hash prefix | Name | RT state evidence | Class |
 | --- | --- | --- | --- |
-| `0b236c5155a4` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10: rehomed to `/pool/media/torrents/seeding/cross-seed/seedpool (API)/...`, RT `complete=1`, qB `stoppedUP`, DB payload `20326` complete on device 45 | resolved |
-| `1c6285d80aa3` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10: hardlinked verified seedpool inode to `/pool/media/torrents/seeding/cross-seed/Darkpeers (API)/...`, RT `complete=1 left=0 state=1`, qB `stoppedUP progress=1.0 left=0`, DB payload `20328` complete on device 45 | resolved |
-| `4b4a1747e01b` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10: hardlinked verified seedpool inode to `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)/...`, RT `complete=1 left=0 state=1`, qB `stoppedUP progress=1.0 left=0`, DB payload `20327` complete on device 45 | resolved |
+| `0b236c5155a4` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10 with split/rename/redownload: old shared stash inode did not verify for seedpool; seedpool was moved to a unique pool path, downloaded fresh bytes, then verified complete. Final RT `complete=1`, qB `stoppedUP`, DB payload `20326` complete on device 45 | resolved |
+| `1c6285d80aa3` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10 after seedpool redownload proved a new variant: Darkpeers was pointed at a per-tracker pool view hardlinked to the new verified seedpool variant. Final RT `complete=1 left=0 state=1`, qB `stoppedUP progress=1.0 left=0`, DB payload `20328` complete on device 45 | resolved |
+| `4b4a1747e01b` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10 after seedpool redownload proved a new variant: DigitalCore was pointed at a per-tracker pool view hardlinked to the new verified seedpool variant. Final RT `complete=1 left=0 state=1`, qB `stoppedUP progress=1.0 left=0`, DB payload `20327` complete on device 45 | resolved |
 | `c5a827e36ebb` | `Here.2024.1080p.AMZN...` | `state=0 complete=0 hashing=0 active=0 left=1048576` plus failed-completion message | split-first 99% holdout |
 | `5feb771c9b7f` | `Spider-Man.Into.the.Spider-Verse...` | `state=0 complete=0 hashing=0 active=0 left=524288` plus failed-completion message | split-first 99% holdout |
 | `f938949604fd` | `Killers of the Flower Moon 2023...` | `state=0 complete=0 hashing=0 active=0 left=27185179550`, no failed-completion message | missing-payload blocker |
@@ -39,7 +39,7 @@ The five 99% rows are not isolated files. Their payload files share inodes with
 
 | Hash prefix | Inode evidence | 100% sibling evidence |
 | --- | --- | --- |
-| `0b236c5155a4`, `1c6285d80aa3`, `4b4a1747e01b` | originally same file inode `dev=49 ino=67281 nlink=9`; `0b236c5155a4` was split/rehomed to pool on 2026-07-10 | RT cache shows siblings `87b6670c265e`, `f8c7e9b445ee`, `b1722c003cd9` at `stalledUP 100` |
+| `0b236c5155a4`, `1c6285d80aa3`, `4b4a1747e01b` | originally shared old stash inode `dev=49 ino=67281 nlink=9`, which did not satisfy the target torrents. After split/rename/redownload, the repaired group is a new pool inode `dev=45 ino=50291 nlink=3` with payload hash `3d5fd5f8d7fb6996`; old stash siblings remain on payload hash `2a23eeb97cc253a1`. | RT/qB now show `0b236c5155a4`, `1c6285d80aa3`, `4b4a1747e01b` complete on the new pool variant; siblings `87b6670c265e`, `f8c7e9b445ee`, `b1722c003cd9` remain complete on the old stash variant. |
 | `c5a827e36ebb` | file inode `dev=49 ino=4066 nlink=5` | RT cache shows siblings `fe76ddefe9b5`, `e2a7eab3a5be` at `stalledUP 100` |
 | `5feb771c9b7f` | file inode `dev=49 ino=65878 nlink=4` | RT cache shows sibling `5c86280a99d1` at `stalledUP 100` |
 
@@ -62,6 +62,13 @@ There are two root causes working together:
 The observed "will not transition to SD" behavior is therefore expected from the
 current state: the items are stopped after failed hash checks, and there is no
 safe automatic start path for this condition.
+
+This is easy to miss because it does not present as a plain tracker or disk
+error. RT can refuse to fetch revised bytes while the failed torrent is still
+attached to a path/inode it had treated as complete, and that inode may also be
+the live payload for healthy siblings. The visible symptom is a quiet stopped
+near-complete item with a failed-completion hash message, not a normal active
+download waiting for seeds.
 
 ## Correct course of action
 

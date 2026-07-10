@@ -34,9 +34,18 @@ proof. A valid payload is defined by the torrent metadata: path tree, file
 sizes, and byte content. The source bytes must verify against the target
 `.torrent` before they may be used.
 
+The practical symptom is subtle: rTorrent does not necessarily show a loud
+write error. It can mark the torrent stopped after a failed completion hash
+check and refuse to redownload the bad piece while the path is still attached to
+a file it previously treated as complete, especially when that file is also a
+hardlinked 100 percent sibling. That is why these cases look like detective work
+instead of an obvious client failure.
+
 ## Safety Rules
 
 - Never start the 99.* torrent in its current shared-inode location.
+- Never expect RT to repair the bad piece in place while the failed torrent is
+  still pointed at a complete/shared sibling inode.
 - Never repair by filename or release name alone.
 - Never overwrite an existing target file unless the tool proves it is already
   the same inode and expected size.
@@ -82,10 +91,12 @@ For each hash, record:
 ## Repair Plan B: Split, Rename, and Redownload
 
 Use this when Plan A proves the sibling/source bytes do not match the failed
-torrent. This was the important E.T. lesson in reverse: E.T. was repaired
-because the seedpool inode verified against the other target torrents; when a
-candidate sibling fails verification, the next valid action is to create room
-for the failed torrent to fetch its own variant bytes.
+torrent. This is the E.T. lesson: the old shared stash inode did not satisfy
+the failed seedpool/Darkpeers/DigitalCore target torrents, so the seedpool
+target was split away, its invalid path was renamed/cleared, and seedpool
+downloaded a fresh file. That fresh file proved a second variant exists in the
+wild. Only after that new seedpool file verified did the other compatible
+target torrents get per-tracker views hardlinked to the new verified variant.
 
 1. Stop the failed torrent in both clients.
 2. Record every expected target path, inode, size, and hardlink count.
@@ -107,6 +118,20 @@ for the failed torrent to fetch its own variant bytes.
 
 Do not delete the renamed invalid file/tree until the comparison is recorded
 and the healthy sibling has been rechecked or otherwise proven unaffected.
+
+## E.T. Reference Pattern
+
+The E.T. repair is the reference case for this failure mode:
+
+| Variant | Hashes | Location | Payload hash | Inode evidence | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| old/original | `b1722c003cd9`, `87b6670c265e`, `f8c7e9b445ee` plus related stash paths | `/stash` and `/data` tracker views | `2a23eeb97cc253a1` | `dev=49 ino=67281 nlink=9` | Healthy sibling group, but not valid for the seedpool/Darkpeers/DigitalCore target piece maps. |
+| new seedpool variant | `0b236c5155a4`, `1c6285d80aa3`, `4b4a1747e01b` | `/pool/media/torrents/seeding/cross-seed/{seedpool,Darkpeers,DigitalCore} (API)/...` | `3d5fd5f8d7fb6996` | `dev=45 ino=50291 nlink=3` | Freshly downloaded/split variant that verifies for those target torrents. |
+
+Correct lesson: Plan B proves whether a second variant exists. Plan A may then
+reuse the newly verified variant for other target torrents whose piece maps
+accept it. Do not describe the initial E.T. repair as "old sibling bytes
+verified"; they did not.
 
 ## Tooling
 
@@ -135,8 +160,11 @@ Live repair requires replacing `--dry-run` with `--apply` and should include
 
 ## Outcome Classes
 
-- `repaired`: source and target both verify, clients recheck to 100 percent, DB
-  sync shows complete payload.
+- `direct-repaired`: existing source and target both verify, clients recheck to
+  100 percent, DB sync shows complete payload.
+- `redownload-repaired`: Plan B redownload produces a new verified payload for
+  the failed torrent; compatible sibling target torrents may then be hardlinked
+  to that new variant.
 - `needs-split-redownload`: candidate source exists but fails target torrent
   piece verification; next step is Plan B, not terminal classification.
 - `variant-proven`: after Plan B, the newly downloaded verified target bytes
