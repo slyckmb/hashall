@@ -66,6 +66,16 @@ new payload and only download another item if verification fails.
   classification. That is the trigger to rename the invalid target file/tree out
   of the expected path, let the failed torrent download fresh target bytes into
   a unique path, and then compare old vs new bytes.
+- Decide stash-vs-pool home for the whole same-inode payload group, not for one
+  torrent at a time. The canonical path shape is per torrent, but the storage
+  home is group-wide. If any same-inode member has a hardlink in a media library
+  path such as `movies/`, `shows/`, `books/`, `music/`, or `audiobooks/`, the
+  entire group stays on stash. Only groups with no media-library consumers are
+  eligible for pool placement.
+- Repeat the group-home check after Plan B creates a new verified variant. A
+  split/redownload creates a new byte variant and therefore a new group
+  candidate; do not assume the representative's current directory is the final
+  canonical home.
 - Run `payload sync --hash` after a successful repair, and do not run a
   whole-catalog orphan prune as part of a hash-scoped sync.
 
@@ -80,6 +90,9 @@ For each hash, record:
 - DB payload rows for the failed hash and candidate sibling hashes;
 - offline piece verification result for the candidate source bytes;
 - offline piece verification result for the constructed target tree;
+- same-inode member paths for the repaired/new variant group;
+- placement audit result: `stash_required` if any same-inode member is in a
+  media library path, otherwise `pool_eligible`;
 - post-recheck RT/qB state;
 - post-sync DB payload status.
 
@@ -126,8 +139,12 @@ target torrents get per-tracker views hardlinked to the new verified variant.
 7. Compare the new verified target file/tree against the renamed invalid source:
    same bytes means prior client metadata/path state was wrong; different bytes
    means they are real content variants and must remain separate payloads.
-8. Run hash-scoped DB sync for the failed hash and any affected sibling hash.
-9. Record the final outcome in the validation report and OP/JOB tracking.
+8. Run a placement audit on the newly verified variant group. Enumerate all
+   same-inode paths and check media-library prefixes. If any member is in a
+   media library path, classify the whole group as `stash_required`; otherwise
+   classify it as `pool_eligible`.
+9. Run hash-scoped DB sync for the failed hash and any affected sibling hash.
+10. Record the final outcome in the validation report and OP/JOB tracking.
 
 Do not delete the renamed invalid file/tree until the comparison is recorded
 and the healthy sibling has been rechecked or otherwise proven unaffected.
@@ -217,6 +234,30 @@ download rate or normal stalled-download behavior while waiting for seeds.
 `--start-existing-split` uses the same start gate but first blocks if the target
 path is missing, still shares an inode, is already complete, or contains another
 RT session directory below it.
+
+Plan B placement audit:
+
+```bash
+.venv/bin/python bin/rt-qb-variant-split-redownload.py --dry-run \
+  --placement-audit \
+  --placement-scan-root /data/media/torrents/seeding \
+  --placement-scan-root /data/media/movies \
+  --placement-scan-root /data/media/shows \
+  --hash HASH \
+  --report-json .agent/reports/<run>/HASH-placement-audit.json
+```
+
+The placement audit is read-only. It scans same-inode paths for the current
+payload and emits `placement_audit.group_home`:
+
+- `stash_required`: at least one same-inode member is in a media-library path,
+  so the whole newly verified variant group must stay on stash.
+- `pool_eligible`: no media-library member was found in the scanned roots, so
+  pool placement may be considered after the normal canonical path, free-space,
+  and client-routing checks.
+- `unknown_requires_manual_review`: the scan hit `--placement-max-files` before
+  completing. Narrow the scan roots to the suspected group/media-library roots
+  or raise the limit; do not treat this as pool-eligible.
 
 `bin/prowlarr-freeleech-proof.py` is read-only. It searches Prowlarr and treats
 freeleech as proven only when Prowlarr returns an explicit zero download-volume

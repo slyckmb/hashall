@@ -222,3 +222,144 @@ def test_start_existing_split_blocks_shared_inode(tmp_path, monkeypatch):
 
     assert report["status"] == "blocked"
     assert report["blocked_reason"] == "payload_still_shared_inode"
+
+
+def test_placement_audit_media_library_member_requires_stash(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "1" * 40
+    session = tmp_path / "session"
+    seeding = tmp_path / "data" / "media" / "torrents" / "seeding" / "movies"
+    library = tmp_path / "data" / "media" / "movies" / "Spider-Man"
+    session.mkdir()
+    seeding.mkdir(parents=True)
+    library.mkdir(parents=True)
+    write_single_torrent(session / f"{h.upper()}.torrent", "movie.mkv", 4)
+    payload = seeding / "movie.mkv"
+    payload.write_bytes(b"data")
+    (library / "movie.mkv").hardlink_to(payload)
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(seeding))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        allow_start_download=False,
+        operator_download_approval=False,
+        freeleech_proof="",
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.placement_audit(
+        mod.build_report(args),
+        scan_roots=[str(tmp_path / "data" / "media")],
+        media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        max_files=100,
+    )
+
+    audit = report["placement_audit"]
+    assert audit["group_home"] == "stash_required"
+    assert audit["reason"] == "media_library_member_present"
+    assert str(library / "movie.mkv") in audit["media_library_member_paths"]
+
+
+def test_placement_audit_seeding_only_group_is_pool_eligible(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "2" * 40
+    session = tmp_path / "session"
+    seeding = tmp_path / "data" / "media" / "torrents" / "seeding" / "movies"
+    sibling = tmp_path / "data" / "media" / "torrents" / "seeding" / "cross-seed" / "tracker"
+    session.mkdir()
+    seeding.mkdir(parents=True)
+    sibling.mkdir(parents=True)
+    write_single_torrent(session / f"{h.upper()}.torrent", "movie.mkv", 4)
+    payload = seeding / "movie.mkv"
+    payload.write_bytes(b"data")
+    (sibling / "movie.mkv").hardlink_to(payload)
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(seeding))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        allow_start_download=False,
+        operator_download_approval=False,
+        freeleech_proof="",
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.placement_audit(
+        mod.build_report(args),
+        scan_roots=[str(tmp_path / "data" / "media")],
+        media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        max_files=100,
+    )
+
+    audit = report["placement_audit"]
+    assert audit["group_home"] == "pool_eligible"
+    assert audit["media_library_member_paths"] == []
+    assert str(sibling / "movie.mkv") in audit["same_inode_member_paths"]
+
+
+def test_placement_audit_file_limit_requires_manual_review(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "3" * 40
+    session = tmp_path / "session"
+    seeding = tmp_path / "data" / "media" / "torrents" / "seeding" / "movies"
+    session.mkdir()
+    seeding.mkdir(parents=True)
+    write_single_torrent(session / f"{h.upper()}.torrent", "movie.mkv", 4)
+    payload = seeding / "movie.mkv"
+    payload.write_bytes(b"data")
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(seeding))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        allow_start_download=False,
+        operator_download_approval=False,
+        freeleech_proof="",
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.placement_audit(
+        mod.build_report(args),
+        scan_roots=[str(tmp_path / "data" / "media")],
+        media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        max_files=0,
+    )
+
+    audit = report["placement_audit"]
+    assert audit["group_home"] == "unknown_requires_manual_review"
+    assert audit["reason"] == "placement_scan_file_limit_reached"
+    assert audit["scan_truncated"] is True

@@ -32,6 +32,32 @@ from hashall.rtorrent import (
 
 SCRIPT_NAME = "rt-qb-variant-split-redownload.py"
 SEMVER = "0.2.0"
+DEFAULT_PLACEMENT_SCAN_ROOTS = (
+    "/data/media/torrents/seeding",
+    "/stash/media/torrents/seeding",
+    "/data/media/movies",
+    "/stash/media/movies",
+    "/data/media/shows",
+    "/stash/media/shows",
+    "/data/media/books",
+    "/stash/media/books",
+    "/data/media/music",
+    "/stash/media/music",
+    "/data/media/audiobooks",
+    "/stash/media/audiobooks",
+)
+DEFAULT_MEDIA_LIBRARY_PREFIXES = (
+    "/data/media/movies",
+    "/stash/media/movies",
+    "/data/media/shows",
+    "/stash/media/shows",
+    "/data/media/books",
+    "/stash/media/books",
+    "/data/media/music",
+    "/stash/media/music",
+    "/data/media/audiobooks",
+    "/stash/media/audiobooks",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,6 +79,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--start-existing-split",
         action="store_true",
         help="Start an already-split item after proving its payload path is not shared.",
+    )
+    parser.add_argument(
+        "--placement-audit",
+        action="store_true",
+        help=(
+            "Read-only: enumerate same-inode paths for this payload and classify "
+            "the payload-group home as stash-required or pool-eligible."
+        ),
+    )
+    parser.add_argument(
+        "--placement-scan-root",
+        action="append",
+        default=[],
+        help="Root to scan for hardlink group members during --placement-audit; repeatable.",
+    )
+    parser.add_argument(
+        "--media-library-prefix",
+        action="append",
+        default=[],
+        help="Prefix that counts as a media-library consumer during --placement-audit; repeatable.",
+    )
+    parser.add_argument(
+        "--placement-max-files",
+        type=int,
+        default=200000,
+        help="Maximum files to inspect during --placement-audit before returning manual-review status; -1 means unlimited.",
     )
     parser.add_argument(
         "--allow-start-download",
@@ -170,6 +222,84 @@ def child_stats(payload_path: Path, shape: dict[str, Any]) -> list[dict[str, Any
 
 def has_shared_inode(stats: list[dict[str, Any]]) -> bool:
     return any(int(row.get("nlink") or 0) > 1 for row in stats if row.get("exists"))
+
+
+def _is_relative_to(path: Path, prefix: Path) -> bool:
+    try:
+        path.resolve().relative_to(prefix.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def path_under_any(path_text: str, prefixes: list[str]) -> bool:
+    path = Path(path_text)
+    return any(_is_relative_to(path, Path(prefix)) for prefix in prefixes)
+
+
+def same_inode_paths(wanted: set[tuple[int, int]], roots: list[Path], *, max_files: int) -> tuple[list[str], bool, int]:
+    matches: set[str] = set()
+    checked = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [name for name in dirnames if name not in {".git", ".zfs"}]
+            for name in filenames:
+                checked += 1
+                if max_files >= 0 and checked > max_files:
+                    return sorted(matches), True, checked
+                path = Path(dirpath) / name
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                if (int(st.st_dev), int(st.st_ino)) in wanted:
+                    matches.add(str(path))
+    return sorted(matches), False, checked
+
+
+def placement_audit(
+    report: dict[str, Any],
+    *,
+    scan_roots: list[str],
+    media_prefixes: list[str],
+    max_files: int,
+) -> dict[str, Any]:
+    roots = [Path(item).expanduser() for item in (scan_roots or list(DEFAULT_PLACEMENT_SCAN_ROOTS))]
+    prefixes = media_prefixes or list(DEFAULT_MEDIA_LIBRARY_PREFIXES)
+    wanted = {
+        (int(row["dev"]), int(row["inode"]))
+        for row in report.get("file_stats", [])
+        if row.get("exists") and row.get("dev") is not None and row.get("inode") is not None
+    }
+    members, truncated, checked = same_inode_paths(wanted, roots, max_files=max_files) if wanted else ([], False, 0)
+    media_members = [path for path in members if path_under_any(path, prefixes)]
+    if truncated:
+        group_home = "unknown_requires_manual_review"
+        reason = "placement_scan_file_limit_reached"
+    elif media_members:
+        group_home = "stash_required"
+        reason = "media_library_member_present"
+    else:
+        group_home = "pool_eligible"
+        reason = "no_media_library_members_found"
+    report["placement_audit"] = {
+        "rule": (
+            "placement is decided for the whole same-inode payload group; "
+            "any media-library member requires stash home for the group"
+        ),
+        "scan_roots": [str(root) for root in roots],
+        "files_checked": checked,
+        "scan_truncated": truncated,
+        "max_files": max_files,
+        "media_library_prefixes": prefixes,
+        "same_inode_member_paths": members,
+        "media_library_member_paths": media_members,
+        "group_home": group_home,
+        "reason": reason,
+    }
+    return report
 
 
 def nested_session_dirs(
@@ -383,6 +513,13 @@ def main() -> int:
             print(f"ERROR invalid --freeleech-proof: {reason}", file=sys.stderr)
             return 2
     report = build_report(args)
+    if args.placement_audit:
+        report = placement_audit(
+            report,
+            scan_roots=list(args.placement_scan_root or []),
+            media_prefixes=list(args.media_library_prefix or []),
+            max_files=int(args.placement_max_files),
+        )
     if args.start_existing_split:
         report = start_existing_split(args, report)
     elif args.apply:

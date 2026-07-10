@@ -160,6 +160,16 @@ Completion validation:
 - Hash-scoped RT payload sync processed the one torrent, recorded one complete
   payload, skipped orphan prune, and exited cleanly after fixing the
   `--upgrade-missing` empty-queue summary bug.
+- The procedure and tool now require a payload-group home audit before reusing
+  or rehoming the newly verified variant. Canonical path shape is per torrent,
+  but stash-vs-pool home is decided for the full same-inode group: any
+  media-library hardlink keeps the whole group on stash.
+- Targeted placement audit for the repaired Spider-Man variant scanned
+  `/data/media/torrents/seeding/movies`, `/data/media/movies`, and
+  `/stash/media/movies`. It found one same-inode member, no media-library member,
+  and classified the current new variant group as `pool_eligible`. Rerun this
+  audit after any additional compatible target torrent is hardlinked into the
+  group.
 
 Keep the other split rows stopped unless the operator chooses a tracker/source or
 Prowlarr records freeleech proof with viable seeds. After the representative
