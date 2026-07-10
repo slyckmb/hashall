@@ -24,7 +24,7 @@ lane.
 
 | Hash prefix | Name | RT state evidence | Class |
 | --- | --- | --- | --- |
-| `0b236c5155a4` | `E.T.The.Extra-Terrestrial.1982...` | `state=0 complete=0 hashing=0 active=0 left=16777216` plus failed-completion message | split-first 99% holdout |
+| `0b236c5155a4` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10: rehomed to `/pool/media/torrents/seeding/cross-seed/seedpool (API)/...`, RT `complete=1`, qB `stoppedUP`, DB payload `20326` complete on device 45 | resolved |
 | `1c6285d80aa3` | `E.T.The.Extra-Terrestrial.1982...` | `state=0 complete=0 hashing=0 active=0 left=16777216` plus failed-completion message | split-first 99% holdout |
 | `4b4a1747e01b` | `E.T.The.Extra-Terrestrial.1982...` | `state=0 complete=0 hashing=0 active=0 left=16777216` plus failed-completion message | split-first 99% holdout |
 | `c5a827e36ebb` | `Here.2024.1080p.AMZN...` | `state=0 complete=0 hashing=0 active=0 left=1048576` plus failed-completion message | split-first 99% holdout |
@@ -39,7 +39,7 @@ The five 99% rows are not isolated files. Their payload files share inodes with
 
 | Hash prefix | Inode evidence | 100% sibling evidence |
 | --- | --- | --- |
-| `0b236c5155a4`, `1c6285d80aa3`, `4b4a1747e01b` | same file inode `dev=49 ino=67281 nlink=9` | RT cache shows siblings `87b6670c265e`, `f8c7e9b445ee`, `b1722c003cd9` at `stalledUP 100` |
+| `0b236c5155a4`, `1c6285d80aa3`, `4b4a1747e01b` | originally same file inode `dev=49 ino=67281 nlink=9`; `0b236c5155a4` was split/rehomed to pool on 2026-07-10 | RT cache shows siblings `87b6670c265e`, `f8c7e9b445ee`, `b1722c003cd9` at `stalledUP 100` |
 | `c5a827e36ebb` | file inode `dev=49 ino=4066 nlink=5` | RT cache shows siblings `fe76ddefe9b5`, `e2a7eab3a5be` at `stalledUP 100` |
 | `5feb771c9b7f` | file inode `dev=49 ino=65878 nlink=4` | RT cache shows sibling `5c86280a99d1` at `stalledUP 100` |
 
