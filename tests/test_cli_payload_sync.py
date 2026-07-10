@@ -1061,6 +1061,58 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertIn("Hash: bbb222", result.output)
         self.assertNotIn("Hash: aaa111", result.output)
 
+    def test_payload_sync_hash_filter_skips_orphan_prune(self):
+        torrents = [
+            QBitTorrent(
+                hash="aaa111",
+                name="torrent-1",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+            QBitTorrent(
+                hash="bbb222",
+                name="torrent-2",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+
+        def fail_prune(*args, **kwargs):
+            raise AssertionError("hash-scoped payload sync must not run orphan prune")
+
+        runner = CliRunner()
+        with (
+            patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake),
+            patch("hashall.payload.prune_orphan_payloads", side_effect=fail_prune),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--hash",
+                    "bbb",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (hash): 1", result.output)
+        self.assertIn("orphan prune skipped: hash-scoped sync", result.output)
+
     def test_payload_sync_remaps_alternate_mountpoints_for_prefix_filtering(self):
         """
         qBittorrent may report torrent roots under an alternate mount target

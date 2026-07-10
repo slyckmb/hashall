@@ -25,8 +25,8 @@ lane.
 | Hash prefix | Name | RT state evidence | Class |
 | --- | --- | --- | --- |
 | `0b236c5155a4` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10: rehomed to `/pool/media/torrents/seeding/cross-seed/seedpool (API)/...`, RT `complete=1`, qB `stoppedUP`, DB payload `20326` complete on device 45 | resolved |
-| `1c6285d80aa3` | `E.T.The.Extra-Terrestrial.1982...` | `state=0 complete=0 hashing=0 active=0 left=16777216` plus failed-completion message | split-first 99% holdout |
-| `4b4a1747e01b` | `E.T.The.Extra-Terrestrial.1982...` | `state=0 complete=0 hashing=0 active=0 left=16777216` plus failed-completion message | split-first 99% holdout |
+| `1c6285d80aa3` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10: hardlinked verified seedpool inode to `/pool/media/torrents/seeding/cross-seed/Darkpeers (API)/...`, RT `complete=1 left=0 state=1`, qB `stoppedUP progress=1.0 left=0`, DB payload `20328` complete on device 45 | resolved |
+| `4b4a1747e01b` | `E.T.The.Extra-Terrestrial.1982...` | repaired 2026-07-10: hardlinked verified seedpool inode to `/pool/media/torrents/seeding/cross-seed/DigitalCore (API)/...`, RT `complete=1 left=0 state=1`, qB `stoppedUP progress=1.0 left=0`, DB payload `20327` complete on device 45 | resolved |
 | `c5a827e36ebb` | `Here.2024.1080p.AMZN...` | `state=0 complete=0 hashing=0 active=0 left=1048576` plus failed-completion message | split-first 99% holdout |
 | `5feb771c9b7f` | `Spider-Man.Into.the.Spider-Verse...` | `state=0 complete=0 hashing=0 active=0 left=524288` plus failed-completion message | split-first 99% holdout |
 | `f938949604fd` | `Killers of the Flower Moon 2023...` | `state=0 complete=0 hashing=0 active=0 left=27185179550`, no failed-completion message | missing-payload blocker |

@@ -1675,7 +1675,7 @@ def payload_sync(
                 f"payload_candidates={stale_rt_stats['payload_candidates']}"
             )
 
-    if (not dry_run) and limit == 0:
+    if (not dry_run) and limit == 0 and not hash_filter_prefixes:
         prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
         try:
             prune_stats = prune_orphan_payloads(
@@ -1688,6 +1688,8 @@ def payload_sync(
         except Exception as exc:
             print(f"   ⚠️  orphan prune failed (non-fatal): {exc}")
             prune_stats = None
+    elif (not dry_run) and limit == 0 and hash_filter_prefixes:
+        print("   orphan prune skipped: hash-scoped sync")
 
     if not dry_run:
         recount = _payload_sync_recount_for_hashes(conn, torrent_hashes=processed_torrent_hashes)
