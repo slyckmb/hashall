@@ -101,6 +101,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prefix that counts as a media-library consumer during --placement-audit; repeatable.",
     )
     parser.add_argument(
+        "--placement-member-path",
+        action="append",
+        default=[],
+        help=(
+            "Existing or proposed compatible member path to include in placement "
+            "audit before hardlinking it into the repaired variant group; repeatable."
+        ),
+    )
+    parser.add_argument(
         "--placement-max-files",
         type=int,
         default=200000,
@@ -211,6 +220,14 @@ def stat_or_missing(path: Path) -> dict[str, Any]:
     return out
 
 
+def inode_keys_from_stats(stats: list[dict[str, Any]]) -> set[tuple[int, int]]:
+    return {
+        (int(row["dev"]), int(row["inode"]))
+        for row in stats
+        if row.get("exists") and row.get("dev") is not None and row.get("inode") is not None
+    }
+
+
 def child_stats(payload_path: Path, shape: dict[str, Any]) -> list[dict[str, Any]]:
     if not bool(shape["is_multi_file"]):
         return [stat_or_missing(payload_path)]
@@ -271,20 +288,19 @@ def placement_audit(
     *,
     scan_roots: list[str],
     media_prefixes: list[str],
+    member_paths: list[str],
     max_files: int,
 ) -> dict[str, Any]:
     roots = [Path(item).expanduser() for item in (scan_roots or list(DEFAULT_PLACEMENT_SCAN_ROOTS))]
     prefixes = media_prefixes or list(DEFAULT_MEDIA_LIBRARY_PREFIXES)
+    member_stats = [stat_or_missing(Path(item).expanduser()) for item in member_paths]
     expected_existing_paths = [
         str(row["path"])
-        for row in report.get("file_stats", [])
+        for row in [*report.get("file_stats", []), *member_stats]
         if row.get("exists") and row.get("path")
     ]
-    wanted = {
-        (int(row["dev"]), int(row["inode"]))
-        for row in report.get("file_stats", [])
-        if row.get("exists") and row.get("dev") is not None and row.get("inode") is not None
-    }
+    missing_member_paths = [str(row["path"]) for row in member_stats if not row.get("exists")]
+    wanted = inode_keys_from_stats(report.get("file_stats", [])) | inode_keys_from_stats(member_stats)
     members, truncated, checked = same_inode_paths(wanted, roots, max_files=max_files) if wanted else ([], False, 0)
     media_members = [path for path in members if path_under_any(path, prefixes)]
     found_existing_paths = [
@@ -297,6 +313,9 @@ def placement_audit(
     elif not wanted:
         group_home = "unknown_requires_manual_review"
         reason = "no_existing_payload_files_to_audit"
+    elif missing_member_paths:
+        group_home = "unknown_requires_manual_review"
+        reason = "placement_member_path_missing"
     elif truncated:
         group_home = "unknown_requires_manual_review"
         reason = "placement_scan_file_limit_reached"
@@ -316,6 +335,9 @@ def placement_audit(
         "scan_truncated": truncated,
         "max_files": max_files,
         "media_library_prefixes": prefixes,
+        "placement_member_paths": member_paths,
+        "placement_member_stats": member_stats,
+        "missing_placement_member_paths": missing_member_paths,
         "same_inode_member_paths": members,
         "media_library_member_paths": media_members,
         "expected_existing_payload_paths": expected_existing_paths,
@@ -548,6 +570,7 @@ def main() -> int:
             report,
             scan_roots=list(args.placement_scan_root or []),
             media_prefixes=list(args.media_library_prefix or []),
+            member_paths=list(args.placement_member_path or []),
             max_files=int(args.placement_max_files),
         )
     if args.start_existing_split:

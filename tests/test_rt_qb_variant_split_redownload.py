@@ -264,6 +264,7 @@ def test_placement_audit_media_library_member_requires_stash(tmp_path, monkeypat
         mod.build_report(args),
         scan_roots=[str(tmp_path / "data" / "media")],
         media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[],
         max_files=100,
     )
 
@@ -312,6 +313,7 @@ def test_placement_audit_seeding_only_group_is_pool_eligible(tmp_path, monkeypat
         mod.build_report(args),
         scan_roots=[str(tmp_path / "data" / "media")],
         media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[],
         max_files=100,
     )
 
@@ -357,6 +359,7 @@ def test_placement_audit_file_limit_requires_manual_review(tmp_path, monkeypatch
         mod.build_report(args),
         scan_roots=[str(tmp_path / "data" / "media")],
         media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[],
         max_files=0,
     )
 
@@ -422,6 +425,7 @@ def test_placement_audit_missing_payload_is_manual_review(tmp_path, monkeypatch)
         mod.build_report(args),
         scan_roots=[str(tmp_path / "data" / "media")],
         media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[],
         max_files=100,
     )
 
@@ -468,6 +472,7 @@ def test_placement_audit_scan_root_missing_payload_is_manual_review(tmp_path, mo
         mod.build_report(args),
         scan_roots=[str(unrelated)],
         media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[],
         max_files=100,
     )
 
@@ -517,6 +522,7 @@ def test_placement_audit_media_member_wins_over_file_limit(tmp_path, monkeypatch
         mod.build_report(args),
         scan_roots=[str(seeding), str(library)],
         media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[],
         max_files=2,
     )
 
@@ -524,3 +530,161 @@ def test_placement_audit_media_member_wins_over_file_limit(tmp_path, monkeypatch
     assert audit["group_home"] == "stash_required"
     assert audit["reason"] == "media_library_member_present"
     assert audit["scan_truncated"] is True
+
+
+def test_placement_audit_proposed_two_variants_with_one_media_anchor_requires_stash(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "7" * 40
+    session = tmp_path / "session"
+    rep_root = tmp_path / "data" / "media" / "torrents" / "seeding" / "movies"
+    candidate_a_root = tmp_path / "data" / "media" / "torrents" / "seeding" / "cross-seed" / "aither"
+    candidate_b_root = tmp_path / "data" / "media" / "torrents" / "seeding" / "cross-seed" / "tl"
+    library = tmp_path / "data" / "media" / "movies" / "Movie"
+    session.mkdir()
+    for path in (rep_root, candidate_a_root, candidate_b_root, library):
+        path.mkdir(parents=True)
+    write_single_torrent(session / f"{h.upper()}.torrent", "movie.mkv", 4)
+    representative = rep_root / "movie.mkv"
+    representative.write_bytes(b"new-variant")
+    candidate_a = candidate_a_root / "movie.mkv"
+    candidate_a.write_bytes(b"candidate-a")
+    candidate_b = candidate_b_root / "movie.mkv"
+    candidate_b.write_bytes(b"candidate-b")
+    (library / "movie.mkv").hardlink_to(candidate_a)
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(rep_root))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        allow_start_download=False,
+        operator_download_approval=False,
+        freeleech_proof="",
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.placement_audit(
+        mod.build_report(args),
+        scan_roots=[str(tmp_path / "data" / "media")],
+        media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[str(candidate_a), str(candidate_b)],
+        max_files=100,
+    )
+
+    audit = report["placement_audit"]
+    assert audit["group_home"] == "stash_required"
+    assert audit["reason"] == "media_library_member_present"
+    assert str(library / "movie.mkv") in audit["media_library_member_paths"]
+    assert str(candidate_a) in audit["same_inode_member_paths"]
+    assert str(candidate_b) in audit["same_inode_member_paths"]
+    assert str(representative) in audit["same_inode_member_paths"]
+
+
+def test_placement_audit_proposed_two_variants_without_media_anchor_is_pool_eligible(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "8" * 40
+    session = tmp_path / "session"
+    rep_root = tmp_path / "data" / "media" / "torrents" / "seeding" / "movies"
+    candidate_a_root = tmp_path / "data" / "media" / "torrents" / "seeding" / "cross-seed" / "aither"
+    candidate_b_root = tmp_path / "data" / "media" / "torrents" / "seeding" / "cross-seed" / "tl"
+    session.mkdir()
+    for path in (rep_root, candidate_a_root, candidate_b_root):
+        path.mkdir(parents=True)
+    write_single_torrent(session / f"{h.upper()}.torrent", "movie.mkv", 4)
+    representative = rep_root / "movie.mkv"
+    representative.write_bytes(b"new-variant")
+    candidate_a = candidate_a_root / "movie.mkv"
+    candidate_a.write_bytes(b"candidate-a")
+    candidate_b = candidate_b_root / "movie.mkv"
+    candidate_b.write_bytes(b"candidate-b")
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(rep_root))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        allow_start_download=False,
+        operator_download_approval=False,
+        freeleech_proof="",
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.placement_audit(
+        mod.build_report(args),
+        scan_roots=[str(tmp_path / "data" / "media")],
+        media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[str(candidate_a), str(candidate_b)],
+        max_files=100,
+    )
+
+    audit = report["placement_audit"]
+    assert audit["group_home"] == "pool_eligible"
+    assert audit["reason"] == "no_media_library_members_found"
+    assert audit["media_library_member_paths"] == []
+
+
+def test_placement_audit_missing_proposed_member_requires_manual_review(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "9" * 40
+    session = tmp_path / "session"
+    rep_root = tmp_path / "data" / "media" / "torrents" / "seeding" / "movies"
+    session.mkdir()
+    rep_root.mkdir(parents=True)
+    write_single_torrent(session / f"{h.upper()}.torrent", "movie.mkv", 4)
+    representative = rep_root / "movie.mkv"
+    representative.write_bytes(b"new-variant")
+    missing_candidate = tmp_path / "data" / "media" / "torrents" / "seeding" / "cross-seed" / "missing" / "movie.mkv"
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(rep_root))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        allow_start_download=False,
+        operator_download_approval=False,
+        freeleech_proof="",
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.placement_audit(
+        mod.build_report(args),
+        scan_roots=[str(tmp_path / "data" / "media")],
+        media_prefixes=[str(tmp_path / "data" / "media" / "movies")],
+        member_paths=[str(missing_candidate)],
+        max_files=100,
+    )
+
+    audit = report["placement_audit"]
+    assert audit["group_home"] == "unknown_requires_manual_review"
+    assert audit["reason"] == "placement_member_path_missing"
+    assert str(missing_candidate) in audit["missing_placement_member_paths"]

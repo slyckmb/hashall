@@ -243,12 +243,15 @@ Plan B placement audit:
   --placement-scan-root /data/media/torrents/seeding \
   --placement-scan-root /data/media/movies \
   --placement-scan-root /data/media/shows \
+  --placement-member-path /path/to/compatible/sibling-a \
+  --placement-member-path /path/to/compatible/sibling-b \
   --hash HASH \
   --report-json .agent/reports/<run>/HASH-placement-audit.json
 ```
 
 The placement audit is read-only. It scans same-inode paths for the current
-payload and emits `placement_audit.group_home`:
+payload plus any `--placement-member-path` entries that are proposed compatible
+members of the repaired variant group. It emits `placement_audit.group_home`:
 
 - `stash_required`: at least one same-inode member is in a media-library path,
   so the whole newly verified variant group must stay on stash.
@@ -256,8 +259,24 @@ payload and emits `placement_audit.group_home`:
   pool placement may be considered after the normal canonical path, free-space,
   and client-routing checks.
 - `unknown_requires_manual_review`: the scan hit `--placement-max-files` before
-  completing. Narrow the scan roots to the suspected group/media-library roots
-  or raise the limit; do not treat this as pool-eligible.
+  completing, the payload was not present in the scan roots, or a proposed
+  member path was missing. Narrow the scan roots to the suspected group and
+  media-library roots, fix the missing path, or raise the limit; do not treat
+  this as pool-eligible.
+
+Placement matrix for one repaired representative plus two 99.* candidates:
+
+| Representative group | Candidate A | Candidate B | Expected action |
+| --- | --- | --- | --- |
+| no media anchor | neither candidate is compatible | neither candidate is compatible | Audit representative only. If no media anchor is found, it may be `pool_eligible`; do not include incompatible candidates. |
+| no media anchor | compatible, no media anchor | compatible, no media anchor | Audit with both `--placement-member-path` values. If the payload and both candidates are found and no media member appears, result is `pool_eligible`. |
+| no media anchor | compatible, media anchor | compatible, no media anchor | Audit with both member paths. Any media anchor on either candidate makes the proposed combined group `stash_required`. |
+| no media anchor | compatible, media anchor | compatible, media anchor | Audit with both member paths. Result is `stash_required`. |
+| media anchor | compatible or not | compatible or not | Representative audit is already `stash_required`; compatible candidates inherit stash home if added. Incompatible candidates stay out of the group. |
+| any | compatible candidate path missing | any | Result is `unknown_requires_manual_review`; do not hardlink or rehome until the path is resolved. |
+| any | scan roots do not include the representative or candidate paths | any | Result is `unknown_requires_manual_review`; widen/fix scan roots. |
+| any | scan hits file limit before completion and no media anchor was found | any | Result is `unknown_requires_manual_review`; do not treat as pool-eligible. |
+| any | scan hits file limit after finding a media anchor | any | Result remains `stash_required`; positive media-library evidence wins over incomplete scan uncertainty. |
 
 `bin/prowlarr-freeleech-proof.py` is read-only. It searches Prowlarr and treats
 freeleech as proven only when Prowlarr returns an explicit zero download-volume
