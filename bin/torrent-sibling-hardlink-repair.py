@@ -11,6 +11,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +36,13 @@ from hashall.torrent_verify import verify_torrent_pieces
 
 
 SCRIPT_NAME = "torrent-sibling-hardlink-repair.py"
-SEMVER = "0.1.0"
+SEMVER = "0.2.0"
+
+
+@dataclass(frozen=True)
+class ExpectedFile:
+    rel_path: Path
+    length: int
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,7 +54,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--hash", action="append", dest="hashes", default=[], help="Torrent hash; repeatable")
     parser.add_argument("--hashes-file", default="", help="File of hashes, one per line")
-    parser.add_argument("--source-file", required=True, help="Verified source file to hardlink from")
+    parser.add_argument("--source-file", default="", help="Verified single source file to hardlink from")
+    parser.add_argument(
+        "--source-dir",
+        default="",
+        help=(
+            "Verified source save path for single- or multi-file torrents. "
+            "May be the directory above info_name or the info_name directory itself."
+        ),
+    )
     parser.add_argument(
         "--target",
         action="append",
@@ -137,18 +152,46 @@ def load_torrent_info(torrent_file: Path) -> dict[bytes, Any]:
     return payload[b"info"]
 
 
-def expected_single_file(info: dict[bytes, Any]) -> tuple[str, int, int, list[bytes]]:
-    if isinstance(info.get(b"files"), list):
-        raise ValueError("multi-file torrents are not supported by --source-file repair yet")
+def torrent_expected_files(info: dict[bytes, Any]) -> tuple[str, bool, int, int, list[bytes], list[ExpectedFile]]:
     raw_name = info.get(b"name", b"")
     name = raw_name.decode("utf-8", "replace") if isinstance(raw_name, bytes) else str(raw_name)
-    size = int(info.get(b"length", 0) or 0)
     piece_length = int(info.get(b"piece length", 0) or 0)
     raw_pieces = info.get(b"pieces", b"")
-    if not name or size <= 0 or piece_length <= 0 or not isinstance(raw_pieces, bytes) or len(raw_pieces) % 20:
-        raise ValueError("invalid single-file torrent metadata")
+    if not name or piece_length <= 0 or not isinstance(raw_pieces, bytes) or len(raw_pieces) % 20:
+        raise ValueError("invalid torrent metadata")
     pieces = [raw_pieces[i : i + 20] for i in range(0, len(raw_pieces), 20)]
-    return name, size, piece_length, pieces
+    if isinstance(info.get(b"files"), list):
+        entries: list[ExpectedFile] = []
+        for file_info in info.get(b"files", []):
+            parts = [
+                p.decode("utf-8", "replace") if isinstance(p, bytes) else str(p)
+                for p in (file_info.get(b"path") or [])
+            ]
+            length = int(file_info.get(b"length", 0) or 0)
+            if not parts or length < 0:
+                raise ValueError("invalid multi-file torrent metadata")
+            entries.append(ExpectedFile(Path(name).joinpath(*parts), length))
+        if not entries:
+            raise ValueError("multi-file torrent has no files")
+        return name, True, sum(e.length for e in entries), piece_length, pieces, entries
+    size = int(info.get(b"length", 0) or 0)
+    if size <= 0:
+        raise ValueError("invalid single-file torrent metadata")
+    return name, False, size, piece_length, pieces, [ExpectedFile(Path(name), size)]
+
+
+def source_base_for_dir(source_dir: Path, info_name: str, entries: list[ExpectedFile]) -> Path:
+    if all((source_dir / entry.rel_path).is_file() for entry in entries):
+        return source_dir
+    stripped: list[Path] = []
+    for entry in entries:
+        try:
+            stripped.append(entry.rel_path.relative_to(info_name))
+        except ValueError:
+            stripped.append(entry.rel_path)
+    if all((source_dir / rel).is_file() for rel in stripped):
+        return source_dir.parent
+    raise ValueError(f"source_dir does not contain expected torrent tree for {info_name}: {source_dir}")
 
 
 def verify_source_file(source_file: Path, expected_size: int, piece_length: int, pieces: list[bytes]) -> dict[str, Any]:
@@ -232,6 +275,34 @@ def hardlink_expected_file(
     return out
 
 
+def hardlink_expected_tree(
+    source_base_dir: Path,
+    target_base_dir: Path,
+    entries: list[ExpectedFile],
+    *,
+    apply: bool,
+) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    ok = True
+    for entry in entries:
+        result = hardlink_expected_file(
+            source_base_dir / entry.rel_path,
+            target_base_dir / entry.rel_path,
+            entry.length,
+            apply=apply,
+        )
+        files.append(result)
+        ok = ok and bool(result.get("ok"))
+    return {
+        "source_base_dir": str(source_base_dir),
+        "target_base_dir": str(target_base_dir),
+        "file_count": len(entries),
+        "apply": apply,
+        "ok": ok,
+        "files": files,
+    }
+
+
 def rt_scalar(method: str, torrent_hash: str, *, rpc_url: str, timeout: int) -> str:
     try:
         return _xmlrpc_scalar_text(rt_xmlrpc_call(method, torrent_hash, rpc_url=rpc_url, timeout=timeout))
@@ -279,7 +350,8 @@ def wait_qb_recheck(qb: Any, torrent_hash: str, *, timeout_s: float = 180.0) -> 
 
 def repair_one(args: argparse.Namespace, torrent_hash: str, target_save_path: str) -> dict[str, Any]:
     session_dir = Path(args.session_dir).expanduser()
-    source_file = Path(args.source_file).expanduser()
+    source_file = Path(args.source_file).expanduser() if args.source_file else None
+    source_dir = Path(args.source_dir).expanduser() if args.source_dir else None
     torrent_file = torrent_file_for(session_dir, torrent_hash)
     target_dir = Path(target_save_path).expanduser()
     report: dict[str, Any] = {
@@ -293,14 +365,15 @@ def repair_one(args: argparse.Namespace, torrent_hash: str, target_save_path: st
     }
     try:
         info = load_torrent_info(torrent_file)
-        expected_name, expected_size, piece_length, pieces = expected_single_file(info)
-        target_file = target_dir / expected_name
+        expected_name, is_multi_file, expected_size, piece_length, pieces, entries = torrent_expected_files(info)
         report["torrent"] = {
             "torrent_file": str(torrent_file),
             "name": expected_name,
+            "is_multi_file": is_multi_file,
             "size": expected_size,
             "piece_length": piece_length,
             "piece_count": len(pieces),
+            "file_count": len(entries),
         }
         report["pre_rt"] = {
             "directory": rt_get_torrent_directory(torrent_hash, rpc_url=args.rpc_url, timeout=args.timeout),
@@ -310,18 +383,44 @@ def repair_one(args: argparse.Namespace, torrent_hash: str, target_save_path: st
             "left_bytes": rt_scalar("d.left_bytes", torrent_hash, rpc_url=args.rpc_url, timeout=args.timeout),
             "message": rt_scalar("d.message", torrent_hash, rpc_url=args.rpc_url, timeout=args.timeout),
         }
-        source_verify = verify_source_file(source_file, expected_size, piece_length, pieces)
+        source_is_single_file = source_file is not None
+        if source_file is not None:
+            if is_multi_file:
+                raise ValueError("--source-file is only valid for single-file torrents; use --source-dir")
+            source_verify = verify_source_file(source_file, expected_size, piece_length, pieces)
+            source_base_dir = source_file.parent
+        elif source_dir is not None:
+            source_base_dir = source_base_for_dir(source_dir, expected_name, entries)
+            source_verify_raw = verify_torrent_pieces(torrent_file, source_base_dir)
+            source_verify = {
+                "path": str(source_dir),
+                "source_base_dir": str(source_base_dir),
+                "exists": source_dir.exists(),
+                "expected_size": expected_size,
+                "piece_count": source_verify_raw.piece_count,
+                "pieces_ok": source_verify_raw.pieces_ok,
+                "pieces_fail": source_verify_raw.pieces_fail,
+                "pieces_missing": source_verify_raw.pieces_missing,
+                "files_missing": source_verify_raw.files_missing,
+                "success": source_verify_raw.success,
+                "summary": source_verify_raw.summary,
+            }
+        else:
+            raise ValueError("one of --source-file or --source-dir is required")
         report["source_verify"] = source_verify
         if not source_verify.get("success"):
             report["status"] = "blocked"
             report["blocked_reason"] = "source_failed_torrent_piece_verification"
             return report
-        link_result = hardlink_expected_file(
-            source_file,
-            target_file,
-            expected_size,
-            apply=bool(args.apply),
-        )
+        if source_is_single_file:
+            link_result = hardlink_expected_file(
+                source_file,
+                target_dir / entries[0].rel_path,
+                entries[0].length,
+                apply=bool(args.apply),
+            )
+        else:
+            link_result = hardlink_expected_tree(source_base_dir, target_dir, entries, apply=bool(args.apply))
         report["hardlink"] = link_result
         if not link_result.get("ok"):
             report["status"] = "blocked"
@@ -404,6 +503,9 @@ def repair_one(args: argparse.Namespace, torrent_hash: str, target_save_path: st
 
 def main() -> int:
     args = build_parser().parse_args()
+    if bool(args.source_file) == bool(args.source_dir):
+        print("ERROR specify exactly one of --source-file or --source-dir", file=sys.stderr)
+        return 2
     hashes = read_hashes(args)
     if not hashes:
         print("ERROR no hashes supplied", file=sys.stderr)

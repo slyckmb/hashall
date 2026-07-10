@@ -83,6 +83,7 @@ RT/qB repair paths.
 - [4-Gate Mutation Protocol](docs/4-GATE-MUTATION-PROTOCOL.md) — required before live RT/qB mutation
 - [RT/qB State Policy](docs/RT-QB-STATE-POLICY.md) — authoritative desired client states
 - [RT/qB Surgical Repair Runbook](docs/RT-QB-SURGICAL-REPAIR-RUNBOOK.md) — explicit-hash repair path
+- [RT/qB 99 Percent Content-Variant Repair Runbook](docs/RT-QB-99PCT-CONTENT-VARIANT-REPAIR.md) — sibling hardlink repair process for 99.* content-variant failures
 - [StoppedDL SOP](comms/docs/STOPPEDDL-SOP.md) — qB stoppedDL recovery pipeline
 
 ## Useful Commands
