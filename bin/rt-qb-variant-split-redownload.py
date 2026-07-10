@@ -21,6 +21,7 @@ from hashall.bencode import bencode_decode
 from hashall.rtorrent import (
     DEFAULT_RT_RPC_URL,
     DEFAULT_RT_SESSION_DIR,
+    load_rt_session_directories,
     load_rt_torrent_meta,
     normalize_rt_target_directory,
     rt_get_torrent_directory,
@@ -30,7 +31,7 @@ from hashall.rtorrent import (
 
 
 SCRIPT_NAME = "rt-qb-variant-split-redownload.py"
-SEMVER = "0.1.0"
+SEMVER = "0.2.0"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-start-download",
         action="store_true",
         help="After quarantine and hash-check, call d.start so RT can fetch fresh bytes",
+    )
+    parser.add_argument(
+        "--operator-download-approval",
+        action="store_true",
+        help="Confirm the operator approved this tracker/download choice.",
+    )
+    parser.add_argument(
+        "--freeleech-proof",
+        default="",
+        help="Path or note proving the selected existing torrent/source is freeleech.",
     )
     parser.add_argument("--quarantine-suffix", default="", help="Override quarantine suffix")
     parser.add_argument("--report-json", default="", help="Write JSON report to this path")
@@ -156,6 +167,34 @@ def has_shared_inode(stats: list[dict[str, Any]]) -> bool:
     return any(int(row.get("nlink") or 0) > 1 for row in stats if row.get("exists"))
 
 
+def nested_session_dirs(
+    session_dir: Path,
+    payload_path: Path,
+    torrent_hash: str,
+) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    if not payload_path.is_dir():
+        return out
+    try:
+        payload_resolved = payload_path.resolve()
+    except OSError:
+        payload_resolved = payload_path
+    for h, entry in load_rt_session_directories(session_dir).items():
+        if h == torrent_hash:
+            continue
+        directory = Path(entry.directory)
+        try:
+            resolved = directory.resolve()
+        except OSError:
+            resolved = directory
+        try:
+            resolved.relative_to(payload_resolved)
+        except ValueError:
+            continue
+        out.append({"hash": h, "directory": entry.directory})
+    return out
+
+
 def choose_quarantine_path(payload_path: Path, torrent_hash: str, suffix: str) -> Path:
     base_suffix = suffix or f".invalid-for-{torrent_hash[:12]}-{time.strftime('%Y%m%d-%H%M%S')}"
     candidate = payload_path.with_name(payload_path.name + base_suffix)
@@ -224,6 +263,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "payload_stat": stat_or_missing(payload_path),
         "file_stats": file_stats,
         "shared_inode_detected": has_shared_inode(file_stats),
+        "nested_session_dirs": nested_session_dirs(session_dir, payload_path, torrent_hash),
         "quarantine_path": str(quarantine_path),
         "actions": [],
         "status": "planned",
@@ -241,6 +281,10 @@ def apply_report(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, 
     if quarantine_path.exists():
         report["status"] = "blocked"
         report["blocked_reason"] = "quarantine_path_exists"
+        return report
+    if report.get("nested_session_dirs"):
+        report["status"] = "blocked"
+        report["blocked_reason"] = "nested_rt_session_dir_under_payload"
         return report
     if not report.get("shared_inode_detected"):
         report["status"] = "blocked"
@@ -273,8 +317,11 @@ def main() -> int:
     if args.apply and args.dry_run:
         print("ERROR choose --apply or --dry-run, not both", file=sys.stderr)
         return 2
-    if args.apply and not args.allow_start_download:
-        print("ERROR live apply requires --allow-start-download", file=sys.stderr)
+    if args.allow_start_download and not (args.operator_download_approval or args.freeleech_proof):
+        print(
+            "ERROR --allow-start-download requires --operator-download-approval or --freeleech-proof",
+            file=sys.stderr,
+        )
         return 2
     report = build_report(args)
     if args.apply:

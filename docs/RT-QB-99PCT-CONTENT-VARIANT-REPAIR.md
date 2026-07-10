@@ -47,6 +47,11 @@ for the bytes that differ from its own piece map. The repair is not "start
 harder"; the repair is to split the failed torrent away from the shared inode
 first, then start the split item.
 
+Do not redownload every member of a suspected variant group. One representative
+fresh download is enough to prove whether that group has a second byte variant.
+After that representative verifies, test the other target torrents against the
+new payload and only download another item if verification fails.
+
 ## Safety Rules
 
 - Never start the 99.* torrent in its current shared-inode location.
@@ -112,8 +117,10 @@ target torrents get per-tracker views hardlinked to the new verified variant.
 4. Confirm the healthy sibling's own path still exists and still points to its
    original inode. Renaming one hardlink path must not remove the sibling's
    directory entry.
-5. Start or recheck/resume only the failed torrent, so it writes fresh bytes
-   into the now-empty expected target path.
+5. Start or recheck/resume only one representative failed torrent for the group,
+   so it writes fresh bytes into the now-empty expected target path. Stop for
+   operator tracker/freeleech choice before starting unless tooling has recorded
+   proof that the selected source is freeleech.
 6. When the failed torrent reaches 100 percent, stop it and verify it offline
    against its `.torrent`.
 7. Compare the new verified target file/tree against the renamed invalid source:
@@ -178,16 +185,23 @@ Plan B limited live pilot:
 ```bash
 .venv/bin/python bin/rt-qb-variant-split-redownload.py --apply \
   --allow-start-download \
+  --operator-download-approval \
   --hash HASH \
   --report-json .agent/reports/<run>/HASH-split-pilot-live.json
 ```
 
 The Plan B tool is intentionally hash-scoped and dry-run first. Live mode stops
 the RT item, renames only that torrent's expected payload path to an
-`.invalid-for-HASH` quarantine name, runs `d.check_hash`, and starts RT only
-when `--allow-start-download` is explicit. The expected successful pilot symptom
-is a new target inode with `nlink=1` and RT `d.state=1` with either a nonzero
-download rate or normal stalled-download behavior while waiting for seeds.
+`.invalid-for-HASH` quarantine name, and runs `d.check_hash`. It starts RT only
+when `--allow-start-download` is explicit and either
+`--operator-download-approval` or `--freeleech-proof` is also present. The
+expected successful pilot symptom is a new target inode with `nlink=1` and RT
+`d.state=1` with either a nonzero download rate or normal stalled-download
+behavior while waiting for seeds.
+
+If a multi-file payload root contains another RT session directory below it, do
+not quarantine the whole root. That would break the sibling view. Use a more
+targeted file-level split or a unique per-hash target tree.
 
 ## Outcome Classes
 

@@ -44,6 +44,7 @@ def test_dry_run_reports_shared_inode_and_quarantine_path(tmp_path, monkeypatch)
 
     monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(save))
     monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
     monkeypatch.setattr(mod, "rt_scalar", lambda *a, **k: "0")
 
     args = Namespace(
@@ -56,6 +57,8 @@ def test_dry_run_reports_shared_inode_and_quarantine_path(tmp_path, monkeypatch)
         dry_run=True,
         apply=False,
         allow_start_download=False,
+        operator_download_approval=False,
+        freeleech_proof="",
         quarantine_suffix=".invalid-for-test",
         report_json="",
     )
@@ -84,6 +87,7 @@ def test_apply_renames_only_failed_path_and_starts_rt(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(save))
     monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
     monkeypatch.setattr(mod, "rt_scalar", lambda *a, **k: "0")
     monkeypatch.setattr(mod, "rt_xmlrpc_call", lambda method, *a, **k: calls.append(method) or "0")
 
@@ -97,6 +101,8 @@ def test_apply_renames_only_failed_path_and_starts_rt(tmp_path, monkeypatch):
         dry_run=False,
         apply=True,
         allow_start_download=True,
+        operator_download_approval=True,
+        freeleech_proof="",
         quarantine_suffix=".invalid-for-test",
         report_json="",
     )
@@ -117,3 +123,49 @@ def test_hash_prefix_resolves_against_session_torrent_files(tmp_path):
     write_single_torrent(session / f"{h.upper()}.torrent", "movie.mkv", 4)
 
     assert mod.resolve_hash(session, "cccccccccccc") == h
+
+
+def test_apply_blocks_nested_session_dir_under_payload(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "d" * 40
+    other = "e" * 40
+    session = tmp_path / "session"
+    save = tmp_path / "save"
+    session.mkdir()
+    save.mkdir()
+    write_single_torrent(session / f"{h.upper()}.torrent", "release", 4)
+    sibling_payload = save / "release" / "nested"
+    sibling_payload.mkdir(parents=True)
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"data")
+    (save / "release" / "file.bin").hardlink_to(source)
+
+    class Entry:
+        def __init__(self, directory):
+            self.directory = directory
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(save))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {other: Entry(str(sibling_payload))})
+    monkeypatch.setattr(mod, "rt_scalar", lambda *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=False,
+        apply=True,
+        allow_start_download=False,
+        operator_download_approval=False,
+        freeleech_proof="",
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.apply_report(args, mod.build_report(args))
+
+    assert report["status"] == "blocked"
+    assert report["blocked_reason"] == "nested_rt_session_dir_under_payload"

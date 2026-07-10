@@ -31,13 +31,16 @@ Validated:
 - RT mutation order is `d.stop`, rename to quarantine, `d.check_hash`, `d.start`;
 - hash prefixes resolve against RT session `.torrent` files.
 
-Focused validation passed:
+Focused validation passed initially:
 
 ```text
 tests/test_rt_qb_variant_split_redownload.py 3 passed
 tests/test_rtorrent_safe_start.py 8 passed
 tests/test_torrent_sibling_hardlink_repair.py 2 passed
 ```
+
+After the download-choice and nested-session hardening, focused validation
+passed again with 52 tests.
 
 ## Loop 3 - Dry Run Against Current 99.* Set
 
@@ -92,9 +95,48 @@ start"; RT could not make progress while the failed torrent stayed attached to
 the complete/shared sibling inode. After split/quarantine, `d.start` moved it to
 active download against an isolated target.
 
+## Follow-up Correction
+
+Two extra gates were added after the pilot:
+
+- download choice gate: starting a split item now requires explicit operator
+  approval or freeleech proof, because tracker/source choice can affect ratio;
+- group representative rule: only one item in a suspected variant group should
+  download fresh bytes first. Other items should be checked against that new
+  representative payload before any additional download is allowed.
+
+The tool was also hardened to block whole-root multi-file quarantine when another
+RT session directory is nested under that root. Live evidence showed that this
+can break a healthy sibling view even though the file inodes remain recoverable.
+
+## Batch Split and Containment
+
+After the c5 pilot, the remaining five split-eligible rows were split and then
+contained/stopped pending tracker/freeleech choice:
+
+| Hash | Final RT state | Left bytes | Shared inode after split |
+| --- | ---: | ---: | --- |
+| `127c38342cfe` | `0` | `21950408183` | no |
+| `245f2bce6afa` | `0` | `8339890797` | no |
+| `5feb771c9b7f` | `0` | `23450701324` | no |
+| `96d896ca35f4` | `0` | `21082531706` | no |
+| `c5a827e36ebb` | `0` | `810549248` | no |
+| `e36553b12dc1` | `0` | `5757836898` | no |
+
+Final dry inventory result: `split_eligible_shared_count=0`.
+
+Guard result after containment: pass, 0 issues.
+
+Dexter S02 correction: the first whole-root split moved a path that contained a
+nested healthy RT sibling view (`e56e8c574db0`). The nested view was restored as
+hardlinks from quarantine, RT rechecked it to `complete=1 left=0`, and the tool
+now blocks that nested-session shape before mutation.
+
 ## Next
 
-Let `c5a827e36ebb` finish, then compare the quarantined file/tree against the new
-verified file/tree. If they differ, record `variant-proven`; if they match,
-investigate client/session metadata. Then repeat the same Plan B loop for the
-remaining 99.* rows, prioritizing stopped hashes before already-active hashes.
+Stop before starting any split item for fresh download. Pick one representative
+per suspected variant group, confirm the desired tracker/source and freeleech
+status with the operator or Prowlarr proof, then resume only that representative.
+After it verifies, compare quarantined vs new bytes and test other target
+torrents against that representative payload before allowing any further
+downloads.
