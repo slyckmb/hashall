@@ -1183,6 +1183,96 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Loaded 1 rTorrent session rows", result.output)
         self.assertIn("processed: 1", result.output)
+
+    def test_payload_sync_rt_source_expands_path_prefix_mount_aliases(self):
+        """
+        rTorrent rows may be canonicalized from an alternate mount target before
+        filtering. The operator's --path-prefix must match either alias.
+        """
+        stash_mount = self.tmp_path / "stash" / "media"
+        data_mount = self.tmp_path / "data" / "media"
+        stash_mount.mkdir(parents=True)
+        data_mount.mkdir(parents=True)
+
+        payload_rel = Path("DigitalCore (API)") / "movie"
+        payload_root_stash = stash_mount / payload_rel
+        payload_root_data = data_mount / payload_rel
+        payload_root_stash.mkdir(parents=True)
+        payload_root_data.mkdir(parents=True)
+        (payload_root_stash / "movie.mkv").write_bytes(b"payload")
+
+        device_id = os.stat(stash_mount).st_dev
+        conn = connect_db(self.db_path)
+        cur = conn.cursor()
+        ensure_files_table(cur, device_id)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (f"dev-{device_id}", device_id, "stash", str(stash_mount), str(stash_mount)),
+        )
+        st = (payload_root_stash / "movie.mkv").stat()
+        cur.execute(
+            f"""
+            INSERT INTO files_{device_id} (path, size, mtime, sha256, inode, status)
+            VALUES (?, ?, ?, ?, ?, 'active')
+            """,
+            (str(payload_rel / "movie.mkv"), st.st_size, time.time(), "sha256-movie", st.st_ino),
+        )
+        conn.commit()
+        conn.close()
+
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        torrent_hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+            bencode_encode({b"directory": str(payload_root_data).encode("utf-8")})
+        )
+        (session_dir / f"{torrent_hash}.torrent").write_bytes(
+            bencode_encode({b"info": {b"name": b"movie.mkv", b"length": st.st_size}})
+        )
+
+        def fake_get_mount_point(p: str):
+            p = str(Path(p))
+            if p.startswith(str(data_mount)):
+                return str(data_mount)
+            if p.startswith(str(stash_mount)):
+                return str(stash_mount)
+            return None
+
+        def fake_get_mount_source(p: str):
+            p = str(Path(p))
+            if p.startswith(str(data_mount)) or p.startswith(str(stash_mount)):
+                return "stash/media"
+            return None
+
+        runner = CliRunner()
+        with (
+            patch("hashall.pathing.get_mount_point", side_effect=fake_get_mount_point),
+            patch("hashall.pathing.get_mount_source", side_effect=fake_get_mount_source),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--source",
+                    "rt",
+                    "--rt-session-dir",
+                    str(session_dir),
+                    "--dry-run",
+                    "--path-prefix",
+                    str(data_mount),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Loaded 1 rTorrent session rows", result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (path-prefix): 0", result.output)
         self.assertIn("complete payloads: 1", result.output)
         self.assertIn("root path source: rt_session_rows=1", result.output)
 

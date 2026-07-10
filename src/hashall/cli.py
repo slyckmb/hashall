@@ -1120,13 +1120,6 @@ def payload_sync(
                 continue
             prefix_inputs.append(cleaned)
 
-    prefix_paths = []
-    for p in prefix_inputs:
-        try:
-            prefix_paths.append(canonicalize_path(Path(p)))
-        except Exception:
-            prefix_paths.append(Path(p))
-
     def _canonicalize_payload_root_path(root_path: str) -> Path:
         """
         Normalize torrent roots onto the device preferred mount point when possible.
@@ -1165,6 +1158,64 @@ def payload_sync(
                     return remapped
 
         return p
+
+    def _expand_prefix_path_aliases(prefix_path: str) -> list[Path]:
+        """
+        Expand --path-prefix through the same mount-alias vocabulary used for roots.
+
+        Without this, a scoped sync can canonicalize a torrent root from /data/... to
+        /stash/... and then reject an operator's equivalent /data/... prefix.
+        """
+        raw = Path(prefix_path)
+        candidates: list[Path] = [raw]
+        try:
+            candidates.append(canonicalize_path(raw))
+        except Exception:
+            pass
+        try:
+            candidates.append(_canonicalize_payload_root_path(str(raw)))
+        except Exception:
+            pass
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT mount_point, preferred_mount_point
+                FROM devices
+                WHERE mount_point IS NOT NULL OR preferred_mount_point IS NOT NULL
+                """
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        for row in rows:
+            bases = [Path(v) for v in row if v]
+            for candidate in list(candidates):
+                for base in bases:
+                    remapped = remap_to_mount_alias(candidate, base)
+                    if remapped is not None:
+                        candidates.append(remapped)
+                    for other in bases:
+                        if base == other:
+                            continue
+                        try:
+                            rel = candidate.relative_to(base)
+                        except ValueError:
+                            continue
+                        candidates.append(other / rel)
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(candidate)
+        return deduped
+
+    prefix_paths: list[Path] = []
+    for p in prefix_inputs:
+        prefix_paths.extend(_expand_prefix_path_aliases(p))
 
     # Get torrents
     if source == "qb":

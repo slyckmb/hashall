@@ -543,6 +543,11 @@ def _get_payload_size_bytes(db_session: sqlite3.Connection, torrent_hash: str) -
         return 0
 
 
+def _target_save_path_for_client(target_path: str) -> str:
+    """Return qB/RT save directory for a planned target content path."""
+    return os.path.dirname(str(target_path).rstrip("/"))
+
+
 def _execute_fix_path_only(
     plan: RepairPlan,
     db_session: sqlite3.Connection,
@@ -621,10 +626,11 @@ def _execute_fix_path_only(
     qb_ok = False
     if qb_client:
         try:
-            success = qb_client.set_location(plan.torrent_hash, tgt, resume_after=False)
+            qb_target = _target_save_path_for_client(tgt)
+            success = qb_client.set_location(plan.torrent_hash, qb_target, resume_after=False)
             if success:
                 qb_ok = True
-                notes.append(f"qB set_location -> {tgt}")
+                notes.append(f"qB set_location -> {qb_target}")
             else:
                 notes.append(f"qB set_location returned False")
         except Exception as e:
@@ -776,10 +782,11 @@ def _execute_fix_placement(
     qb_ok = False
     if qb_client:
         try:
-            success = qb_client.set_location(plan.torrent_hash, tgt, resume_after=False)
+            qb_target = _target_save_path_for_client(tgt)
+            success = qb_client.set_location(plan.torrent_hash, qb_target, resume_after=False)
             if success:
                 qb_ok = True
-                notes.append(f"qB set_location -> {tgt}")
+                notes.append(f"qB set_location -> {qb_target}")
                 # Trigger recheck so qB verifies the file at new location and returns to stoppedUP.
                 # Without recheck, qB may remain stoppedDL after cross-device set_location.
                 try:
@@ -890,10 +897,18 @@ def apply_repair_plan(
 
         src = plan.source_path.rstrip("/")
         tgt = plan.target_path.rstrip("/")
-        notes.append(f"would rename: {src} -> {tgt}") if plan.plan_type == "fix_path_only" else None
-        notes.append(f"would rsync: {src}/ -> {tgt}/") if plan.plan_type in ("fix_placement_only", "fix_both") else None
-        notes.append(f"would repoint RT to {tgt}")
-        notes.append(f"would set qB location to {tgt}")
+        if plan.plan_type == "fix_path_only":
+            notes.append(f"would rename: {src} -> {tgt}")
+        if plan.plan_type in ("fix_placement_only", "fix_both"):
+            if os.path.isfile(src):
+                notes.append(f"would rsync file: {src} -> {tgt}")
+                notes.append(f"would repoint RT to {os.path.dirname(tgt)}")
+            else:
+                notes.append(f"would rsync dir: {src}/ -> {tgt}/")
+                notes.append(f"would repoint RT to {tgt}")
+        else:
+            notes.append(f"would repoint RT to {tgt}")
+        notes.append(f"would set qB location to {_target_save_path_for_client(tgt)}")
 
         return ApplyResult(
             torrent_hash=plan.torrent_hash, plan_type=plan.plan_type,

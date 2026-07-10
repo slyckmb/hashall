@@ -18,6 +18,8 @@ import sqlite3
 from hashall.canonicalize import (
     CanonicalizeRequest,
     CanonicalizeConfig,
+    RepairPlan,
+    apply_repair_plan,
     canonicalize_torrent,
     generate_repair_plan,
 )
@@ -316,3 +318,77 @@ def test_scenario_6_blocked(
 
     assert verdict.blocked is True
     assert plan.plan_type == "blocked"
+
+
+@patch("hashall.canonicalize.get_torrent_instance")
+@patch("hashall.canonicalize.get_payload_by_id")
+def test_blank_rt_metadata_seedpool_path_targets_pool_cross_seed(
+    mock_get_payload, mock_get_torrent, db_session, policy,
+):
+    planner = make_planner_mock()
+    config = make_config(planner, policy)
+
+    mock_get_torrent.return_value = TorrentInstance(
+        torrent_hash="h-seedpool", payload_id=7, device_id=50,
+        save_path="/stash/media/torrents/seeding/seedpool (API)",
+        root_name="Movie.2024.mkv", category="", tags="",
+        last_seen_at=1000.0,
+    )
+    mock_get_payload.return_value = Payload(
+        payload_id=7, payload_hash=None, device_id=50,
+        root_path="/stash/media/torrents/seeding/seedpool (API)/Movie.2024.mkv",
+        file_count=1, total_bytes=1024, status="complete", last_built_at=1000.0,
+    )
+
+    request = CanonicalizeRequest(
+        torrent_hash="h-seedpool", category="", tags="",
+        save_path="/stash/media/torrents/seeding/seedpool (API)",
+        content_path="/stash/media/torrents/seeding/seedpool (API)/Movie.2024.mkv",
+        rt_directory="/stash/media/torrents/seeding/seedpool (API)",
+        state="uploading",
+    )
+
+    verdict = canonicalize_torrent(request, db_session, config)
+    plan = generate_repair_plan(verdict, current_path=request.content_path)
+
+    assert verdict.canonical_device == "pool"
+    assert verdict.canonical_subdir == "cross-seed/seedpool (API)"
+    assert (
+        verdict.canonical_path
+        == "/pool/media/torrents/seeding/cross-seed/seedpool (API)/Movie.2024.mkv"
+    )
+    assert verdict.placement_drift is True
+    assert verdict.path_structure_drift is True
+    assert plan.plan_type == "fix_both"
+    assert plan.target_path == verdict.canonical_path
+
+
+def test_dry_run_fix_both_file_notes_do_not_add_directory_slashes(tmp_path, db_session, policy):
+    src = tmp_path / "stash" / "seedpool (API)" / "Movie.2024.mkv"
+    tgt = tmp_path / "pool" / "cross-seed" / "seedpool (API)" / "Movie.2024.mkv"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"seed")
+
+    plan = RepairPlan(
+        torrent_hash="h-file",
+        plan_type="fix_both",
+        source_path=str(src),
+        target_path=str(tgt),
+        move_required=True,
+        reuse_possible=False,
+        notes=[],
+    )
+
+    result = apply_repair_plan(
+        plan=plan,
+        db_session=db_session,
+        config=make_config(make_planner_mock(), policy),
+        dry_run=True,
+    )
+
+    assert result.success is True
+    assert f"would rsync file: {src} -> {tgt}" in result.notes
+    assert f"would rsync: {src}/ -> {tgt}/" not in result.notes
+    assert f"would repoint RT to {tgt.parent}" in result.notes
+    assert f"would set qB location to {tgt.parent}" in result.notes
+    assert f"would set qB location to {tgt}" not in result.notes

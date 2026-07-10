@@ -264,3 +264,17 @@ def test_rt_directory_pool_hint_used_when_save_path_absent():
     )
     assert result.device == "pool"
     assert any("device=pool" in n for n in result.notes)
+
+
+def test_blank_category_cross_seed_provider_path_preserves_provider_subdir():
+    """RT-only rows may lack qB category/tags but still carry tracker provider paths."""
+    result = infer_canonical_save_path(
+        category="",
+        tags="",
+        current_save_path=f"{STASH}/seedpool (API)",
+        current_content_path=f"{STASH}/seedpool (API)/Movie.2024.mkv",
+    )
+    assert result.category == "cross-seed"
+    assert result.subdir == "cross-seed/seedpool (API)"
+    assert result.canonical_save_path == f"{STASH}/cross-seed/seedpool (API)"
+    assert any("category=cross-seed inferred" in n for n in result.notes)

@@ -59,6 +59,10 @@ APPROVED_SAVE_ROOTS = (
     "/pool/media/torrents/seeding",  # /pool (seed-only, no hardlinks)
 )
 
+_SAVE_ROOT_ALIASES = APPROVED_SAVE_ROOTS + (
+    "/stash/media/torrents/seeding",
+)
+
 # ARR category → post-import category mapping (sonarr → tv, etc.)
 ARR_CATEGORY_FINAL_MAP = {
     "sonarr": "tv",
@@ -220,7 +224,7 @@ def extract_cross_seed_provider_name(*paths: str) -> str | None:
         if not normalized:
             continue
         # Pass 1 — canonical seeding roots
-        for root in APPROVED_SAVE_ROOTS:
+        for root in _SAVE_ROOT_ALIASES:
             if not (normalized == root or normalized.startswith(root + "/")):
                 continue
             rel = normalized[len(root):].lstrip("/")
@@ -253,6 +257,31 @@ def extract_cross_seed_provider_name(*paths: str) -> str | None:
     return None
 
 
+def _provider_name_is_tracker_like(provider: str | None) -> bool:
+    """Return True when a path component looks like a tracker/provider folder."""
+    name = str(provider or "").strip()
+    if not name:
+        return False
+    if name.endswith(" (API)"):
+        return True
+    registry_canonical, registry_aliases = _load_tracker_registry_keys()
+    registry_names = {n.lower() for n in registry_canonical | registry_aliases}
+    return name.lower() in registry_names
+
+
+def infer_category_from_paths(category: str, *paths: str) -> tuple[str, list[str]]:
+    """Fill missing category from path shape when the path is clearly cross-seed."""
+    category_norm = str(category or "").strip()
+    if category_norm and category_norm != "Uncategorized":
+        return category_norm, []
+
+    provider = extract_cross_seed_provider_name(*paths)
+    if _provider_name_is_tracker_like(provider):
+        return "cross-seed", [f"category=cross-seed inferred from provider path: {provider}"]
+
+    return category_norm, []
+
+
 def derive_policy_base_save_path(
     category: str,
     *,
@@ -264,8 +293,13 @@ def derive_policy_base_save_path(
     Derive canonical save path from category and contextual paths.
     Returns (path, error, strategy).
     """
-    category_norm = str(category or "").strip()
     rt_host_directory = rt_container_path_to_host(rt_directory) if rt_directory else ""
+    category_norm, _ = infer_category_from_paths(
+        category,
+        save_path,
+        content_path,
+        rt_host_directory,
+    )
     primary_root = choose_preferred_save_root(save_path, content_path, rt_host_directory)
 
     if category_norm:
@@ -381,10 +415,16 @@ def infer_canonical_save_path(
     Returns:
         InferredSavePath with canonical path and reliability classification
     """
-    category_norm = str(category or "").strip()
+    rt_host_directory = rt_container_path_to_host(current_rt_directory) if current_rt_directory else ""
+    category_norm, category_notes = infer_category_from_paths(
+        category,
+        current_save_path,
+        current_content_path,
+        rt_host_directory,
+    )
     tags_set = {t.strip() for t in (tags or "").split(",") if t.strip()}
 
-    notes = []
+    notes = list(category_notes)
 
     # Determine device root: ~noHL tag is authoritative; fall back to path hint.
     has_no_hardlinks = "~noHL" in tags_set
