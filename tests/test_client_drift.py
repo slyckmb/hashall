@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from hashall.bencode import bencode_dump
 from hashall.cli import cli
+from hashall.cli import _monitor_rt_qb_rechecks
 from hashall.cli import _read_client_drift_journal
 from hashall.cli import _rt_qb_monitor_classify
 from hashall.client_drift import (
@@ -110,6 +111,67 @@ def test_rt_qb_monitor_keeps_checking_pending() -> None:
 
     assert status == "pending"
     assert "checkingDL" in detail
+
+
+class _FakeQbitRecheckMonitor:
+    def __init__(self, rows: list[_FakeTorrentInfo]) -> None:
+        self.rows = list(rows)
+        self.pause_calls: list[str] = []
+
+    def get_torrent_info(self, torrent_hash: str):
+        if len(self.rows) > 1:
+            return self.rows.pop(0)
+        return self.rows[0]
+
+    def pause_torrent(self, torrent_hash: str) -> bool:
+        self.pause_calls.append(torrent_hash)
+        return True
+
+
+def test_monitor_rt_qb_rechecks_waits_when_stoppeddl_progress_moves(monkeypatch) -> None:
+    monkeypatch.setattr("hashall.cli.time.sleep", lambda _seconds: None)
+    qbit = _FakeQbitRecheckMonitor(
+        [
+            _FakeTorrentInfo("stoppedDL", 0.302, 4_672_301_392),
+            _FakeTorrentInfo("stoppedDL", 0.703, 1_986_898_256),
+            _FakeTorrentInfo("stoppedUP", 1.0, 0),
+        ]
+    )
+
+    results = _monitor_rt_qb_rechecks(
+        qbit,
+        ["abc123"],
+        timeout_s=10,
+        interval_s=1,
+        stop_after_check=True,
+        stalled_dl_grace=0,
+    )
+
+    assert results["abc123"]["status"] == "success"
+    assert qbit.pause_calls == ["abc123"]
+
+
+def test_monitor_rt_qb_rechecks_fails_stable_stoppeddl_after_grace(monkeypatch) -> None:
+    monkeypatch.setattr("hashall.cli.time.sleep", lambda _seconds: None)
+    qbit = _FakeQbitRecheckMonitor(
+        [
+            _FakeTorrentInfo("stoppedDL", 0.302, 4_672_301_392),
+            _FakeTorrentInfo("stoppedDL", 0.302, 4_672_301_392),
+        ]
+    )
+
+    results = _monitor_rt_qb_rechecks(
+        qbit,
+        ["abc123"],
+        timeout_s=10,
+        interval_s=1,
+        stop_after_check=True,
+        stalled_dl_grace=0,
+    )
+
+    assert results["abc123"]["status"] == "failure"
+    assert "transitioned_to_downloading state=stoppedDL" in results["abc123"]["detail"]
+    assert qbit.pause_calls == []
 
 
 def test_client_drift_conservative_does_not_auto_mirror_rt_only(tmp_path: Path) -> None:

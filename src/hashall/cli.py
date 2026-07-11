@@ -3793,16 +3793,37 @@ def _monitor_rt_qb_rechecks(
     # command. Track consecutive stoppedDL observations per hash; only fail after the grace
     # window expires so we don't misclassify a queued recheck as a download failure.
     stalled_dl_seen: dict[str, int] = {}
+    last_recheck_progress: dict[str, tuple[float, int]] = {}
     while pending and time.time() < deadline:
         for torrent_hash in list(pending):
             info = qbit.get_torrent_info(torrent_hash)
             raw_state = str(info.state or "") if info is not None else ""
+            progress = float(getattr(info, "progress", 0.0) or 0.0) if info is not None else 0.0
+            amount_left = int(getattr(info, "amount_left", 0) or 0) if info is not None else 0
+            previous_progress = last_recheck_progress.get(torrent_hash)
+            progress_changed = (
+                previous_progress is not None
+                and (progress != previous_progress[0] or amount_left != previous_progress[1])
+            )
+            last_recheck_progress[torrent_hash] = (progress, amount_left)
             if raw_state == "stoppedDL":
                 count = stalled_dl_seen.get(torrent_hash, 0) + 1
                 stalled_dl_seen[torrent_hash] = count
                 if count <= stalled_dl_grace:
                     status = "pending"
                     detail = f"stoppedDL (grace {count}/{stalled_dl_grace}, waiting for recheck)"
+                elif previous_progress is None:
+                    status = "pending"
+                    detail = (
+                        "stoppedDL (baseline; waiting for recheck) "
+                        f"progress={progress:.3f} left={amount_left}"
+                    )
+                elif progress_changed:
+                    status = "pending"
+                    detail = (
+                        "stoppedDL (progress moving; waiting for recheck) "
+                        f"progress={progress:.3f} left={amount_left}"
+                    )
                 else:
                     status, detail = _rt_qb_monitor_classify(info)
             else:
