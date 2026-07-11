@@ -207,3 +207,27 @@ Strict source results:
 
 Strict proof reports are under
 `.agent/reports/j51-variant-source-scan-20260710/*-prowlarr-strict.json`.
+
+## River Monsters Live Start
+
+Operator approved the next representative pilot. `127c38342cfe` River Monsters
+was started with `--start-existing-split`, `--allow-start-download`, and the
+strict TorrentLeech freeleech proof report.
+
+Evidence:
+
+- Dry-run passed: payload exists, no shared inode, no nested RT session dirs,
+  torrent incomplete.
+- Live apply report:
+  `.agent/reports/j51-variant-source-scan-20260710/127c38342cfe-start-existing-live.json`.
+- RT moved from `state=0 complete=0 left=21950408183` to
+  `state=1 complete=0 left=21950408183`.
+- Watch result after roughly three minutes: still active, no message, no hashing,
+  no connected peers, no byte progress.
+- Tracker evidence from `t.multicall`: TorrentDay trackers are enabled/usable;
+  the focused tracker reported scrape complete/incomplete `1/1` and latest peers
+  `1`, but RT had `peers_connected=0`.
+
+Current interpretation: the split/start path worked and the item is active, but
+it has not connected to a peer yet. Leave it active for now and recheck progress
+before starting another representative.
