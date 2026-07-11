@@ -112,6 +112,48 @@ For each hash, record:
 9. Confirm qB is `stoppedUP` with `progress=1.0` and `amount_left=0`.
 10. Run a hash-scoped DB sync and confirm the DB payload is complete.
 
+## Failed-Piece Analysis Gate
+
+Before starting a Plan B download, map the failed pieces to the torrent's
+expected files. This distinguishes a true media-byte mismatch from a missing
+sidecar-only problem.
+
+Current target path:
+
+```bash
+make client-drift-verify-pieces HASH=<hash> SHOW=1 MAP=1
+```
+
+Exact split/quarantine tree:
+
+```bash
+make client-drift-verify-pieces HASH=<hash> QUARANTINE_ROOT="/path/to/.invalid-for-<hash>" SHOW=1 MAP=1
+```
+
+Machine-readable report:
+
+```bash
+make client-drift-verify-pieces HASH=<hash> PAYLOAD_ROOT="/path/to/payload-root" JSON=1
+```
+
+Interpretation:
+
+- `sidecar_only_missing`: repair or fetch the sidecar first; do not assume a
+  media variant.
+- `sidecar_media_boundary_piece`: the failed piece spans a sidecar and media
+  bytes; treat it as ambiguous until the mapped byte ranges are inspected.
+- `media_piece_mismatch`: the media file bytes do not match the torrent piece
+  map; Plan B split/redownload is appropriate if no verified sibling source
+  exists.
+- `media_piece_missing_or_truncated`: the media file is missing or too short at
+  the mapped byte range; Plan B or a verified donor source is needed.
+- `layout_missing`: the expected tree is absent or the wrong root was supplied;
+  fix the path/root before concluding content differs.
+
+After a split, the live target may contain zero-byte placeholder files. In that
+case, use `--quarantine-root` or `QUARANTINE_ROOT=...` to inspect the old bytes
+that were moved aside, not the new empty target directory.
+
 ## Repair Plan B: Split, Rename, and Redownload
 
 Use this when Plan A proves the sibling/source bytes do not match the failed

@@ -6,6 +6,7 @@ against bytes on disk — independently of qBittorrent or rTorrent rechecks.
 """
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -20,6 +21,41 @@ class TorrentFileEntry:
 
 
 @dataclass
+class PieceFileSpan:
+    rel_path: str
+    abs_path: str
+    file_offset_start: int
+    file_offset_end: int
+    piece_offset_start: int
+    piece_offset_end: int
+    exists: bool
+    size: int | None
+    kind: str
+
+
+@dataclass
+class PieceDiagnostic:
+    piece_index: int
+    status: str
+    classification: str
+    byte_start: int
+    byte_end: int
+    spans: list[PieceFileSpan] = field(default_factory=list)
+    missing_files: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "piece_index": self.piece_index,
+            "status": self.status,
+            "classification": self.classification,
+            "byte_start": self.byte_start,
+            "byte_end": self.byte_end,
+            "spans": [span.__dict__ for span in self.spans],
+            "missing_files": list(self.missing_files),
+        }
+
+
+@dataclass
 class TorrentVerifyResult:
     torrent_path: str
     base_dir: str
@@ -31,6 +67,7 @@ class TorrentVerifyResult:
     pieces_fail: int = 0
     pieces_missing: int = 0   # piece spans a file that couldn't be opened
     files_missing: list[str] = field(default_factory=list)
+    failed_pieces: list[PieceDiagnostic] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -73,11 +110,75 @@ def _file_entries(info: dict, info_name: str, is_multi_file: bool) -> list[Torre
         return [TorrentFileEntry(rel_path=Path(info_name), length=length)]
 
 
+MEDIA_EXTENSIONS = {
+    ".avi",
+    ".m2ts",
+    ".m4v",
+    ".mka",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".ts",
+    ".vob",
+    ".webm",
+    ".wmv",
+}
+
+SIDECAR_EXTENSIONS = {
+    ".ass",
+    ".cue",
+    ".idx",
+    ".jpg",
+    ".jpeg",
+    ".log",
+    ".nfo",
+    ".png",
+    ".srt",
+    ".sub",
+    ".txt",
+}
+
+
+def _file_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in MEDIA_EXTENSIONS:
+        return "media"
+    if suffix in SIDECAR_EXTENSIONS:
+        return "sidecar"
+    return "other"
+
+
+def _path_for_entry(base_dir: Path, entry: TorrentFileEntry, *, content_root: Path | None) -> Path:
+    if content_root is None:
+        return base_dir / entry.rel_path
+    parts = entry.rel_path.parts
+    if len(parts) > 1:
+        return content_root.joinpath(*parts[1:])
+    return content_root
+
+
+def _classify_piece(status: str, spans: list[PieceFileSpan]) -> str:
+    kinds = {span.kind for span in spans}
+    if "media" in kinds and ("sidecar" in kinds or "other" in kinds):
+        return "sidecar_media_boundary_piece"
+    if "media" in kinds:
+        return "media_piece_missing_or_truncated" if status == "missing" else "media_piece_mismatch"
+    if kinds == {"sidecar"}:
+        return "sidecar_only_missing" if status == "missing" else "sidecar_piece_mismatch"
+    if status == "missing":
+        return "layout_missing"
+    return "non_media_piece_mismatch"
+
+
 def _piece_stream(
     entries: list[TorrentFileEntry],
     base_dir: Path,
     piece_length: int,
-) -> Iterator[tuple[bytes, list[str]]]:
+    *,
+    content_root: Path | None = None,
+) -> Iterator[tuple[bytes, list[str], list[PieceFileSpan]]]:
     """
     Yield (piece_bytes, missing_files) for each piece.
 
@@ -86,17 +187,19 @@ def _piece_stream(
     is added to missing_files for that piece.
     """
     buf = bytearray()
-    missing: list[str] = []
     missing_this_piece: list[str] = []
+    spans_this_piece: list[PieceFileSpan] = []
 
-    def flush_piece() -> tuple[bytes, list[str]]:
+    def flush_piece() -> tuple[bytes, list[str], list[PieceFileSpan]]:
         data = bytes(buf[:piece_length])
         m = list(missing_this_piece)
-        return data, m
+        spans = list(spans_this_piece)
+        return data, m, spans
 
     for entry in entries:
-        fpath = base_dir / entry.rel_path
+        fpath = _path_for_entry(base_dir, entry, content_root=content_root)
         remaining = entry.length
+        file_offset = 0
         try:
             fh = open(fpath, "rb")
         except OSError:
@@ -105,11 +208,27 @@ def _piece_stream(
             while remaining > 0:
                 space = piece_length - len(buf)
                 chunk = min(space, remaining)
+                size = fpath.stat().st_size if fpath.exists() else None
+                spans_this_piece.append(
+                    PieceFileSpan(
+                        rel_path=str(entry.rel_path),
+                        abs_path=str(fpath),
+                        file_offset_start=file_offset,
+                        file_offset_end=file_offset + chunk,
+                        piece_offset_start=len(buf),
+                        piece_offset_end=len(buf) + chunk,
+                        exists=fpath.exists(),
+                        size=size,
+                        kind=_file_kind(entry.rel_path),
+                    )
+                )
                 buf.extend(b"\x00" * chunk)
+                file_offset += chunk
                 remaining -= chunk
                 if len(buf) >= piece_length:
                     yield flush_piece()
                     buf = bytearray()
+                    spans_this_piece = []
                     missing_this_piece = [str(fpath)] if remaining > 0 else []
             continue
 
@@ -117,29 +236,48 @@ def _piece_stream(
             while remaining > 0:
                 space = piece_length - len(buf)
                 want = min(space, remaining)
+                size = fpath.stat().st_size if fpath.exists() else None
+                spans_this_piece.append(
+                    PieceFileSpan(
+                        rel_path=str(entry.rel_path),
+                        abs_path=str(fpath),
+                        file_offset_start=file_offset,
+                        file_offset_end=file_offset + want,
+                        piece_offset_start=len(buf),
+                        piece_offset_end=len(buf) + want,
+                        exists=fpath.exists(),
+                        size=size,
+                        kind=_file_kind(entry.rel_path),
+                    )
+                )
                 chunk = fh.read(want)
                 if not chunk:
                     # Truncated file — fill remainder with zeros
                     missing_this_piece.append(str(fpath))
                     buf.extend(b"\x00" * want)
                     remaining -= want
+                    file_offset += want
                 else:
                     buf.extend(chunk)
                     remaining -= len(chunk)
+                    file_offset += len(chunk)
                 if len(buf) >= piece_length:
                     yield flush_piece()
                     buf = bytearray()
+                    spans_this_piece = []
                     missing_this_piece = []
 
     # Last (possibly short) piece
     if buf:
-        yield bytes(buf), list(missing_this_piece)
+        yield bytes(buf), list(missing_this_piece), list(spans_this_piece)
 
 
 def verify_torrent_pieces(
     torrent_path: Path,
     base_dir: Path,
     *,
+    content_root: Path | None = None,
+    collect_piece_details: bool = False,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> TorrentVerifyResult:
     """
@@ -180,25 +318,75 @@ def verify_torrent_pieces(
 
     all_missing: set[str] = set()
 
-    for idx, (piece_bytes, missing_files) in enumerate(_piece_stream(entries, base_dir, piece_length)):
+    total_size = sum(entry.length for entry in entries)
+
+    for idx, (piece_bytes, missing_files, spans) in enumerate(
+        _piece_stream(entries, base_dir, piece_length, content_root=content_root)
+    ):
         expected = piece_hashes[idx]
+        byte_start = idx * piece_length
+        byte_end = min(byte_start + len(piece_bytes), total_size)
         if missing_files:
             result.pieces_missing += 1
             for f in missing_files:
                 if f not in all_missing:
                     all_missing.add(f)
                     result.files_missing.append(f)
+            if collect_piece_details:
+                result.failed_pieces.append(
+                    PieceDiagnostic(
+                        piece_index=idx,
+                        status="missing",
+                        classification=_classify_piece("missing", spans),
+                        byte_start=byte_start,
+                        byte_end=byte_end,
+                        spans=spans,
+                        missing_files=list(dict.fromkeys(missing_files)),
+                    )
+                )
         else:
             actual = hashlib.sha1(piece_bytes).digest()
             if actual == expected:
                 result.pieces_ok += 1
             else:
                 result.pieces_fail += 1
+                if collect_piece_details:
+                    result.failed_pieces.append(
+                        PieceDiagnostic(
+                            piece_index=idx,
+                            status="mismatch",
+                            classification=_classify_piece("mismatch", spans),
+                            byte_start=byte_start,
+                            byte_end=byte_end,
+                            spans=spans,
+                        )
+                    )
 
         if progress_cb:
             progress_cb(idx + 1, piece_count)
 
     return result
+
+
+def result_to_dict(result: TorrentVerifyResult) -> dict:
+    return {
+        "success": result.success,
+        "torrent_path": result.torrent_path,
+        "base_dir": result.base_dir,
+        "info_name": result.info_name,
+        "is_multi_file": result.is_multi_file,
+        "piece_length": result.piece_length,
+        "piece_count": result.piece_count,
+        "pieces_ok": result.pieces_ok,
+        "pieces_fail": result.pieces_fail,
+        "pieces_missing": result.pieces_missing,
+        "files_missing": list(result.files_missing),
+        "failed_pieces": [piece.to_dict() for piece in result.failed_pieces],
+    }
+
+
+def result_to_json(result: TorrentVerifyResult) -> str:
+    return json.dumps(result_to_dict(result), indent=2, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
@@ -339,4 +527,17 @@ def format_verify_result(result: TorrentVerifyResult) -> str:
         lines.append("  missing files:")
         for f in result.files_missing:
             lines.append(f"    {f}")
+    if result.failed_pieces:
+        lines.append("  failed pieces:")
+        for piece in result.failed_pieces:
+            lines.append(
+                f"    piece={piece.piece_index} status={piece.status} "
+                f"class={piece.classification} bytes={piece.byte_start}-{piece.byte_end}"
+            )
+            for span in piece.spans:
+                lines.append(
+                    f"      {span.kind} {span.rel_path} "
+                    f"file_bytes={span.file_offset_start}-{span.file_offset_end} "
+                    f"exists={span.exists} size={span.size}"
+                )
     return "\n".join(lines)

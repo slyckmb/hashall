@@ -5100,8 +5100,23 @@ def client_drift_verify_layout_scan_cmd(qb_cache_file, rt_cache_file, rt_session
 @click.argument("hash_val", metavar="HASH")
 @click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")
 @click.option("--base-dir", "base_dir_override", type=click.Path(file_okay=False), default=None, help="Override base directory (default: QB save_path converted to FS path).")
+@click.option("--payload-root", type=click.Path(file_okay=True), default=None, help="Verify against an exact payload root instead of base_dir/info_name.")
+@click.option("--quarantine-root", type=click.Path(file_okay=True), default=None, help="Alias for --payload-root when checking a .invalid-for-* tree.")
 @click.option("--torrent-file", "torrent_file_override", type=click.Path(exists=True, dir_okay=False), default=None, help="Override .torrent file path (default: RT session dir).")
-def client_drift_verify_pieces_cmd(hash_val, qb_url, base_dir_override, torrent_file_override):
+@click.option("--show-failed-pieces", is_flag=True, help="Show failed/missing piece indexes and byte ranges.")
+@click.option("--map-failed-pieces-to-files", is_flag=True, help="Map failed/missing pieces to expected torrent files.")
+@click.option("--json-output", is_flag=True, help="Emit machine-readable JSON.")
+def client_drift_verify_pieces_cmd(
+    hash_val,
+    qb_url,
+    base_dir_override,
+    payload_root,
+    quarantine_root,
+    torrent_file_override,
+    show_failed_pieces,
+    map_failed_pieces_to_files,
+    json_output,
+):
     """Verify torrent piece hashes from .torrent file against data on disk.
 
     Reads piece SHA1 hashes directly from the .torrent bencode metadata and
@@ -5109,37 +5124,39 @@ def client_drift_verify_pieces_cmd(hash_val, qb_url, base_dir_override, torrent_
     """
     import sys
     from pathlib import Path as _Path
-    from hashall.torrent_verify import verify_torrent_pieces, format_verify_result
+    from hashall.torrent_verify import verify_torrent_pieces, format_verify_result, result_to_json
     from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
     from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
     from hashall.nested_folder_repair import _api_to_fs
 
     prefix = str(hash_val).strip().lower()
     qb_client = QBittorrentClient(base_url=qb_url)
+    needs_qb_lookup = not (torrent_file_override and (base_dir_override or payload_root or quarantine_root))
 
     # Resolve QB torrent to get save_path and full hash
     qb_torrent = None
-    try:
-        cached = get_torrents_from_cache(max_age_s=600, cache_path=DEFAULT_QB_CACHE_FILE)
-        if cached is not None:
-            for r in cached:
-                t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
-                if t and t.hash and t.hash.lower().startswith(prefix):
-                    qb_torrent = t
-                    break
-        if qb_torrent is None:
-            live = qb_client.get_torrents_by_hashes([hash_val]) or {}
-            for h, t in live.items():
-                if h.lower().startswith(prefix):
-                    qb_torrent = t
-                    break
-    except Exception as e:
-        raise click.ClickException(f"QB lookup failed: {e}")
+    if needs_qb_lookup:
+        try:
+            cached = get_torrents_from_cache(max_age_s=600, cache_path=DEFAULT_QB_CACHE_FILE)
+            if cached is not None:
+                for r in cached:
+                    t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                    if t and t.hash and t.hash.lower().startswith(prefix):
+                        qb_torrent = t
+                        break
+            if qb_torrent is None:
+                live = qb_client.get_torrents_by_hashes([hash_val]) or {}
+                for h, t in live.items():
+                    if h.lower().startswith(prefix):
+                        qb_torrent = t
+                        break
+        except Exception as e:
+            raise click.ClickException(f"QB lookup failed: {e}")
 
-    if qb_torrent is None:
+    if needs_qb_lookup and qb_torrent is None:
         raise click.ClickException(f"hash not found in QB: {hash_val}")
 
-    full_hash = qb_torrent.hash.upper()
+    full_hash = qb_torrent.hash.upper() if qb_torrent is not None else str(hash_val).strip().upper()
 
     # Resolve .torrent file
     if torrent_file_override:
@@ -5152,29 +5169,51 @@ def client_drift_verify_pieces_cmd(hash_val, qb_url, base_dir_override, torrent_
         raise click.ClickException(f".torrent not found: {torrent_path}")
 
     # Resolve base_dir (save_path on host FS)
-    if base_dir_override:
+    content_root = None
+    if payload_root and quarantine_root:
+        raise click.ClickException("choose --payload-root or --quarantine-root, not both")
+    if payload_root or quarantine_root:
+        content_root = _Path(payload_root or quarantine_root)
+        base_dir = content_root.parent
+    elif base_dir_override:
         base_dir = _Path(base_dir_override)
     else:
+        if qb_torrent is None:
+            raise click.ClickException("base directory required when QB lookup is bypassed")
         save_path_api = (qb_torrent.save_path or "").rstrip("/")
         base_dir = _Path(_api_to_fs(save_path_api))
 
-    click.echo(f"Verifying: {qb_torrent.name}")
-    click.echo(f"  hash:        {full_hash.lower()[:16]}")
-    click.echo(f"  torrent:     {torrent_path}")
-    click.echo(f"  base_dir:    {base_dir}")
+    if not json_output:
+        click.echo(f"Verifying: {qb_torrent.name if qb_torrent is not None else hash_val}")
+        click.echo(f"  hash:        {full_hash.lower()[:16]}")
+        click.echo(f"  torrent:     {torrent_path}")
+        click.echo(f"  base_dir:    {base_dir}")
+        if content_root is not None:
+            click.echo(f"  payload_root:{content_root}")
 
     def _progress(idx: int, total: int) -> None:
+        if json_output:
+            return
         pct = idx / total * 100
         sys.stderr.write(f"\r  checking pieces: {idx}/{total} ({pct:.0f}%)  ")
         sys.stderr.flush()
 
     try:
-        result = verify_torrent_pieces(torrent_path, base_dir, progress_cb=_progress)
+        result = verify_torrent_pieces(
+            torrent_path,
+            base_dir,
+            content_root=content_root,
+            collect_piece_details=show_failed_pieces or map_failed_pieces_to_files or json_output,
+            progress_cb=_progress,
+        )
     except Exception as e:
         raise click.ClickException(f"verification failed: {e}")
 
-    sys.stderr.write("\n")
-    click.echo(format_verify_result(result))
+    if json_output:
+        click.echo(result_to_json(result))
+    else:
+        sys.stderr.write("\n")
+        click.echo(format_verify_result(result))
     if not result.success:
         raise SystemExit(1)
 

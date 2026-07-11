@@ -6,8 +6,9 @@
 TRACKER_ISSUE_SCRIPT ?= $(TRK_WARN_SCRIPT)
 # Deprecated alias — remove after docker repo renames the script
 TRK_WARN_SCRIPT ?= $(HOME)/dev/sys/docker/gluetun_qbit/rtorrent_vpn/bin/rt-tracker-manual-report.py
-HASHALL_CLI := python3 -m hashall.cli
-REHOME_CLI := python3 -m rehome.cli
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+HASHALL_CLI := $(PYTHON) -m hashall.cli
+REHOME_CLI := $(PYTHON) -m rehome.cli
 CATALOG ?= $(HOME)/.hashall/catalog.db
 
 # Gate: abort if hashall editable install does not point to current worktree
@@ -211,7 +212,16 @@ client-drift-verify-layout-scan:
 	@$(HASHALL_CLI) client-drift verify-layout-scan $$([ -n "$${ZERO:-}" ] && echo "--zero-progress-only") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
 
 client-drift-verify-pieces:
-	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; $(HASHALL_CLI) client-drift verify-pieces "$${HASH}"
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; \
+	set --; \
+	[ -n "$${BASE_DIR:-}" ] && set -- "$$@" --base-dir "$${BASE_DIR}"; \
+	[ -n "$${PAYLOAD_ROOT:-}" ] && set -- "$$@" --payload-root "$${PAYLOAD_ROOT}"; \
+	[ -n "$${QUARANTINE_ROOT:-}" ] && set -- "$$@" --quarantine-root "$${QUARANTINE_ROOT}"; \
+	[ -n "$${TORRENT_FILE:-}" ] && set -- "$$@" --torrent-file "$${TORRENT_FILE}"; \
+	[ "$${SHOW:-0}" = "1" ] && set -- "$$@" --show-failed-pieces; \
+	[ "$${MAP:-0}" = "1" ] && set -- "$$@" --map-failed-pieces-to-files; \
+	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
+	$(HASHALL_CLI) client-drift verify-pieces "$${HASH}" "$$@"
 
 rt-repoint-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}"
