@@ -20,14 +20,38 @@ def load_module():
     return module
 
 
-def write_single_torrent(path: Path, name: str, size: int) -> None:
+def write_single_torrent(path: Path, name: str, size: int, *, announce: str = "") -> None:
     info = {
         b"name": name.encode("utf-8"),
         b"length": size,
         b"piece length": 4,
         b"pieces": b"\x00" * 20,
     }
-    path.write_bytes(bencode_encode({b"info": info}))
+    payload = {b"info": info}
+    if announce:
+        payload[b"announce"] = announce.encode("utf-8")
+        payload[b"announce-list"] = [[announce.encode("utf-8")]]
+    path.write_bytes(bencode_encode(payload))
+
+
+def write_freeleech_proof(path: Path, indexer: str = "TorrentLeech") -> None:
+    path.write_text(
+        """
+{
+  "freeleech_proven": true,
+  "freeleech_hits": 1,
+  "freeleech": [
+    {
+      "indexer": "%s",
+      "freeleech": {"is_freeleech": true},
+      "proof_match": {"is_match": true}
+    }
+  ]
+}
+""".strip()
+        % indexer,
+        encoding="utf-8",
+    )
 
 
 def test_dry_run_reports_shared_inode_and_quarantine_path(tmp_path, monkeypatch):
@@ -223,6 +247,100 @@ def test_start_existing_split_blocks_shared_inode(tmp_path, monkeypatch):
 
     assert report["status"] == "blocked"
     assert report["blocked_reason"] == "payload_still_shared_inode"
+
+
+def test_start_existing_split_blocks_freeleech_proof_tracker_mismatch(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "0" * 40
+    session = tmp_path / "session"
+    save = tmp_path / "save"
+    session.mkdir()
+    save.mkdir()
+    write_single_torrent(
+        session / f"{h.upper()}.torrent",
+        "movie.mkv",
+        4,
+        announce="http://speed.connecting.center/passkey/announce",
+    )
+    payload = save / "movie.mkv"
+    payload.write_bytes(b"data")
+    proof = tmp_path / "proof.json"
+    write_freeleech_proof(proof, "TorrentLeech")
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(save))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        start_existing_split=True,
+        allow_start_download=True,
+        operator_download_approval=False,
+        freeleech_proof=str(proof),
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.start_existing_split(args, mod.build_report(args))
+
+    assert report["status"] == "blocked"
+    assert report["blocked_reason"] == "freeleech_proof_tracker_mismatch"
+    assert report["freeleech_tracker_match"]["proof_indexers"] == ["TorrentLeech"]
+    assert report["freeleech_tracker_match"]["tracker_hosts"] == ["speed.connecting.center"]
+
+
+def test_start_existing_split_allows_matching_freeleech_tracker(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "a0" * 20
+    session = tmp_path / "session"
+    save = tmp_path / "save"
+    session.mkdir()
+    save.mkdir()
+    write_single_torrent(
+        session / f"{h.upper()}.torrent",
+        "movie.mkv",
+        4,
+        announce="https://tracker.torrentleech.org/passkey/announce",
+    )
+    payload = save / "movie.mkv"
+    payload.write_bytes(b"data")
+    proof = tmp_path / "proof.json"
+    write_freeleech_proof(proof, "TorrentLeech")
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(save))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        start_existing_split=True,
+        allow_start_download=True,
+        operator_download_approval=False,
+        freeleech_proof=str(proof),
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.start_existing_split(args, mod.build_report(args))
+
+    assert report["status"] == "dry_run_ok"
+    assert report["freeleech_tracker_match"]["matched_indexer"] == "TorrentLeech"
 
 
 def test_placement_audit_media_library_member_requires_stash(tmp_path, monkeypatch):

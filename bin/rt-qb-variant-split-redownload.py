@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -31,7 +32,13 @@ from hashall.rtorrent import (
 
 
 SCRIPT_NAME = "rt-qb-variant-split-redownload.py"
-SEMVER = "0.2.0"
+SEMVER = "0.2.1"
+INDEXER_TRACKER_HOST_HINTS = {
+    "digitalcore": ("digitalcore",),
+    "speedcd": ("speed", "speedcd", "connecting.center"),
+    "torrentday": ("torrentday", "td-peers", "jumbohostpro"),
+    "torrentleech": ("torrentleech", "tleech"),
+}
 DEFAULT_PLACEMENT_SCAN_ROOTS = (
     "/data/media/torrents/seeding",
     "/stash/media/torrents/seeding",
@@ -168,10 +175,15 @@ def torrent_file_for(session_dir: Path, torrent_hash: str) -> Path:
     return session_dir / f"{key.upper()}.torrent"
 
 
-def load_torrent_info(torrent_file: Path) -> dict[bytes, Any]:
+def load_torrent_payload(torrent_file: Path) -> dict[bytes, Any]:
     payload = bencode_decode(torrent_file.read_bytes())
     if not isinstance(payload, dict) or not isinstance(payload.get(b"info"), dict):
         raise ValueError(f"invalid torrent metadata: {torrent_file}")
+    return payload
+
+
+def load_torrent_info(torrent_file: Path) -> dict[bytes, Any]:
+    payload = load_torrent_payload(torrent_file)
     return payload[b"info"]
 
 
@@ -193,6 +205,104 @@ def torrent_shape(info: dict[bytes, Any]) -> dict[str, Any]:
         return {"name": name, "is_multi_file": True, "files": rows, "size": total}
     size = int(info.get(b"length", 0) or 0)
     return {"name": name, "is_multi_file": False, "files": [{"relative_path": name, "size": size}], "size": size}
+
+
+def _flatten_tracker_urls(value: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "replace")
+        if text:
+            out.append(text)
+    elif isinstance(value, str):
+        if value:
+            out.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            out.extend(_flatten_tracker_urls(item))
+    return out
+
+
+def torrent_tracker_urls(torrent_file: Path) -> list[str]:
+    payload = load_torrent_payload(torrent_file)
+    urls = _flatten_tracker_urls(payload.get(b"announce"))
+    urls.extend(_flatten_tracker_urls(payload.get(b"announce-list")))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for url in urls:
+        if url not in seen:
+            deduped.append(url)
+            seen.add(url)
+    return deduped
+
+
+def _proof_indexer_key(name: str) -> str:
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def _tracker_hosts(urls: list[str]) -> list[str]:
+    hosts: list[str] = []
+    for url in urls:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if host:
+            hosts.append(host.lower())
+    return hosts
+
+
+def _freeleech_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    items = payload.get("freeleech")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    items = payload.get("all_hits")
+    if isinstance(items, list):
+        return [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and bool((item.get("freeleech") or {}).get("is_freeleech"))
+            and bool((item.get("proof_match") or {}).get("is_match"))
+        ]
+    return []
+
+
+def validate_freeleech_proof_matches_trackers(
+    path_text: str,
+    tracker_urls: list[str],
+) -> tuple[bool, str, dict[str, Any]]:
+    path = Path(path_text).expanduser()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    hosts = _tracker_hosts(tracker_urls)
+    proof_indexers = sorted(
+        {
+            str(item.get("indexer") or "")
+            for item in _freeleech_items(payload)
+            if item.get("indexer")
+        }
+    )
+    diagnostics = {
+        "proof_path": str(path),
+        "proof_indexers": proof_indexers,
+        "tracker_urls": tracker_urls,
+        "tracker_hosts": hosts,
+    }
+    unmapped: list[str] = []
+    saw_mapped = False
+    for indexer in proof_indexers:
+        key = _proof_indexer_key(indexer)
+        hints = INDEXER_TRACKER_HOST_HINTS.get(key)
+        if not hints:
+            unmapped.append(indexer)
+            continue
+        saw_mapped = True
+        if any(any(hint in host for hint in hints) for host in hosts):
+            diagnostics["matched_indexer"] = indexer
+            diagnostics["matched_hints"] = list(hints)
+            return True, "ok", diagnostics
+    if unmapped:
+        diagnostics["unmapped_indexers"] = unmapped
+    if not saw_mapped and unmapped:
+        return False, f"freeleech_indexer_unmapped:{unmapped[0]}", diagnostics
+    return False, "freeleech_proof_tracker_mismatch", diagnostics
 
 
 def expected_payload_path(save_path: Path, shape: dict[str, Any]) -> Path:
@@ -425,6 +535,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     torrent_file = torrent_file_for(session_dir, torrent_hash)
     info = load_torrent_info(torrent_file)
     shape = torrent_shape(info)
+    tracker_urls = torrent_tracker_urls(torrent_file)
     live_dir = rt_get_torrent_directory(torrent_hash, rpc_url=args.rpc_url, timeout=args.timeout)
     target_raw = args.target or live_dir
     meta = load_rt_torrent_meta(session_dir, torrent_hash)
@@ -444,6 +555,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "allow_start_download": bool(args.allow_start_download),
         "torrent": {
             "torrent_file": str(torrent_file),
+            "tracker_urls": tracker_urls,
             **shape,
         },
         "pre_rt": {
@@ -510,6 +622,16 @@ def apply_report(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, 
 
 def start_existing_split(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, Any]:
     torrent_hash = report["hash"]
+    if args.allow_start_download and args.freeleech_proof:
+        ok, reason, diagnostics = validate_freeleech_proof_matches_trackers(
+            args.freeleech_proof,
+            list(report.get("torrent", {}).get("tracker_urls") or []),
+        )
+        report["freeleech_tracker_match"] = diagnostics
+        if not ok:
+            report["status"] = "blocked"
+            report["blocked_reason"] = reason
+            return report
     if not report["payload_stat"].get("exists"):
         report["status"] = "blocked"
         report["blocked_reason"] = "payload_path_missing"

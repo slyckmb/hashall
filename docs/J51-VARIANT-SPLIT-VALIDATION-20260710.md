@@ -231,3 +231,28 @@ Evidence:
 Current interpretation: the split/start path worked and the item is active, but
 it has not connected to a peer yet. Leave it active for now and recheck progress
 before starting another representative.
+
+## Tracker-Proof Mismatch Containment
+
+Dexter S07 `e36553b12dc1` was operator-approved using the strict TorrentLeech
+freeleech proof report. The first dry-run used an incorrect full hash and failed
+before mutation; rerunning with the approved prefix resolved the live RT hash
+`e36553b12dc118d8c52575a1d6711532882ae1c3`.
+
+The corrected dry-run and live start showed the payload was already split:
+existing payload files were isolated on `nlink=1` inodes, no nested RT session
+dirs were present, and the planned action was only `d.start`. The live start
+moved RT from `state=0` to `state=1`, but no bytes downloaded.
+
+Follow-up tracker inspection found the actual RT torrent announce URL was
+`speed.connecting.center`, while the proof report's usable proof was from
+TorrentLeech. River Monsters had the same class of mismatch: the proof summary
+identified TorrentLeech, while the live RT torrent used TorrentDay announces.
+Both active starts were stopped immediately while they still had `down_rate=0`,
+`peers_connected=0`, and unchanged `left_bytes`.
+
+Tooling fix: `rt-qb-variant-split-redownload.py` v0.2.1 now extracts tracker
+URLs from the RT `.torrent` file and blocks `--allow-start-download` with
+`--freeleech-proof` unless the proof indexer matches the actual torrent tracker
+host. Regression tests cover the SpeedCD-vs-TorrentLeech mismatch. Re-running
+the Dexter S07 dry-run now blocks with `freeleech_proof_tracker_mismatch`.
