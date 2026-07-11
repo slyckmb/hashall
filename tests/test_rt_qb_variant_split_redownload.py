@@ -343,6 +343,52 @@ def test_start_existing_split_allows_matching_freeleech_tracker(tmp_path, monkey
     assert report["freeleech_tracker_match"]["matched_indexer"] == "TorrentLeech"
 
 
+def test_start_existing_split_allows_digitalcore_api_indexer_alias(tmp_path, monkeypatch):
+    mod = load_module()
+    h = "b0" * 20
+    session = tmp_path / "session"
+    save = tmp_path / "save"
+    session.mkdir()
+    save.mkdir()
+    write_single_torrent(
+        session / f"{h.upper()}.torrent",
+        "movie.mkv",
+        4,
+        announce="https://tracker.digitalcore.club/announce/passkey",
+    )
+    payload = save / "movie.mkv"
+    payload.write_bytes(b"data")
+    proof = tmp_path / "proof.json"
+    write_freeleech_proof(proof, "DigitalCore (API)")
+
+    monkeypatch.setattr(mod, "rt_get_torrent_directory", lambda *a, **k: str(save))
+    monkeypatch.setattr(mod, "load_rt_torrent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "load_rt_session_directories", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "rt_scalar", lambda method, *a, **k: "0")
+
+    args = Namespace(
+        hash=h,
+        target="",
+        session_dir=str(session),
+        rpc_url="http://rt/",
+        timeout=1,
+        poll_secs=0,
+        dry_run=True,
+        apply=False,
+        start_existing_split=True,
+        allow_start_download=True,
+        operator_download_approval=False,
+        freeleech_proof=str(proof),
+        quarantine_suffix=".invalid-for-test",
+        report_json="",
+    )
+
+    report = mod.start_existing_split(args, mod.build_report(args))
+
+    assert report["status"] == "dry_run_ok"
+    assert report["freeleech_tracker_match"]["matched_indexer"] == "DigitalCore (API)"
+
+
 def test_placement_audit_media_library_member_requires_stash(tmp_path, monkeypatch):
     mod = load_module()
     h = "1" * 40

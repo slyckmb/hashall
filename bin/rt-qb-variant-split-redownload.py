@@ -239,6 +239,17 @@ def _proof_indexer_key(name: str) -> str:
     return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
+def _tracker_hints_for_indexer(indexer: str) -> tuple[str, tuple[str, ...]] | tuple[None, None]:
+    key = _proof_indexer_key(indexer)
+    hints = INDEXER_TRACKER_HOST_HINTS.get(key)
+    if hints:
+        return key, hints
+    for known_key, known_hints in INDEXER_TRACKER_HOST_HINTS.items():
+        if key.startswith(known_key):
+            return known_key, known_hints
+    return None, None
+
+
 def _tracker_hosts(urls: list[str]) -> list[str]:
     hosts: list[str] = []
     for url in urls:
@@ -288,8 +299,7 @@ def validate_freeleech_proof_matches_trackers(
     unmapped: list[str] = []
     saw_mapped = False
     for indexer in proof_indexers:
-        key = _proof_indexer_key(indexer)
-        hints = INDEXER_TRACKER_HOST_HINTS.get(key)
+        _key, hints = _tracker_hints_for_indexer(indexer)
         if not hints:
             unmapped.append(indexer)
             continue
