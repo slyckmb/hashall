@@ -293,3 +293,28 @@ title match:
 
 Current interpretation: this is now a valid freeleech wait state, not a tool
 block. Leave River Monsters active and recheck later for byte progress.
+
+## Here Operator-Approved Live Start
+
+The operator explicitly approved starting Here `c5a827e36ebb` even though the
+PrivateHD hit was not freeleech. Guard evidence:
+
+- Exact PrivateHD title/size hit with 31 seeders:
+  `.agent/reports/j51-tracker-matched-source-scan-20260710/c5a827e36ebb-privatehd-strict.json`.
+- Dry-run:
+  `.agent/reports/j51-tracker-matched-source-scan-20260710/c5a827e36ebb-start-existing-dryrun-operator-approved.json`.
+- Live report:
+  `.agent/reports/j51-tracker-matched-source-scan-20260710/c5a827e36ebb-start-existing-live-operator-approved.json`.
+- Payload was already isolated: single file, `nlink=1`, no nested RT session dirs.
+- RT downloaded the remaining data and reached `complete=1 left=0`.
+- Independent offline piece verification against the RT `.torrent` passed:
+  `6384/6384` pieces OK.
+- qB force-recheck then moved from `stoppedDL`/99.984% to `stoppedUP`/100%.
+- Hash-scoped payload sync completed for both clients:
+  qB `processed=1 complete=1 incomplete=0 missing=0`; RT `processed=1
+  complete=1 incomplete=0 missing=0`; both skipped orphan prune.
+
+Process note: qB briefly stayed labelled `stoppedDL` while the recheck was
+actually advancing. Pausing immediately on a stale-looking `stoppedDL` state can
+interrupt a valid qB recheck. Future monitors should watch progress/amount-left
+movement before applying the "pause incomplete download" guard.
