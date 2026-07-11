@@ -256,3 +256,40 @@ URLs from the RT `.torrent` file and blocks `--allow-start-download` with
 `--freeleech-proof` unless the proof indexer matches the actual torrent tracker
 host. Regression tests cover the SpeedCD-vs-TorrentLeech mismatch. Re-running
 the Dexter S07 dry-run now blocks with `freeleech_proof_tracker_mismatch`.
+
+## Tracker-Matched Source Scan
+
+After OP-83, each remaining row was rescanned against the actual tracker in its
+RT `.torrent`, not just any matching title.
+
+| Hash | Actual RT tracker | Tracker-matched strict result | Seeders | Status |
+| --- | --- | --- | ---: | --- |
+| `127c38342cfe` | TorrentDay | exact title/size freeleech proof | 1 | live-started |
+| `245f2bce6afa` | SpeedCD | title match, size mismatch | 0 | blocked |
+| `e36553b12dc1` | SpeedCD | title match, size mismatch | 0 | blocked |
+| `96d896ca35f4` | DigitalCore | exact title/size freeleech proof | 0 | wait, no seeders |
+| `c5a827e36ebb` | PrivateHD | exact title/size hit, not freeleech | 31 | needs operator approval or freeleech proof |
+
+Reports are under
+`.agent/reports/j51-tracker-matched-source-scan-20260710/`.
+
+## River Monsters Tracker-Matched Live Start
+
+River Monsters `127c38342cfe` was re-authorized by tool evidence, not by broad
+title match:
+
+- Prowlarr report:
+  `.agent/reports/j51-tracker-matched-source-scan-20260710/127c38342cfe-torrentday-strict.json`.
+- Exact TorrentDay hit: title and size match, freeleech flag present, seeders=1.
+- Dry-run:
+  `.agent/reports/j51-tracker-matched-source-scan-20260710/127c38342cfe-start-existing-dryrun-tracker-matched.json`.
+- Live report:
+  `.agent/reports/j51-tracker-matched-source-scan-20260710/127c38342cfe-start-existing-live-tracker-matched.json`.
+- RT moved to `state=1` with tracker/proof match `TorrentDay`.
+- Short watch still showed `peers_connected=0`, `down_rate=0`, and unchanged
+  `left_bytes=21950408183`.
+- Tracker counters remain healthy enough to wait: focused TorrentDay tracker is
+  enabled/usable, scrape complete/incomplete is `1/1`, latest peer count is `1`.
+
+Current interpretation: this is now a valid freeleech wait state, not a tool
+block. Leave River Monsters active and recheck later for byte progress.
