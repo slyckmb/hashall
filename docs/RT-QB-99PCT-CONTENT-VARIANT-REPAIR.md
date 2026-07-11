@@ -136,12 +136,22 @@ Machine-readable report:
 make client-drift-verify-pieces HASH=<hash> PAYLOAD_ROOT="/path/to/payload-root" JSON=1
 ```
 
+Compare failed-piece byte ranges against another exact payload root:
+
+```bash
+make client-drift-verify-pieces HASH=<hash> \
+  QUARANTINE_ROOT="/path/to/bad-or-suspect-payload" \
+  COMPARE_ROOT="/path/to/known-good-or-candidate-payload" \
+  JSON=1
+```
+
 Interpretation:
 
 - `sidecar_only_missing`: repair or fetch the sidecar first; do not assume a
   media variant.
 - `sidecar_media_boundary_piece`: the failed piece spans a sidecar and media
-  bytes; treat it as ambiguous until the mapped byte ranges are inspected.
+  bytes; treat it as ambiguous until `COMPARE_ROOT` proves which byte range
+  differs.
 - `media_piece_mismatch`: the media file bytes do not match the torrent piece
   map; Plan B split/redownload is appropriate if no verified sibling source
   exists.
@@ -149,6 +159,15 @@ Interpretation:
   the mapped byte range; Plan B or a verified donor source is needed.
 - `layout_missing`: the expected tree is absent or the wrong root was supplied;
   fix the path/root before concluding content differs.
+- `comparison_classification=sidecar_only_diff`: the sidecar range differs but
+  the mapped media range matches the compare root; try sidecar repair first.
+- `comparison_classification=media_only_diff`: the mapped media range differs;
+  this is a real media-byte variant or corruption, not a sidecar-only issue.
+- `comparison_classification=sidecar_and_media_diff`: both ranges differ; a
+  fresh tracker-approved payload is needed before reusing either set of bytes.
+- `comparison_classification=no_span_diff`: the compared roots have identical
+  bytes in the failed ranges; the compare root is not a useful known-good proof
+  for this target torrent.
 
 After a split, the live target may contain zero-byte placeholder files. In that
 case, use `--quarantine-root` or `QUARANTINE_ROOT=...` to inspect the old bytes

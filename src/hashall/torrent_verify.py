@@ -34,6 +34,26 @@ class PieceFileSpan:
 
 
 @dataclass
+class SpanComparison:
+    rel_path: str
+    kind: str
+    file_offset_start: int
+    file_offset_end: int
+    primary_path: str
+    compare_path: str
+    primary_exists: bool
+    compare_exists: bool
+    primary_size: int | None
+    compare_size: int | None
+    primary_sha256: str | None
+    compare_sha256: str | None
+    verdict: str
+
+    def to_dict(self) -> dict:
+        return self.__dict__.copy()
+
+
+@dataclass
 class PieceDiagnostic:
     piece_index: int
     status: str
@@ -42,6 +62,8 @@ class PieceDiagnostic:
     byte_end: int
     spans: list[PieceFileSpan] = field(default_factory=list)
     missing_files: list[str] = field(default_factory=list)
+    span_comparisons: list[SpanComparison] = field(default_factory=list)
+    comparison_classification: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +74,8 @@ class PieceDiagnostic:
             "byte_end": self.byte_end,
             "spans": [span.__dict__ for span in self.spans],
             "missing_files": list(self.missing_files),
+            "span_comparisons": [span.to_dict() for span in self.span_comparisons],
+            "comparison_classification": self.comparison_classification,
         }
 
 
@@ -68,6 +92,7 @@ class TorrentVerifyResult:
     pieces_missing: int = 0   # piece spans a file that couldn't be opened
     files_missing: list[str] = field(default_factory=list)
     failed_pieces: list[PieceDiagnostic] = field(default_factory=list)
+    compare_root: str | None = None
 
     @property
     def success(self) -> bool:
@@ -157,6 +182,109 @@ def _path_for_entry(base_dir: Path, entry: TorrentFileEntry, *, content_root: Pa
     if len(parts) > 1:
         return content_root.joinpath(*parts[1:])
     return content_root
+
+
+def _path_for_rel_path(base_dir: Path, rel_path: str, *, content_root: Path | None) -> Path:
+    rel = Path(rel_path)
+    if content_root is None:
+        return base_dir / rel
+    parts = rel.parts
+    if len(parts) > 1:
+        return content_root.joinpath(*parts[1:])
+    return content_root
+
+
+def _hash_file_range(path: Path, start: int, end: int) -> tuple[str | None, bool, int | None, str | None]:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None, False, None, "missing"
+    if size < end:
+        return None, True, size, "truncated"
+    h = hashlib.sha256()
+    remaining = end - start
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            while remaining > 0:
+                chunk = fh.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    return None, True, size, "truncated"
+                h.update(chunk)
+                remaining -= len(chunk)
+    except OSError:
+        return None, True, size, "unreadable"
+    return h.hexdigest(), True, size, None
+
+
+def _compare_span(
+    span: PieceFileSpan,
+    base_dir: Path,
+    content_root: Path | None,
+    compare_root: Path,
+) -> SpanComparison:
+    primary_path = Path(span.abs_path)
+    compare_path = _path_for_rel_path(base_dir, span.rel_path, content_root=compare_root)
+    primary_sha, primary_exists, primary_size, primary_err = _hash_file_range(
+        primary_path, span.file_offset_start, span.file_offset_end
+    )
+    compare_sha, compare_exists, compare_size, compare_err = _hash_file_range(
+        compare_path, span.file_offset_start, span.file_offset_end
+    )
+    if primary_err and compare_err:
+        verdict = f"primary-{primary_err}_compare-{compare_err}"
+    elif primary_err:
+        verdict = f"primary-{primary_err}"
+    elif compare_err:
+        verdict = f"compare-{compare_err}"
+    elif primary_sha == compare_sha:
+        verdict = "same"
+    else:
+        verdict = "different"
+    return SpanComparison(
+        rel_path=span.rel_path,
+        kind=span.kind,
+        file_offset_start=span.file_offset_start,
+        file_offset_end=span.file_offset_end,
+        primary_path=str(primary_path),
+        compare_path=str(compare_path),
+        primary_exists=primary_exists,
+        compare_exists=compare_exists,
+        primary_size=primary_size,
+        compare_size=compare_size,
+        primary_sha256=primary_sha,
+        compare_sha256=compare_sha,
+        verdict=verdict,
+    )
+
+
+def _classify_comparisons(comparisons: list[SpanComparison]) -> str:
+    if not comparisons:
+        return "unresolved"
+    missing = [c for c in comparisons if c.verdict != "same" and "missing" in c.verdict]
+    truncated = [c for c in comparisons if c.verdict != "same" and "truncated" in c.verdict]
+    unreadable = [c for c in comparisons if c.verdict != "same" and "unreadable" in c.verdict]
+    diffs = [c for c in comparisons if c.verdict == "different"]
+    if not diffs and not missing and not truncated and not unreadable:
+        return "no_span_diff"
+    if missing and not diffs and not truncated and not unreadable:
+        return "missing_only"
+    if truncated and not diffs:
+        return "truncated_only"
+    if unreadable and not diffs:
+        return "unreadable_only"
+    diff_kinds = {c.kind for c in diffs}
+    if diff_kinds == {"sidecar"}:
+        return "sidecar_only_diff"
+    if diff_kinds == {"media"}:
+        return "media_only_diff"
+    if "sidecar" in diff_kinds and "media" in diff_kinds:
+        return "sidecar_and_media_diff"
+    if "media" in diff_kinds:
+        return "media_and_other_diff"
+    if "sidecar" in diff_kinds:
+        return "sidecar_and_other_diff"
+    return "non_media_diff"
 
 
 def _classify_piece(status: str, spans: list[PieceFileSpan]) -> str:
@@ -277,6 +405,7 @@ def verify_torrent_pieces(
     base_dir: Path,
     *,
     content_root: Path | None = None,
+    compare_root: Path | None = None,
     collect_piece_details: bool = False,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> TorrentVerifyResult:
@@ -315,6 +444,7 @@ def verify_torrent_pieces(
         piece_length=piece_length,
         piece_count=piece_count,
     )
+    result.compare_root = str(compare_root) if compare_root is not None else None
 
     all_missing: set[str] = set()
 
@@ -333,17 +463,24 @@ def verify_torrent_pieces(
                     all_missing.add(f)
                     result.files_missing.append(f)
             if collect_piece_details:
-                result.failed_pieces.append(
-                    PieceDiagnostic(
-                        piece_index=idx,
-                        status="missing",
-                        classification=_classify_piece("missing", spans),
-                        byte_start=byte_start,
-                        byte_end=byte_end,
-                        spans=spans,
-                        missing_files=list(dict.fromkeys(missing_files)),
-                    )
+                diagnostic = PieceDiagnostic(
+                    piece_index=idx,
+                    status="missing",
+                    classification=_classify_piece("missing", spans),
+                    byte_start=byte_start,
+                    byte_end=byte_end,
+                    spans=spans,
+                    missing_files=list(dict.fromkeys(missing_files)),
                 )
+                if compare_root is not None:
+                    diagnostic.span_comparisons = [
+                        _compare_span(span, base_dir, content_root, compare_root)
+                        for span in spans
+                    ]
+                    diagnostic.comparison_classification = _classify_comparisons(
+                        diagnostic.span_comparisons
+                    )
+                result.failed_pieces.append(diagnostic)
         else:
             actual = hashlib.sha1(piece_bytes).digest()
             if actual == expected:
@@ -351,16 +488,23 @@ def verify_torrent_pieces(
             else:
                 result.pieces_fail += 1
                 if collect_piece_details:
-                    result.failed_pieces.append(
-                        PieceDiagnostic(
-                            piece_index=idx,
-                            status="mismatch",
-                            classification=_classify_piece("mismatch", spans),
-                            byte_start=byte_start,
-                            byte_end=byte_end,
-                            spans=spans,
-                        )
+                    diagnostic = PieceDiagnostic(
+                        piece_index=idx,
+                        status="mismatch",
+                        classification=_classify_piece("mismatch", spans),
+                        byte_start=byte_start,
+                        byte_end=byte_end,
+                        spans=spans,
                     )
+                    if compare_root is not None:
+                        diagnostic.span_comparisons = [
+                            _compare_span(span, base_dir, content_root, compare_root)
+                            for span in spans
+                        ]
+                        diagnostic.comparison_classification = _classify_comparisons(
+                            diagnostic.span_comparisons
+                        )
+                    result.failed_pieces.append(diagnostic)
 
         if progress_cb:
             progress_cb(idx + 1, piece_count)
@@ -382,6 +526,7 @@ def result_to_dict(result: TorrentVerifyResult) -> dict:
         "pieces_missing": result.pieces_missing,
         "files_missing": list(result.files_missing),
         "failed_pieces": [piece.to_dict() for piece in result.failed_pieces],
+        "compare_root": result.compare_root,
     }
 
 
@@ -534,10 +679,19 @@ def format_verify_result(result: TorrentVerifyResult) -> str:
                 f"    piece={piece.piece_index} status={piece.status} "
                 f"class={piece.classification} bytes={piece.byte_start}-{piece.byte_end}"
             )
+            if piece.comparison_classification:
+                lines.append(f"      comparison={piece.comparison_classification}")
             for span in piece.spans:
                 lines.append(
                     f"      {span.kind} {span.rel_path} "
                     f"file_bytes={span.file_offset_start}-{span.file_offset_end} "
                     f"exists={span.exists} size={span.size}"
+                )
+            for comp in piece.span_comparisons:
+                lines.append(
+                    f"      compare {comp.kind} {comp.rel_path} "
+                    f"file_bytes={comp.file_offset_start}-{comp.file_offset_end} "
+                    f"verdict={comp.verdict} "
+                    f"primary_sha256={comp.primary_sha256} compare_sha256={comp.compare_sha256}"
                 )
     return "\n".join(lines)

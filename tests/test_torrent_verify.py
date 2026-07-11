@@ -95,6 +95,99 @@ def test_failed_piece_maps_to_sidecar_media_boundary(tmp_path: Path) -> None:
     assert {span.kind for span in result.failed_pieces[0].spans} == {"sidecar", "media"}
 
 
+def test_compare_root_classifies_sidecar_only_boundary_diff(tmp_path: Path) -> None:
+    torrent = tmp_path / "release.torrent"
+    write_multi_torrent(
+        torrent,
+        "release",
+        [("release.nfo", b"ab"), ("episode.mkv", b"cdef")],
+        piece_length=4,
+    )
+    bad = tmp_path / "bad"
+    good = tmp_path / "good"
+    bad.mkdir()
+    good.mkdir()
+    (bad / "release.nfo").write_bytes(b"XY")
+    (bad / "episode.mkv").write_bytes(b"cdef")
+    (good / "release.nfo").write_bytes(b"ab")
+    (good / "episode.mkv").write_bytes(b"cdef")
+
+    result = verify_torrent_pieces(
+        torrent,
+        bad.parent,
+        content_root=bad,
+        compare_root=good,
+        collect_piece_details=True,
+    )
+
+    assert not result.success
+    piece = result.failed_pieces[0]
+    assert piece.comparison_classification == "sidecar_only_diff"
+    verdicts = {c.kind: c.verdict for c in piece.span_comparisons}
+    assert verdicts == {"sidecar": "different", "media": "same"}
+
+
+def test_compare_root_classifies_media_only_boundary_diff(tmp_path: Path) -> None:
+    torrent = tmp_path / "release.torrent"
+    write_multi_torrent(
+        torrent,
+        "release",
+        [("release.nfo", b"ab"), ("episode.mkv", b"cdef")],
+        piece_length=4,
+    )
+    bad = tmp_path / "bad"
+    good = tmp_path / "good"
+    bad.mkdir()
+    good.mkdir()
+    (bad / "release.nfo").write_bytes(b"ab")
+    (bad / "episode.mkv").write_bytes(b"XYef")
+    (good / "release.nfo").write_bytes(b"ab")
+    (good / "episode.mkv").write_bytes(b"cdef")
+
+    result = verify_torrent_pieces(
+        torrent,
+        bad.parent,
+        content_root=bad,
+        compare_root=good,
+        collect_piece_details=True,
+    )
+
+    assert not result.success
+    piece = result.failed_pieces[0]
+    assert piece.comparison_classification == "media_only_diff"
+    verdicts = {c.kind: c.verdict for c in piece.span_comparisons}
+    assert verdicts == {"sidecar": "same", "media": "different"}
+
+
+def test_compare_root_classifies_sidecar_and_media_boundary_diff(tmp_path: Path) -> None:
+    torrent = tmp_path / "release.torrent"
+    write_multi_torrent(
+        torrent,
+        "release",
+        [("release.nfo", b"ab"), ("episode.mkv", b"cdef")],
+        piece_length=4,
+    )
+    bad = tmp_path / "bad"
+    good = tmp_path / "good"
+    bad.mkdir()
+    good.mkdir()
+    (bad / "release.nfo").write_bytes(b"XY")
+    (bad / "episode.mkv").write_bytes(b"ZWef")
+    (good / "release.nfo").write_bytes(b"ab")
+    (good / "episode.mkv").write_bytes(b"cdef")
+
+    result = verify_torrent_pieces(
+        torrent,
+        bad.parent,
+        content_root=bad,
+        compare_root=good,
+        collect_piece_details=True,
+    )
+
+    assert not result.success
+    assert result.failed_pieces[0].comparison_classification == "sidecar_and_media_diff"
+
+
 def test_content_root_verifies_split_payload_with_nonmatching_root_name(tmp_path: Path) -> None:
     torrent = tmp_path / "release.torrent"
     write_multi_torrent(
@@ -150,3 +243,46 @@ def test_cli_verify_pieces_json_maps_payload_root_without_qb(tmp_path: Path) -> 
     report = json.loads(result.output[result.output.find("{"):])
     assert report["pieces_fail"] == 1
     assert report["failed_pieces"][0]["classification"] == "sidecar_media_boundary_piece"
+
+
+def test_cli_verify_pieces_compare_root_reports_span_verdicts(tmp_path: Path) -> None:
+    torrent = tmp_path / "release.torrent"
+    write_multi_torrent(
+        torrent,
+        "release",
+        [("release.nfo", b"ab"), ("episode.mkv", b"cdef")],
+        piece_length=4,
+    )
+    bad = tmp_path / "bad"
+    good = tmp_path / "good"
+    bad.mkdir()
+    good.mkdir()
+    (bad / "release.nfo").write_bytes(b"ab")
+    (bad / "episode.mkv").write_bytes(b"XYef")
+    (good / "release.nfo").write_bytes(b"ab")
+    (good / "episode.mkv").write_bytes(b"cdef")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "client-drift",
+            "verify-pieces",
+            "abc123",
+            "--torrent-file",
+            str(torrent),
+            "--payload-root",
+            str(bad),
+            "--compare-root",
+            str(good),
+            "--json-output",
+        ],
+    )
+
+    assert result.exit_code == 1
+    report = json.loads(result.output[result.output.find("{"):])
+    piece = report["failed_pieces"][0]
+    assert piece["comparison_classification"] == "media_only_diff"
+    assert {c["kind"]: c["verdict"] for c in piece["span_comparisons"]} == {
+        "sidecar": "same",
+        "media": "different",
+    }

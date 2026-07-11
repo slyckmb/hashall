@@ -5102,6 +5102,7 @@ def client_drift_verify_layout_scan_cmd(qb_cache_file, rt_cache_file, rt_session
 @click.option("--base-dir", "base_dir_override", type=click.Path(file_okay=False), default=None, help="Override base directory (default: QB save_path converted to FS path).")
 @click.option("--payload-root", type=click.Path(file_okay=True), default=None, help="Verify against an exact payload root instead of base_dir/info_name.")
 @click.option("--quarantine-root", type=click.Path(file_okay=True), default=None, help="Alias for --payload-root when checking a .invalid-for-* tree.")
+@click.option("--compare-root", type=click.Path(file_okay=True), default=None, help="Exact payload root to compare failed-piece byte ranges against.")
 @click.option("--torrent-file", "torrent_file_override", type=click.Path(exists=True, dir_okay=False), default=None, help="Override .torrent file path (default: RT session dir).")
 @click.option("--show-failed-pieces", is_flag=True, help="Show failed/missing piece indexes and byte ranges.")
 @click.option("--map-failed-pieces-to-files", is_flag=True, help="Map failed/missing pieces to expected torrent files.")
@@ -5112,6 +5113,7 @@ def client_drift_verify_pieces_cmd(
     base_dir_override,
     payload_root,
     quarantine_root,
+    compare_root,
     torrent_file_override,
     show_failed_pieces,
     map_failed_pieces_to_files,
@@ -5190,6 +5192,8 @@ def client_drift_verify_pieces_cmd(
         click.echo(f"  base_dir:    {base_dir}")
         if content_root is not None:
             click.echo(f"  payload_root:{content_root}")
+        if compare_root:
+            click.echo(f"  compare_root:{compare_root}")
 
     def _progress(idx: int, total: int) -> None:
         if json_output:
@@ -5203,7 +5207,8 @@ def client_drift_verify_pieces_cmd(
             torrent_path,
             base_dir,
             content_root=content_root,
-            collect_piece_details=show_failed_pieces or map_failed_pieces_to_files or json_output,
+            compare_root=_Path(compare_root) if compare_root else None,
+            collect_piece_details=show_failed_pieces or map_failed_pieces_to_files or json_output or bool(compare_root),
             progress_cb=_progress,
         )
     except Exception as e:

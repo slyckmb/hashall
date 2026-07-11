@@ -217,6 +217,7 @@ client-drift-verify-pieces:
 	[ -n "$${BASE_DIR:-}" ] && set -- "$$@" --base-dir "$${BASE_DIR}"; \
 	[ -n "$${PAYLOAD_ROOT:-}" ] && set -- "$$@" --payload-root "$${PAYLOAD_ROOT}"; \
 	[ -n "$${QUARANTINE_ROOT:-}" ] && set -- "$$@" --quarantine-root "$${QUARANTINE_ROOT}"; \
+	[ -n "$${COMPARE_ROOT:-}" ] && set -- "$$@" --compare-root "$${COMPARE_ROOT}"; \
 	[ -n "$${TORRENT_FILE:-}" ] && set -- "$$@" --torrent-file "$${TORRENT_FILE}"; \
 	[ "$${SHOW:-0}" = "1" ] && set -- "$$@" --show-failed-pieces; \
 	[ "$${MAP:-0}" = "1" ] && set -- "$$@" --map-failed-pieces-to-files; \
