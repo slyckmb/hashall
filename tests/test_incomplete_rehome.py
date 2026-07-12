@@ -472,7 +472,7 @@ def test_incomplete_rehome_pilot_dryrun_emits_plan_c_sequences(tmp_path: Path) -
     assert pilot["status"] == "ready_for_live_approval"
     rt_operation = [op for op in pilot["operations"] if op["phase"] == "rt"][0]
     qb_operation = [op for op in pilot["operations"] if op["phase"] == "qb"][0]
-    assert rt_operation["xmlrpc_sequence"][-2:] == ["d.open", "d.start"]
+    assert rt_operation["xmlrpc_sequence"][-3:] == ["d.open", "d.check_hash", "d.start"]
     assert "set_location(resume_after=False)" in qb_operation["api_sequence"]
     assert qb_operation["api_sequence"][-1] == "pause_torrent"
 
