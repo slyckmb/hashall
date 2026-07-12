@@ -210,6 +210,68 @@ target torrents get per-tracker views hardlinked to the new verified variant.
 Do not delete the renamed invalid file/tree until the comparison is recorded
 and the healthy sibling has been rechecked or otherwise proven unaffected.
 
+## Repair Plan C: Expected-Incomplete Rehome
+
+Use this when the suspect payload is not complete for the failed torrent, but it
+is still the best known local byte set and should be parked in the correct
+canonical pool/stash location while waiting for seeds. This is the Dexter
+S02/S07 SpeedCD case: the source bytes fail exactly one piece, piece `0`,
+classified as `sidecar_media_boundary_piece`, with no missing files. That is an
+acceptable incomplete wait state, not a verified 100 percent repair.
+
+Plan C success is deliberately different from Plan A:
+
+- RT should point at the canonical target tree and be active/waiting or
+  stalled-DL after recheck/start.
+- qB should point at the matching passive save path and remain `stoppedDL`.
+- The offline piece result must still match the expected incomplete gate:
+  known failed piece(s), expected classification, and no surprise missing files.
+- No cleanup deletion happens until after copy/repoint/recheck verification and
+  explicit operator cleanup approval.
+
+Steps:
+
+1. Verify the source payload against the failed torrent with failed-piece
+   mapping enabled. For Dexter SpeedCD, the expected proof is one failed piece:
+   `piece_index=0`, `classification=sidecar_media_boundary_piece`,
+   `pieces_missing=0`.
+2. Build a source-inode manifest. It must list every same-inode catalog path,
+   protect live/media-library paths, and identify only repair/staging residue as
+   cleanup candidates.
+3. Build an incomplete-rehome dry-run plan. The plan must show:
+   source root(s), target root, target readiness, rsync argv, qB save path, RT
+   target directory, expected post-recheck states, and cleanup manifest summary.
+4. Build the pilot dry-run manifest from the plan. This is the final
+   pre-approval artifact: it restates current source/target stats, the copy
+   command, the RT/qB operation order, and the cleanup gate. It is not live
+   approval.
+5. Confirm qB save path is the parent save path for multi-file torrents. Do not
+   set qB save path equal to the payload root if that would make qB expect a
+   nested `<info_name>/<info_name>/...` tree.
+6. For the live pilot, copy the source bytes to the target with `rsync -aHAX`.
+   Zero-byte placeholder targets may be replaced; nonzero existing target files
+   block the plan.
+7. Repoint RT to the target payload directory, force recheck, and start only so
+   RT can wait for seeds. Do not require completion for Plan C.
+8. Repoint or patch qB to the parent save path, force recheck, and leave qB
+   stopped/passive.
+9. Re-run offline piece verification against the target tree and confirm it
+   still matches the expected incomplete gate.
+10. Build the post-pilot validation report from the live execute report, target
+    verify JSON, and qB/RT state snapshots. The report must be
+    `validated_ready_for_cleanup_approval` before cleanup is discussed.
+11. Run targeted DB sync/refresh for affected hashes.
+12. Only after the clients and offline verifier match the plan, ask for explicit
+    cleanup approval. Cleanup must remove stale repair/staging direntries, not
+    protected live sibling paths. Collapse `/data` and `/stash` aliases, but do
+    not collapse distinct stale hardlink locations such as `_qb-finish` and
+    `RecycleBin`; both must be removed if both are stale.
+
+Plan C is not a downloader. If the item has no seeds, it is allowed to remain
+in the expected incomplete waiting state after rehome. The goal is to make the
+client paths truthful and recoverable while preserving rollback evidence until
+cleanup is explicitly approved.
+
 ## E.T. Reference Pattern
 
 The E.T. repair is the reference case for this failure mode:
@@ -228,6 +290,9 @@ verified"; they did not.
 
 Use `bin/torrent-sibling-hardlink-repair.py` for Plan A and
 `bin/rt-qb-variant-split-redownload.py` for Plan B.
+
+Use `hashall client-drift source-inode-manifest` and
+`hashall client-drift incomplete-rehome-plan` for Plan C dry-runs.
 
 Single-file source:
 
@@ -257,6 +322,88 @@ Plan B split/redownload dry-run:
   --hash HASH \
   --report-json .agent/reports/<run>/HASH-split-dryrun.json
 ```
+
+Plan C source-inode manifest:
+
+```bash
+.venv/bin/python -m hashall.cli client-drift source-inode-manifest \
+  --source-root "/data/media/torrents/seeding/SpeedCD/Dexter.S02.720p.x265-ZMNT" \
+  --target-root "/pool/media/torrents/seeding/cross-seed/speedcd/Dexter.S02.720p.x265-ZMNT" \
+  --catalog ~/.hashall/catalog.db \
+  --output /tmp/HASH-source-inode-manifest.json
+```
+
+Plan C incomplete-rehome dry-run:
+
+```bash
+.venv/bin/python -m hashall.cli client-drift incomplete-rehome-plan HASH \
+  --source-root "/data/media/torrents/seeding/SpeedCD/Dexter.S02.720p.x265-ZMNT" \
+  --target-root "/pool/media/torrents/seeding/cross-seed/speedcd/Dexter.S02.720p.x265-ZMNT" \
+  --verify-json /tmp/HASH-verify-pieces.json \
+  --qb-save-path "/pool/media/torrents/seeding/cross-seed/speedcd" \
+  --rt-target-directory "/pool/media/torrents/seeding/cross-seed/speedcd/Dexter.S02.720p.x265-ZMNT" \
+  --catalog ~/.hashall/catalog.db \
+  --output /tmp/HASH-incomplete-rehome-plan.json
+```
+
+Plan C pilot operation dry-run:
+
+```bash
+.venv/bin/python -m hashall.cli client-drift incomplete-rehome-pilot-dry-run \
+  --plan /tmp/HASH-incomplete-rehome-plan.json \
+  --output /tmp/HASH-incomplete-rehome-pilot-dryrun.json
+```
+
+Equivalent Make target:
+
+```bash
+make client-drift-incomplete-rehome-pilot \
+  PLAN=/tmp/HASH-incomplete-rehome-plan.json \
+  OUTPUT=/tmp/HASH-incomplete-rehome-pilot-dryrun.json
+```
+
+Plan C guarded live pilot:
+
+```bash
+make client-drift-incomplete-rehome-execute \
+  PILOT=/tmp/HASH-incomplete-rehome-pilot-dryrun.json \
+  APPLY=1 \
+  APPROVAL="approve Plan C HASH no cleanup" \
+  OUTPUT=/tmp/HASH-incomplete-rehome-execute-live.json
+```
+
+The approval string must include `Plan C`, the target hash, and `no cleanup`.
+This command performs copy/repoint/recheck only. It does not delete stale source
+paths; cleanup remains a separate approval after verification.
+
+Plan C qB/RT state snapshots:
+
+```bash
+make client-drift-incomplete-rehome-snapshot \
+  HASH=HASH \
+  SIDE=qb \
+  OUTPUT=/tmp/HASH-qb-snapshot.json
+
+make client-drift-incomplete-rehome-snapshot \
+  HASH=HASH \
+  SIDE=rt \
+  OUTPUT=/tmp/HASH-rt-snapshot.json
+```
+
+Plan C post-pilot validation:
+
+```bash
+make client-drift-incomplete-rehome-post-validate \
+  EXECUTE_REPORT=/tmp/HASH-incomplete-rehome-execute-live.json \
+  TARGET_VERIFY_JSON=/tmp/HASH-target-verify-pieces.json \
+  QB_JSON=/tmp/HASH-qb-snapshot.json \
+  RT_JSON=/tmp/HASH-rt-snapshot.json \
+  OUTPUT=/tmp/HASH-post-pilot-validation.json
+```
+
+If `QB_JSON` or `RT_JSON` is omitted, the validator warns and still checks the
+execute report plus target piece gate. Cleanup approval should wait for both
+client snapshots.
 
 Plan B limited live pilot:
 

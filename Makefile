@@ -82,6 +82,12 @@ help:
 	@echo "  make client-drift-verify-layout HASH=<hash> — verify folder depth/layout against .torrent expected paths"
 	@echo "  make client-drift-verify-layout-scan — scan all torrents for layout depth mismatches (add ZERO=1 to filter 0% only)"
 	@echo "  make client-drift-verify-pieces HASH=<hash> — verify piece hashes from .torrent against data on disk"
+	@echo "  make client-drift-source-inode-manifest SOURCE_ROOT=<path> TARGET_ROOT=<path> — Plan C cleanup manifest"
+	@echo "  make client-drift-incomplete-rehome-plan HASH=<hash> SOURCE_ROOT=<path> TARGET_ROOT=<path> VERIFY_JSON=<path> QB_SAVE_PATH=<path> RT_TARGET=<path> — Plan C dry-run"
+	@echo "  make client-drift-incomplete-rehome-pilot PLAN=<path> — Plan C live-pilot operation dry-run"
+	@echo "  make client-drift-incomplete-rehome-execute PILOT=<path> — guarded Plan C execute dry-run (APPLY=1 APPROVAL=... for live)"
+	@echo "  make client-drift-incomplete-rehome-post-validate EXECUTE_REPORT=<path> TARGET_VERIFY_JSON=<path> — Plan C post-pilot validation"
+	@echo "  make client-drift-incomplete-rehome-snapshot HASH=<hash> SIDE=qb|rt — Plan C qB/RT cache snapshot"
 	@echo ""
 	@echo "  make hitchhiker-audit          — find N→1 payload groups and split safety"
 	@echo "  make hitchhiker-plan HASH=<hash>|PAYLOAD_ID=<id> — selected de-hitchhiker evidence"
@@ -223,6 +229,74 @@ client-drift-verify-pieces:
 	[ "$${MAP:-0}" = "1" ] && set -- "$$@" --map-failed-pieces-to-files; \
 	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
 	$(HASHALL_CLI) client-drift verify-pieces "$${HASH}" "$$@"
+
+client-drift-source-inode-manifest:
+	@[ -n "$${SOURCE_ROOT:-}" ] || { echo "SOURCE_ROOT is required"; exit 2; }; \
+	[ -n "$${TARGET_ROOT:-}" ] || { echo "TARGET_ROOT is required"; exit 2; }; \
+	set --; \
+	[ -n "$${OUTPUT:-}" ] && set -- "$$@" --output "$${OUTPUT}"; \
+	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
+	$(HASHALL_CLI) client-drift source-inode-manifest \
+		--source-root "$${SOURCE_ROOT}" \
+		--target-root "$${TARGET_ROOT}" \
+		--catalog "$${CATALOG:-$(CATALOG)}" "$$@"
+
+client-drift-incomplete-rehome-plan:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; \
+	[ -n "$${SOURCE_ROOT:-}" ] || { echo "SOURCE_ROOT is required"; exit 2; }; \
+	[ -n "$${TARGET_ROOT:-}" ] || { echo "TARGET_ROOT is required"; exit 2; }; \
+	[ -n "$${VERIFY_JSON:-}" ] || { echo "VERIFY_JSON is required"; exit 2; }; \
+	[ -n "$${QB_SAVE_PATH:-}" ] || { echo "QB_SAVE_PATH is required"; exit 2; }; \
+	[ -n "$${RT_TARGET:-}" ] || { echo "RT_TARGET is required"; exit 2; }; \
+	set --; \
+	[ -n "$${SOURCE_ROOT_2:-}" ] && set -- "$$@" --source-root "$${SOURCE_ROOT_2}"; \
+	[ -n "$${OUTPUT:-}" ] && set -- "$$@" --output "$${OUTPUT}"; \
+	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
+	$(HASHALL_CLI) client-drift incomplete-rehome-plan "$${HASH}" \
+		--source-root "$${SOURCE_ROOT}" "$$@" \
+		--target-root "$${TARGET_ROOT}" \
+		--verify-json "$${VERIFY_JSON}" \
+		--qb-save-path "$${QB_SAVE_PATH}" \
+		--rt-target-directory "$${RT_TARGET}" \
+		--catalog "$${CATALOG:-$(CATALOG)}"
+
+client-drift-incomplete-rehome-pilot:
+	@[ -n "$${PLAN:-}" ] || { echo "PLAN is required"; exit 2; }; \
+	set --; \
+	[ -n "$${OUTPUT:-}" ] && set -- "$$@" --output "$${OUTPUT}"; \
+	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
+	$(HASHALL_CLI) client-drift incomplete-rehome-pilot-dry-run --plan "$${PLAN}" "$$@"
+
+client-drift-incomplete-rehome-execute:
+	@[ -n "$${PILOT:-}" ] || { echo "PILOT is required"; exit 2; }; \
+	set --; \
+	[ -n "$${APPROVAL:-}" ] && set -- "$$@" --approval "$${APPROVAL}"; \
+	[ -n "$${OUTPUT:-}" ] && set -- "$$@" --output "$${OUTPUT}"; \
+	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
+	[ "$${APPLY:-0}" = "1" ] && set -- "$$@" --apply; \
+	$(HASHALL_CLI) client-drift incomplete-rehome-pilot-execute --pilot "$${PILOT}" "$$@"
+
+client-drift-incomplete-rehome-post-validate:
+	@[ -n "$${EXECUTE_REPORT:-}" ] || { echo "EXECUTE_REPORT is required"; exit 2; }; \
+	[ -n "$${TARGET_VERIFY_JSON:-}" ] || { echo "TARGET_VERIFY_JSON is required"; exit 2; }; \
+	set --; \
+	[ -n "$${QB_JSON:-}" ] && set -- "$$@" --qb-json "$${QB_JSON}"; \
+	[ -n "$${RT_JSON:-}" ] && set -- "$$@" --rt-json "$${RT_JSON}"; \
+	[ -n "$${OUTPUT:-}" ] && set -- "$$@" --output "$${OUTPUT}"; \
+	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
+	$(HASHALL_CLI) client-drift incomplete-rehome-post-validate \
+		--execute-report "$${EXECUTE_REPORT}" \
+		--target-verify-json "$${TARGET_VERIFY_JSON}" "$$@"
+
+client-drift-incomplete-rehome-snapshot:
+	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; \
+	[ -n "$${SIDE:-}" ] || { echo "SIDE is required: qb or rt"; exit 2; }; \
+	set --; \
+	[ -n "$${QB_CACHE_FILE:-}" ] && set -- "$$@" --qb-cache-file "$${QB_CACHE_FILE}"; \
+	[ -n "$${RT_CACHE_FILE:-}" ] && set -- "$$@" --rt-cache-file "$${RT_CACHE_FILE}"; \
+	[ -n "$${OUTPUT:-}" ] && set -- "$$@" --output "$${OUTPUT}"; \
+	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
+	$(HASHALL_CLI) client-drift incomplete-rehome-snapshot "$${HASH}" --side "$${SIDE}" "$$@"
 
 rt-repoint-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}"

@@ -5223,6 +5223,305 @@ def client_drift_verify_pieces_cmd(
         raise SystemExit(1)
 
 
+@client_drift.command("source-inode-manifest")
+@click.option("--source-root", "source_roots", multiple=True, required=True, type=click.Path(exists=True), help="Source payload root whose inodes should be tracked.")
+@click.option("--target-root", "target_roots", multiple=True, type=click.Path(), help="Target/root path that must not be cleaned.")
+@click.option("--library-root", "library_roots", multiple=True, help="Media/library root that protects matching inode paths.")
+@click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), default=str(DEFAULT_DB_PATH), show_default=True, help="Catalog DB used for inode reference lookup.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON manifest to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON manifest to stdout.")
+def client_drift_source_inode_manifest_cmd(
+    source_roots,
+    target_roots,
+    library_roots,
+    catalog_path,
+    output_path,
+    json_output,
+):
+    """Build a read-only source-inode cleanup manifest for surgical rehome work."""
+    from hashall.incomplete_rehome import (
+        DEFAULT_LIBRARY_ROOTS,
+        build_source_inode_manifest,
+        write_manifest,
+    )
+
+    manifest = build_source_inode_manifest(
+        source_roots=[Path(item).expanduser() for item in source_roots],
+        target_roots=[Path(item).expanduser() for item in target_roots],
+        library_roots=library_roots or DEFAULT_LIBRARY_ROOTS,
+        catalog_path=Path(catalog_path).expanduser() if catalog_path else None,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), manifest)
+
+    if json_output:
+        click.echo(json.dumps(manifest, indent=2, sort_keys=True))
+        return
+
+    summary = manifest["summary"]
+    click.echo("source inode manifest")
+    click.echo(f"  sources: {len(manifest['sources'])}")
+    click.echo(f"  source_files: {summary['source_files']}")
+    click.echo(f"  source_unique_inodes: {summary['source_unique_inodes']}")
+    click.echo(f"  catalog_matches: {summary['catalog_matches']}")
+    click.echo(f"  protected_or_live_paths: {summary['protected_or_live_paths']}")
+    click.echo(f"  cleanup_candidates_after_verify: {summary['cleanup_candidates_after_verify']}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-plan")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--source-root", "source_roots", multiple=True, required=True, type=click.Path(exists=True), help="Known 99.* source payload root. First root is the copy source.")
+@click.option("--target-root", required=True, type=click.Path(), help="Canonical pool payload/view root to prepare.")
+@click.option("--verify-json", "verify_json_path", type=click.Path(exists=True, dir_okay=False), help="JSON output from client-drift verify-pieces for the source root.")
+@click.option("--qb-save-path", default="", help="Expected qB save_path after rehome.")
+@click.option("--qb-expected-state", default="stoppedDL", show_default=True, help="Expected qB state after recheck.")
+@click.option("--rt-target-directory", default="", help="Expected RT d.directory target after rehome.")
+@click.option("--rt-expected-state", default="stalledDL", show_default=True, help="Expected RT state after recheck/start.")
+@click.option("--library-root", "library_roots", multiple=True, help="Media/library root that protects matching inode paths.")
+@click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), default=str(DEFAULT_DB_PATH), show_default=True, help="Catalog DB used for inode reference lookup.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON plan to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON plan to stdout.")
+def client_drift_incomplete_rehome_plan_cmd(
+    hash_val,
+    source_roots,
+    target_root,
+    verify_json_path,
+    qb_save_path,
+    qb_expected_state,
+    rt_target_directory,
+    rt_expected_state,
+    library_roots,
+    catalog_path,
+    output_path,
+    json_output,
+):
+    """Build a dry-run surgical plan for an expected-incomplete payload rehome."""
+    from hashall.incomplete_rehome import (
+        DEFAULT_LIBRARY_ROOTS,
+        build_incomplete_rehome_plan,
+        write_manifest,
+    )
+
+    verify_result = None
+    if verify_json_path:
+        verify_result = json.loads(Path(verify_json_path).expanduser().read_text(encoding="utf-8"))
+    plan = build_incomplete_rehome_plan(
+        torrent_hash=hash_val,
+        source_roots=[Path(item).expanduser() for item in source_roots],
+        target_root=Path(target_root).expanduser(),
+        catalog_path=Path(catalog_path).expanduser() if catalog_path else None,
+        verify_result=verify_result,
+        qb_save_path=qb_save_path,
+        qb_expected_state=qb_expected_state,
+        rt_target_directory=rt_target_directory,
+        rt_expected_state=rt_expected_state,
+        library_roots=library_roots or DEFAULT_LIBRARY_ROOTS,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), plan)
+
+    if json_output:
+        click.echo(json.dumps(plan, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome plan")
+    click.echo(f"  hash: {plan['hash'][:16]}")
+    click.echo(f"  status: {plan['status']}")
+    click.echo(f"  source_roots: {len(plan['source_roots'])}")
+    click.echo(f"  target_class: {plan['target']['class']}")
+    click.echo(f"  expected_incomplete_gate: {plan['expected_incomplete_gate']['ok']}")
+    click.echo(f"  cleanup_candidates_after_verify: {plan['cleanup_gate']['manifest_summary']['cleanup_candidates_after_verify']}")
+    if plan["blockers"]:
+        click.echo(f"  blockers: {', '.join(plan['blockers'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-pilot-dry-run")
+@click.option("--plan", "plan_path", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON plan from incomplete-rehome-plan.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON pilot dry-run to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON pilot dry-run to stdout.")
+def client_drift_incomplete_rehome_pilot_dry_run_cmd(plan_path, output_path, json_output):
+    """Build the non-mutating pilot operation manifest for a Plan C repair."""
+    from hashall.incomplete_rehome import build_incomplete_rehome_pilot_dryrun, write_manifest
+
+    plan = json.loads(Path(plan_path).expanduser().read_text(encoding="utf-8"))
+    pilot = build_incomplete_rehome_pilot_dryrun(plan=plan)
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), pilot)
+
+    if json_output:
+        click.echo(json.dumps(pilot, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome pilot dry-run")
+    click.echo(f"  hash: {pilot['hash'][:16]}")
+    click.echo(f"  status: {pilot['status']}")
+    click.echo(f"  source_roots: {len(pilot['current_sources'])}")
+    click.echo(f"  target_class: {pilot['current_target'].get('class')}")
+    click.echo(f"  operations: {len(pilot['operations'])}")
+    click.echo(f"  cleanup_delete_paths_after_verify: {len((pilot.get('cleanup_gate') or {}).get('delete_paths_after_verify') or [])}")
+    if pilot["blockers"]:
+        click.echo(f"  blockers: {', '.join(pilot['blockers'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-pilot-execute")
+@click.option("--pilot", "pilot_path", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON pilot dry-run manifest.")
+@click.option("--approval", default="", help="Required live approval string; must include 'Plan C', hash, and 'no cleanup'.")
+@click.option("--rt-rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON execution report to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON execution report to stdout.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually run copy/qB/RT operations. Default is dry-run.")
+def client_drift_incomplete_rehome_pilot_execute_cmd(
+    pilot_path,
+    approval,
+    rt_rpc_url,
+    output_path,
+    json_output,
+    do_apply,
+):
+    """Execute or preview a guarded Plan C pilot. Cleanup is never performed here."""
+    from hashall.incomplete_rehome import execute_incomplete_rehome_pilot, write_manifest
+
+    pilot = json.loads(Path(pilot_path).expanduser().read_text(encoding="utf-8"))
+    report = execute_incomplete_rehome_pilot(
+        pilot=pilot,
+        apply=bool(do_apply),
+        approval=approval,
+        rt_rpc_url=rt_rpc_url,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), report)
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome pilot execute")
+    click.echo(f"  hash: {report['hash'][:16]}")
+    click.echo(f"  mode: {report['mode']}")
+    click.echo(f"  status: {report['status']}")
+    click.echo(f"  events: {len(report.get('events') or [])}")
+    if report.get("blockers"):
+        click.echo(f"  blockers: {', '.join(report['blockers'])}")
+    if report.get("error"):
+        click.echo(f"  error: {report['error']}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-post-validate")
+@click.option("--execute-report", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON report from incomplete-rehome-pilot-execute.")
+@click.option("--target-verify-json", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON output from verify-pieces against the target tree after pilot.")
+@click.option("--qb-json", type=click.Path(exists=True, dir_okay=False), help="Optional qB snapshot JSON with state/save_path/progress/amount_left.")
+@click.option("--rt-json", type=click.Path(exists=True, dir_okay=False), help="Optional RT snapshot JSON with state/directory/complete/left_bytes.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON validation report to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON validation report to stdout.")
+def client_drift_incomplete_rehome_post_validate_cmd(
+    execute_report,
+    target_verify_json,
+    qb_json,
+    rt_json,
+    output_path,
+    json_output,
+):
+    """Validate a Plan C pilot after copy/repoint/recheck, before cleanup approval."""
+    from hashall.incomplete_rehome import validate_incomplete_rehome_post_pilot, write_manifest
+
+    execute_payload = json.loads(Path(execute_report).expanduser().read_text(encoding="utf-8"))
+    verify_payload = json.loads(Path(target_verify_json).expanduser().read_text(encoding="utf-8"))
+    qb_payload = json.loads(Path(qb_json).expanduser().read_text(encoding="utf-8")) if qb_json else None
+    rt_payload = json.loads(Path(rt_json).expanduser().read_text(encoding="utf-8")) if rt_json else None
+    report = validate_incomplete_rehome_post_pilot(
+        execute_report=execute_payload,
+        target_verify_result=verify_payload,
+        qb_snapshot=qb_payload,
+        rt_snapshot=rt_payload,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), report)
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome post-validate")
+    click.echo(f"  hash: {report['hash'][:16]}")
+    click.echo(f"  status: {report['status']}")
+    click.echo(f"  target_verify_gate: {report['target_verify_gate']['ok']}")
+    click.echo(f"  qb_snapshot: {report['qb_check']['provided']}")
+    click.echo(f"  rt_snapshot: {report['rt_check']['provided']}")
+    click.echo(f"  cleanup_delete_paths_after_verify: {len((report.get('cleanup_gate') or {}).get('delete_paths_after_verify') or [])}")
+    if report["blockers"]:
+        click.echo(f"  blockers: {', '.join(report['blockers'])}")
+    if report["warnings"]:
+        click.echo(f"  warnings: {', '.join(report['warnings'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-snapshot")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--side", type=click.Choice(["qb", "rt"]), required=True, help="Client cache to snapshot.")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON snapshot to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON snapshot to stdout.")
+def client_drift_incomplete_rehome_snapshot_cmd(
+    hash_val,
+    side,
+    qb_cache_file,
+    rt_cache_file,
+    output_path,
+    json_output,
+):
+    """Build a single-hash qB or RT cache snapshot for Plan C validation."""
+    from hashall.incomplete_rehome import (
+        build_qb_snapshot_from_cache,
+        build_rt_snapshot_from_cache,
+        write_manifest,
+    )
+
+    if side == "qb":
+        snapshot = build_qb_snapshot_from_cache(
+            torrent_hash=hash_val,
+            cache_file=Path(qb_cache_file).expanduser(),
+        )
+    else:
+        snapshot = build_rt_snapshot_from_cache(
+            torrent_hash=hash_val,
+            cache_file=Path(rt_cache_file).expanduser(),
+        )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), snapshot)
+
+    if json_output:
+        click.echo(json.dumps(snapshot, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome snapshot")
+    click.echo(f"  side: {snapshot['side']}")
+    click.echo(f"  hash: {snapshot['hash'][:16]}")
+    click.echo(f"  status: {snapshot['status']}")
+    click.echo(f"  state: {snapshot.get('state', '')}")
+    if snapshot["side"] == "qb":
+        click.echo(f"  save_path: {snapshot.get('save_path', '')}")
+        click.echo(f"  content_path: {snapshot.get('content_path', '')}")
+        click.echo(f"  amount_left: {snapshot.get('amount_left', '')}")
+    else:
+        click.echo(f"  directory: {snapshot.get('directory', '')}")
+        click.echo(f"  complete: {snapshot.get('complete', '')}")
+        click.echo(f"  left_bytes: {snapshot.get('left_bytes', '')}")
+    if snapshot.get("blockers"):
+        click.echo(f"  blockers: {', '.join(snapshot['blockers'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
 @cli.group("rt-qb-mirror")
 def rt_qb_mirror():
     """Mirror complete RT additions into qB as stopped torrents."""
