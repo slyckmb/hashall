@@ -763,7 +763,6 @@ def execute_incomplete_rehome_pilot(
                 )
                 # Existing rt_recheck_torrent only starts when complete; Plan C must
                 # explicitly start so the incomplete torrent can wait for seeds.
-                rt_start_func("d.open", torrent_hash, rpc_url=rt_rpc_url, timeout=60)
                 rt_start_func("d.check_hash", torrent_hash, rpc_url=rt_rpc_url, timeout=60)
                 rt_start_func("d.start", torrent_hash, rpc_url=rt_rpc_url, timeout=60)
                 events.append({"phase": phase, "status": "ok", "target_directory": target_directory})

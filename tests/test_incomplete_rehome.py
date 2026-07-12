@@ -637,6 +637,7 @@ def test_incomplete_rehome_pilot_execute_mocked_apply_sequence(tmp_path: Path) -
     assert report["status"] == "applied_no_cleanup"
     assert run_calls
     assert rt_calls[0][0] == "repoint"
+    assert [call[1][0] for call in rt_calls[1:]] == ["d.check_hash", "d.start"]
     assert [call[0] for call in fake_qbit.calls] == ["pause", "set_location", "recheck", "pause"]
     assert fake_qbit.calls[1][-1] is False
 
