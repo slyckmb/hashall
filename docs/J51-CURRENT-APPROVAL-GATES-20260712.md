@@ -245,6 +245,22 @@ These 7 hashes are intentionally excluded from the verified-safe qB conversion b
 | `96d896ca35f4` | Transformers.Rise.of.the.Beasts.2023.1080p.BluRay.x265.10bit.TrueHD.7.1.Atmos-TORRENTLEECHENC0DE | RT cache currently `stalledDL`; targeted DB-root verify proved partial, class D, ratio `0.9999070414299701`; report `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-transformers-dbroot-verify-20260712.json` | Do not convert to `stoppedUP`; continue variant/replacement handling. |
 | `e36553b12dc1` | Dexter.S07.720p.x265-ZMNT | RT cache currently `stalledDL`; targeted DB-root verify proved partial, class D, ratio `0.9996357743303342`; report `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-dexter-s07-dbroot-verify-20260712.json` | Do not convert to `stoppedUP`; source cleanup remains blocked by a live TorrentLeech client reference. |
 
+### Partial Wait-State Refresh - 2026-07-13
+
+Read-only refresh on 2026-07-13 confirmed the four partial rows are already split/isolated and mechanically startable in RT, but they are not verified-complete payloads. They must remain `stoppedDL`/`stalledDL` wait-state rows until tracker peers provide the missing pieces or a separately approved replacement path is chosen.
+
+| Hash | Tracker | RT state | Seeds | Peers | Missing/left bytes | Current action |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| `127c38342cfe` | TorrentDay | `stalledDL` | 0 | 0 | 16 MiB | Wait; tracker announces are working, no peers now. |
+| `245f2bce6afa` | SpeedCD | `stalledDL` | 0 | 0 | 2 MiB | Wait or separately approve SpeedCD Plan B; do not convert to `stoppedUP`. |
+| `96d896ca35f4` | DigitalCore | `stalledDL` | 0 | 0 | 1.96 MiB | Wait; tracker announces are working, no peers now. |
+| `e36553b12dc1` | SpeedCD | `stalledDL` | 0 | 0 | 2 MiB | Wait or separately approve SpeedCD Plan B; do not convert to `stoppedUP`. |
+
+Artifacts:
+
+- qB refresh: `/tmp/qb-stoppeddl-bucket-live/reports/j51-refresh-stoppeddl-peercheck-20260713.json`
+- Current Plan B dry-runs: `.agent/reports/j51-partial4-current-20260713/`
+
 ## Important Tracking Note
 
 Commit `b1d9eb5` added the guarded source-cleanup executor and has the expected j51-t22 trailers, but `chatrap ack commit HEAD` reports `s05_direct_cr_commit=FAIL` because this long-running session is committing on the CR branch instead of a job worktree.
