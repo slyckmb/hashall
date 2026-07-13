@@ -1,6 +1,6 @@
 # QUICKSTART - hashall-20260626-151456
 
-Updated: 2026-07-05
+Updated: 2026-07-13 16:29:30
 Model tier: small
 Agent: codex
 
@@ -33,9 +33,9 @@ repair. j51 read-only refresh/bucket/drain planning may continue.
 
 ## Next Work
 
-(see JOB-QUEUE.md)
+(no jobs.json found)
 
-See JOB-QUEUE.md for full task breakdown.
+See `chatrap lead status` for current job state.
 
 ## Open OPs (summary)
 
