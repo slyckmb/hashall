@@ -67,9 +67,9 @@ bin/qb-stoppeddl-apply.py \
 
 Expected post-apply result: the refresh should show roughly `7` active `stoppedDL` hashes, and the follow-up dry-run should skip the 157 hashes by live state or otherwise plan `0` new actions.
 
-## Approval Gate 2: Reclaim Dexter S02 Old Source Root
+## Applied Gate 2: Reclaim Dexter S02 Old Source Root
 
-The guarded Plan C cleanup executor previews Dexter S02 source cleanup as ready, but live deletion still requires explicit operator approval.
+The guarded Plan C cleanup executor previewed Dexter S02 source cleanup as ready. Operator approval was received and live deletion completed successfully on 2026-07-13.
 
 Evidence:
 
@@ -81,25 +81,33 @@ Evidence:
 - Filesystem check: `13` files, `8339890797` bytes, `min_nlink=1`, `max_nlink=1`, `non_nlink1=0`
 - Safety state: no exact qB/RT client hits, no library hits, no dry-run blockers
 
-Required approval text:
+Approved text:
 
 ```text
 approve Plan C source cleanup delete 245f2bce6afa /data/media/torrents/seeding/SpeedCD/Dexter.S02.720p.x265-ZMNT
 ```
 
-Execution command after approval:
+Executed command:
 
 ```bash
 .venv/bin/python -m hashall.cli client-drift incomplete-rehome-source-cleanup-execute \
   --dry-run-report /tmp/hashall-j51-dexter-s02-source-cleanup-dryrun-refresh-20260712.json \
   --apply \
   --approval 'approve Plan C source cleanup delete 245f2bce6afa /data/media/torrents/seeding/SpeedCD/Dexter.S02.720p.x265-ZMNT' \
-  --output /tmp/hashall-j51-dexter-s02-source-cleanup-execute-live-20260712.json
+  --output /tmp/hashall-j51-dexter-s02-source-cleanup-execute-live-20260713.json
 ```
 
-## Approval Gate 3: qB Retarget All 3 Verified Hard-Tail Items
+Live result:
 
-The three RT-complete/qB-stoppedDL hard-tail rows now all have independent class-A byte proof and a combined dry-run. This is the preferred live gate over applying the three individual gates separately.
+- Execute report: `/tmp/hashall-j51-dexter-s02-source-cleanup-execute-live-20260713.json`
+- Status: `deleted`
+- Deleted root: `/data/media/torrents/seeding/SpeedCD/Dexter.S02.720p.x265-ZMNT`
+- Deleted files: 13
+- Reclaimed bytes: 8339890797
+
+## Applied Gate 3: qB Retarget All 3 Verified Hard-Tail Items
+
+The three RT-complete/qB-stoppedDL hard-tail rows all had independent class-A byte proof and a combined dry-run. Operator approval was received and live fastresume retarget completed successfully on 2026-07-13.
 
 Included hashes:
 
@@ -114,13 +122,13 @@ Evidence:
 - Combined apply dry-run: `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-verified3-apply-dryrun-20260713.json`
 - Dry-run state: `planned=3`, `fr_needed=3`, `same_filesystem_overridden=3`, `blocked=0`, `root_policy_rejected=0`
 
-Required approval text:
+Approved text:
 
 ```text
 approve j51 live fastresume retarget verified hard-tail 3 hashes from /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-verified3-combined-drain-20260713.json using --allow-verified-fastresume-cross-filesystem
 ```
 
-Execution command after approval:
+Executed command:
 
 ```bash
 bin/qb-stoppeddl-apply.py \
@@ -133,6 +141,15 @@ bin/qb-stoppeddl-apply.py \
   --report-json /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-verified3-apply-live-20260713.json \
   --rollback-ledger /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-verified3-rollback-ledger-20260713.jsonl
 ```
+
+Live result:
+
+- Live report: `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-verified3-apply-live-20260713.json`
+- Rollback ledger: `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-verified3-rollback-ledger-20260713.jsonl`
+- Tool summary: `planned=3`, `applied=3`, `ok=2`, `failed=1`, `fr_patched=3`, `rollback_ledger_written=3`
+- The one failed row was a post-check timeout while Nintendo was still actively checking. A focused monitor confirmed Nintendo later completed as `stoppedUP`.
+- Final states: Yu-Gi-Oh, Supernatural, and Nintendo are all `stoppedUP`, progress `1.0`, amount left `0`, save path `/pool/media/torrents/seeding`.
+- qB stoppedDL tail after this batch: 4.
 
 ## Approval Gate 4: qB Retarget Yu-Gi-Oh Verified Hard-Tail Item
 
@@ -231,17 +248,17 @@ bin/qb-stoppeddl-apply.py \
   --rollback-ledger /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-nintendo-rollback-ledger-20260713.jsonl
 ```
 
-## Excluded Hard-Tail Items
+## Current Hard-Tail Items
 
-These 7 hashes are intentionally excluded from the verified-safe qB conversion batch.
+The original 7-hash hard-tail is reduced to 4 active qB `stoppedDL` rows. The three verified rows below are complete and retained for audit history; the four partial rows remain intentionally excluded from `stoppedUP` conversion.
 
 | Hash | Name | Current evidence | Next action |
 | --- | --- | --- | --- |
-| `09bceba1b43c` | Nintendo Gamecube Complete Collection - HardStyle | Full verifier now proves class A exact tree, verified `true`, ratio `1.0`; dry-run requires one fastresume retarget | Ready for explicit live approval under Approval Gate 6, or the combined Approval Gate 3. |
-| `09c5e08c31eb` | Supernatural S01-S15 web eac3 hevc-d3g | Full verifier now proves class A exact tree, verified `true`, ratio `1.0`; dry-run requires one fastresume retarget | Ready for explicit live approval under Approval Gate 5, or the combined Approval Gate 3. |
+| `09bceba1b43c` | Nintendo Gamecube Complete Collection - HardStyle | Full verifier proved class A exact tree, verified `true`, ratio `1.0`; live fastresume retarget completed after extended monitor | Complete: `stoppedUP`, progress `1.0`, amount left `0`. |
+| `09c5e08c31eb` | Supernatural S01-S15 web eac3 hevc-d3g | Full verifier proved class A exact tree, verified `true`, ratio `1.0`; live fastresume retarget completed | Complete: `stoppedUP`, progress `1.0`, amount left `0`. |
 | `127c38342cfe` | River Monsters S07 1080p AMZN WEB-DL DDP2 0 H 264-NTb | RT cache currently `stalledDL`; verified partial, class D, ratio `0.9992356763546204`; report `/tmp/qb-stoppeddl-bucket-live/reports/verify-127c38342cfedaf4016b8079be13c5f7883b9cfe-20260712-223627.json` | Leave as partial/no-seed or continue variant/replacement handling; do not convert to `stoppedUP`. |
-| `245f2bce6afa` | Dexter.S02.720p.x265-ZMNT | RT cache currently `stalledDL`; verified partial, class D, ratio `0.9997485396330664`; report `/tmp/qb-stoppeddl-bucket-live/reports/verify-245f2bce6afaf96b0a48ad216366c4281fdd864f-20260712-220009.json` | Do not convert to `stoppedUP`; source cleanup is separate from partial repair. |
-| `399f4c0bbb79` | Yu-Gi-Oh! Zexal Season 4 | Full verifier now proves class A exact tree, verified `true`, ratio `1.0`; dry-run requires one fastresume retarget | Ready for explicit live approval under Approval Gate 4, or the combined Approval Gate 3. |
+| `245f2bce6afa` | Dexter.S02.720p.x265-ZMNT | RT cache currently `stalledDL`; verified partial, class D, ratio `0.9997485396330664`; report `/tmp/qb-stoppeddl-bucket-live/reports/verify-245f2bce6afaf96b0a48ad216366c4281fdd864f-20260712-220009.json` | Do not convert to `stoppedUP`; old source cleanup is complete. |
+| `399f4c0bbb79` | Yu-Gi-Oh! Zexal Season 4 | Full verifier proved class A exact tree, verified `true`, ratio `1.0`; live fastresume retarget completed | Complete: `stoppedUP`, progress `1.0`, amount left `0`. |
 | `96d896ca35f4` | Transformers.Rise.of.the.Beasts.2023.1080p.BluRay.x265.10bit.TrueHD.7.1.Atmos-TORRENTLEECHENC0DE | RT cache currently `stalledDL`; targeted DB-root verify proved partial, class D, ratio `0.9999070414299701`; report `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-transformers-dbroot-verify-20260712.json` | Do not convert to `stoppedUP`; continue variant/replacement handling. |
 | `e36553b12dc1` | Dexter.S07.720p.x265-ZMNT | RT cache currently `stalledDL`; targeted DB-root verify proved partial, class D, ratio `0.9996357743303342`; report `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-dexter-s07-dbroot-verify-20260712.json` | Do not convert to `stoppedUP`; source cleanup remains blocked by a live TorrentLeech client reference. |
 
