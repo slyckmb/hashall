@@ -162,13 +162,45 @@ bin/qb-stoppeddl-apply.py \
   --rollback-ledger /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-supernatural-rollback-ledger-20260713.jsonl
 ```
 
+## Approval Gate 5: qB Retarget Nintendo Verified Hard-Tail Item
+
+Nintendo was previously excluded because the earlier verifier timed out at 19.6% after 900 seconds. A targeted full verifier on 2026-07-13 proved the pool payload is complete and byte-correct.
+
+Evidence:
+
+- Apply-compatible drain report: `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-nintendo-drain-verified-crossfs-20260713.json`
+- Apply dry-run: `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-nintendo-apply-dryrun-20260713.json`
+- Verification result: class A, exact tree, verified `true`, ratio `1.0`
+- Recommended path: `/pool/media/torrents/seeding/Nintendo Gamecube Complete Collection - HardStyle`
+- Dry-run state: `planned=1`, `fr_needed=1`, `same_filesystem_overridden=1`, `blocked=0`, `root_policy_rejected=0`
+
+Required approval text:
+
+```text
+approve j51 live fastresume retarget Nintendo 09bceba1b43c using verified class-A drain report /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-nintendo-drain-verified-crossfs-20260713.json with --allow-verified-fastresume-cross-filesystem
+```
+
+Execution command after approval:
+
+```bash
+bin/qb-stoppeddl-apply.py \
+  --bucket-dir /tmp/qb-stoppeddl-bucket-live \
+  --drain-report /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-nintendo-drain-verified-crossfs-20260713.json \
+  --hashes-file /tmp/qb-stoppeddl-bucket-live/reports/j51-nintendo-verify-hash.txt \
+  --allow-verified-fastresume-cross-filesystem \
+  --apply \
+  --wait-recheck \
+  --report-json /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-nintendo-apply-live-20260713.json \
+  --rollback-ledger /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-nintendo-rollback-ledger-20260713.jsonl
+```
+
 ## Excluded Hard-Tail Items
 
 These 7 hashes are intentionally excluded from the verified-safe qB conversion batch.
 
 | Hash | Name | Current evidence | Next action |
 | --- | --- | --- | --- |
-| `09bceba1b43c` | Nintendo Gamecube Complete Collection - HardStyle | RT cache currently `stalledUP` on pool path; quick tree/size match is perfect; full verifier timed out at 19.6% after 900s, so independent byte proof is incomplete | Do not retarget without either a full verifier pass or an explicit operator decision to trust RT complete state plus qB recheck. |
+| `09bceba1b43c` | Nintendo Gamecube Complete Collection - HardStyle | Full verifier now proves class A exact tree, verified `true`, ratio `1.0`; dry-run requires one fastresume retarget | Ready for explicit live approval under Approval Gate 5. |
 | `09c5e08c31eb` | Supernatural S01-S15 web eac3 hevc-d3g | Full verifier now proves class A exact tree, verified `true`, ratio `1.0`; dry-run requires one fastresume retarget | Ready for explicit live approval under Approval Gate 4. |
 | `127c38342cfe` | River Monsters S07 1080p AMZN WEB-DL DDP2 0 H 264-NTb | RT cache currently `stalledDL`; verified partial, class D, ratio `0.9992356763546204`; report `/tmp/qb-stoppeddl-bucket-live/reports/verify-127c38342cfedaf4016b8079be13c5f7883b9cfe-20260712-223627.json` | Leave as partial/no-seed or continue variant/replacement handling; do not convert to `stoppedUP`. |
 | `245f2bce6afa` | Dexter.S02.720p.x265-ZMNT | RT cache currently `stalledDL`; verified partial, class D, ratio `0.9997485396330664`; report `/tmp/qb-stoppeddl-bucket-live/reports/verify-245f2bce6afaf96b0a48ad216366c4281fdd864f-20260712-220009.json` | Do not convert to `stoppedUP`; source cleanup is separate from partial repair. |
