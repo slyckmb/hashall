@@ -266,6 +266,15 @@ Steps:
     protected live sibling paths. Collapse `/data` and `/stash` aliases, but do
     not collapse distinct stale hardlink locations such as `_qb-finish` and
     `RecycleBin`; both must be removed if both are stale.
+13. Add a separate source-payload cleanup stage for space reclamation. This is
+    not the same approval as repair/staging cleanup. Source cleanup may delete
+    the original stash/data source tree only after a fresh client-reference scan
+    proves no qB or RT torrent still has that exact release root as its
+    `content_path`, `root_path`, or RT `save_path`, no media-library path anchors
+    the inode group, and the validated pool target remains intact. If another
+    tracker sibling still uses the old source root, block source cleanup for that
+    root until that sibling is rehomed, retired, or explicitly excluded by the
+    operator.
 
 Plan C is not a downloader. If the item has no seeds, it is allowed to remain
 in the expected incomplete waiting state after rehome. The goal is to make the
@@ -404,6 +413,31 @@ make client-drift-incomplete-rehome-post-validate \
 If `QB_JSON` or `RT_JSON` is omitted, the validator warns and still checks the
 execute report plus target piece gate. Cleanup approval should wait for both
 client snapshots.
+
+Plan C source-payload cleanup dry-run:
+
+```bash
+# 1. List exact client references before deleting any original source tree.
+# A source root is blocked if any qB content_path/root_path or RT save_path
+# exactly equals that release root.
+
+# 2. Delete only after the dry-run proves:
+# - post-pilot validation is validated_ready_for_cleanup_approval
+# - repair/staging cleanup has been planned or completed
+# - no qB/RT exact client reference remains on the old source root
+# - no media-library path anchors the inode group
+# - the pool target still verifies against the expected Plan C piece gate
+```
+
+For Dexter S02/S07, the intended sequence after Plan C validation is:
+
+- First cleanup: remove only stale repair/staging paths from `.rehome-cleanup-stage`,
+  `_qb-repair-v2`, `_qb-finish`, and `RecycleBin`.
+- Second cleanup: reclaim old source payloads when they are no longer exact
+  qB/RT roots. Dexter S02 SpeedCD source is eligible only if the fresh exact
+  client-reference scan remains empty. Dexter S07 must keep any source root still
+  used by the TorrentLeech sibling `288305f401ff...` until that sibling is moved
+  or intentionally retired.
 
 Plan B limited live pilot:
 
