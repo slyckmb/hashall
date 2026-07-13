@@ -5585,6 +5585,50 @@ def client_drift_incomplete_rehome_source_cleanup_dry_run_cmd(
         click.echo(f"  output: {Path(output_path).expanduser()}")
 
 
+@client_drift.command("incomplete-rehome-source-cleanup-execute")
+@click.option("--dry-run-report", "dryrun_path", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON source cleanup dry-run report.")
+@click.option("--approval", default="", help="Required live approval string; must include Plan C, source cleanup, delete, hash, and exact path.")
+@click.option("--cleanup-min-depth", default=4, show_default=True, type=int, help="Minimum absolute path depth allowed for deletion.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON execution report to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON execution report to stdout.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually delete approved source roots. Default is preview only.")
+def client_drift_incomplete_rehome_source_cleanup_execute_cmd(
+    dryrun_path,
+    approval,
+    cleanup_min_depth,
+    output_path,
+    json_output,
+    do_apply,
+):
+    """Execute or preview approved old source-payload cleanup after Plan C validation."""
+    from hashall.incomplete_rehome import execute_plan_c_source_cleanup, write_manifest
+
+    dryrun = json.loads(Path(dryrun_path).expanduser().read_text(encoding="utf-8"))
+    report = execute_plan_c_source_cleanup(
+        dryrun=dryrun,
+        apply=bool(do_apply),
+        approval=approval,
+        min_depth=int(cleanup_min_depth),
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), report)
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome source cleanup execute")
+    click.echo(f"  hash: {report['hash'][:16]}")
+    click.echo(f"  status: {report['status']}")
+    click.echo(f"  delete_roots: {len(report['delete_roots'])}")
+    if report["blockers"]:
+        click.echo(f"  blockers: {', '.join(report['blockers'])}")
+    if report.get("error"):
+        click.echo(f"  error: {report['error']}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
 @cli.group("rt-qb-mirror")
 def rt_qb_mirror():
     """Mirror complete RT additions into qB as stopped torrents."""

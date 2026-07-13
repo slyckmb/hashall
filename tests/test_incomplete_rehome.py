@@ -12,6 +12,7 @@ from hashall.incomplete_rehome import build_incomplete_rehome_pilot_dryrun
 from hashall.incomplete_rehome import build_plan_c_source_cleanup_dryrun
 from hashall.incomplete_rehome import build_qb_snapshot_from_cache
 from hashall.incomplete_rehome import build_rt_snapshot_from_cache
+from hashall.incomplete_rehome import execute_plan_c_source_cleanup
 from hashall.incomplete_rehome import execute_incomplete_rehome_pilot
 from hashall.incomplete_rehome import expected_incomplete_piece_gate
 from hashall.incomplete_rehome import validate_incomplete_rehome_post_pilot
@@ -920,3 +921,108 @@ def test_plan_c_source_cleanup_allows_unreferenced_source_root(tmp_path: Path) -
 
     assert report["status"] == "ready_for_source_cleanup_approval"
     assert report["roots"][0]["delete_root_after_approval"] == str(source)
+
+
+def test_plan_c_source_cleanup_execute_previews_without_mutation(tmp_path: Path) -> None:
+    source = tmp_path / "data" / "media" / "torrents" / "seeding" / "SpeedCD" / "Dexter.S02"
+    source.mkdir(parents=True)
+    (source / "episode.mkv").write_bytes(b"payload")
+    dryrun = {
+        "schema": "hashall.incomplete_rehome.source_cleanup_dryrun.v1",
+        "mode": "read_only",
+        "hash": "245f2bce6afaf96b0a48ad216366c4281fdd864f",
+        "status": "ready_for_source_cleanup_approval",
+        "target_verify_gate_ok": True,
+        "roots": [
+            {
+                "source_root": str(source),
+                "status": "eligible_for_source_cleanup_approval",
+                "blockers": [],
+                "exact_client_hits": [],
+                "library_hits": [],
+                "delete_root_after_approval": str(source),
+            }
+        ],
+    }
+    calls = []
+
+    report = execute_plan_c_source_cleanup(
+        dryrun=dryrun,
+        delete_func=lambda path: calls.append(path),
+        min_depth=1,
+    )
+
+    assert report["status"] == "dry_run_ready"
+    assert calls == []
+    assert source.exists()
+
+
+def test_plan_c_source_cleanup_execute_blocks_apply_without_precise_approval(tmp_path: Path) -> None:
+    source = tmp_path / "data" / "media" / "torrents" / "seeding" / "SpeedCD" / "Dexter.S02"
+    source.mkdir(parents=True)
+    (source / "episode.mkv").write_bytes(b"payload")
+    dryrun = {
+        "schema": "hashall.incomplete_rehome.source_cleanup_dryrun.v1",
+        "mode": "read_only",
+        "hash": "245f2bce6afaf96b0a48ad216366c4281fdd864f",
+        "status": "ready_for_source_cleanup_approval",
+        "target_verify_gate_ok": True,
+        "roots": [
+            {
+                "source_root": str(source),
+                "status": "eligible_for_source_cleanup_approval",
+                "blockers": [],
+                "exact_client_hits": [],
+                "library_hits": [],
+                "delete_root_after_approval": str(source),
+            }
+        ],
+    }
+    calls = []
+
+    report = execute_plan_c_source_cleanup(
+        dryrun=dryrun,
+        apply=True,
+        approval="approve cleanup",
+        delete_func=lambda path: calls.append(path),
+        min_depth=1,
+    )
+
+    assert report["status"] == "blocked"
+    assert "approval_string_missing_plan_c_source_cleanup_delete_hash_path" in report["blockers"]
+    assert calls == []
+    assert source.exists()
+
+
+def test_plan_c_source_cleanup_execute_deletes_approved_root(tmp_path: Path) -> None:
+    source = tmp_path / "data" / "media" / "torrents" / "seeding" / "SpeedCD" / "Dexter.S02"
+    source.mkdir(parents=True)
+    (source / "episode.mkv").write_bytes(b"payload")
+    dryrun = {
+        "schema": "hashall.incomplete_rehome.source_cleanup_dryrun.v1",
+        "mode": "read_only",
+        "hash": "245f2bce6afaf96b0a48ad216366c4281fdd864f",
+        "status": "ready_for_source_cleanup_approval",
+        "target_verify_gate_ok": True,
+        "roots": [
+            {
+                "source_root": str(source),
+                "status": "eligible_for_source_cleanup_approval",
+                "blockers": [],
+                "exact_client_hits": [],
+                "library_hits": [],
+                "delete_root_after_approval": str(source),
+            }
+        ],
+    }
+
+    report = execute_plan_c_source_cleanup(
+        dryrun=dryrun,
+        apply=True,
+        approval=f"approve Plan C source cleanup delete 245f2bce6afa {source}",
+        min_depth=1,
+    )
+
+    assert report["status"] == "deleted"
+    assert report["events"][0]["status"] == "deleted"
+    assert not source.exists()

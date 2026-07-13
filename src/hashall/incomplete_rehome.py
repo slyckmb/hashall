@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -1185,6 +1186,145 @@ def build_plan_c_source_cleanup_dryrun(
                 int(root["bytes_reclaimable_if_this_root_unlinked"]) for root in roots
             ),
         },
+    }
+
+
+def _path_depth(path: Path) -> int:
+    return len([part for part in Path(path).parts if part not in ("", "/")])
+
+
+def _cleanup_approval_matches(*, approval: str, torrent_hash: str, roots: Iterable[str]) -> bool:
+    text = str(approval or "").strip().lower()
+    if not text:
+        return False
+    required_terms = ("plan c", "source cleanup", "delete")
+    if any(term not in text for term in required_terms):
+        return False
+    wanted_hash = str(torrent_hash or "").strip().lower()
+    if wanted_hash and wanted_hash[:12] not in text and wanted_hash not in text:
+        return False
+    for root in roots:
+        root_text = str(root or "").strip().lower().rstrip("/")
+        if root_text and root_text not in text:
+            return False
+    return True
+
+
+def execute_plan_c_source_cleanup(
+    *,
+    dryrun: dict[str, Any],
+    apply: bool = False,
+    approval: str = "",
+    min_depth: int = 4,
+    delete_func: Any | None = None,
+) -> dict[str, Any]:
+    """Execute an approved Plan C source cleanup report, or preview it."""
+    torrent_hash = str(dryrun.get("hash") or "").strip().lower()
+    roots = list(dryrun.get("roots") or [])
+    delete_roots = [
+        str(root.get("delete_root_after_approval") or "").rstrip("/")
+        for root in roots
+        if str(root.get("delete_root_after_approval") or "").strip()
+    ]
+    blockers: list[str] = []
+    events: list[dict[str, Any]] = []
+
+    if dryrun.get("schema") != "hashall.incomplete_rehome.source_cleanup_dryrun.v1":
+        blockers.append("dryrun_schema_mismatch")
+    if dryrun.get("mode") != "read_only":
+        blockers.append("dryrun_mode_not_read_only")
+    if dryrun.get("status") != "ready_for_source_cleanup_approval":
+        blockers.append(f"dryrun_not_ready:{dryrun.get('status') or 'unknown'}")
+    if not bool(dryrun.get("target_verify_gate_ok")):
+        blockers.append("target_verify_gate_not_ok")
+    if not delete_roots:
+        blockers.append("no_delete_roots")
+
+    for root in roots:
+        root_path = str(root.get("delete_root_after_approval") or "").rstrip("/")
+        if root.get("status") != "eligible_for_source_cleanup_approval":
+            blockers.append(f"root_not_eligible:{root.get('source_root') or root_path or 'unknown'}")
+        if root.get("blockers"):
+            blockers.append(f"root_has_blockers:{root.get('source_root') or root_path or 'unknown'}")
+        if root.get("exact_client_hits"):
+            blockers.append(f"root_has_client_hits:{root.get('source_root') or root_path or 'unknown'}")
+        if root.get("library_hits"):
+            blockers.append(f"root_has_library_hits:{root.get('source_root') or root_path or 'unknown'}")
+        if root_path:
+            path = Path(root_path)
+            if not path.is_absolute():
+                blockers.append(f"root_not_absolute:{root_path}")
+            if _path_depth(path) < int(min_depth):
+                blockers.append(f"root_depth_below_minimum:{root_path}")
+
+    if apply and not _cleanup_approval_matches(approval=approval, torrent_hash=torrent_hash, roots=delete_roots):
+        blockers.append("approval_string_missing_plan_c_source_cleanup_delete_hash_path")
+
+    if blockers or not apply:
+        return {
+            "schema": "hashall.incomplete_rehome.source_cleanup_execute.v1",
+            "mode": "blocked" if blockers else "dry_run",
+            "hash": torrent_hash,
+            "status": "blocked" if blockers else "dry_run_ready",
+            "blockers": sorted(set(str(item) for item in blockers)),
+            "delete_roots": delete_roots,
+            "events": events,
+            "dryrun": dryrun,
+        }
+
+    if delete_func is None:
+        def delete_func(path: Path) -> None:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+
+    try:
+        for root_text in delete_roots:
+            root_path = Path(root_text)
+            if root_path.is_symlink():
+                raise RuntimeError(f"refusing symlink source root: {root_text}")
+            if not root_path.exists():
+                events.append({"phase": "delete", "status": "source_missing", "path": root_text})
+                continue
+            if _path_depth(root_path) < int(min_depth):
+                raise RuntimeError(f"source root depth below minimum: {root_text}")
+            before = summarize_path(root_path)
+            delete_func(root_path)
+            after_exists = root_path.exists()
+            events.append(
+                {
+                    "phase": "delete",
+                    "status": "deleted" if not after_exists else "failed_still_exists",
+                    "path": root_text,
+                    "file_count": before.file_count,
+                    "total_bytes": before.total_bytes,
+                }
+            )
+            if after_exists:
+                raise RuntimeError(f"delete target still exists: {root_text}")
+    except Exception as exc:
+        return {
+            "schema": "hashall.incomplete_rehome.source_cleanup_execute.v1",
+            "mode": "apply",
+            "hash": torrent_hash,
+            "status": "failed",
+            "blockers": [],
+            "error": f"{type(exc).__name__}: {exc}",
+            "delete_roots": delete_roots,
+            "events": events,
+            "dryrun": dryrun,
+        }
+
+    return {
+        "schema": "hashall.incomplete_rehome.source_cleanup_execute.v1",
+        "mode": "apply",
+        "hash": torrent_hash,
+        "status": "deleted",
+        "blockers": [],
+        "delete_roots": delete_roots,
+        "events": events,
+        "dryrun": dryrun,
     }
 
 
