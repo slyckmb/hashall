@@ -9,6 +9,7 @@ from hashall.cli import cli
 from hashall.incomplete_rehome import build_source_inode_manifest
 from hashall.incomplete_rehome import build_incomplete_rehome_plan
 from hashall.incomplete_rehome import build_incomplete_rehome_pilot_dryrun
+from hashall.incomplete_rehome import build_plan_c_source_cleanup_dryrun
 from hashall.incomplete_rehome import build_qb_snapshot_from_cache
 from hashall.incomplete_rehome import build_rt_snapshot_from_cache
 from hashall.incomplete_rehome import execute_incomplete_rehome_pilot
@@ -831,3 +832,91 @@ def test_cli_incomplete_rehome_snapshot_writes_qb_json(tmp_path: Path) -> None:
     data = json.loads(output.read_text(encoding="utf-8"))
     assert data["schema"] == "hashall.incomplete_rehome.qb_snapshot.v1"
     assert data["state"] == "stoppedDL"
+
+
+def test_plan_c_source_cleanup_blocks_exact_client_reference(tmp_path: Path) -> None:
+    source = tmp_path / "data" / "media" / "torrents" / "seeding" / "SpeedCD" / "Dexter.S02"
+    source.mkdir(parents=True)
+    source_file = source / "episode.mkv"
+    source_file.write_bytes(b"payload")
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    qb_cache.write_text(
+        json.dumps(
+            [
+                {
+                    "hash": "clienthash",
+                    "name": "Dexter.S02",
+                    "state": "stoppedUP",
+                    "content_path": str(source),
+                    "root_path": str(source),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    rt_cache.write_text("[]", encoding="utf-8")
+    plan = {
+        "hash": "245f",
+        "source_inode_manifest": {
+            "catalog_inode_refs": [
+                {
+                    "path": str(source_file),
+                    "inode": source_file.stat().st_ino,
+                    "is_library_anchor": False,
+                    "existing_path_aliases": [str(source_file)],
+                }
+            ]
+        },
+    }
+    post = {"status": "validated_ready_for_cleanup_approval", "target_verify_gate": {"ok": True}}
+
+    report = build_plan_c_source_cleanup_dryrun(
+        plan=plan,
+        post_validate=post,
+        source_roots=[source],
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        library_roots=[],
+    )
+
+    assert report["status"] == "blocked"
+    assert report["roots"][0]["blockers"] == ["exact_client_reference_present"]
+    assert report["roots"][0]["exact_client_hits"][0]["side"] == "qb"
+
+
+def test_plan_c_source_cleanup_allows_unreferenced_source_root(tmp_path: Path) -> None:
+    source = tmp_path / "data" / "media" / "torrents" / "seeding" / "SpeedCD" / "Dexter.S02"
+    source.mkdir(parents=True)
+    source_file = source / "episode.mkv"
+    source_file.write_bytes(b"payload")
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    qb_cache.write_text("[]", encoding="utf-8")
+    rt_cache.write_text("[]", encoding="utf-8")
+    plan = {
+        "hash": "245f",
+        "source_inode_manifest": {
+            "catalog_inode_refs": [
+                {
+                    "path": str(source_file),
+                    "inode": source_file.stat().st_ino,
+                    "is_library_anchor": False,
+                    "existing_path_aliases": [str(source_file)],
+                }
+            ]
+        },
+    }
+    post = {"status": "validated_ready_for_cleanup_approval", "target_verify_gate": {"ok": True}}
+
+    report = build_plan_c_source_cleanup_dryrun(
+        plan=plan,
+        post_validate=post,
+        source_roots=[source],
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        library_roots=[],
+    )
+
+    assert report["status"] == "ready_for_source_cleanup_approval"
+    assert report["roots"][0]["delete_root_after_approval"] == str(source)

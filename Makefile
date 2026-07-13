@@ -88,6 +88,7 @@ help:
 	@echo "  make client-drift-incomplete-rehome-execute PILOT=<path> — guarded Plan C execute dry-run (APPLY=1 APPROVAL=... for live)"
 	@echo "  make client-drift-incomplete-rehome-post-validate EXECUTE_REPORT=<path> TARGET_VERIFY_JSON=<path> — Plan C post-pilot validation"
 	@echo "  make client-drift-incomplete-rehome-snapshot HASH=<hash> SIDE=qb|rt — Plan C qB/RT cache snapshot"
+	@echo "  make client-drift-incomplete-rehome-source-cleanup PLAN=<path> POST_VALIDATE=<path> SOURCE_ROOT=<path> — Plan C old-source cleanup dry-run"
 	@echo ""
 	@echo "  make hitchhiker-audit          — find N→1 payload groups and split safety"
 	@echo "  make hitchhiker-plan HASH=<hash>|PAYLOAD_ID=<id> — selected de-hitchhiker evidence"
@@ -297,6 +298,22 @@ client-drift-incomplete-rehome-snapshot:
 	[ -n "$${OUTPUT:-}" ] && set -- "$$@" --output "$${OUTPUT}"; \
 	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
 	$(HASHALL_CLI) client-drift incomplete-rehome-snapshot "$${HASH}" --side "$${SIDE}" "$$@"
+
+client-drift-incomplete-rehome-source-cleanup:
+	@[ -n "$${PLAN:-}" ] || { echo "PLAN is required"; exit 2; }; \
+	[ -n "$${POST_VALIDATE:-}" ] || { echo "POST_VALIDATE is required"; exit 2; }; \
+	[ -n "$${SOURCE_ROOT:-}" ] || { echo "SOURCE_ROOT is required"; exit 2; }; \
+	set --; \
+	[ -n "$${SOURCE_ROOT_2:-}" ] && set -- "$$@" --source-root "$${SOURCE_ROOT_2}"; \
+	[ -n "$${SOURCE_ROOT_3:-}" ] && set -- "$$@" --source-root "$${SOURCE_ROOT_3}"; \
+	[ -n "$${QB_CACHE_FILE:-}" ] && set -- "$$@" --qb-cache-file "$${QB_CACHE_FILE}"; \
+	[ -n "$${RT_CACHE_FILE:-}" ] && set -- "$$@" --rt-cache-file "$${RT_CACHE_FILE}"; \
+	[ -n "$${OUTPUT:-}" ] && set -- "$$@" --output "$${OUTPUT}"; \
+	[ "$${JSON:-0}" = "1" ] && set -- "$$@" --json-output; \
+	$(HASHALL_CLI) client-drift incomplete-rehome-source-cleanup-dry-run \
+		--plan "$${PLAN}" \
+		--post-validate "$${POST_VALIDATE}" \
+		--source-root "$${SOURCE_ROOT}" "$$@"
 
 rt-repoint-dry:
 	@[ -n "$${HASH:-}" ] || { echo "HASH is required"; exit 2; }; [ -n "$${TARGET:-}" ] || { echo "TARGET is required"; exit 2; }; $(HASHALL_CLI) rt repoint --hash "$${HASH}" --target-directory "$${TARGET}"

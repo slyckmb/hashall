@@ -5522,6 +5522,69 @@ def client_drift_incomplete_rehome_snapshot_cmd(
         click.echo(f"  output: {Path(output_path).expanduser()}")
 
 
+@client_drift.command("incomplete-rehome-source-cleanup-dry-run")
+@click.option("--plan", "plan_path", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON Plan C dry-run plan.")
+@click.option("--post-validate", "post_validate_path", required=True, type=click.Path(exists=True, dir_okay=False), help="Validated post-pilot report.")
+@click.option("--source-root", "source_roots", multiple=True, required=True, type=click.Path(), help="Old source release root to evaluate for cleanup.")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--library-root", "library_roots", multiple=True, help="Media/library root that blocks source cleanup.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON dry-run to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON dry-run to stdout.")
+def client_drift_incomplete_rehome_source_cleanup_dry_run_cmd(
+    plan_path,
+    post_validate_path,
+    source_roots,
+    qb_cache_file,
+    rt_cache_file,
+    library_roots,
+    output_path,
+    json_output,
+):
+    """Dry-run old source-payload cleanup after a validated Plan C repair."""
+    from hashall.incomplete_rehome import (
+        DEFAULT_LIBRARY_ROOTS,
+        build_plan_c_source_cleanup_dryrun,
+        write_manifest,
+    )
+
+    plan = json.loads(Path(plan_path).expanduser().read_text(encoding="utf-8"))
+    post_validate = json.loads(Path(post_validate_path).expanduser().read_text(encoding="utf-8"))
+    report = build_plan_c_source_cleanup_dryrun(
+        plan=plan,
+        post_validate=post_validate,
+        source_roots=[Path(item).expanduser() for item in source_roots],
+        qb_cache_file=Path(qb_cache_file).expanduser(),
+        rt_cache_file=Path(rt_cache_file).expanduser(),
+        library_roots=library_roots or DEFAULT_LIBRARY_ROOTS,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), report)
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    summary = report["summary"]
+    click.echo("incomplete rehome source cleanup dry-run")
+    click.echo(f"  hash: {report['hash'][:16]}")
+    click.echo(f"  status: {report['status']}")
+    click.echo(f"  roots_total: {summary['roots_total']}")
+    click.echo(f"  roots_eligible: {summary['roots_eligible']}")
+    click.echo(f"  roots_blocked: {summary['roots_blocked']}")
+    click.echo(f"  total_bytes: {summary['total_bytes']}")
+    click.echo(f"  bytes_reclaimable_if_roots_unlinked: {summary['bytes_reclaimable_if_roots_unlinked']}")
+    for root in report["roots"]:
+        click.echo(f"  root: {root['source_root']}")
+        click.echo(f"    status: {root['status']}")
+        if root["blockers"]:
+            click.echo(f"    blockers: {', '.join(root['blockers'])}")
+        if root["warnings"]:
+            click.echo(f"    warnings: {', '.join(root['warnings'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
 @cli.group("rt-qb-mirror")
 def rt_qb_mirror():
     """Mirror complete RT additions into qB as stopped torrents."""

@@ -1013,6 +1013,181 @@ def build_rt_snapshot_from_cache(
     return payload
 
 
+def _client_rows_from_cache(cache_file: Path) -> list[dict[str, Any]]:
+    rows, _age, status = _read_cache_rows(cache_file)
+    if status != "loaded":
+        return []
+    return rows
+
+
+def _exact_client_hits_for_root(
+    *,
+    source_root: str,
+    qb_rows: Iterable[dict[str, Any]],
+    rt_rows: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    aliases = {alias.rstrip("/") for alias in path_aliases(source_root)}
+    hits: list[dict[str, Any]] = []
+    for row in qb_rows:
+        for field in ("content_path", "root_path"):
+            value = str(row.get(field) or "").rstrip("/")
+            if value in aliases:
+                hits.append(
+                    {
+                        "side": "qb",
+                        "hash": str(row.get("hash") or "").lower(),
+                        "name": str(row.get("name") or ""),
+                        "state": str(row.get("state") or ""),
+                        "field": field,
+                        "path": value,
+                    }
+                )
+    for row in rt_rows:
+        value = str(row.get("directory") or row.get("save_path") or "").rstrip("/")
+        if value in aliases:
+            hits.append(
+                {
+                    "side": "rt",
+                    "hash": str(row.get("hash") or "").lower(),
+                    "name": str(row.get("name") or ""),
+                    "state": str(row.get("state") or ""),
+                    "field": "save_path",
+                    "path": value,
+                }
+            )
+    return sorted(hits, key=lambda item: (item["side"], item["hash"], item["field"]))
+
+
+def _files_under_root(root: Path) -> list[dict[str, Any]]:
+    base = Path(root)
+    if not base.exists():
+        return []
+    files = [base] if base.is_file() else sorted(path for path in base.rglob("*") if path.is_file())
+    out: list[dict[str, Any]] = []
+    for path in files:
+        st = path.stat(follow_symlinks=False)
+        out.append(
+            {
+                "path": str(path),
+                "dev": int(st.st_dev),
+                "inode": int(st.st_ino),
+                "nlink": int(st.st_nlink),
+                "bytes": int(st.st_size),
+            }
+        )
+    return out
+
+
+def build_plan_c_source_cleanup_dryrun(
+    *,
+    plan: dict[str, Any],
+    post_validate: dict[str, Any],
+    source_roots: Iterable[Path],
+    qb_cache_file: Path,
+    rt_cache_file: Path,
+    library_roots: Iterable[str] = DEFAULT_LIBRARY_ROOTS,
+) -> dict[str, Any]:
+    """Build a read-only source-payload cleanup plan for validated Plan C repairs."""
+    source_list = [Path(root).expanduser() for root in source_roots]
+    qb_rows = _client_rows_from_cache(qb_cache_file)
+    rt_rows = _client_rows_from_cache(rt_cache_file)
+    post_status = str(post_validate.get("status") or "")
+    post_ok = post_status == "validated_ready_for_cleanup_approval"
+    target_gate_ok = bool((post_validate.get("target_verify_gate") or {}).get("ok"))
+    manifest = plan.get("source_inode_manifest") or {}
+    catalog_refs = list(manifest.get("catalog_inode_refs") or [])
+
+    roots: list[dict[str, Any]] = []
+    for root in source_list:
+        root_text = str(root).rstrip("/")
+        root_aliases = sorted(path_aliases(root_text))
+        files = _files_under_root(root)
+        inodes = {int(item["inode"]) for item in files}
+        refs_for_inodes = [row for row in catalog_refs if int(row.get("inode") or 0) in inodes]
+        library_hits = [
+            row
+            for row in refs_for_inodes
+            if row.get("is_library_anchor")
+            or any(under_any(path, library_roots) for path in row.get("existing_path_aliases", []))
+        ]
+        client_hits = _exact_client_hits_for_root(
+            source_root=root_text,
+            qb_rows=qb_rows,
+            rt_rows=rt_rows,
+        )
+        blockers: list[str] = []
+        warnings: list[str] = []
+        if not post_ok:
+            blockers.append(f"post_validate_not_ready:{post_status or 'missing'}")
+        if not target_gate_ok:
+            blockers.append("target_verify_gate_not_ok")
+        if not root.exists():
+            blockers.append("source_root_missing")
+        if client_hits:
+            blockers.append("exact_client_reference_present")
+        if library_hits:
+            blockers.append("library_anchor_present")
+        if not files:
+            warnings.append("source_root_has_no_files")
+
+        bytes_total = sum(int(item["bytes"]) for item in files)
+        bytes_reclaimable_now = sum(int(item["bytes"]) for item in files if int(item["nlink"]) <= 1)
+        bytes_reclaimable_after_unlink = sum(int(item["bytes"]) for item in files if int(item["nlink"]) <= 2)
+        if bytes_total and bytes_reclaimable_now == 0:
+            warnings.append("unlink_removes_names_but_space_needs_other_hardlinks_removed_too")
+
+        roots.append(
+            {
+                "source_root": root_text,
+                "source_root_aliases": root_aliases,
+                "status": "eligible_for_source_cleanup_approval" if not blockers else "blocked",
+                "blockers": sorted(set(blockers)),
+                "warnings": sorted(set(warnings)),
+                "file_count": len(files),
+                "total_bytes": bytes_total,
+                "bytes_reclaimable_now": bytes_reclaimable_now,
+                "bytes_reclaimable_if_this_root_unlinked": bytes_reclaimable_after_unlink,
+                "min_nlink": min((int(item["nlink"]) for item in files), default=0),
+                "max_nlink": max((int(item["nlink"]) for item in files), default=0),
+                "exact_client_hits": client_hits,
+                "library_hits": [
+                    {
+                        "path": row.get("path"),
+                        "inode": row.get("inode"),
+                        "existing_path_aliases": row.get("existing_path_aliases", []),
+                    }
+                    for row in library_hits
+                ],
+                "delete_root_after_approval": root_text if not blockers else "",
+                "files": files,
+            }
+        )
+
+    return {
+        "schema": "hashall.incomplete_rehome.source_cleanup_dryrun.v1",
+        "mode": "read_only",
+        "hash": str(plan.get("hash") or post_validate.get("hash") or "").lower(),
+        "status": "ready_for_source_cleanup_approval"
+        if roots and all(root["status"] == "eligible_for_source_cleanup_approval" for root in roots)
+        else "blocked",
+        "post_validate_status": post_status,
+        "target_verify_gate_ok": target_gate_ok,
+        "qb_cache_file": str(Path(qb_cache_file).expanduser()),
+        "rt_cache_file": str(Path(rt_cache_file).expanduser()),
+        "roots": roots,
+        "summary": {
+            "roots_total": len(roots),
+            "roots_eligible": sum(1 for root in roots if root["status"] == "eligible_for_source_cleanup_approval"),
+            "roots_blocked": sum(1 for root in roots if root["status"] == "blocked"),
+            "total_bytes": sum(int(root["total_bytes"]) for root in roots),
+            "bytes_reclaimable_now": sum(int(root["bytes_reclaimable_now"]) for root in roots),
+            "bytes_reclaimable_if_roots_unlinked": sum(
+                int(root["bytes_reclaimable_if_this_root_unlinked"]) for root in roots
+            ),
+        },
+    }
+
+
 def validate_incomplete_rehome_post_pilot(
     *,
     execute_report: dict[str, Any],
