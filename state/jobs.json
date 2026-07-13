@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T18:38:14Z",
+    "updated_at": "2026-07-13T20:30:00Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -19,12 +19,12 @@
     "j50",
     "j57",
     "j51",
+    "j58",
     "j52",
     "j55",
     "j42",
     "j39",
     "j43",
-    "j44",
     "j56",
     "j45"
   ],
@@ -155,10 +155,18 @@
         "OP-62",
         "OP-70",
         "OP-78",
-        "OP-79"
+        "OP-79",
+        "OP-80",
+        "OP-81",
+        "OP-82",
+        "OP-83",
+        "OP-84",
+        "OP-85",
+        "OP-86",
+        "OP-87"
       ],
-      "status": "planned",
-      "summary": "Active recovery in progress. t10+t11 live verified-retarget batches succeeded: qB `stoppedDL` dropped 441\u2192395 and `stoppedUP` rose 4475\u21924521. Next approval-ready batches: t12=24, t13=25."
+      "status": "active",
+      "summary": "Active recovery follow-up. Live qB stoppedDL tail is four proven partial/no-peer wait-state rows; OP-86 and OP-87 are tooling/reporting follow-ups with briefs written as j51-t23/t24."
     },
     "j52": {
       "slug": "mirror-placement-anomalies",
@@ -212,19 +220,6 @@
       "status": "planned",
       "summary": "Planned infrastructure/state work after j57 guard."
     },
-    "j44": {
-      "slug": "chatrap-infra",
-      "ops": [
-        "OP-42",
-        "OP-45",
-        "OP-71",
-        "OP-72",
-        "OP-73",
-        "OP-77"
-      ],
-      "status": "planned",
-      "summary": "Planned orchestration/session/security reliability work."
-    },
     "j56": {
       "slug": "link-plan-ux",
       "ops": [
@@ -240,6 +235,27 @@
       ],
       "status": "planned",
       "summary": "Final merge only."
+    },
+    "j58": {
+      "slug": "hashall-agent-safety",
+      "ops": [
+        "OP-45",
+        "OP-73"
+      ],
+      "status": "planned",
+      "summary": "Planned. Hashall-local operational hardening: explicit hash scope for mutation briefs and qB credential argv/log hardening."
+    },
+    "hold-chatrap": {
+      "slug": "chatrap-upgrade-hold",
+      "ops": [
+        "OP-42",
+        "OP-71",
+        "OP-72",
+        "OP-77",
+        "OP-88"
+      ],
+      "status": "hold",
+      "summary": "Chatrap-owned OPs held pending chatrap upgrade; may be OBE and must be revalidated before reopening."
     }
   }
 }

@@ -1,13 +1,13 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-08T18:38:14Z"
+    "updated_at": "2026-07-13T20:30:00Z"
   },
   "ops": [
     {
       "id": "OP-09",
       "type": "reliability",
-      "title": "Execute slice 12c \u2014 10 `cross-seed/<hash>/` items: resolve tracker \u2192 rename dir \u2192 repoint RT+qB",
+      "title": "Execute slice 12c — 10 `cross-seed/<hash>/` items: resolve tracker → rename dir → repoint RT+qB",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -17,7 +17,7 @@
     {
       "id": "OP-15",
       "type": "doc",
-      "title": "Audit all cross-seed folder references across repo (src/, docs/, scripts/, Makefile, SPRINT.md, RUNBOOK.md, AGENTS.md) \u2014 ensure all are aligned with \u00a74.4 policy: cross-seed/<prowlarr-tracker-name>/ is canonical; no \"prefix removal\" framing anywhere",
+      "title": "Audit all cross-seed folder references across repo (src/, docs/, scripts/, Makefile, SPRINT.md, RUNBOOK.md, AGENTS.md) — ensure all are aligned with §4.4 policy: cross-seed/<prowlarr-tracker-name>/ is canonical; no \"prefix removal\" framing anywhere",
       "status": "in-job",
       "observed": "",
       "fix_targets": []
@@ -25,7 +25,7 @@
     {
       "id": "OP-17",
       "type": "reliability",
-      "title": "Migrate ~2000 cross-seed items from bare `<tracker>/` back to `cross-seed/<tracker>/` \u2014 consequence of OP-16 rogue mutation; requires OP-16 code fix first, then 4-gate validated migration (rename dir + repoint RT + repoint qB per item)",
+      "title": "Migrate ~2000 cross-seed items from bare `<tracker>/` back to `cross-seed/<tracker>/` — consequence of OP-16 rogue mutation; requires OP-16 code fix first, then 4-gate validated migration (rename dir + repoint RT + repoint qB per item)",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -36,7 +36,7 @@
     {
       "id": "OP-19",
       "type": "bug",
-      "title": "Spurious subdirectory around bare single-file torrents \u2014 RT creates a release-name folder even when the torrent defines no internal folder; canonical form is `<root>/<cat>/<filename>` with no subdirectory; scope unknown, needs audit",
+      "title": "Spurious subdirectory around bare single-file torrents — RT creates a release-name folder even when the torrent defines no internal folder; canonical form is `<root>/<cat>/<filename>` with no subdirectory; scope unknown, needs audit",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -46,7 +46,7 @@
     {
       "id": "OP-24",
       "type": "reliability",
-      "title": "4 anomalous items need manual review \u2014 dangerous source paths excluded from all automation: seeding root itself, cross-seed dir root, and 2 content subdirs 2 levels deep (FileList.io/Beetlejuice, FileList.io/UEFA); require human inspection before any path repair",
+      "title": "4 anomalous items need manual review — dangerous source paths excluded from all automation: seeding root itself, cross-seed dir root, and 2 content subdirs 2 levels deep (FileList.io/Beetlejuice, FileList.io/UEFA); require human inspection before any path repair",
       "status": "in-job",
       "observed": "",
       "fix_targets": []
@@ -54,7 +54,7 @@
     {
       "id": "OP-47",
       "type": "bug",
-      "title": "RCCA: Beetlejuice (E04E524750C999AC) and UEFA (3E82F6F7A3A5ADAE) had RT d.directory pointing to `/pool/media/torrents/seeding/FileList.io/<name>/<name>` \u2014 path missing `cross-seed/` prefix, directory did not exist on disk; both stuck state=0 complete=0 (0%); content was actually at `cross-seed/FileList.io/<name>/<name>/` all along; fix applied manually (repoint + hash-check \u2192 both now state=1 complete=1)",
+      "title": "RCCA: Beetlejuice (E04E524750C999AC) and UEFA (3E82F6F7A3A5ADAE) had RT d.directory pointing to `/pool/media/torrents/seeding/FileList.io/<name>/<name>` — path missing `cross-seed/` prefix, directory did not exist on disk; both stuck state=0 complete=0 (0%); content was actually at `cross-seed/FileList.io/<name>/<name>/` all along; fix applied manually (repoint + hash-check → both now state=1 complete=1)",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -117,7 +117,7 @@
     {
       "id": "OP-23",
       "type": "reliability",
-      "title": "12 conflict items need operator resolution \u2014 both source and target paths exist with different content; excluded from lane1 automation; need decision: keep source, keep target, or merge; blocked until decision made",
+      "title": "12 conflict items need operator resolution — both source and target paths exist with different content; excluded from lane1 automation; need decision: keep source, keep target, or merge; blocked until decision made",
       "status": "in-job",
       "observed": "",
       "fix_targets": []
@@ -125,7 +125,7 @@
     {
       "id": "OP-26",
       "type": "reliability",
-      "title": "Lane 2 execution strategy decision needed \u2014 1030 ROOT_DRIFT + 2361 compound drift items require STASH\u2192POOL cross-device copy; no executor exists yet; 19.4 TB unique data vs ~3.1 TB free on pool; full migration not feasible without storage expansion or phased approach",
+      "title": "Lane 2 execution strategy decision needed — 1030 ROOT_DRIFT + 2361 compound drift items require STASH→POOL cross-device copy; no executor exists yet; 19.4 TB unique data vs ~3.1 TB free on pool; full migration not feasible without storage expansion or phased approach",
       "status": "in-job",
       "observed": "",
       "fix_targets": []
@@ -143,7 +143,7 @@
     {
       "id": "OP-12",
       "type": "doc",
-      "title": "Migrate qB cache daemon from hashall \u2192 silo (3 files, update imports, delete hashall copies; carry zombie fix from b6c3f8d)",
+      "title": "Migrate qB cache daemon from hashall → silo (3 files, update imports, delete hashall copies; carry zombie fix from b6c3f8d)",
       "status": "in-job",
       "observed": "",
       "fix_targets": []
@@ -151,8 +151,8 @@
     {
       "id": "OP-42",
       "type": "bug",
-      "title": "`chatrap lead after-job` Steps A/B skipped every run because opencode agent task-logs are written to the opencode run log (`<job-wt>/.agent/logs/<job>/<job>-tNN-opencode.log`) but NOT to the chatrap artifact directory (`<job-wt>/.agent/artifacts/.../`); after-job scans only the artifact dir so task-log friction, ops_closed entries, and file-change reports are never surfaced to the lead; `ops_closed=` lines in task-logs are silently ignored, preventing automatic OP closure; fix: after-job should also scan opencode logs in `.agent/logs/` for task-log blocks, OR the dispatch wrapper should copy/mirror the task-log block into the artifact dir on agent completion *(j46 additional evidence: lead wrote LOG_DIR to job worktree path instead of CR_WORKTREE per INIT.md Step 3 \u2014 all j46 task logs deleted when chatrap job done removed the worktree; secondary failure: flat `.agent/logs/j46/` instead of `.agent/logs/<session-id>/j46/`)*",
-      "status": "in-job",
+      "title": "`chatrap lead after-job` Steps A/B skipped every run because opencode agent task-logs are written to the opencode run log (`<job-wt>/.agent/logs/<job>/<job>-tNN-opencode.log`) but NOT to the chatrap artifact directory (`<job-wt>/.agent/artifacts/.../`); after-job scans only the artifact dir so task-log friction, ops_closed entries, and file-change reports are never surfaced to the lead; `ops_closed=` lines in task-logs are silently ignored, preventing automatic OP closure; fix: after-job should also scan opencode logs in `.agent/logs/` for task-log blocks, OR the dispatch wrapper should copy/mirror the task-log block into the artifact dir on agent completion *(j46 additional evidence: lead wrote LOG_DIR to job worktree path instead of CR_WORKTREE per INIT.md Step 3 — all j46 task logs deleted when chatrap job done removed the worktree; secondary failure: flat `.agent/logs/j46/` instead of `.agent/logs/<session-id>/j46/`)*",
+      "status": "hold",
       "observed": "",
       "fix_targets": [
         "chatrap lead after-job",
@@ -162,43 +162,47 @@
         ".agent/logs/",
         ".agent/logs/j46/",
         ".agent/logs/<session-id>/j46/"
-      ]
+      ],
+      "hold": "chatrap-upgrade-may-be-OBE"
     },
     {
       "id": "OP-45",
       "type": "reliability",
-      "title": "j33 opencode agent ran out-of-scope `d.check_hash` on Diary of Teenage Girl (5CACA88D) \u2014 agent included Diary in its hash-check loop despite it not being a target item in the brief; Diary was left at state=0 complete=0 98.42% (2 files genuinely missing, confirmed by hash-check); no new damage (was already broken per OP-36), but agent scope violation confirms agents will act on any stopped torrent visible in RT without explicit filtering; briefs must explicitly state excluded hashes or use --limit with explicit hash list only",
+      "title": "j33 opencode agent ran out-of-scope `d.check_hash` on Diary of Teenage Girl (5CACA88D) — agent included Diary in its hash-check loop despite it not being a target item in the brief; Diary was left at state=0 complete=0 98.42% (2 files genuinely missing, confirmed by hash-check); no new damage (was already broken per OP-36), but agent scope violation confirms agents will act on any stopped torrent visible in RT without explicit filtering; briefs must explicitly state excluded hashes or use --limit with explicit hash list only",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
         "d.check_hash"
-      ]
+      ],
+      "job": "j58"
     },
     {
       "id": "OP-71",
       "type": "bug",
       "title": "Chatrap session tracking allowed an active session to continue with `goal: (none set)` while `current` had the real state",
-      "status": "in-job",
+      "status": "hold",
       "observed": "",
       "fix_targets": [
         "goal: (none set)",
         "current",
         "chatrap session save/read",
         "chatrap session read"
-      ]
+      ],
+      "hold": "chatrap-upgrade-may-be-OBE"
     },
     {
       "id": "OP-72",
       "type": "reliability",
       "title": "Direct-to-CR commits remain possible despite workflow policy: the hook only warns, then `chatrap ack commit HEAD` fails with `s05_direct_cr_commit=FAIL`",
-      "status": "in-job",
+      "status": "hold",
       "observed": "",
       "fix_targets": [
         "chatrap ack commit HEAD",
         "s05_direct_cr_commit=FAIL",
         "cr/hashall-20260626-151456",
         "chatrap lead tracking-commit"
-      ]
+      ],
+      "hold": "chatrap-upgrade-may-be-OBE"
     },
     {
       "id": "OP-73",
@@ -210,13 +214,14 @@
         "payload sync",
         "--qbit-user/--qbit-pass",
         "ps"
-      ]
+      ],
+      "job": "j58"
     },
     {
       "id": "OP-77",
       "type": "bug",
       "title": "`chatrap lead ship j51` failed before dispatch because ship checks `${REPO_ROOT}/state/jobs.json` where `REPO_ROOT` is resolved to the base repo, then calls obsolete `chatrap state import --jobs` even though the supported syntax is `chatrap state import jobs`",
-      "status": "in-job",
+      "status": "hold",
       "observed": "",
       "fix_targets": [
         "chatrap lead ship j51",
@@ -227,12 +232,13 @@
         "chatrap state import jobs",
         "chatrap lead run-job --resume",
         "run-job --resume"
-      ]
+      ],
+      "hold": "chatrap-upgrade-may-be-OBE"
     },
     {
       "id": "OP-57",
       "type": "reliability",
-      "title": "Orphan migration must skip files hardlinked to active seeding content \u2014 recent orphan offload run (WD6TB) rsync'd files from orphan dir to external filesystem, but some orphan files were hardlinked to actively-seeding torrent content within the same filesystem",
+      "title": "Orphan migration must skip files hardlinked to active seeding content — recent orphan offload run (WD6TB) rsync'd files from orphan dir to external filesystem, but some orphan files were hardlinked to actively-seeding torrent content within the same filesystem",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -258,7 +264,7 @@
     {
       "id": "OP-61",
       "type": "perf",
-      "title": "Pool orphan dedupe via cross-device content matching \u2014 18,645 quick_hash matches (1,599 GB) across stash library, hotspare, and WD6TB; pool/media snapshot destroyed (809 GB freed); pilot SHA256-confirmed deletion (66 GB) executed; SHA256 upgrade scan complete (21,943 files, 19,370 updated, 810G free on pool); ready to classify and, after explicit approval, delete SHA256-confirmed orphan files",
+      "title": "Pool orphan dedupe via cross-device content matching — 18,645 quick_hash matches (1,599 GB) across stash library, hotspare, and WD6TB; pool/media snapshot destroyed (809 GB freed); pilot SHA256-confirmed deletion (66 GB) executed; SHA256 upgrade scan complete (21,943 files, 19,370 updated, 810G free on pool); ready to classify and, after explicit approval, delete SHA256-confirmed orphan files",
       "status": "in-job",
       "observed": "",
       "fix_targets": []
@@ -266,7 +272,7 @@
     {
       "id": "OP-63",
       "type": "reliability",
-      "title": "Pool cross-seed item duplicate of stash ARR copy needs rehome (pool\u2192stash) with hardlink payload \u2014 Elemental.2023 confirmed on stash (inode 99558, nlink=3: Plex + rTorrent + cross-seed payload) with separate pool duplicate (inode 3265, nlink=2, `~noHL`)",
+      "title": "Pool cross-seed item duplicate of stash ARR copy needs rehome (pool→stash) with hardlink payload — Elemental.2023 confirmed on stash (inode 99558, nlink=3: Plex + rTorrent + cross-seed payload) with separate pool duplicate (inode 3265, nlink=2, `~noHL`)",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -276,7 +282,7 @@
     {
       "id": "OP-58",
       "type": "bug",
-      "title": "RT\u2192qB mirror left 2 TorrentDay cross-seed items stalledUP in qB while RT has them stoppedUP \u2014 `Cold Case Files 2017 S01` (a98fc34) and `The Bear S04` (acb52ed) are `stalledUP` in qB with state not synced to RT's `stoppedUP`; both have `~rt-mirrored`, `~noHL`, `~share_limit_950.public` tags; seeding from stash `/data/media/torrents/seeding/cross-seed/TorrentDay/` despite `~noHL` tag (should be pool); stalled since ~Jan 2026 (177 days); root cause unknown: `hashall-client-drift` mirror handler may have missed stop signal, or qB share-limit reached (`~share_limit_950`) before client-drift could stop them; fix: investigate mirror flow for share-limit race; stop both in qB and repoint to pool path per `~noHL`",
+      "title": "RT→qB mirror left 2 TorrentDay cross-seed items stalledUP in qB while RT has them stoppedUP — `Cold Case Files 2017 S01` (a98fc34) and `The Bear S04` (acb52ed) are `stalledUP` in qB with state not synced to RT's `stoppedUP`; both have `~rt-mirrored`, `~noHL`, `~share_limit_950.public` tags; seeding from stash `/data/media/torrents/seeding/cross-seed/TorrentDay/` despite `~noHL` tag (should be pool); stalled since ~Jan 2026 (177 days); root cause unknown: `hashall-client-drift` mirror handler may have missed stop signal, or qB share-limit reached (`~share_limit_950`) before client-drift could stop them; fix: investigate mirror flow for share-limit race; stop both in qB and repoint to pool path per `~noHL`",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -297,7 +303,7 @@
     {
       "id": "OP-59",
       "type": "bug",
-      "title": "2 cross-seed TorrentDay items in `PU` (Paused/Uploading) state in rTorrent \u2014 same hashes as OP-58 (a98fc34 Cold Case Files 2017 S01, acb52ed The Bear S04); both are 100% complete with `~noHL` tag but stuck in PU instead of stopped or SD; RT UL sidebar shows `stopped: 2` \u2014 these are the 2 PU items; root cause unknown; fix: determine what process set PU state, transition both to stopped, and harden whatever workflow touched these to prevent recurrence",
+      "title": "2 cross-seed TorrentDay items in `PU` (Paused/Uploading) state in rTorrent — same hashes as OP-58 (a98fc34 Cold Case Files 2017 S01, acb52ed The Bear S04); both are 100% complete with `~noHL` tag but stuck in PU instead of stopped or SD; RT UL sidebar shows `stopped: 2` — these are the 2 PU items; root cause unknown; fix: determine what process set PU state, transition both to stopped, and harden whatever workflow touched these to prevent recurrence",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -347,11 +353,11 @@
     {
       "id": "OP-70",
       "type": "reliability",
-      "title": "Agent/brief source-of-truth selection failed during j51: the repair was qB mirror drift from RT, but the first t07 execution used generic catalog stoppedDL drain and reported no candidates instead of checking `qB hash \u2192 RT hash \u2192 RT d.directory` first",
+      "title": "Agent/brief source-of-truth selection failed during j51: the repair was qB mirror drift from RT, but the first t07 execution used generic catalog stoppedDL drain and reported no candidates instead of checking `qB hash → RT hash → RT d.directory` first",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
-        "qB hash \u2192 RT hash \u2192 RT d.directory"
+        "qB hash → RT hash → RT d.directory"
       ]
     },
     {
@@ -401,20 +407,20 @@
         "applied=24",
         "ok=24",
         "failed=0",
-        "stoppedDL=441\u2192417",
+        "stoppedDL=441→417",
         "planned=22",
         "applied=22",
         "ok=22",
         "failed=0",
         "stoppedUP",
-        "stoppedDL=417\u2192395",
-        "stoppedUP=4499\u21924521"
+        "stoppedDL=417→395",
+        "stoppedUP=4499→4521"
       ]
     },
     {
       "id": "OP-65",
       "type": "ux",
-      "title": "`hashall link show-plan` output uses \"Keep\" and \"Replace\" labels that imply directionality \u2014 user/agent interprets this as \"orphan becomes canonical, seeding becomes dependent\" which is misleading",
+      "title": "`hashall link show-plan` output uses \"Keep\" and \"Replace\" labels that imply directionality — user/agent interprets this as \"orphan becomes canonical, seeding becomes dependent\" which is misleading",
       "status": "in-job",
       "observed": "",
       "fix_targets": [
@@ -426,7 +432,7 @@
     {
       "id": "OP-14",
       "type": "reliability",
-      "title": "Merge hashall CR branch to main \u2014 j05 (--repair) and j06 (--escalating-search) Makefile fixes pending",
+      "title": "Merge hashall CR branch to main — j05 (--repair) and j06 (--escalating-search) Makefile fixes pending",
       "status": "in-job",
       "observed": "",
       "fix_targets": []
@@ -450,7 +456,7 @@
     {
       "id": "OP-43",
       "type": "reliability",
-      "title": "4 items seeding at 99.9x% with complete=0 after j33 repair \u2014 confirmed normal stalledDL behavior; no action required",
+      "title": "4 items seeding at 99.9x% with complete=0 after j33 repair — confirmed normal stalledDL behavior; no action required",
       "status": "closed",
       "observed": "closed:no-action",
       "fix_targets": []
@@ -458,7 +464,7 @@
     {
       "id": "OP-44",
       "type": "superseded",
-      "title": "job counter consumed on failed/rolled-back attempts \u2014 superseded by OP-49 (evidence: 2026-06-26)",
+      "title": "job counter consumed on failed/rolled-back attempts — superseded by OP-49 (evidence: 2026-06-26)",
       "status": "closed",
       "observed": "closed:superseded",
       "fix_targets": []
@@ -466,7 +472,7 @@
     {
       "id": "OP-53",
       "type": "reliability",
-      "title": "SHA256 library content anchor \u2014 `_Sha256ContentMatcher` added for cross-device content matching; library-dupe flow wired through j48",
+      "title": "SHA256 library content anchor — `_Sha256ContentMatcher` added for cross-device content matching; library-dupe flow wired through j48",
       "status": "closed",
       "observed": "j48",
       "fix_targets": [
@@ -476,7 +482,7 @@
     {
       "id": "OP-55",
       "type": "bug",
-      "title": "83 blocked Gate 2 false positives \u2014 j48 SHA256/library-dupe work made the blocked FP class resolvable",
+      "title": "83 blocked Gate 2 false positives — j48 SHA256/library-dupe work made the blocked FP class resolvable",
       "status": "closed",
       "observed": "j48",
       "fix_targets": []
@@ -484,7 +490,7 @@
     {
       "id": "OP-56",
       "type": "reliability",
-      "title": "qB recheck gap after `set_location` \u2014 j48 extended apply/rank flow with explicit recheck handling",
+      "title": "qB recheck gap after `set_location` — j48 extended apply/rank flow with explicit recheck handling",
       "status": "closed",
       "observed": "j48",
       "fix_targets": [
@@ -551,7 +557,7 @@
     {
       "id": "OP-C1",
       "type": "bug",
-      "title": "`auth_err` + escalation: plan_action never checked escalation hits \u2192 report_only",
+      "title": "`auth_err` + escalation: plan_action never checked escalation hits → report_only",
       "status": "closed",
       "observed": "j03 (v1.9.6)",
       "fix_targets": [
@@ -571,7 +577,7 @@
     {
       "id": "OP-C3",
       "type": "bug",
-      "title": "`candidate_replace_individual` execution block re-read ep_rep from scratch \u2014 erase without reload",
+      "title": "`candidate_replace_individual` execution block re-read ep_rep from scratch — erase without reload",
       "status": "closed",
       "observed": "j03 (v1.9.6)",
       "fix_targets": [
@@ -581,7 +587,7 @@
     {
       "id": "OP-C4",
       "type": "bug",
-      "title": "`trk-warn-replace-individual` Makefile target missing `--repair` flag \u2014 auth_err bucket blocked",
+      "title": "`trk-warn-replace-individual` Makefile target missing `--repair` flag — auth_err bucket blocked",
       "status": "closed",
       "observed": "j05",
       "fix_targets": [
@@ -603,7 +609,7 @@
     {
       "id": "OP-20",
       "type": "bug",
-      "title": "English Grammar Boot Camp stoppedDL investigation \u2014 pre-j23 FNF bypass during j17/j18 pilot; PDF landed at wrong dir level; no new bug needed; see `docs/RCCA-GRAMMAR-BREAK.md`",
+      "title": "English Grammar Boot Camp stoppedDL investigation — pre-j23 FNF bypass during j17/j18 pilot; PDF landed at wrong dir level; no new bug needed; see `docs/RCCA-GRAMMAR-BREAK.md`",
       "status": "closed",
       "observed": "j24",
       "fix_targets": [
@@ -613,7 +619,7 @@
     {
       "id": "OP-21",
       "type": "reliability",
-      "title": "Repair English Grammar Boot Camp qB to stoppedUP \u2014 hardlinked PDF to content_path level; recheck \u2192 stoppedUP; stoppedDL = 5 (pre-existing only)",
+      "title": "Repair English Grammar Boot Camp qB to stoppedUP — hardlinked PDF to content_path level; recheck → stoppedUP; stoppedDL = 5 (pre-existing only)",
       "status": "closed",
       "observed": "j26",
       "fix_targets": []
@@ -621,7 +627,7 @@
     {
       "id": "OP-22",
       "type": "bug",
-      "title": "Audit 34 j22-touched items for FNF bypass damage \u2014 all stoppedUP confirmed; only Grammar Boot Camp was damaged (pre-j23 pilot); no j22 damage",
+      "title": "Audit 34 j22-touched items for FNF bypass damage — all stoppedUP confirmed; only Grammar Boot Camp was damaged (pre-j23 pilot); no j22 damage",
       "status": "closed",
       "observed": "j25",
       "fix_targets": []
@@ -629,7 +635,7 @@
     {
       "id": "OP-27",
       "type": "bug",
-      "title": "j20 MISSING_DATA false-negative audit \u2014 27/28 recovered; Grammar Boot Camp only outlier (confirmed j24 root cause)",
+      "title": "j20 MISSING_DATA false-negative audit — 27/28 recovered; Grammar Boot Camp only outlier (confirmed j24 root cause)",
       "status": "closed",
       "observed": "j25",
       "fix_targets": []
@@ -637,7 +643,7 @@
     {
       "id": "OP-28",
       "type": "reliability",
-      "title": "11 missingFiles after qB restart \u2014 4 patterns: double-nested (4), deadpool-hardlink (1), FileList.io root (2), stash-pointer (2), displaced (2); all set_location+recheck; missingFiles: 11\u21920",
+      "title": "11 missingFiles after qB restart — 4 patterns: double-nested (4), deadpool-hardlink (1), FileList.io root (2), stash-pointer (2), displaced (2); all set_location+recheck; missingFiles: 11→0",
       "status": "closed",
       "observed": "j27",
       "fix_targets": []
@@ -645,7 +651,7 @@
     {
       "id": "OP-30",
       "type": "bug",
-      "title": "`rt_apply_directory_repoint(..., restart=True)` unconditional `d.start` \u2014 fixed: `check_before_start` param added; `rt_recheck_torrent` fixed; `lane1_execute.py` updated; 5 new tests; see `docs/RCCA-RT-LEECHING-INCIDENT.md`",
+      "title": "`rt_apply_directory_repoint(..., restart=True)` unconditional `d.start` — fixed: `check_before_start` param added; `rt_recheck_torrent` fixed; `lane1_execute.py` updated; 5 new tests; see `docs/RCCA-RT-LEECHING-INCIDENT.md`",
       "status": "closed",
       "observed": "j28",
       "fix_targets": [
@@ -660,7 +666,7 @@
     {
       "id": "OP-31",
       "type": "reliability",
-      "title": "All mutation callers of `rt_apply_directory_repoint` updated to use `check_before_start=True` \u2014 all 8 callers (lane1_execute.py \u00d72, save_path_repair.py, hitchhiker_split.py, save_path_recovery.py, nested_folder_repair.py, cli.py \u00d74); after-job A/B skipped (OP-42) so closure recorded here",
+      "title": "All mutation callers of `rt_apply_directory_repoint` updated to use `check_before_start=True` — all 8 callers (lane1_execute.py ×2, save_path_repair.py, hitchhiker_split.py, save_path_recovery.py, nested_folder_repair.py, cli.py ×4); after-job A/B skipped (OP-42) so closure recorded here",
       "status": "closed",
       "observed": "j29",
       "fix_targets": [
@@ -671,7 +677,7 @@
     {
       "id": "OP-33",
       "type": "reliability",
-      "title": "Snowfall S05 pool copy damaged \u2014 E01 downloaded (nlinks=1) + E02-E10 zero stubs; j28 batch repair hardlinked stubs from nested; hash-check passed complete=1; item now seeding; E01 downloaded copy verified correct by hash; no repoint needed",
+      "title": "Snowfall S05 pool copy damaged — E01 downloaded (nlinks=1) + E02-E10 zero stubs; j28 batch repair hardlinked stubs from nested; hash-check passed complete=1; item now seeding; E01 downloaded copy verified correct by hash; no repoint needed",
       "status": "closed",
       "observed": "j28",
       "fix_targets": []
@@ -679,7 +685,7 @@
     {
       "id": "OP-34",
       "type": "reliability",
-      "title": "River Monsters S07 (127C3834) + Transformers (96D896CA) repaired via repair_cross_seed_nested_stubs.py --execute --hash; hash-checked and started; seeding at 99.92%/99.99% (missing .nfo + last chunk of E01 \u2014 zero-byte in nested, will complete from peers)",
+      "title": "River Monsters S07 (127C3834) + Transformers (96D896CA) repaired via repair_cross_seed_nested_stubs.py --execute --hash; hash-checked and started; seeding at 99.92%/99.99% (missing .nfo + last chunk of E01 — zero-byte in nested, will complete from peers)",
       "status": "closed",
       "observed": "j33",
       "fix_targets": []
@@ -687,7 +693,7 @@
     {
       "id": "OP-35",
       "type": "reliability",
-      "title": "6 720p items repaired via repair script per-hash \u2014 Chicago.Fire.S12.720p \u00d73 (1FEB6EDA, 39378378, 40A1D9DC) seeding 100%; Dexter.S02.720p \u00d72 (E56E8C57 100%, 245F2BCE 99.97%) + Dexter.S07.720p (E36553B1 99.96%) seeding; .nfo + last E01 chunk missing for 3 items (will complete from peers)",
+      "title": "6 720p items repaired via repair script per-hash — Chicago.Fire.S12.720p ×3 (1FEB6EDA, 39378378, 40A1D9DC) seeding 100%; Dexter.S02.720p ×2 (E56E8C57 100%, 245F2BCE 99.97%) + Dexter.S07.720p (E36553B1 99.96%) seeding; .nfo + last E01 chunk missing for 3 items (will complete from peers)",
       "status": "closed",
       "observed": "j33",
       "fix_targets": []
@@ -703,7 +709,7 @@
     {
       "id": "OP-37",
       "type": "bug",
-      "title": "`rt_check_and_conditionally_start()` final `d.complete` read after poll timeout \u2014 if complete=1, start torrent; prevents stoppedUL stalls on large multi-episode seasons; fixed in j29; after-job A/B skipped (OP-42) so closure recorded here",
+      "title": "`rt_check_and_conditionally_start()` final `d.complete` read after poll timeout — if complete=1, start torrent; prevents stoppedUL stalls on large multi-episode seasons; fixed in j29; after-job A/B skipped (OP-42) so closure recorded here",
       "status": "closed",
       "observed": "j29",
       "fix_targets": [
@@ -738,7 +744,7 @@
     {
       "id": "OP-41",
       "type": "reliability",
-      "title": "4 course/BLURAY items removed from RT and partial download data deleted \u2014 erased DB1175F8, 247303F4, F8C32150, CFE048E5 from RT; deleted nlinks=1 partial data from disk",
+      "title": "4 course/BLURAY items removed from RT and partial download data deleted — erased DB1175F8, 247303F4, F8C32150, CFE048E5 from RT; deleted nlinks=1 partial data from disk",
       "status": "closed",
       "observed": "j30",
       "fix_targets": []
@@ -746,7 +752,7 @@
     {
       "id": "OP-29",
       "type": "reliability",
-      "title": "80\u21920 stopped resolved",
+      "title": "80→0 stopped resolved",
       "status": "closed",
       "observed": "manual+j35",
       "fix_targets": []
@@ -762,7 +768,7 @@
     {
       "id": "OP-46",
       "type": "bug",
-      "title": "RT Docker path (/stash/media\u2192/data/media) documented in INIT.md; all briefs updated to use /data/ paths",
+      "title": "RT Docker path (/stash/media→/data/media) documented in INIT.md; all briefs updated to use /data/ paths",
       "status": "closed",
       "observed": "lead",
       "fix_targets": []
@@ -778,7 +784,7 @@
     {
       "id": "OP-18",
       "type": "reliability",
-      "title": "Exploration complete \u2014 docs/EXPLORE-UNIFIED-TOOL.md produced; split-brain root cause documented; unified `hashall canonicalize` orchestrator design sketched (~730-1340 lines); mutation block on rehome/save_path_inference remains until unified tool is built and 4-gate validated",
+      "title": "Exploration complete — docs/EXPLORE-UNIFIED-TOOL.md produced; split-brain root cause documented; unified `hashall canonicalize` orchestrator design sketched (~730-1340 lines); mutation block on rehome/save_path_inference remains until unified tool is built and 4-gate validated",
       "status": "closed",
       "observed": "j41",
       "fix_targets": [
@@ -862,7 +868,7 @@
     {
       "id": "OP-08",
       "type": "doc",
-      "title": "Superseded \u2014 REQUIREMENTS.md \u00a74.4 establishes canonical policy; 12b is historical record",
+      "title": "Superseded — REQUIREMENTS.md §4.4 establishes canonical policy; 12b is historical record",
       "status": "closed",
       "observed": "j40-t03",
       "fix_targets": []
@@ -870,7 +876,7 @@
     {
       "id": "OP-51",
       "type": "reliability",
-      "title": "Run 4-gate validated canonicalize repair pass \u2014 build hashall canonicalize-apply executor; run Gate 0+1 pre-flight, Gate 2 dry-run manifest, Gate 3 single-item live pilot, Gate 4 gated batch; formalize 4-gate protocol as institutional doc (j47-t01 output); mutation block fully lifted only after Gate 4 batch complete and stoppedDL delta=0",
+      "title": "Run 4-gate validated canonicalize repair pass — build hashall canonicalize-apply executor; run Gate 0+1 pre-flight, Gate 2 dry-run manifest, Gate 3 single-item live pilot, Gate 4 gated batch; formalize 4-gate protocol as institutional doc (j47-t01 output); mutation block fully lifted only after Gate 4 batch complete and stoppedDL delta=0",
       "status": "closed",
       "observed": "j47",
       "fix_targets": []
@@ -878,7 +884,7 @@
     {
       "id": "OP-52",
       "type": "reliability",
-      "title": "qB path update needed after Gate 4 canonicalize batch \u2014 `set_location` blocked for cross-device moves (stash\u2192pool); ~465 qB torrents have stale save_path pointing to staged stash locations; items are stoppedUP so no immediate stoppedDL risk, but qB paths need update via rehome/fastresume-edit before any forced recheck; scope: all fix_placement_only items processed in Gate 4",
+      "title": "qB path update needed after Gate 4 canonicalize batch — `set_location` blocked for cross-device moves (stash→pool); ~465 qB torrents have stale save_path pointing to staged stash locations; items are stoppedUP so no immediate stoppedDL risk, but qB paths need update via rehome/fastresume-edit before any forced recheck; scope: all fix_placement_only items processed in Gate 4",
       "status": "closed",
       "observed": "j47",
       "fix_targets": [
@@ -888,7 +894,7 @@
     {
       "id": "OP-54",
       "type": "reliability",
-      "title": "pool/media orphan offload blocked \u2014 `rsync -a` without `-H` expands internal hardlinks in orphans dir: `du` shows 3.9T (ZFS counts each inode once) but rsync transfers each directory entry independently, inflating actual transfer to ~8T; WD6TB (5.2T usable) filled at 71% (~5.4T copied, rsync died); pool still at 0 bytes free; **superseded by OP-61** \u2014 switched to dedupe-based strategy (delete confirmed dupes instead of migrate)",
+      "title": "pool/media orphan offload blocked — `rsync -a` without `-H` expands internal hardlinks in orphans dir: `du` shows 3.9T (ZFS counts each inode once) but rsync transfers each directory entry independently, inflating actual transfer to ~8T; WD6TB (5.2T usable) filled at 71% (~5.4T copied, rsync died); pool still at 0 bytes free; **superseded by OP-61** — switched to dedupe-based strategy (delete confirmed dupes instead of migrate)",
       "status": "closed",
       "observed": "j47",
       "fix_targets": [
@@ -905,12 +911,130 @@
       "observed": "closed:j54",
       "fix_targets": [
         "setLocation",
-        "bucket\u2192drain\u2192apply\u2192roundloop",
+        "bucket→drain→apply→roundloop",
         "pause_mirror_seeders.py",
         "pause_mirror_seeders.py",
         "--extra-root-file",
         "--restore-from-backup",
         "qb mirror quiesce"
+      ]
+    },
+    {
+      "id": "OP-80",
+      "type": "reliability",
+      "title": "J51 near-complete qB stoppedDL policy accepts good tracker announce with no connected seeders as wait-state; Plan B split/redownload is required for sibling content variants.",
+      "status": "in-job",
+      "job": "j51",
+      "observed": "",
+      "fix_targets": [
+        "qB stoppedDL",
+        "Plan B",
+        "freeleech proof",
+        "variant split"
+      ]
+    },
+    {
+      "id": "OP-81",
+      "type": "bug",
+      "title": "payload sync --source rt --path-prefix did not apply /data ↔ /stash alias handling to path-prefix filters.",
+      "status": "in-job",
+      "job": "j51",
+      "observed": "",
+      "fix_targets": [
+        "payload sync",
+        "--path-prefix",
+        "/data",
+        "/stash"
+      ]
+    },
+    {
+      "id": "OP-82",
+      "type": "bug",
+      "title": "payload sync --hash skipped row scope correctly but still ran whole-catalog orphan prune after explicit hash filters.",
+      "status": "in-job",
+      "job": "j51",
+      "observed": "",
+      "fix_targets": [
+        "payload sync",
+        "--hash",
+        "orphan prune"
+      ]
+    },
+    {
+      "id": "OP-83",
+      "type": "bug",
+      "title": "Plan B start gate accepted freeleech proof for one tracker while starting an RT torrent from a different tracker.",
+      "status": "in-job",
+      "job": "j51",
+      "observed": "",
+      "fix_targets": [
+        "freeleech proof",
+        "tracker match",
+        "rt-qb-variant-split-redownload.py"
+      ]
+    },
+    {
+      "id": "OP-84",
+      "type": "bug",
+      "title": "qB recheck monitor can misclassify active moving stoppedDL/checking progress as stalled or incomplete.",
+      "status": "in-job",
+      "job": "j51",
+      "observed": "",
+      "fix_targets": [
+        "qB recheck monitor",
+        "stoppedDL",
+        "amount_left"
+      ]
+    },
+    {
+      "id": "OP-85",
+      "type": "feature",
+      "title": "J51 99.* analysis needs failed-piece-to-file mapping so operators can classify media-byte mismatch vs missing sidecar.",
+      "status": "in-job",
+      "job": "j51",
+      "observed": "",
+      "fix_targets": [
+        "client-drift verify-pieces",
+        "failed pieces",
+        "sidecar"
+      ]
+    },
+    {
+      "id": "OP-86",
+      "type": "feature",
+      "title": "[hashall] Add guarded qB partial fastresume restore tooling for known-good 99.* backup piece maps.",
+      "status": "in-job",
+      "job": "j51",
+      "observed": "",
+      "fix_targets": [
+        "qB fastresume",
+        "pieces",
+        "restore from backup"
+      ]
+    },
+    {
+      "id": "OP-87",
+      "type": "bug",
+      "title": "[hashall] qb-stoppeddl-apply should report moving qB rechecks as pending/needs-monitor instead of failed.",
+      "status": "in-job",
+      "job": "j51",
+      "observed": "",
+      "fix_targets": [
+        "qb-stoppeddl-apply.py",
+        "checkingDL",
+        "pending monitor"
+      ]
+    },
+    {
+      "id": "OP-88",
+      "type": "bug",
+      "title": "[chatrap] SESSION.md can become stale or mismatched relative to active work even when a goal exists.",
+      "status": "hold",
+      "hold": "chatrap-upgrade-may-be-OBE",
+      "observed": "",
+      "fix_targets": [
+        "SESSION.md",
+        "chatrap session"
       ]
     }
   ]

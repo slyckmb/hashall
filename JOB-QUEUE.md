@@ -26,11 +26,12 @@ updated: 2026-07-07
 | j57 | rt-qb-state-guard | OP-69 | Implemented on CR in `f06e944` with direct-CR workflow caveat. Guard tools/docs/prompts are usable now; root-cause follow-up remains open. |
 | j51 | qb-stoppeddl-recovery | OP-62,OP-70,OP-78,OP-79,OP-80,OP-81,OP-82,OP-83,OP-84,OP-85,OP-86,OP-87 | Active recovery in progress. t10+t11 live verified-retarget batches succeeded, later t12 work brought live qB to `stoppedDL=362`, `stoppedUP=4554`; approved t13-t20 live verified-retarget succeeded and moved qB to `stoppedDL=170`, `stoppedUP=4746`; approved 157-hash follow-up brought qB to 7 active stoppedDL hard-tail rows. Approved 3-hash verified hard-tail retarget completed on 2026-07-13: Yu-Gi-Oh `399f4c0bbb79`, Supernatural `09c5e08c31eb`, and Nintendo `09bceba1b43c` are now `stoppedUP` with progress `1.0` and amount left `0`; Nintendo required an extended focused monitor after the apply wrapper timed out while checking. qB stoppedDL tail is now 4. River Monsters, Dexter S02, Transformers, and Dexter S07 are proven partial/no-seed or Plan B rows and must not be forced to `stoppedUP`; 2026-07-13 refresh shows all four have working tracker announces but seeds=0 and peers=0, so they are wait-state rows unless a separately approved replacement/download path is chosen. Follow-up fastresume restore fixed qB's `0%` drift for those four by restoring partial `pieces` bitmaps from known-good backups and correcting River/Transformers save paths to parent roots; qB now mirrors RT at `99.*` while remaining `stoppedDL`. Dexter S02 old source cleanup completed on 2026-07-13 and deleted `/data/media/torrents/seeding/SpeedCD/Dexter.S02.720p.x265-ZMNT`, reclaiming 8339890797 bytes across 13 files. New friction slotted: OP-86 guarded partial fastresume restore tooling; OP-87 apply-wrapper pending-monitor semantics for moving qB rechecks. Next: leave the four partial/no-peer rows parked or handle them through the documented variant/replacement process only with tracker/download approval. |
 | j52 | mirror-placement-anomalies | OP-58,OP-59,OP-63,OP-74 | Planned. Surgical mirror/rehome fixes for known small anomaly set plus RT/qB pause-state sync RCCA. |
+| j58 | hashall-agent-safety | OP-45,OP-73 | Planned. Hashall-local operational hardening: enforce explicit hash scope for torrent-state mutation briefs and remove qB credentials from process argv/log paths. |
 | j55 | pool-orphan-dedupe-gated | OP-60,OP-61 | Planned. Dry-run/classify first; live deletion/rsync requires explicit operator approval. |
 | j42 | lane2-strategy | OP-23,OP-26 | Planned after immediate qB/orphan blockers. |
 | j39 | cross-seed-repair | OP-09,OP-15,OP-17,OP-19,OP-24,OP-47,OP-68 | Planned after lane strategy. |
 | j43 | rt-state-monitor | OP-10,OP-12 | Planned infrastructure/state work after j57 guard. |
-| j44 | chatrap-infra | OP-42,OP-45,OP-71,OP-72,OP-73,OP-77,OP-88 | Planned orchestration/session/security reliability work. |
+| hold-chatrap | chatrap-upgrade-hold | OP-42,OP-71,OP-72,OP-77,OP-88 | On hold. These belong to chatrap and may be obsolete after the pending chatrap upgrade; do not dispatch from hashall unless revalidated. |
 | j56 | link-plan-ux | OP-65 | Planned low-risk UX cleanup. |
 | j45 | cr-to-main | OP-14 | Final merge only. |
 
@@ -41,7 +42,8 @@ updated: 2026-07-07
 - j50 is a code/tooling closeout only. Do not run live orphan deletion or rsync in j50.
 - j57 guard/enforcement exists and is usable. Any further live RT/qB repair mutation is still blocked unless it uses full 4-Gate or surgical mini-gate; stop-only qB containment remains the only exception.
 - j51 requires j54 tooling and j57 guard/enforcement; both are satisfied. j51 live apply remains blocked until a fresh t09 plan identifies exact hashes/batches, includes the OP-70 RT-first source-of-truth gate, guard artifacts pass, and the operator explicitly approves.
-- j52 should run after j51 so qB passive-state enforcement is already hardened; it handles a tiny known anomaly set (TorrentDay mirror race + Elemental duplicate).
+- j58 should run before the next live-heavy operational job if payload sync or delegated mutation agents will be used; it closes hashall-local safety gaps before more live repair work.
+- j52 should run after j58 so qB credential handling and explicit-hash dispatch discipline are hardened before mirror/rehome mutation; it handles a tiny known anomaly set (TorrentDay mirror race + Elemental duplicate).
 - j55 must not mutate live storage until its dry-run/classification output is reviewed. Live deletion/rsync requires explicit operator approval.
 - j42 and j39 remain downstream of immediate safety repairs and storage feasibility decisions.
 - j45 is last — merge only after planned repair jobs complete.
@@ -50,7 +52,7 @@ updated: 2026-07-07
 
 ## Run Order
 
-j50 → j57 → j51 → j52 → j55 → j42 → j39 → j43 → j44 → j56 → j45
+j50 → j57 → j51 → j58 → j52 → j55 → j42 → j39 → j43 → j56 → j45
 
 Notes:
 - j48 (sha256-content-anchor) done — SHA256 backfill + _Sha256ContentMatcher + repoint_both_to_stash delivered; 83 blocked FPs resolvable
@@ -59,12 +61,13 @@ Notes:
 - j54 (stoppeddl-tooling) done — OP-66 closed. 6 gaps fixed: pause_mirror_seeders extended, watchdog built, 4-Gate protocol updated, --extra-root-file added, --restore-from-backup added, verify-persistence.sh built. Hardened pipeline ready for j51 safety gate.
 - j57 (rt-qb-state-guard) implemented in `f06e944` — OP-69 hardens the gap exposed by recurring RT/qB state regressions: existing tooling existed but ad hoc live repairs could bypass gate evidence, watchdogs, persistence checks, and prompt/brief enforcement. `chatrap ack commit HEAD` flags direct-CR workflow, but validation passed and tools are usable.
 - j51 (qb-stoppeddl-recovery, OP-62/OP-70/OP-78/OP-79/OP-80/OP-81/OP-82/OP-83/OP-84/OP-85/OP-86/OP-87) active recovery in progress — OP-62 started as 440 missingFiles. Current 2026-07-09 refresh: qB `stoppedDL=362`, `stoppedUP=4554`, active upload/download=0; bucket `/tmp/qb-stoppeddl-bucket-live` has 441 original hashes. DB refresh artifacts live under `.agent/reports/db-refresh-j51-20260707-045304/`. Correction after t07: generic catalog-drain policy was the wrong first lens; direct RT session mapping shows all 441 qB stoppedDL hashes are present in rTorrent and all 441 RT paths exist. Original t09 path-shape Class A evidence was not apply-compatible, so the first approved 25-hash batch was re-verified: 24 verified, 1 failed partial-match hash (`376c463cd58324`). OP-79 v0.2.14 added explicit `--allow-verified-fastresume-cross-filesystem`, limited to independently verified fastresume-only retargets. Approved t10 and t11 live batches succeeded; t12 progress is reflected in the current live count. Approved t13-t20 live verified-fastresume retarget succeeded: combined pre-live report `/tmp/qb-stoppeddl-bucket-live/reports/j51-t13-t20-approved-192-apply-dryrun-prelive.json` had `planned=192`, `blocked=0`; live report `/tmp/qb-stoppeddl-bucket-live/reports/j51-t13-t20-approved-192-apply-live.json` has `planned=192`, `applied=192`, `ok=192`, `failed=0`, `fr_patched=192`, `rollback_ledger_written=192`; rollback ledger `/tmp/qb-stoppeddl-bucket-live/reports/j51-t13-t20-approved-192-rollback-ledger.jsonl` has 192 entries; post-state `/tmp/qb-stoppeddl-bucket-live/reports/j51-t13-t20-approved-192-post-state.json` confirms all 192 are `stoppedUP`; global qB count changed `stoppedDL=362→170`, `stoppedUP=4554→4746`; qB container healthy; pause mirror dry-run found no active mirror items. Seven t14 candidates remain excluded for now: 6 missing verifier reports/no-candidate rows and 1 huge Nintendo set timed out at 19.6% after 900s. OP-80 follow-up on 2026-07-10 documents Plan A/Plan B for sibling content variants. Plan A validates all 6 current qB `99.* stoppedDL` rows and finds 0 direct sibling-hardlink repair candidates; all 6 now require gated Plan B split/rename/redownload to prove duplicate vs real variant. OP-81 fixes the `e4446638c792...` alias miss by expanding `payload sync --source rt --path-prefix` through the same alias set as roots. OP-82 fixes hash-scoped sync so it skips whole-catalog orphan prune after explicit `--hash` filters. OP-83 fixes the Plan B tracker-proof mismatch gate and the DigitalCore API indexer-label alias. OP-84 fixes qB recheck monitoring for moving `stoppedDL` progress. OP-85 adds failed-piece-to-file mapping with media/sidecar classifications and exact payload/quarantine-root support. OP-86 records the missing guarded tool for restoring partial qB fastresume piece maps from known-good backups. OP-87 records the apply-wrapper timeout/reporting gap for moving qB rechecks. Validation: focused Plan B/client-drift tests pass; 2026-07-11 Transformers live start report is `.agent/reports/j51-tracker-matched-source-scan-20260711/96d896ca35f4-start-existing-live-digitalcore.json`; live sample is `.agent/reports/j51-tracker-matched-source-scan-20260711/live-sample-after-transformers-start.txt`. Next: use failed-piece mapping before any further Plan B start; parked active/no-peer items are not blockers; find strict proof or approval for Dexter S02/S07, then continue one controlled Plan B start at a time.
+- j58 (hashall-agent-safety) is the next new-code job after j51 follow-up tooling: OP-45 adds explicit-hash/exclusion discipline for torrent-state mutation briefs, and OP-73 removes qB credentials from argv/log exposure paths. This should run before broad live repair work that uses delegated agents or `payload sync`.
 - j52 (mirror-placement-anomalies) groups the small known mirror/rehome anomalies before broad strategy work: OP-58/59 TorrentDay race, OP-63 Elemental pool→stash hardlink payload rehome, and OP-74 RT/qB paused-100 sync mismatch/RCCA.
 - j55 (pool-orphan-dedupe-gated) holds the high-risk pool orphan deletion/rsync work. It starts with dry-run/classification and stops for operator approval before deletion.
 - j42 (lane2-strategy) after immediate blockers — quantifies Lane 2 scope for 1030 ROOT_DRIFT + 2361 compound drift items on POOL; decide STASH→POOL vs POOL→stash strategy using new library_dupe/repoint_both_to_stash tooling
 - j39 (cross-seed-repair) after j42 — requires canonicalize drift items corrected (j46+j47+j48 done) and lane2 strategy settled; includes OP-68 RT `PD` holdouts/regression. 2026-07-05 surgical dry-runs keep `f9389496` and `8685d0e6` blocked because current RT directories lack required payload files. 2026-07-09 RCCA: the current 99% RT `PD` rows are stopped after failed completion hash checks and share hardlinked inodes with 100% siblings, so do not simply start them; split the incomplete hash to a unique payload tree before any wait-for-seeds start. 2026-07-10 repair: E.T. proved the procedure. The old stash inode did not verify for seedpool/Darkpeers/DigitalCore, so seedpool `0b236c5155a4` was split to pool and downloaded fresh bytes, proving a second variant; Darkpeers `1c6285d80aa3` and DigitalCore `4b4a1747e01b` now point at per-tracker pool paths hardlinked to that new verified variant. qB is `stoppedUP` 100%, RT is `complete=1 left=0`, and DB has all three complete payload rows on device 45. Report: `docs/RCCA-RT-PD-HOLDOUTS-20260709.md`.
 - j43 (rt-state-monitor) — RT restart + qB cache daemon migration (OP-12 re-slotted from j40); depends on j57 for RT/qB guard primitives
-- j44 (chatrap infra) — upstream fixes plus new friction from this session: enforce session goals, detect stale/mismatched session goals, eliminate direct-CR S05 failures, stop secret leakage through process argv/logs, and fix `lead ship`/fallback dispatch false-success issues from OP-77.
+- hold-chatrap — OP-42/71/72/77/88 are deliberately unslotted from hashall jobs and held pending the chatrap upgrade; revalidate after upgrade before reopening any local work.
 - j56 (link-plan-ux) — low-risk UX cleanup for hardlink plan labels; can run whenever operational jobs are paused
 - j45 (cr-to-main) — merge CR to main after all repair jobs done
 
@@ -76,7 +79,7 @@ Notes:
   - `comms/briefs/j51-t01-deep-dive.md`
   - `comms/briefs/j51-t02-stoppeddl-sop.md`
   - `comms/briefs/TASK-BRIEF-j54-t01.md` through `TASK-BRIEF-j54-t06.md` (already executed/merged)
-- Current j51 briefs:
+- Current/next briefs:
   - `j51-t04` state refresh only — done by lead read-only refresh
   - `j51-t05` tool/readiness audit only — done by lead read-only refresh
   - `j51-t06` bucket sync only — done by lead read-only refresh
@@ -84,6 +87,10 @@ Notes:
   - `j51-t08` RT→qB repair worksheet — done by lead read-only refresh
   - `j51-t09` execution-plan synthesis — done; approval plan copied to `.agent/reports/j51-ship-20260708/`
   - `j51-t10` live execution — blocked; verified 24-hash live attempt patched 0 due same-filesystem gate after qB stop
+  - `j51-t23` partial fastresume restore tooling — written
+  - `j51-t24` apply-wrapper pending-monitor semantics — written
+  - `j58-t01` hash-scoped mutation brief guard — written
+  - `j58-t02` qB credential argv/log hardening — written
   - `j52-t01` mirror/rehome anomaly investigation
   - `j55-t01` orphan dry-run/classification
   - `j55-t02+` live deletion/rsync briefs only after operator approval
@@ -307,19 +314,29 @@ Recommended dispatch order: t01 → t04 → t05 → t06 → t03 → t02.
 ## j44 — chatrap-infra
 
 **Slug:** chatrap-infra
-**OPs:** OP-42, OP-45, OP-71, OP-72, OP-73, OP-77, OP-88
-**Goal:** Fix orchestration reliability gaps that hide friction, allow workflow bypass, or leak sensitive runtime data.
+**OPs:** none active in hashall
+**Goal:** On hold pending chatrap upgrade. Prior chatrap-owned OPs are held in OPS.md and should be revalidated after upgrade before reopening local work.
 
 ### Tasks
 
 | Task | Status | Goal |
 |------|--------|------|
-| j44-t01 | planned | Fix OP-42: make after-job scan opencode/Pi/direct logs and artifact dirs for task-log/friction/ops_closed blocks; preserve logs under `.agent/logs/<session>/<job>/`. |
-| j44-t02 | planned | Fix OP-45 class: enforce explicit hash allowlists/exclusion lists in torrent-state mutation briefs and dispatch wrappers so agents cannot act on visible-but-out-of-scope stopped torrents. |
-| j44-t03 | planned | Fix OP-71: make chatrap session tracking refuse or loudly warn on meaningful work with unset `goal`; provide safe goal recovery from current step/evidence. |
-| j44-t04 | planned | Fix OP-72: hard-block direct-CR project commits or provide an explicit lead tracking-commit path that records equivalent task-log/friction metadata and passes S05. |
-| j44-t05 | planned | Fix OP-73: remove qB password/user from payload-sync argv/logging; use env/config/cookie loading and add a smoke test proving `ps`/logs do not expose qB secrets. |
-| j44-t06 | planned | Fix OP-88: detect stale/mismatched `SESSION.md` goals by comparing stored goal to current step/recent commits, then require an explicit goal refresh before archive/clear. |
+| hold-chatrap | hold | OP-42, OP-71, OP-72, OP-77, and OP-88 are held as chatrap-owned and may be OBE pending chatrap upgrade. |
+
+---
+
+## j58 — hashall-agent-safety
+
+**Slug:** hashall-agent-safety
+**OPs:** OP-45, OP-73
+**Goal:** Close hashall-local safety gaps before more live repair work: mutation briefs must force explicit hash scope, and qB credentials must not appear in process argv, shell logs, reports, or tool output.
+
+### Tasks
+
+| Task | Status | Goal |
+|------|--------|------|
+| j58-t01 | planned | Fix OP-45: add reusable explicit-hash/exclusion-list guidance and checks to hashall mutation briefs/runbooks so delegated agents cannot act on visible but out-of-scope torrents. |
+| j58-t02 | planned | Fix OP-73: audit `payload sync`/qB credential call paths, move qB auth out of CLI argv, redact command/report output, and add a smoke test proving `ps`/logs do not expose secrets. |
 
 ---
 
@@ -406,4 +423,5 @@ Replanned 2026-07-03: added j54 (stoppeddl-tooling, OP-66). Ordered after j53, b
 Replanned 2026-07-03 (logical safety replan): split j50 into tooling-only closeout (OP-57), j51 qB stoppedDL recovery (OP-62), j52 mirror/rehome anomaly fixes (OP-58/59/63), j55 gated orphan dedupe (OP-60/61, approval before live deletion/rsync), and j56 low-risk link-plan UX (OP-65). Run order: j50→j51→j52→j55→j42→j39→j43→j44→j56→j45.
 
 Replanned 2026-07-03 (weak-model j51 split): j51-t03 audit blocked mutation because qB still had `checkingUP=3080` and `checkingDL=4`. Split broad recovery work into smaller dispatch slices: t04 state refresh only, t05 tool readiness only, t06 bucket sync only, t07 tiny drain pilot, t08 full read-only drain, t09 execution-plan synthesis, t10 approval-gated live execution. This avoids asking weak/free models to reason over qB state, tool readiness, drain policy, and mutation planning in one task.
-Replanned 2026-07-07 (session-friction capture): added OP-70 to j51 after the lead used the wrong generic catalog-drain lens before checking RT truth; t09 must now include an explicit RT-first source-of-truth gate. Added OP-71/OP-72/OP-73 to j44 for chatrap session goal enforcement, direct-CR S05 failures, and qB secret leakage through payload-sync argv/logging.
+Replanned 2026-07-07 (session-friction capture): added OP-70 to j51 after the lead used the wrong generic catalog-drain lens before checking RT truth; t09 must now include an explicit RT-first source-of-truth gate. Added OP-71/OP-72 to chatrap tracking and OP-73 to hashall safety tracking.
+Replanned 2026-07-13 (chatrap hold + hashall safety): unslotted chatrap-owned OP-42/71/72/77/88 from hashall execution and moved them to `hold:chatrap-upgrade-may-be-OBE`; slotted hashall-owned OP-45/73 to new j58; kept all current hashall OPs assigned; run order is now j50→j57→j51→j58→j52→j55→j42→j39→j43→j56→j45. Briefs written for j51-t23, j51-t24, j58-t01, and j58-t02.
