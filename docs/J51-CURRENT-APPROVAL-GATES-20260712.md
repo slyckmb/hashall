@@ -75,6 +75,8 @@ Evidence:
 
 - Source cleanup dry-run: `/tmp/hashall-j51-dexter-s02-source-cleanup-dryrun-refresh-20260712.json`
 - Guarded execute preview: `/tmp/hashall-j51-dexter-s02-source-cleanup-execute-preview-20260712-230548.json`
+- Current guarded execute preview: `/tmp/hashall-j51-dexter-s02-source-cleanup-execute-preview-20260713-005557.json`
+- Latest guarded execute preview: `/tmp/hashall-j51-dexter-s02-source-cleanup-execute-preview-20260713-current.json`
 - Delete root after approval: `/data/media/torrents/seeding/SpeedCD/Dexter.S02.720p.x265-ZMNT`
 - Filesystem check: `13` files, `8339890797` bytes, `min_nlink=1`, `max_nlink=1`, `non_nlink1=0`
 - Safety state: no exact qB/RT client hits, no library hits, no dry-run blockers
@@ -95,19 +97,52 @@ Execution command after approval:
   --output /tmp/hashall-j51-dexter-s02-source-cleanup-execute-live-20260712.json
 ```
 
+## Approval Gate 3: qB Retarget Yu-Gi-Oh Verified Hard-Tail Item
+
+Yu-Gi-Oh was previously listed as class E/no-candidate because the earlier verifier timed out before reading enough data. A targeted full verifier on 2026-07-13 proved the pool payload is complete and byte-correct.
+
+Evidence:
+
+- Full piece verifier: `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-yugioh-full-verify-20260713.json`
+- Apply-compatible drain report: `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-yugioh-drain-verified-crossfs-20260713.json`
+- Apply dry-run: `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-yugioh-apply-dryrun-20260713.json`
+- Verification result: class A, exact tree, verified `true`, ratio `1.0`, `2799/2799` pieces OK
+- Recommended path: `/pool/media/torrents/seeding/Yu-Gi-Oh! Zexal Season 4`
+- Dry-run state: `planned=1`, `fr_needed=1`, `same_filesystem_overridden=1`, `blocked=0`, `root_policy_rejected=0`
+
+Required approval text:
+
+```text
+approve j51 live fastresume retarget Yu-Gi-Oh 399f4c0bbb791 using verified class-A drain report /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-yugioh-drain-verified-crossfs-20260713.json with --allow-verified-fastresume-cross-filesystem
+```
+
+Execution command after approval:
+
+```bash
+bin/qb-stoppeddl-apply.py \
+  --bucket-dir /tmp/qb-stoppeddl-bucket-live \
+  --drain-report /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-yugioh-drain-verified-crossfs-20260713.json \
+  --hashes-file /tmp/qb-stoppeddl-bucket-live/reports/j51-yugioh-verified-hash.txt \
+  --allow-verified-fastresume-cross-filesystem \
+  --apply \
+  --wait-recheck \
+  --report-json /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-yugioh-apply-live-20260713.json \
+  --rollback-ledger /tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-yugioh-rollback-ledger-20260713.jsonl
+```
+
 ## Excluded Hard-Tail Items
 
 These 7 hashes are intentionally excluded from the verified-safe qB conversion batch.
 
 | Hash | Name | Current evidence | Next action |
 | --- | --- | --- | --- |
-| `09bceba1b43c` | Nintendo Gamecube Complete Collection - HardStyle | DB payload incomplete; 675.98 GiB; not verified safe | Do not retarget. Run a dedicated long verifier only if the I/O is worthwhile. |
-| `09c5e08c31eb` | Supernatural S01-S15 web eac3 hevc-d3g | DB payload incomplete; 268.87 GiB; not verified safe | Do not retarget. Run a dedicated long verifier only if the I/O is worthwhile. |
-| `127c38342cfe` | River Monsters S07 1080p AMZN WEB-DL DDP2 0 H 264-NTb | Verified partial, class D, ratio `0.9992356763546204` | Leave as partial/no-seed or continue variant/replacement handling. |
-| `245f2bce6afa` | Dexter.S02.720p.x265-ZMNT | Verified partial, class D, ratio `0.9997485396330664` | Do not convert to `stoppedUP`; source cleanup is separate from partial repair. |
-| `399f4c0bbb79` | Yu-Gi-Oh! Zexal Season 4 | Incomplete/no candidate, class E | Needs targeted source discovery or replacement plan. |
-| `96d896ca35f4` | Transformers.Rise.of.the.Beasts.2023.1080p.BluRay.x265.10bit.TrueHD.7.1.Atmos-TORRENTLEECHENC0DE | Targeted DB-root verify proved partial, class D, ratio `0.9999070414299701` | Do not convert to `stoppedUP`; continue variant/replacement handling. |
-| `e36553b12dc1` | Dexter.S07.720p.x265-ZMNT | Targeted DB-root verify proved partial, class D, ratio `0.9996357743303342` | Do not convert to `stoppedUP`; source cleanup remains blocked by a live TorrentLeech client reference. |
+| `09bceba1b43c` | Nintendo Gamecube Complete Collection - HardStyle | RT cache currently `stalledUP` on pool path; quick tree/size match is perfect; full verifier timed out at 19.6% after 900s, so independent byte proof is incomplete | Do not retarget without either a full verifier pass or an explicit operator decision to trust RT complete state plus qB recheck. |
+| `09c5e08c31eb` | Supernatural S01-S15 web eac3 hevc-d3g | RT cache currently `stalledUP` on pool path; no independent full verifier artifact found; 268.87 GiB | Do not retarget without either a full verifier pass or an explicit operator decision to trust RT complete state plus qB recheck. |
+| `127c38342cfe` | River Monsters S07 1080p AMZN WEB-DL DDP2 0 H 264-NTb | RT cache currently `stalledDL`; verified partial, class D, ratio `0.9992356763546204`; report `/tmp/qb-stoppeddl-bucket-live/reports/verify-127c38342cfedaf4016b8079be13c5f7883b9cfe-20260712-223627.json` | Leave as partial/no-seed or continue variant/replacement handling; do not convert to `stoppedUP`. |
+| `245f2bce6afa` | Dexter.S02.720p.x265-ZMNT | RT cache currently `stalledDL`; verified partial, class D, ratio `0.9997485396330664`; report `/tmp/qb-stoppeddl-bucket-live/reports/verify-245f2bce6afaf96b0a48ad216366c4281fdd864f-20260712-220009.json` | Do not convert to `stoppedUP`; source cleanup is separate from partial repair. |
+| `399f4c0bbb79` | Yu-Gi-Oh! Zexal Season 4 | Full verifier now proves class A exact tree, verified `true`, ratio `1.0`; dry-run requires one fastresume retarget | Ready for explicit live approval under Approval Gate 3. |
+| `96d896ca35f4` | Transformers.Rise.of.the.Beasts.2023.1080p.BluRay.x265.10bit.TrueHD.7.1.Atmos-TORRENTLEECHENC0DE | RT cache currently `stalledDL`; targeted DB-root verify proved partial, class D, ratio `0.9999070414299701`; report `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-transformers-dbroot-verify-20260712.json` | Do not convert to `stoppedUP`; continue variant/replacement handling. |
+| `e36553b12dc1` | Dexter.S07.720p.x265-ZMNT | RT cache currently `stalledDL`; targeted DB-root verify proved partial, class D, ratio `0.9996357743303342`; report `/tmp/qb-stoppeddl-bucket-live/reports/j51-hardtail-dexter-s07-dbroot-verify-20260712.json` | Do not convert to `stoppedUP`; source cleanup remains blocked by a live TorrentLeech client reference. |
 
 ## Important Tracking Note
 
