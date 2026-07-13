@@ -266,6 +266,8 @@ The original 7-hash hard-tail is reduced to 4 active qB `stoppedDL` rows. The th
 
 Read-only refresh on 2026-07-13 confirmed the four partial rows are already split/isolated and mechanically startable in RT, but they are not verified-complete payloads. They must remain `stoppedDL`/`stalledDL` wait-state rows until tracker peers provide the missing pieces or a separately approved replacement path is chosen.
 
+Follow-up on 2026-07-13 found qB had drifted to `0%` for these four because the current qB `.fastresume` files had empty or all-zero `pieces` bitfields. Known-good backup fastresume files still had the expected partial piece maps, and River Monsters plus Transformers also needed qB `save_path` corrected back to the parent folder so qB's `content_path` matched the real payload tree. A guarded fastresume restore stopped qB, backed up the current fastresume files, restored the partial `pieces` bitmaps from the verified backups, fixed the save paths, cleared `qBt-downloadPath`, and restarted qB.
+
 | Hash | Tracker | RT state | Seeds | Peers | Missing/left bytes | Current action |
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | `127c38342cfe` | TorrentDay | `stalledDL` | 0 | 0 | 16 MiB | Wait; tracker announces are working, no peers now. |
@@ -273,10 +275,22 @@ Read-only refresh on 2026-07-13 confirmed the four partial rows are already spli
 | `96d896ca35f4` | DigitalCore | `stalledDL` | 0 | 0 | 1.96 MiB | Wait; tracker announces are working, no peers now. |
 | `e36553b12dc1` | SpeedCD | `stalledDL` | 0 | 0 | 2 MiB | Wait or separately approve SpeedCD Plan B; do not convert to `stoppedUP`. |
 
+Post-restore qB/RT agreement:
+
+| Hash | qB state/progress | RT state/progress | qB save path |
+| --- | --- | --- | --- |
+| `127c38342cfe` | `stoppedDL`, `0.9992356763546204` | `stalledDL`, `0.9992356763546204` | `/pool/media/torrents/seeding` |
+| `245f2bce6afa` | `stoppedDL`, `0.9997485396330664` | `stalledDL`, `0.9997485396330664` | `/pool/media/torrents/seeding/cross-seed/speedcd` |
+| `96d896ca35f4` | `stoppedDL`, `0.9999070414299701` | `stalledDL`, `0.9999070414299701` | `/data/media/torrents/seeding/DigitalCore (API)` |
+| `e36553b12dc1` | `stoppedDL`, `0.9996357743303342` | `stalledDL`, `0.9996357743303342` | `/pool/media/torrents/seeding/cross-seed/speedcd` |
+
 Artifacts:
 
 - qB refresh: `/tmp/qb-stoppeddl-bucket-live/reports/j51-refresh-stoppeddl-peercheck-20260713.json`
 - Current Plan B dry-runs: `.agent/reports/j51-partial4-current-20260713/`
+- Fastresume restore dry-run: `/tmp/qb-stoppeddl-bucket-live/reports/j51-partial4-fastresume-restore-dryrun-20260713.json`
+- Fastresume restore live report: `/tmp/qb-stoppeddl-bucket-live/reports/j51-partial4-fastresume-restore-live-20260713.json`
+- qB post-restore refresh: `/tmp/qb-stoppeddl-bucket-live/reports/j51-partial4-restore-qb-refresh-20260713.json`
 
 ## Important Tracking Note
 
