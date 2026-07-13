@@ -28,6 +28,42 @@ Required approval text:
 approve j51 live fastresume retarget for 157 verified current stoppedDL hashes from /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-drain-20260712.json using --allow-verified-fastresume-cross-filesystem
 ```
 
+Execution command after approval:
+
+```bash
+bin/qb-stoppeddl-apply.py \
+  --bucket-dir /tmp/qb-stoppeddl-bucket-live \
+  --drain-report /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-drain-20260712.json \
+  --hashes-file /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-hashes-20260712.txt \
+  --allow-verified-fastresume-cross-filesystem \
+  --apply \
+  --report-json /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-apply-live.json \
+  --rollback-ledger /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-rollback-ledger.jsonl
+```
+
+Immediate post-apply checks:
+
+```bash
+bin/qb-stoppeddl-bucket.py \
+  --bucket-dir /tmp/qb-stoppeddl-bucket-live \
+  --states stoppedDL \
+  --no-export-torrents \
+  --prune-absent \
+  --report-json /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-post-refresh.json
+```
+
+```bash
+bin/qb-stoppeddl-apply.py \
+  --bucket-dir /tmp/qb-stoppeddl-bucket-live \
+  --drain-report /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-drain-20260712.json \
+  --hashes-file /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-hashes-20260712.txt \
+  --allow-verified-fastresume-cross-filesystem \
+  --report-json /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-post-apply-dryrun.json \
+  --no-wait-recheck
+```
+
+Expected post-apply result: the refresh should show roughly `7` active `stoppedDL` hashes, and the follow-up dry-run should skip the 157 hashes by live state or otherwise plan `0` new actions.
+
 ## Approval Gate 2: Reclaim Dexter S02 Old Source Root
 
 The guarded Plan C cleanup executor previews Dexter S02 source cleanup as ready, but live deletion still requires explicit operator approval.
