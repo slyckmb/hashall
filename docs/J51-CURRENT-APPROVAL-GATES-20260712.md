@@ -9,9 +9,9 @@ Latest qB stoppedDL metadata refresh:
 - Report: `/tmp/qb-stoppeddl-bucket-live/reports/j51-refresh-stoppeddl-20260712-230531.json`
 - Result: `active=164`, `missing_in_qb=0`, `pruned=0`
 
-## Approval Gate 1: Convert Verified-Safe qB Items
+## Applied Gate 1: Convert Verified-Safe qB Items
 
-The current safe batch contains 157 verified qB `stoppedDL` hashes.
+The current safe batch contained 157 verified qB `stoppedDL` hashes. Operator approval was received and the live fastresume retarget completed successfully on 2026-07-13.
 
 Evidence:
 
@@ -19,16 +19,19 @@ Evidence:
 - Hash file: `/tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-hashes-20260712.txt`
 - Fresh dry-run: `/tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-apply-dryrun-refresh-20260712-230548.json`
 - Dry-run result: `planned=157`, `blocked=0`, `skipped_live_state=0`, `root_policy_rejected=0`, `same_filesystem_overridden=156`, `fr_needed=156`
+- Live apply report: `/tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-apply-live.json`
+- Rollback ledger: `/tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-rollback-ledger.jsonl`
+- Post-refresh report: `/tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-post-refresh.json`
+- Live qB state report: `/tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-live-state-after-apply.json`
 
-Expected live effect: qB `stoppedDL` should drop from `164` to roughly `7`; the remaining 7 are excluded hard-tail items and must not be forced to `stoppedUP`.
+Live result:
 
-Required approval text:
+- Apply summary: `planned=157`, `applied=157`, `ok=157`, `failed=0`, `blocked=0`, `fr_patched=156`, `rollback_ledger_written=156`
+- qB stoppedDL bucket refresh: `active=7`, `pruned=157`, `missing_in_qb=0`
+- Direct qB state check: `requested=157`, `found=157`, `state_counts={"stoppedUP": 157}`, `stoppedup_complete=157`
+- The remaining 7 are excluded hard-tail items and must not be forced to `stoppedUP`.
 
-```text
-approve j51 live fastresume retarget for 157 verified current stoppedDL hashes from /tmp/qb-stoppeddl-bucket-live/reports/j51-current-combined-verified157-drain-20260712.json using --allow-verified-fastresume-cross-filesystem
-```
-
-Execution command after approval:
+Executed command:
 
 ```bash
 bin/qb-stoppeddl-apply.py \
