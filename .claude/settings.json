@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c '_chatrap=$(command -v chatrap 2>/dev/null || echo \"/home/michael/dev/tools/chatrap/bin/chatrap\"); if [[ ! -x \"$_chatrap\" ]]; then echo \"⚠ chatrap_stop_hook status=warn missing=${_chatrap} hook=Stop action=skipped\"; else $_chatrap ack init 2>/dev/null | grep -q verdict=PASS || echo \"⚠ chatrap: session not initialized — prompt the agent: run INIT.md\"; fi'"
+          }
+        ]
+      }
+    ]
+  }
+}
