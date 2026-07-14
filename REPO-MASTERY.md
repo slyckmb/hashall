@@ -44,7 +44,7 @@ Run `chatrap lead status` for completed-job list.
 
 ## Next Work
 
-(no jobs.json found)
+j51 — qb-stoppeddl-recovery
 
 ## Open OPs
 
