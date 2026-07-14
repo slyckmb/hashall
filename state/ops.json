@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-13T20:30:00Z"
+    "updated_at": "2026-07-14T00:00:00Z"
   },
   "ops": [
     {
@@ -1035,6 +1035,24 @@
       "fix_targets": [
         "SESSION.md",
         "chatrap session"
+      ]
+    },
+    {
+      "id": "OP-89",
+      "type": "reliability",
+      "title": "[hashall] Repo chatrap integration is behind latest chatrap infra standard and lead dispatch workflow.",
+      "status": "in-job",
+      "job": "j59",
+      "observed": "Latest chatrap guidance requires .chatrap runtime state to remain untracked, OPS.md/JOB-QUEUE.md to be rendered read-only views from .chatrap/state, logs/task-logs to use .chatrap paths, and lead source mutations to be dispatched through chatrap dispatch/Pi/direct. Hashall still tracks and edits legacy control files, has empty .chatrap/state/queue.json, no dispatchable next job in lead status, missing gitignore patterns, stale .agent runtime refs, and recent lead work bypassed dispatch.",
+      "fix_targets": [
+        ".chatrap/state",
+        "OPS.md generated view",
+        "JOB-QUEUE.md generated view",
+        "chatrap dispatch",
+        ".chatrap/logs",
+        ".chatrap/task-logs",
+        "gitignore",
+        "prepare-clear"
       ]
     }
   ]

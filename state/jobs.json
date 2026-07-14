@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "1.0",
-    "updated_at": "2026-07-13T20:30:00Z",
+    "updated_at": "2026-07-14T00:00:00Z",
     "session_chat_id": ""
   },
   "plan_order": [
@@ -18,6 +18,7 @@
     "j54",
     "j50",
     "j57",
+    "j59",
     "j51",
     "j58",
     "j52",
@@ -256,6 +257,14 @@
       ],
       "status": "hold",
       "summary": "Chatrap-owned OPs held pending chatrap upgrade; may be OBE and must be revalidated before reopening."
+    },
+    "j59": {
+      "slug": "chatrap-standard-upgrade",
+      "ops": [
+        "OP-89"
+      ],
+      "status": "planned",
+      "summary": "Next. Bring hashall onto the latest chatrap infra/lead standard: .chatrap runtime/state authority, generated read-only control views, current dispatch flow, .chatrap logs/task-logs, gitignore/untracking cleanup, and lead status/prepare-clear validation."
     }
   }
 }
