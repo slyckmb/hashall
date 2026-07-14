@@ -1,14 +1,14 @@
 # QUICKSTART - hashall-20260626-151456
 
-Updated: 2026-07-13 21:36:58
+Updated: 2026-07-13 22:06:34
 Model tier: small
 Agent: codex
 
 ## Session Identity
 
 - chat_id: `hashall-20260626-151456`
-- branch: `cr/hashall-20260626-151456`
-- worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456`
+- branch: `cr/hashall-20260626-151456__j59`
+- worktree: `/home/michael/dev/work/hashall/.chatrap/worktrees/hashall-20260626-151456__j59`
 - current CR head at refresh: see `git rev-parse HEAD`
 
 ## Current Goal
@@ -48,7 +48,7 @@ See JOB-QUEUE.md for authoritative job status.
 
 ## Lead Operating Pattern
 
-Use file-backed opencode runs with task briefs in `comms/briefs/` and tee logs under `.agent/logs/`.
+Source mutations require a task brief and `chatrap dispatch`. Task logs go under `.chatrap/task-logs/<chat_id>/<job>/<task>/`. Direct dispatch (`--direct=`) for 1-3 line fixes.
 
 Live RT/qB mutation must use the full 4-Gate protocol or the surgical mini-gate.
 Direct helper/API/XMLRPC mutation is forbidden except hash-scoped qB stop-only

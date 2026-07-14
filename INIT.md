@@ -9,7 +9,7 @@ Updated: 2026-07-05
 
 ## YOU ARE THE CR LEAD
 
-Execute all actions via Bash tool. Dispatch agents via `opencode run`. **Never narrate commands to the user — run them.** Never ask the user what to do next — check JOB-QUEUE.md. Never write agent code inline. Never commit without S05 check.
+Execute all actions via Bash tool. Dispatch agents via `chatrap dispatch`. **Never narrate commands to the user — run them.** Never ask the user what to do next — check JOB-QUEUE.md. Never write agent code inline. Never commit without S05 check.
 
 ---
 
@@ -96,18 +96,18 @@ Then dispatch t01 immediately (standard model):
 
 ```bash
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-t01.md"
-LOG="${CR_WORKTREE}/.agent/logs/hashall-20260626-151456/${JOB}/${JOB}-t01-opencode.log"
+LOG="${CR_WORKTREE}/.chatrap/task-logs/hashall-20260626-151456/${JOB}/t01/TASK-LOG.md"
 mkdir -p "$(dirname "$LOG")"
-(cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode-go/deepseek-v4-flash \
-  opencode run "Read and execute $BRIEF. Follow it literally. Emit the required task-log." \
-  2>&1 | tee "$LOG")
+chatrap dispatch run --model-override opencode-go/deepseek-v4-flash \
+  "$BRIEF" "$LOG" "${JOB_WORKTREE}"
 ```
 
 ---
 
 > **DISPATCH CONTRACT — NON-NEGOTIABLE**
+> Source mutations require a task brief and `chatrap dispatch`.
 > NEVER execute task steps directly using file-edit or shell tools.
-> ALL task work MUST go through `opencode run <brief>`.
+> 1-3 line fixes use direct dispatch (`chatrap dispatch run --direct=...`), not inline edits.
 > Inline execution bypasses task logs, signal files, and friction tracking.
 
 ## AGENT DISPATCH PATTERN
@@ -116,11 +116,10 @@ For every task after t01:
 
 ```bash
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-tNN.md"
-LOG="${CR_WORKTREE}/.agent/logs/hashall-20260626-151456/${JOB}/${JOB}-tNN-opencode.log"
+LOG="${CR_WORKTREE}/.chatrap/task-logs/hashall-20260626-151456/${JOB}/tNN/TASK-LOG.md"
 mkdir -p "$(dirname "$LOG")"
-(cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode-go/minimax-m3 \
-  opencode run "Read and execute $BRIEF. Follow it literally. Emit the required task-log." \
-  2>&1 | tee "$LOG")
+chatrap dispatch run --model-override opencode-go/minimax-m3 \
+  "$BRIEF" "$LOG" "${JOB_WORKTREE}"
 ```
 
 Tail progress: `tail -n 80 -F "$LOG"`
@@ -183,7 +182,7 @@ cd ${JOB_WORKTREE} && chatrap ack commit HEAD
   signal READY FOR /clear after closeout and wait for user to clear
 - Proceeding when kickstart warns about orphaned CWD — run the cd command shown
   and re-execute Step 1 from the correct worktree
-- Executing task steps inline (via Edit/Write/Bash) instead of `opencode run <brief>` — inline execution is always invalid in chatrap sessions
+- Executing task steps inline (via Edit/Write/Bash) instead of `chatrap dispatch <brief>` — inline execution is always invalid in chatrap sessions
 - Asking the user open-ended questions before checking INIT.md/lead-onboarding.md/CLI-LEAD-SOP.md for the answer
 - Presenting unbounded "what do you want?" choices instead of bounded A/B/C options with a recommended COA
 - Asking "Consent to proceed?" after already identifying a recommended COA — just execute it

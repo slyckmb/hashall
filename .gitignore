@@ -94,7 +94,12 @@ briefs/
 .chatrap/signals/
 .chatrap/artifacts/
 .chatrap/task-logs/
+# contains unstable merged_at timestamps — cosmetic only
+state/jobs.json
 state/jobs.json        # contains unstable merged_at timestamps — cosmetic only
 CODEQ.md
 .chatrap/state/session-rehydrate.json
 .chatrap/state/mastery-proof.json
+OPS.md
+state/ops.json
+docs/OPS.md
