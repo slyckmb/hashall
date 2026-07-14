@@ -88,3 +88,13 @@ docs/S01--inventory-and-requirements.md
 bin/chatrap
 briefs/
 briefs/
+
+# chatrap v2.16.0 — 2026-07-02
+.chatrap/logs/
+.chatrap/signals/
+.chatrap/artifacts/
+.chatrap/task-logs/
+state/jobs.json        # contains unstable merged_at timestamps — cosmetic only
+CODEQ.md
+.chatrap/state/session-rehydrate.json
+.chatrap/state/mastery-proof.json
