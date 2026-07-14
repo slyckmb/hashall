@@ -4,7 +4,7 @@ role=agent
 task_type=implementation
 goal=Migrate hashall chatrap authority from tracked markdown/legacy state into current .chatrap/state runtime files.
 repo=hashall
-worktree=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__j59
+worktree=/home/michael/dev/work/hashall/.chatrap/worktrees/hashall-20260626-151456__j59
 expected_branch=cr/hashall-20260626-151456__j59
 allowed_mutation=repo-files-only
 forbidden_commands=git push,git commit,rm -rf,docker,*--apply-live*,*--delete-live*,*--rsync-live*
@@ -37,6 +37,12 @@ Validation:
 - `chatrap lead status`
 - JSON schema/parse checks for any generated state files
 - Confirm `git status` does not include `.chatrap/`
+
+Repair note from first dispatch attempt:
+- Run `chatrap state ... --repo-root /home/michael/dev/work/hashall/.chatrap/worktrees/hashall-20260626-151456__j59`.
+- Do not use `/home/michael/dev/work/hashall` as `--repo-root`.
+- Do not read or write `/home/michael/dev/work/hashall/.chatrap/state/*`; keep all runtime state under this job worktree.
+- Use shell commands (`cat`, `jq`, `python3`) for `.chatrap/state/*.json` inspection if the dispatch read tool rejects ignored runtime paths.
 
 Do not mutate live RT/qB state.
 

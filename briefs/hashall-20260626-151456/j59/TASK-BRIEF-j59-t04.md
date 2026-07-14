@@ -4,7 +4,7 @@ role=agent
 task_type=implementation
 goal=Update hashall lead/brief guidance so source mutations go through chatrap dispatch instead of inline edits.
 repo=hashall
-worktree=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__j59
+worktree=/home/michael/dev/work/hashall/.chatrap/worktrees/hashall-20260626-151456__j59
 expected_branch=cr/hashall-20260626-151456__j59
 allowed_mutation=repo-files-only
 forbidden_commands=git push,git commit,rm -rf,docker,*--apply-live*,*--delete-live*,*--rsync-live*
@@ -38,3 +38,9 @@ Requirements:
 Do not run live RT/qB mutation.
 
 Emit a task-log with changed files, tests/checks run, and any remaining stale references.
+
+Repair note after first dispatch:
+- Do not probe `/home/michael/dev/work/hashall` or expect `./bin/chatrap`; this job worktree has the chatrap CLI on PATH.
+- Required local edit targets are `INIT.md`, `QUICKSTART.md`, `REPO-MASTERY.md`, and `prompts/system/lead-onboarding.md` if stale references remain there.
+- Preserve `.gitignore` legacy `.agent/*` ignore entries; those are harmless backward-compatible ignores, not workflow guidance.
+- Write the required task log at `.chatrap/task-logs/hashall-20260626-151456/j59/j59-t04/TASK-LOG.md`.

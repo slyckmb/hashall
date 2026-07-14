@@ -4,7 +4,7 @@ role=agent
 task_type=audit
 goal=Produce a precise gap report comparing latest chatrap guidance against current hashall repo state.
 repo=hashall
-worktree=/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456__j59
+worktree=/home/michael/dev/work/hashall/.chatrap/worktrees/hashall-20260626-151456__j59
 expected_branch=cr/hashall-20260626-151456__j59
 allowed_mutation=reports-only
 allowed_commands=cat,grep,rg,sed,awk,jq,python3,git status,git diff,git log,find,chatrap
@@ -15,7 +15,8 @@ final_output_required=true
 
 Implement the audit portion of OP-89.
 
-Read latest chatrap guidance and infra from the local chatrap checkout, especially:
+Read latest chatrap guidance and infra from the job-local mirror in
+`comms/reference/chatrap/`, especially:
 - `docs/INFRA-RULES.md`
 - `prompts/system/lead-onboarding.md`
 - `prompts/system/session-lifecycle.md`
