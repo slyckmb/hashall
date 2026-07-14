@@ -1,14 +1,14 @@
 # QUICKSTART - hashall-20260626-151456
 
-Updated: 2026-07-13 22:06:34
+Updated: 2026-07-13 22:18:51
 Model tier: small
 Agent: codex
 
 ## Session Identity
 
 - chat_id: `hashall-20260626-151456`
-- branch: `cr/hashall-20260626-151456__j59`
-- worktree: `/home/michael/dev/work/hashall/.chatrap/worktrees/hashall-20260626-151456__j59`
+- branch: `cr/hashall-20260626-151456`
+- worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456`
 - current CR head at refresh: see `git rev-parse HEAD`
 
 ## Current Goal
