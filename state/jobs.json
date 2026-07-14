@@ -147,8 +147,8 @@
       "ops": [
         "OP-69"
       ],
-      "status": "planned",
-      "summary": "Implemented on CR in `f06e944` with direct-CR workflow caveat. Guard tools/docs/prompts are usable now; root-cause follow-up remains open."
+      "status": "merged",
+      "summary": "Merged to CR via direct implementation in `f06e944` with direct-CR workflow caveat. Guard tools/docs/prompts are usable now; root-cause follow-up remains open."
     },
     "j51": {
       "slug": "qb-stoppeddl-recovery",
