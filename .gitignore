@@ -60,6 +60,7 @@ out/
 .state/
 .chatrap/
 SESSION.md
+/INIT.md
 .agent/*
 .clinerules/99-session.md
 AGENTS.override.md
