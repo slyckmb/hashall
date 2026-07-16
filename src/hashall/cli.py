@@ -865,8 +865,33 @@ def orphan():
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
 @click.option("--qb-cache", type=click.Path(), default=None, help="qB cache file path.")
 @click.option("--rt-rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC URL.")
-@click.option("--auto-scan/--no-auto-scan", default=True, help="After repoint, re-scan orphan dir to sync catalog with disk state (rm/mv detection). Recommended unless sequencing multiple ops with a final sync.")
-def orphan_repoint_cmd(dry_run, execute, rt_session_dir, qb_cache, rt_rpc_url, auto_scan):
+@click.option(
+    "--auto-scan/--no-auto-scan",
+    default=True,
+    help="After repoint, re-scan orphan dir to sync catalog with disk state (rm/mv detection). Recommended unless sequencing multiple ops with a final sync.",
+)
+@click.option(
+    "--hash",
+    "hash_filters",
+    multiple=True,
+    help="Only process torrent hash prefix(es); repeatable. REQUIRED for --execute.",
+)
+@click.option(
+    "--hash-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Read additional torrent hash prefixes from a newline-delimited file. REQUIRED for --execute.",
+)
+def orphan_repoint_cmd(
+    dry_run,
+    execute,
+    rt_session_dir,
+    qb_cache,
+    rt_rpc_url,
+    auto_scan,
+    hash_filters,
+    hash_file,
+):
     """Scan RT and qB for torrents pointing at the orphan directory and repoint to canonical paths.
 
     Dry-run by default. Pass --execute to apply repoints.
@@ -878,13 +903,18 @@ def orphan_repoint_cmd(dry_run, execute, rt_session_dir, qb_cache, rt_rpc_url, a
 
     really_dry_run = not execute
 
-    summary = run_orphan_repoint(
-        dry_run=really_dry_run,
-        rt_session_dir=Path(rt_session_dir),
-        qb_cache_path=Path(qb_cache) if qb_cache else None,
-        rt_rpc_url=rt_rpc_url,
-        auto_scan=auto_scan,
-    )
+    try:
+        summary = run_orphan_repoint(
+            dry_run=really_dry_run,
+            rt_session_dir=Path(rt_session_dir),
+            qb_cache_path=Path(qb_cache) if qb_cache else None,
+            rt_rpc_url=rt_rpc_url,
+            auto_scan=auto_scan,
+            hash_filters=list(hash_filters),
+            hash_file=Path(hash_file) if hash_file else None,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     mode = "DRY-RUN" if really_dry_run else "EXECUTION"
     print(f"orphan-repoint mode={mode}")

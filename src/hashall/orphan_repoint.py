@@ -221,6 +221,8 @@ def run_orphan_repoint(
     qb_cache_path: Path | None = None,
     rt_rpc_url: str = DEFAULT_RT_RPC_URL,
     auto_scan: bool = True,
+    hash_filters: list[str] | None = None,
+    hash_file: Path | None = None,
 ) -> dict:
     """Orchestrate orphan repoint scan + resolution + optional execution.
 
@@ -231,6 +233,31 @@ def run_orphan_repoint(
     from rm/mv operations, update metadata). Pass auto_scan=False when
     sequencing multiple ops where a single final sync suffices.
     """
+    hash_filter_prefixes: list[str] = []
+    if hash_filters:
+        hash_filter_prefixes.extend(
+            str(h).strip().lower() for h in hash_filters if str(h).strip()
+        )
+    if hash_file:
+        for raw in hash_file.read_text(encoding="utf-8").splitlines():
+            cleaned = raw.split("#", 1)[0].strip().lower()
+            if cleaned:
+                hash_filter_prefixes.append(cleaned)
+    hash_filter_prefixes = sorted(set(hash_filter_prefixes))
+
+    if not dry_run and not hash_filter_prefixes:
+        raise ValueError(
+            "Torrent mutation operations (e.g., --execute for orphan repoint) "
+            "require explicit hash filters via --hash or --hash-file "
+            "to prevent accidental mutation of out-of-scope torrents."
+        )
+
+    def _hash_matches_filters(torrent_hash: str) -> bool:
+        if not hash_filter_prefixes:
+            return True
+        h = str(torrent_hash or "").strip().lower()
+        return bool(h) and any(h.startswith(prefix) for prefix in hash_filter_prefixes)
+
     qb_lookup = build_qb_lookup(cache_path=qb_cache_path)
 
     rt_hits = scan_rt(session_dir=rt_session_dir)
@@ -245,6 +272,12 @@ def run_orphan_repoint(
             seen.add(key)
             deduped.append(h)
     all_hits = deduped
+
+    if hash_filter_prefixes:
+        original_count = len(all_hits)
+        all_hits = [hit for hit in all_hits if _hash_matches_filters(hit.torrent_hash)]
+        if original_count - len(all_hits) > 0:
+            print(f"Filtered {original_count - len(all_hits)} torrents by hash filters.")
 
     for ref in all_hits:
         ref.canonical_path = resolve_canonical_path(ref, qb_lookup=qb_lookup)
