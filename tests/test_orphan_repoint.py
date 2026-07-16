@@ -403,6 +403,44 @@ def test_orphan_repoint_cli_execute(monkeypatch):
 # ── build_qb_lookup ──────────────────────────────────────────────────────────
 
 
+def test_orphan_repoint_cli_execute_without_hash_filters_fails():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["orphan", "repoint", "--execute"])
+    assert result.exit_code != 0
+    assert "require explicit hash filters" in result.output
+
+
+def test_orphan_repoint_cli_execute_with_hash_filters_succeeds_and_filters(monkeypatch):
+    monkeypatch.setattr(
+        "hashall.orphan_repoint.run_orphan_repoint",
+        lambda **kwargs: {
+            "dry_run": False,
+            "rt_scanned": 1,
+            "qb_scanned": 0,
+            "total_orphan_refs": 1,
+            "rt_repointed": 1,
+            "qb_repointed": 0,
+            "failed": 0,
+            "results": [
+                {
+                    "torrent_hash": "f37b9983",
+                    "name": "His.Three.Daughters.2024",
+                    "source": "RT",
+                    "current_path": "/pool/media/torrents/orphans/His.Three.Daughters.2024",
+                    "canonical_path": "/pool/media/torrents/seeding/movies/His.Three.Daughters.2024",
+                    "action": "repointed_rt",
+                },
+            ],
+        },
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["orphan", "repoint", "--execute", "--hash", "f37b"])
+    assert result.exit_code == 0
+    assert "EXECUTION" in result.output
+    assert "f37b9983" in result.output
+    assert "RT repointed: 1" in result.output
+
+
 def test_build_qb_lookup_from_cache(monkeypatch):
     monkeypatch.setattr(
         "hashall.orphan_repoint.get_torrents_from_cache",

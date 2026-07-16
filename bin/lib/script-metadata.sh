@@ -44,6 +44,7 @@ script_meta_start() {
   local argv=""
   if (($#)); then
     argv="$*"
+    argv="$(script_meta_redact_argv "$@")"
   fi
   printf 'event=start script=%s semver=%s last_updated=%s timestamp=%s' \
     "$(script_meta_name)" "$(script_meta_semver)" "$(script_meta_last_updated)" "$(script_meta_now)"
@@ -51,6 +52,32 @@ script_meta_start() {
     printf ' argv=%q' "${argv}"
   fi
   printf '\n'
+}
+
+script_meta_redact_argv() {
+  local out=()
+  local redact_next=0
+  local arg
+  for arg in "$@"; do
+    if [[ "$redact_next" == "1" ]]; then
+      out+=("<redacted>")
+      redact_next=0
+      continue
+    fi
+    case "$arg" in
+      --qbit-pass|--password|-P)
+        out+=("$arg")
+        redact_next=1
+        ;;
+      --qbit-pass=*|--password=*)
+        out+=("${arg%%=*}=<redacted>")
+        ;;
+      *)
+        out+=("$arg")
+        ;;
+    esac
+  done
+  printf '%s' "${out[*]}"
 }
 
 script_meta_end() {

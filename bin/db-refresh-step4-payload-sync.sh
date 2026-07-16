@@ -33,8 +33,6 @@ source /home/michael/dev/secrets/qbittorrent/api.env 2>/dev/null || {
 
 "$PYTHON" -m hashall payload sync \
   --qbit-url  "http://localhost:9003" \
-  --qbit-user "$QBITTORRENTAPI_USERNAME" \
-  --qbit-pass "$QBITTORRENTAPI_PASSWORD" \
   2>&1 | tee "$LOGFILE"
 
 echo ""
