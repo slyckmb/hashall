@@ -15,6 +15,7 @@ from click.testing import CliRunner
 import hashall.cli as cli_mod
 from hashall.cli import (
     cli,
+    _redact_argv,
     _build_rt_repair_assistant_row,
     _collect_complete_payload_candidates,
     _collect_sidecar_hits,
@@ -120,6 +121,50 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].save_path, str(payload_root))
         self.assertEqual(rows[0].content_path, str(payload_root))
+
+    def test_redact_argv_masks_qbit_password_values(self):
+        self.assertEqual(
+            _redact_argv([
+                "payload",
+                "sync",
+                "--qbit-user",
+                "admin",
+                "--qbit-pass",
+                "super-secret",
+                "--password=also-secret",
+            ]),
+            [
+                "payload",
+                "sync",
+                "--qbit-user",
+                "admin",
+                "--qbit-pass",
+                "<redacted>",
+                "--password=<redacted>",
+            ],
+        )
+
+    def test_payload_sync_warns_when_qbit_pass_cli_arg_is_used(self):
+        with patch("hashall.qbittorrent.get_qbittorrent_client") as factory:
+            factory.return_value = _FakeQbit([])
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--qbit-pass",
+                    "super-secret",
+                    "--dry-run",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("--qbit-pass is deprecated", result.stderr)
+        self.assertNotIn("super-secret", result.output)
+        self.assertNotIn("super-secret", result.stderr)
 
     def test_load_rt_inventory_rows_appends_filename_for_single_file(self):
         file_name = "Example.Movie.2024.1080p.mkv"

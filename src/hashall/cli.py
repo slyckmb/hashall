@@ -41,6 +41,12 @@ _LOG_SETUP = False
 _LOG_FILE = None
 _LOG_PATH = None
 _RUN_HEADER_EMITTED = False
+
+_SENSITIVE_ARG_NAMES = {
+    "--qbit-pass",
+    "--password",
+    "-P",
+}
 _PIPE_BROKEN = False
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -569,11 +575,35 @@ def _setup_master_log() -> None:
     _LOG_SETUP = True
 
 
+def _redact_argv(argv: list[str]) -> list[str]:
+    """Redact known secret-bearing CLI arguments before logging argv text."""
+    redacted: list[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            redacted.append("<redacted>")
+            skip_next = False
+            continue
+        if any(arg == name for name in _SENSITIVE_ARG_NAMES):
+            redacted.append(arg)
+            skip_next = True
+            continue
+        matched_prefix = next(
+            (f"{name}=" for name in _SENSITIVE_ARG_NAMES if arg.startswith(f"{name}=")),
+            None,
+        )
+        if matched_prefix:
+            redacted.append(f"{matched_prefix}<redacted>")
+            continue
+        redacted.append(arg)
+    return redacted
+
+
 def _emit_run_header() -> None:
     global _RUN_HEADER_EMITTED
     if _RUN_HEADER_EMITTED:
         return
-    argv = [str(arg) for arg in sys.argv[1:]]
+    argv = _redact_argv([str(arg) for arg in sys.argv[1:]])
     if "--json-output" in argv or argv[:2] == ["client-drift", "policy-template"]:
         _RUN_HEADER_EMITTED = True
         return
@@ -959,7 +989,14 @@ def payload():
 )
 @click.option("--qbit-url", default=None, help="qBittorrent URL (default: http://localhost:9003)")
 @click.option("--qbit-user", default=None, help="qBittorrent username (default: admin)")
-@click.option("--qbit-pass", default=None, help="qBittorrent password")
+@click.option(
+    "--qbit-pass",
+    default=None,
+    help=(
+        "qBittorrent password. Deprecated because it can appear in process argv; "
+        "prefer QBITTORRENTAPI_PASSWORD or QBITTORRENT_CREDENTIALS_FILE."
+    ),
+)
 @click.option(
     "--rt-session-dir",
     type=click.Path(exists=True, file_okay=False),
@@ -1113,6 +1150,12 @@ def payload_sync(
     root_path_files_fallback_calls = 0
 
     if source == "qb":
+        if qbit_pass:
+            click.echo(
+                "WARNING: --qbit-pass is deprecated because it can leak via process argv; "
+                "prefer QBITTORRENTAPI_PASSWORD or QBITTORRENT_CREDENTIALS_FILE.",
+                err=True,
+            )
         print("🔌 Connecting to qBittorrent...")
         qbit = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
 
