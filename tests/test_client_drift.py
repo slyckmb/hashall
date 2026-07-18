@@ -300,6 +300,139 @@ def test_client_drift_common_hash_aligned_paths_are_not_drift(tmp_path: Path) ->
     assert report["rows"] == []
 
 
+def _mirror_pause_drift_setup(tmp_path: Path, torrent_hash: str, qb_state: str, rt_state: str) -> tuple[Path, Path, Path]:
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    (content_root / "file.bin").write_text("payload", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "save_path": str(seed_root),
+                "content_path": str(content_root),
+                "state": qb_state,
+                "tags": "",
+                "progress": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    rt_cache.write_text(
+        json.dumps([
+            {
+                "hash": torrent_hash,
+                "name": "Release.One",
+                "directory": str(content_root),
+                "state": rt_state,
+                "complete": 1,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    return qb_cache, rt_cache, session_dir
+
+
+def test_mirror_pause_drift_detected_when_rt_stopped_and_qb_stalled(tmp_path: Path) -> None:
+    qb_cache, rt_cache, session_dir = _mirror_pause_drift_setup(
+        tmp_path, "aaa111",
+        qb_state="stalledUP",
+        rt_state="stoppedUP",
+    )
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            mirror_roots=(str(tmp_path / "seeding"),),
+        ),
+    )
+    assert len(report["rows"]) == 1
+    row = report["rows"][0]
+    assert row["side"] == "mirror_pause_drift"
+    assert row["action"] == "pause_qb_mirror"
+    assert row["confidence"] == "high"
+    assert "mirror_pause_inversion" in row["reasons"]
+
+
+def test_mirror_pause_drift_detects_rt_qb_abbreviations(tmp_path: Path) -> None:
+    qb_cache, rt_cache, session_dir = _mirror_pause_drift_setup(
+        tmp_path,
+        "aaa115",
+        qb_state="SU",
+        rt_state="PU",
+    )
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            mirror_roots=(str(tmp_path / "seeding"),),
+        ),
+    )
+    assert len(report["rows"]) == 1
+    row = report["rows"][0]
+    assert row["side"] == "mirror_pause_drift"
+    assert row["action"] == "pause_qb_mirror"
+    assert row["confidence"] == "high"
+    assert "rt_PU" in row["reasons"]
+    assert "qb_SU" in row["reasons"]
+
+
+def test_mirror_pause_drift_not_detected_when_both_stopped(tmp_path: Path) -> None:
+    qb_cache, rt_cache, session_dir = _mirror_pause_drift_setup(
+        tmp_path, "aaa112",
+        qb_state="stoppedUP",
+        rt_state="stoppedUP",
+    )
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            mirror_roots=(str(tmp_path / "seeding"),),
+        ),
+    )
+    assert report["rows"] == []
+
+
+def test_mirror_pause_drift_not_detected_when_both_uploading(tmp_path: Path) -> None:
+    qb_cache, rt_cache, session_dir = _mirror_pause_drift_setup(
+        tmp_path, "aaa113",
+        qb_state="uploading",
+        rt_state="uploading",
+    )
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(
+            mirror_roots=(str(tmp_path / "seeding"),),
+        ),
+    )
+    assert report["rows"] == []
+
+
+def test_mirror_pause_drift_not_detected_without_mirror_roots(tmp_path: Path) -> None:
+    qb_cache, rt_cache, session_dir = _mirror_pause_drift_setup(
+        tmp_path, "aaa114",
+        qb_state="stalledUP",
+        rt_state="stoppedUP",
+    )
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(),
+    )
+    assert report["rows"] == []
+
+
 def test_client_drift_mount_alias_paths_are_not_path_drift(monkeypatch, tmp_path: Path) -> None:
     _install_media_mount_alias(monkeypatch)
     session_dir = tmp_path / "session"

@@ -1538,6 +1538,40 @@ def _classify_common_path_drift(
     return "manual_review", "medium", reasons, blockers, placement
 
 
+MIRROR_PAUSED_RT_STATES = {"stoppedUP", "pausedUP", "PU"}
+MIRROR_ACTIVE_QB_UPLOAD_STATES = {"stalledUP", "uploading", "forcedUP", "queuedUP", "SU"}
+
+
+def _is_mirror_item(qb_row: ClientTorrentRow, rt_row: ClientTorrentRow, policy: ClientDriftPolicy) -> bool:
+    if _has_tag(qb_row.tags, RT_MIRROR_TAG):
+        return True
+    if _under_any_policy_prefix(qb_row.save_path or qb_row.content_path, policy.mirror_roots, policy):
+        return True
+    if _under_any_policy_prefix(rt_row.save_path or rt_row.content_path, policy.mirror_roots, policy):
+        return True
+    return False
+
+
+def _classify_mirror_pause_drift(
+    qb_row: ClientTorrentRow,
+    rt_row: ClientTorrentRow,
+    policy: ClientDriftPolicy,
+) -> tuple[str, str, list[str], list[str]] | None:
+    if not _is_mirror_item(qb_row, rt_row, policy):
+        return None
+    rt_state = str(rt_row.state or "").strip()
+    qb_state = str(qb_row.state or "").strip()
+    if rt_state in MIRROR_PAUSED_RT_STATES and qb_state in MIRROR_ACTIVE_QB_UPLOAD_STATES:
+        reasons = [
+            "mirror_pause_inversion",
+            f"rt_{rt_state}",
+            f"qb_{qb_state}",
+        ]
+        blockers: list[str] = []
+        return "pause_qb_mirror", "high", reasons, blockers
+    return None
+
+
 def build_client_drift_report(
     *,
     qb_cache_file: Path = DEFAULT_QB_CACHE_FILE,
@@ -1575,6 +1609,23 @@ def build_client_drift_report(
             policy=active_policy,
         )
         if aligned:
+            pause_drift = _classify_mirror_pause_drift(qb_row, rt_row, active_policy)
+            if pause_drift is not None:
+                action, confidence, reasons, blockers = pause_drift
+                drift_rows.append(
+                    {
+                        "hash": torrent_hash,
+                        "side": "mirror_pause_drift",
+                        "action": action,
+                        "confidence": confidence,
+                        "reasons": reasons,
+                        "blockers": blockers,
+                        "name": qb_row.name or rt_row.name,
+                        "placement": {"anchor_scan": {}},
+                        "rt": rt_row.to_dict(),
+                        "qb": qb_row.to_dict(),
+                    }
+                )
             continue
         action, confidence, reasons, blockers, placement = _classify_common_path_drift(
             qb_row,
