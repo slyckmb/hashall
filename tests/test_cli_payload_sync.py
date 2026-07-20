@@ -15,6 +15,7 @@ from click.testing import CliRunner
 import hashall.cli as cli_mod
 from hashall.cli import (
     cli,
+    _redact_argv,
     _build_rt_repair_assistant_row,
     _collect_complete_payload_candidates,
     _collect_sidecar_hits,
@@ -120,6 +121,50 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].save_path, str(payload_root))
         self.assertEqual(rows[0].content_path, str(payload_root))
+
+    def test_redact_argv_masks_qbit_password_values(self):
+        self.assertEqual(
+            _redact_argv([
+                "payload",
+                "sync",
+                "--qbit-user",
+                "admin",
+                "--qbit-pass",
+                "super-secret",
+                "--password=also-secret",
+            ]),
+            [
+                "payload",
+                "sync",
+                "--qbit-user",
+                "admin",
+                "--qbit-pass",
+                "<redacted>",
+                "--password=<redacted>",
+            ],
+        )
+
+    def test_payload_sync_warns_when_qbit_pass_cli_arg_is_used(self):
+        with patch("hashall.qbittorrent.get_qbittorrent_client") as factory:
+            factory.return_value = _FakeQbit([])
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--qbit-pass",
+                    "super-secret",
+                    "--dry-run",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("--qbit-pass is deprecated", result.stderr)
+        self.assertNotIn("super-secret", result.output)
+        self.assertNotIn("super-secret", result.stderr)
 
     def test_load_rt_inventory_rows_appends_filename_for_single_file(self):
         file_name = "Example.Movie.2024.1080p.mkv"
@@ -1013,6 +1058,108 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("processed: 1", result.output)
 
+    def test_payload_sync_qb_accepts_hash_filter(self):
+        torrents = [
+            QBitTorrent(
+                hash="aaa111",
+                name="torrent-1",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+            QBitTorrent(
+                hash="bbb222",
+                name="torrent-2",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+
+        runner = CliRunner()
+        with patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--dry-run",
+                    "--hash",
+                    "bbb",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (hash): 1", result.output)
+        self.assertIn("Hash: bbb222", result.output)
+        self.assertNotIn("Hash: aaa111", result.output)
+
+    def test_payload_sync_hash_filter_skips_orphan_prune(self):
+        torrents = [
+            QBitTorrent(
+                hash="aaa111",
+                name="torrent-1",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+            QBitTorrent(
+                hash="bbb222",
+                name="torrent-2",
+                save_path=str(self.tmp_path),
+                content_path=str(self.payload_root),
+                category="",
+                tags="",
+                state="",
+                size=0,
+                progress=1.0,
+            ),
+        ]
+        fake = _FakeQbit(torrents)
+
+        def fail_prune(*args, **kwargs):
+            raise AssertionError("hash-scoped payload sync must not run orphan prune")
+
+        runner = CliRunner()
+        with (
+            patch("hashall.qbittorrent.get_qbittorrent_client", return_value=fake),
+            patch("hashall.payload.prune_orphan_payloads", side_effect=fail_prune),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--hash",
+                    "bbb",
+                    "--upgrade-missing",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (hash): 1", result.output)
+        self.assertIn("orphan prune skipped: hash-scoped sync", result.output)
+        self.assertIn("upgrade stage: queued=0 started=0 completed=0 failed=0", result.output)
+
     def test_payload_sync_remaps_alternate_mountpoints_for_prefix_filtering(self):
         """
         qBittorrent may report torrent roots under an alternate mount target
@@ -1183,6 +1330,138 @@ class TestPayloadSyncCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Loaded 1 rTorrent session rows", result.output)
         self.assertIn("processed: 1", result.output)
+
+    def test_payload_sync_rt_accepts_hash_file_filter(self):
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        hashes = [
+            "AAA1110000000000000000000000000000000000",
+            "BBB2220000000000000000000000000000000000",
+        ]
+        for torrent_hash in hashes:
+            (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+                bencode_encode({b"directory": str(self.payload_root).encode("utf-8")})
+            )
+            (session_dir / f"{torrent_hash}.torrent").write_bytes(
+                bencode_encode({b"info": {b"name": b"a.bin"}})
+            )
+        hash_file = self.tmp_path / "hashes.txt"
+        hash_file.write_text("bbb222\n", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "payload",
+                "sync",
+                "--db",
+                str(self.db_path),
+                "--source",
+                "rt",
+                "--rt-session-dir",
+                str(session_dir),
+                "--dry-run",
+                "--hash-file",
+                str(hash_file),
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Loaded 2 rTorrent session rows", result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (hash): 1", result.output)
+        self.assertIn("Hash: bbb2220000000000000000000000000000000000", result.output)
+        self.assertNotIn("Hash: aaa1110000000000000000000000000000000000", result.output)
+
+    def test_payload_sync_rt_source_expands_path_prefix_mount_aliases(self):
+        """
+        rTorrent rows may be canonicalized from an alternate mount target before
+        filtering. The operator's --path-prefix must match either alias.
+        """
+        stash_mount = self.tmp_path / "stash" / "media"
+        data_mount = self.tmp_path / "data" / "media"
+        stash_mount.mkdir(parents=True)
+        data_mount.mkdir(parents=True)
+
+        payload_rel = Path("DigitalCore (API)") / "movie"
+        payload_root_stash = stash_mount / payload_rel
+        payload_root_data = data_mount / payload_rel
+        payload_root_stash.mkdir(parents=True)
+        payload_root_data.mkdir(parents=True)
+        (payload_root_stash / "movie.mkv").write_bytes(b"payload")
+
+        device_id = os.stat(stash_mount).st_dev
+        conn = connect_db(self.db_path)
+        cur = conn.cursor()
+        ensure_files_table(cur, device_id)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO devices (fs_uuid, device_id, device_alias, mount_point, preferred_mount_point)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (f"dev-{device_id}", device_id, "stash", str(stash_mount), str(stash_mount)),
+        )
+        st = (payload_root_stash / "movie.mkv").stat()
+        cur.execute(
+            f"""
+            INSERT INTO files_{device_id} (path, size, mtime, sha256, inode, status)
+            VALUES (?, ?, ?, ?, ?, 'active')
+            """,
+            (str(payload_rel / "movie.mkv"), st.st_size, time.time(), "sha256-movie", st.st_ino),
+        )
+        conn.commit()
+        conn.close()
+
+        session_dir = self.tmp_path / "session"
+        session_dir.mkdir()
+        torrent_hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        (session_dir / f"{torrent_hash}.torrent.rtorrent").write_bytes(
+            bencode_encode({b"directory": str(payload_root_data).encode("utf-8")})
+        )
+        (session_dir / f"{torrent_hash}.torrent").write_bytes(
+            bencode_encode({b"info": {b"name": b"movie.mkv", b"length": st.st_size}})
+        )
+
+        def fake_get_mount_point(p: str):
+            p = str(Path(p))
+            if p.startswith(str(data_mount)):
+                return str(data_mount)
+            if p.startswith(str(stash_mount)):
+                return str(stash_mount)
+            return None
+
+        def fake_get_mount_source(p: str):
+            p = str(Path(p))
+            if p.startswith(str(data_mount)) or p.startswith(str(stash_mount)):
+                return "stash/media"
+            return None
+
+        runner = CliRunner()
+        with (
+            patch("hashall.pathing.get_mount_point", side_effect=fake_get_mount_point),
+            patch("hashall.pathing.get_mount_source", side_effect=fake_get_mount_source),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "payload",
+                    "sync",
+                    "--db",
+                    str(self.db_path),
+                    "--source",
+                    "rt",
+                    "--rt-session-dir",
+                    str(session_dir),
+                    "--dry-run",
+                    "--path-prefix",
+                    str(data_mount),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Loaded 1 rTorrent session rows", result.output)
+        self.assertIn("processed: 1", result.output)
+        self.assertIn("skipped (path-prefix): 0", result.output)
         self.assertIn("complete payloads: 1", result.output)
         self.assertIn("root path source: rt_session_rows=1", result.output)
 

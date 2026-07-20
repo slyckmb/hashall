@@ -282,6 +282,23 @@ make trk-warn-dry BUCKET=deleted
 make trk-warn-replace-individual BUCKET=deleted
 ```
 
+### Auto-Scan After File Operations
+
+Every `rm`/`mv`/`rsync` operation on a tracked path makes the hashall catalog stale.
+Always re-scan the affected path afterward so the catalog reflects disk state:
+
+```bash
+# Fast scan — detects deletions, no rehashing
+hashall scan /pool/media/torrents/orphans --hash-mode fast
+
+# Orphan repoint includes --auto-scan (default on). Use --no-auto-scan
+# when sequencing multiple operations with a final sync planned.
+hashall orphan repoint --execute           # syncs automatically
+hashall orphan repoint --execute --no-auto-scan  # skip, final sync later
+```
+
+**Rule of thumb:** Always use `--auto-scan` (default) unless batching multiple rm/mv calls where one final scan at the end is cheaper. The scan is lightweight (`--hash-mode fast` only checks quick_hash, no full SHA256 recomputation) and marks missing files as `status=deleted` in the catalog.
+
 ---
 
 ## 5. High-Risk Files
@@ -385,7 +402,9 @@ make trk-warn-replace-individual BUCKET=deleted
 
 ## 8. Mastery Self-Check
 
-Answer all 7 before dispatching any task. Answers come from this document only.
+Answer all 30 before dispatching any task. Answers come from this document and the supplementary docs they reference.
+
+### Foundational (Q1–Q7)
 
 **Q1.** A torrent's MKV file is hardlinked to `/stash/media/movies/`. Where should it live and why — and is this a hard rule or a preference?
 
@@ -401,6 +420,68 @@ Answer all 7 before dispatching any task. Answers come from this document only.
 
 **Q7.** The drift audit default runs with `ANCHOR_SCAN=0`. Why is that wrong, and what value should you use?
 
+### Seed-Root & Path Authority (Q8–Q9)
+
+**Q8.** You're writing a rehome orchestration script that needs to know valid seeding roots on the target pool. You add `POOL_MEDIA_ROOT = "/pool/media/torrents/seeding"` as a module constant and use it to compute all target paths. During review, another agent flags this as fragile. What principle is violated, and what is the correct runtime source for active seeding roots?
+
+**Q9.** You compute a rehome target path by taking a payload name and appending it to a hard-coded seeding root: `target = "/pool/media/torrents/seeding/cross-seed/Darkpeers/" + payload_name`. The path resolves, and the move succeeds — but a reviewer says this pattern will break when seeding roots change. What is the canonical path formula, and what must you substitute instead of hard-coding the root string?
+
+### Payload Identity & Donor Safety (Q10–Q12)
+
+**Q10.** Two directory trees at different paths — `Aither/Show.S01/` and `Darkpeers/Show.S01/` — both contain `Show.S01E01.mkv` with identical file sizes and modification timestamps. An agent concludes they're identical payloads and declares Darkpeers a REUSE donor for Aither without computing SHA256 hashes. What principle is violated?
+
+**Q11.** Three torrents (A, B, C) are exact-hash siblings sharing inodes on stash, being rehomed to pool. A is 100% verified, B is incomplete (missing 2 files), and C resolves to a `_rehome-unique/<hash>/` staging path. The plan selects B as the primary mover because "it has the fewest files, so least work." What two rules of primary mover selection are violated? What is the correct selection priority?
+
+**Q12.** A `~noHL`-tagged torrent is being evaluated for pool placement. The agent checks only the qB item's own files, finds no external hardlinks, and authorizes the pool move. A month later, Plex reports broken library links. Which three verification steps were skipped?
+
+### Hitchhiker & Path Collisions (Q13–Q14)
+
+**Q13.** A new cross-seed injection produces files that would land in the same directory as an existing unrelated torrent with a different payload_hash. To "save space via hardlinks," an agent places both payloads' files into the shared directory, creating a co-mingled tree. What prohibition is violated, and what is the correct taxonomy for this condition?
+
+**Q14.** Two payloads with different payload_hashes both resolve to `cross-seed/Alpha/Show.S01/`. Rather than leaving them co-mingled or aborting, what is the correct collision routing mechanism? Where should each payload's files actually live?
+
+### Pre-Move Safety Gates (Q15–Q17)
+
+**Q15.** A MOVE plan targets `cross-seed/Darkpeers/Show.S01/` on pool-media. The preflight check discovers the target already has 42 files (87GB) while the source has 38 files (82GB). The agent notes "the extra 4 files are probably junk" and proceeds with the MOVE. What principle is violated, and what must happen instead?
+
+**Q16.** The rehome planner encounters a sibling payload group with three simultaneous anomalies: (a) stash and pool both hold fully verified copies but placement signals disagree on which is the primary, (b) one file has hardlink-anchor evidence that is mixed (some scans show external consumers, some don't), and (c) one member torrent is only partially verified with missing files. What must the planner do? Name the category of these conditions.
+
+**Q17.** A torrent rehomed to pool-media still has qB ATM enabled, with its category's save path configured to `/data/media/torrents/seeding/` (stash). The agent marks the rehome complete. Three days later, qB ATM moves the torrent back to stash. What should have been checked before declaring rehome complete? Why must the two path-routing mechanisms never be mixed?
+
+### Gate Protocol & Mutation Safety (Q18–Q21)
+
+**Q18.** Gate 0 of the four-gate validation requires confirming 0 checkingUP, 0 stalledUP, and stoppedDL at or below the documented baseline of 6. Before a new mutation run, the agent finds stoppedDL=9 and checkingUP=2. Reasoning "it's only slightly above baseline," the agent proceeds to Gate 1. What principle is violated? What must happen instead before any mutation proceeds?
+
+**Q19.** During a rehome execution batch, 15 torrents enter checkingUP state simultaneously (normal post-repoint behavior). An agent runs `for h in $(cat affected.txt); do qb pause $h; done` to "clear the board." The next state snapshot shows 115 stoppedDL. What principle was violated, and what is the correct abort procedure?
+
+**Q20.** Gate 3 of the four-gate protocol requires a single-group live pilot. An agent proposes running the pilot on a `fix_both` plan item because "it exercises the most complex case." Is this the correct pilot selection? What is the safe pilot selection priority order, and why?
+
+**Q21.** Gate 4 allows up to 5 groups per batch with human sign-off between batches. An agent completes batch 1 successfully and, finding no issues, processes batches 2, 3, and 4 without intermediate sign-off, reasoning "batch 1 was clean, so the rest probably are." What protocol detail was violated?
+
+### Code-Level Safety Invariants (Q22–Q24)
+
+**Q22.** A `save-path-repair --dry-run` was generated Tuesday. On Thursday, the agent runs `save-path-repair --execute` using Tuesday's dry-run output without re-running the dry-run first. The catalog DB was refreshed Wednesday. During execution, items with ambiguous hash prefixes match the wrong payloads. What two principles are violated?
+
+**Q23.** An agent adds `"speed"` to the `SYSTEM_TAGS` frozenset in `save_path_inference.py` because `speed` appears as a directory name in some torrent paths. The next `canonical-tree-report` misclassifies all Speed.cd tracker items as system-tagged, stripping their tracker identity. What principle is violated? What is the correct way to determine whether a string is a tracker name versus a system tag?
+
+**Q24.** The canonical tree normalization identifies 5 non-canonical path classes plus Type A de-hitchhike. An agent proposes running Class 3 (`fix_placement_only`) first because it has the largest item count. What operational safety principle is violated? What is the correct remediation order, and why does order matter?
+
+### Recovery & Data Safety (Q25–Q27)
+
+**Q25.** A recovery operation successfully repairs one stoppedDL torrent in a 5-torrent cohort sharing a common root cause. The agent marks the entire cohort as "recovered" without checking the remaining 4 items, reasoning "they all went through the same damaged pipeline." What recovery-lane principle is violated?
+
+**Q26.** The rehome planner generates MOVE plans for two independent payload groups: Group A (30GB) and Group B (35GB). Executed concurrently from two terminals, both pass their individual free-space checks against pool-media (70GB free). Mid-execution, the pool runs out of space. What safety mechanism prevents this, and what step was skipped?
+
+**Q27.** After a MOVE to pool-media completes and passes byte-level verification, the agent immediately runs `rm -rf` on the stash source files to reclaim space. The next qB restart shows the torrent as missingFiles. Which two safety rules were violated, and what is the correct source cleanup procedure?
+
+### Orphan Pipeline & External Consumer Detection (Q28–Q30)
+
+**Q28.** The external consumer detector reports a torrent is BLOCKED because a hardlink exists at `/pool/media/torrents/orphans/movies/Some.Movie.2023/`. An agent unblocks the torrent, reasoning "orphan staging paths aren't real consumers." What principle is violated? What must be corrected in the detector logic, and what must NOT be done to the torrent?
+
+**Q29.** An audit finds 500 orphan files spanning three classifications. The agent proposes deleting all of them in a single pass "to be efficient." What operational model is being ignored? What is the three-way orphan classification, and why must Class A orphans all be deleted together for each inode?
+
+**Q30.** You are booting into a cold-start recovery session. The agent immediately opens `RUN-STATE.md` and starts running commands. What protocol is violated? What is the correct document reading order, and why does sequence matter?
+
 ---
 
-*Answers to all 8 questions are contained in sections 1–7 above. If you cannot answer a question without opening another file, re-read the relevant section before proceeding.*
+*Answers to all 30 questions are contained in sections 1–7 above and in the supplementary docs they reference (REQUIREMENTS.md, 4-GATE-MUTATION-PROTOCOL.md, ORPHAN-MIGRATION-PROCESS.md, SPRINT.md, BACKLOG.md, CANONICALIZE-PILOT-RESULTS.md). If you cannot answer a question, re-read the relevant section before proceeding.*

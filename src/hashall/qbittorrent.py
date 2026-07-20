@@ -1487,7 +1487,7 @@ class QBittorrentClient:
             )
             return False
 
-        paused_states = {"pausedUP", "stoppedUP", "pausedDL", "stoppedDL"}
+        paused_states = {"pausedUP", "stoppedUP", "pausedDL", "stoppedDL", "missingFiles"}
         for _ in range(20):
             info = self.get_torrent_info(torrent_hash)
             if info is not None and info.state in paused_states:

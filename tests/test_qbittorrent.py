@@ -172,6 +172,42 @@ def test_set_location_retries_transient_connection_with_exponential_backoff(monk
     assert len(sleeps) >= 2
 
 
+def test_set_location_accepts_missing_files_as_non_active_after_pause(monkeypatch):
+    client = QBittorrentClient(base_url="http://example", username="u", password="p")
+    monkeypatch.setattr(client, "_ensure_authenticated", lambda: None)
+    monkeypatch.setattr(client, "pause_torrent", lambda h: True)
+    monkeypatch.setattr(client, "resume_torrent", lambda h: True)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    monkeypatch.setattr("os.stat", lambda p: SimpleNamespace(st_dev=45))
+
+    monkeypatch.setattr(
+        client,
+        "get_torrent_info",
+        lambda h: SimpleNamespace(
+            save_path="/pool/media/torrents/seeding/cross-seed/speedcd/Dexter.S07.720p.x265-ZMNT",
+            state="missingFiles",
+        ),
+    )
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    posts = []
+
+    def fake_post(_url, data=None, timeout=None):
+        posts.append(data)
+        return FakeResponse()
+
+    monkeypatch.setattr(client.session, "post", fake_post)
+
+    ok = client.set_location("e36553", "/pool/media/torrents/seeding/cross-seed/speedcd", resume_after=False)
+
+    assert ok is True
+    assert posts[-1]["hashes"] == "e36553"
+    assert posts[-1]["location"] == "/pool/media/torrents/seeding/cross-seed/speedcd"
+
+
 def test_is_reachable_uses_login_when_not_authenticated(monkeypatch):
     client = QBittorrentClient(base_url="http://example", username="u", password="p")
     calls = {"count": 0}

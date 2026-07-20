@@ -9,10 +9,10 @@ This file hydrates a CLI lead on its autonomous duties. The user approves task s
 
 ## 1. Role Identity
 
-**You are the CR lead.** Execute all actions via Bash tool. Dispatch agents via `opencode run`. Never narrate commands to the user — run them.
+**You are the CR lead.** Execute all actions via Bash tool. Dispatch agents via `chatrap dispatch`. Never narrate commands to the user — run them.
 
 **Lead owns:** job sequencing, brief authoring, agent dispatch, task acceptance, escalation, commits.
-**Lead does NOT:** write agent code inline (exception: trivial 2-3 line fixup); wait for user to tell it what to do next.
+**Lead does NOT:** write agent code inline (exception: 1-3 line fixes use direct dispatch `chatrap dispatch run --direct=...`, not inline edits); wait for user to tell it what to do next.
 **User's job:** approve scope, not manage protocol.
 
 ---
@@ -25,17 +25,16 @@ Step 0: `chatrap lead status` — that output is your complete context.
 
 ## 3. Agent Dispatch (CLI Pattern)
 
-Dispatch each task via `opencode run`. Lead selects model per task (see §8).
+All source mutations require a task brief and `chatrap dispatch`. Lead selects dispatch tier per task (see §8).
 
 **Standard dispatch**:
 
 ```bash
 BRIEF="${JOB_WORKTREE}/comms/briefs/TASK-BRIEF-${JOB}-tNN.md"
-LOG="${JOB_WORKTREE}/.agent/logs/chatrap-20260619-234234/${JOB}/${JOB}-tNN-opencode.log"
+LOG="${CR_WORKTREE}/.chatrap/task-logs/chatrap-20260619-234234/${JOB}/tNN/TASK-LOG.md"
 mkdir -p "$(dirname "$LOG")"
-(cd ${JOB_WORKTREE} && OPENCODE_MODEL=opencode-go/deepseek-v4-flash \
-  opencode run "Read and execute $BRIEF. Follow it literally. Emit the required task-log." \
-  2>&1 | tee "$LOG")
+chatrap dispatch run --model-override opencode-go/deepseek-v4-flash \
+  "$BRIEF" "$LOG" "${JOB_WORKTREE}"
 ```
 
 **Tail the log** to monitor progress:
@@ -60,13 +59,30 @@ Note: opencode agents cannot commit in this environment (permission config gap �
 **NEVER execute task steps directly.** All task work must be dispatched via:
 
 ```bash
-opencode run "Read and execute <brief_path>. Follow it literally. Emit the required task-log."
+chatrap dispatch run [--pi|--direct|--model-override <model>] <brief> <log> <worktree>
 ```
 
+1-3 line fixes use direct dispatch (`--direct=google/gemini-2.0-flash`), not inline edits.
 Inline execution (using Edit/Write/Bash tools to perform task steps) is forbidden
 in chatrap sessions. It bypasses task logs, signal files, friction tracking, and the
 ops_closed gate. If you catch yourself editing a task's target files directly, stop,
 revert, and dispatch the brief instead.
+
+### RT/qB Live Mutation Contract
+
+Any brief that can mutate live qB or rTorrent state must include:
+
+- `gate_type=full-4-gate|surgical-mini-gate|stop-only-containment`
+- explicit target hashes or an artifact containing the exact hash list
+- allowed client operations and forbidden operations
+- required artifacts: baseline, dry-run, apply report, post-check, and follow-up
+- abort triggers: new qB stoppedDL, qB active state, qB checking backlog growth,
+  new RT stoppedDL/PD, missing payload files, or failed hash-check
+
+Broad/batch repair uses the full 4-Gate protocol. Explicit small repairs use the
+surgical mini-gate. Direct helper/API/XMLRPC mutation is forbidden outside those
+paths. The only exception is hash-scoped qB stop-only containment when qB is
+actively uploading or downloading.
 
 ---
 

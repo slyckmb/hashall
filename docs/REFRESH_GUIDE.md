@@ -29,6 +29,20 @@ Freshness refresh is designed to support repair tooling evidence without doing
 broad dedupe or hash-backfill work. It still scans managed roots and runs payload
 sync, so qB/RT path and payload mappings are current enough for repair planning.
 
+## qB Credential Handling
+
+Do not pass qB passwords on command lines. Command-line arguments are visible in
+process listings and can be copied into logs. Use environment variables from the
+standard secrets file instead:
+
+```bash
+source /home/michael/dev/secrets/qbittorrent/api.env
+python3 -m hashall payload sync --qbit-url http://localhost:9003
+```
+
+`hashall payload sync --qbit-pass ...` remains accepted for compatibility, but it
+emits a warning and should not be used in runbooks or automation.
+
 ## Understanding Scan Modes
 
 ### `--scan-hash-mode`

@@ -1,23 +1,25 @@
-# QUICKSTART - hashall-20260530-000517-claude
+# QUICKSTART - hashall-20260626-151456
 
-Updated: 2026-06-26 13:34:24
+Updated: 2026-07-15 14:16:12
 Model tier: small
-Agent: claude
+Agent: codex
 
 ## Session Identity
 
-- chat_id: `hashall-20260530-000517-claude`
-- branch: `cr/hashall-20260530-000517-claude`
-- worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude`
-- current CR head at refresh: `1e8494c`
+- chat_id: `hashall-20260626-151456`
+- branch: `cr/hashall-20260626-151456`
+- worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456`
+- current CR head at refresh: see `git rev-parse HEAD`
 
 ## Current Goal
 
-Code bug fixes + RCCA + cross-seed repair + docs toward CR→main merge (j37–j45)
+Harden RT/qB state mutation enforcement before further live repair.
 
 ## Current Step
 
-j38 merged: RCCA path audit added, RT repoint target-exists guard implemented, version 0.8.69. OP-19/24/47 follow-ups moved to j39. Next dispatch: j40-t01 docs-batch audit/plan.
+j57 is next. OP-69 showed the safety process was bypassable during recurring
+RT/qB state repairs. Finish j57 before j51 live qB stoppedDL apply or j39 RT PD
+repair. j51 read-only refresh/bucket/drain planning may continue.
 
 ## Recent Commits (last 5)
 
@@ -31,13 +33,14 @@ j38 merged: RCCA path audit added, RT repoint target-exists guard implemented, v
 
 ## Next Work
 
-(see JOB-QUEUE.md)
+(no jobs.json found)
 
-See JOB-QUEUE.md for full task breakdown.
+See `chatrap lead status` for current job state.
 
 ## Open OPs (summary)
 
-31 open OPs; all are slotted in JOB-QUEUE.md. j40 is next per run order.
+Open OPs are tracked in OPS.md and slotted in JOB-QUEUE.md. OP-69 is the current
+hardening blocker.
 
 ## Current State
 
@@ -45,7 +48,11 @@ See JOB-QUEUE.md for authoritative job status.
 
 ## Lead Operating Pattern
 
-Use file-backed opencode runs with task briefs in `comms/briefs/` and tee logs under `.agent/logs/`.
+Source mutations require a task brief and `chatrap dispatch`. Task logs go under `.chatrap/task-logs/<chat_id>/<job>/<task>/`. Direct dispatch (`--direct=`) for 1-3 line fixes.
+
+Live RT/qB mutation must use the full 4-Gate protocol or the surgical mini-gate.
+Direct helper/API/XMLRPC mutation is forbidden except hash-scoped qB stop-only
+containment. Use `docs/RT-QB-SURGICAL-REPAIR-RUNBOOK.md` for explicit repairs.
 
 ## Closeout Rules
 

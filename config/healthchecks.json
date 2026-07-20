@@ -1,0 +1,9 @@
+{
+  "_note": "Register monitors at https://healthchecks.io and fill in UUIDs below",
+  "monitors": {
+    "rt_qb_mirror_sync_apply": {
+      "uuid": "",
+      "_note": "OPERATOR TODO: register this monitor at healthchecks.io and paste UUID here"
+    }
+  }
+}

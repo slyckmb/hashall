@@ -1,7 +1,7 @@
 # Chatrap - Repo Mastery Reference
 
-Session: `hashall-20260530-000517-claude`
-Updated: 2026-06-26 13:34:24
+Session: `hashall-20260626-151456`
+Updated: 2026-07-15 14:16:12
 
 ## What Chatrap Is
 
@@ -14,13 +14,13 @@ Chatrap is a Bash/tmux/git-worktree orchestration layer for AI coding sessions.
 - `bin/chatrap-session.sh` - session state and lifecycle.
 - `lib/chatrap-common.sh` - shared helpers.
 - `prompts/system/` - injected session and job rules.
-- `JOB-QUEUE.md` - authoritative job plan.
+- `.chatrap/state/jobs.json` — authoritative job state (JSON).
 - `tests/` - focused regression coverage.
 
 ## Current Architecture Rules
 
-- Active CR worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260530-000517-claude`
-- Active branch: `cr/hashall-20260530-000517-claude`
+- Active CR worktree: `/home/michael/dev/work/hashall/.agent/worktrees/hashall-20260626-151456`
+- Active branch: `cr/hashall-20260626-151456`
 - Job branches use `cr/<chat_id>__jNN`.
 - Job and task identifiers are lowercase: `jNN`, `tNN`, `jNN-tNN`.
 - Prefer the worktree `./bin/chatrap` for validation.
@@ -36,19 +36,19 @@ Chatrap is a Bash/tmux/git-worktree orchestration layer for AI coding sessions.
 
 ## Agent Execution Pattern
 
-Use `opencode run` with a brief file under `comms/briefs/` and tee output to a log file.
+Use `chatrap dispatch run` with a brief file under `briefs/<chat_id>/jNN/`. Task logs go to `.chatrap/task-logs/<chat_id>/<job>/<task>/`.
 
 ## Completed Work This Session
 
-See JOB-QUEUE.md for the authoritative completed-job list.
+Run `chatrap lead status` for completed-job list.
 
 ## Next Work
 
-(see JOB-QUEUE.md)
+j51 — qb-stoppeddl-recovery
 
 ## Open OPs
 
-31 open OPs, all slotted in JOB-QUEUE.md. Next dispatchable job: j40 docs-batch.
+(none)
 
 ## High-Risk Areas
 
@@ -87,10 +87,25 @@ Before operating as lead after /clear, answer these without more browsing:
 ## Recent Changes
 
 ```
-1e8494c chore: regen QUICKSTART + REPO-MASTERY (after-job j38)
-986cc36 lead: after-job post-merge j38 — OP closure + JOB-QUEUE replan + INIT advance
-9652d01 lead: advance closeout to j40 docs batch
-7037f25 merge(cr/hashall-20260530-000517-claude__j38)
-6324c06 fix(j38-t02): validate RT repoint targets before writes
-7184d79 docs(j38-t01): add path audit RCCA for OP-19 OP-24 OP-47
+7965bf0 docs(queue): hold chatrap ops and prep safety briefs
+M	JOB-QUEUE.md
+M	OPS.md
+A	briefs/hashall-20260626-151456/j51/TASK-BRIEF-j51-t23.md
+A	briefs/hashall-20260626-151456/j51/TASK-BRIEF-j51-t24.md
+A	briefs/hashall-20260626-151456/j58/TASK-BRIEF-j58-t01.md
+A	briefs/hashall-20260626-151456/j58/TASK-BRIEF-j58-t02.md
+M	state/jobs.json
+M	state/ops.json
+fdab7a5 docs(ops): record session friction
+M	JOB-QUEUE.md
+M	OPS.md
+3ca5af1 docs(j51): record partial fastresume restore
+M	JOB-QUEUE.md
+M	docs/J51-CURRENT-APPROVAL-GATES-20260712.md
+389459f docs(j51): record hard-tail live completion
+M	JOB-QUEUE.md
+M	docs/J51-CURRENT-APPROVAL-GATES-20260712.md
+b85747a docs(j51): record partial wait-state refresh
+M	JOB-QUEUE.md
+M	docs/J51-CURRENT-APPROVAL-GATES-20260712.md
 ```

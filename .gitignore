@@ -8,6 +8,7 @@ comms/
 .vscode/
 .idea/
 *.code-workspace
+.venv/
 .venv_name
 
 # 🐍 Python Artifacts
@@ -57,7 +58,9 @@ tools/pre-commit-gptrail.sh
 out/
 **/._*
 .state/
+.chatrap/
 SESSION.md
+/INIT.md
 .agent/*
 .clinerules/99-session.md
 AGENTS.override.md
@@ -83,3 +86,21 @@ shared-prompts.md
 comms/.chatrap-mastery-proof
 status/CURRENT.md
 docs/S01--inventory-and-requirements.md
+bin/chatrap
+briefs/
+briefs/
+
+# chatrap v2.16.0 — 2026-07-02
+.chatrap/logs/
+.chatrap/signals/
+.chatrap/artifacts/
+.chatrap/task-logs/
+# contains unstable merged_at timestamps — cosmetic only
+state/jobs.json
+state/jobs.json        # contains unstable merged_at timestamps — cosmetic only
+CODEQ.md
+.chatrap/state/session-rehydrate.json
+.chatrap/state/mastery-proof.json
+OPS.md
+state/ops.json
+docs/OPS.md

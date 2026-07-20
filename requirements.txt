@@ -17,3 +17,4 @@ flake8>=6.0
 
 # Optional: For parsing JSON files more strictly
 orjson>=3.9
+PyYAML>=6.0

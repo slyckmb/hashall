@@ -41,6 +41,12 @@ _LOG_SETUP = False
 _LOG_FILE = None
 _LOG_PATH = None
 _RUN_HEADER_EMITTED = False
+
+_SENSITIVE_ARG_NAMES = {
+    "--qbit-pass",
+    "--password",
+    "-P",
+}
 _PIPE_BROKEN = False
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -569,11 +575,35 @@ def _setup_master_log() -> None:
     _LOG_SETUP = True
 
 
+def _redact_argv(argv: list[str]) -> list[str]:
+    """Redact known secret-bearing CLI arguments before logging argv text."""
+    redacted: list[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            redacted.append("<redacted>")
+            skip_next = False
+            continue
+        if any(arg == name for name in _SENSITIVE_ARG_NAMES):
+            redacted.append(arg)
+            skip_next = True
+            continue
+        matched_prefix = next(
+            (f"{name}=" for name in _SENSITIVE_ARG_NAMES if arg.startswith(f"{name}=")),
+            None,
+        )
+        if matched_prefix:
+            redacted.append(f"{matched_prefix}<redacted>")
+            continue
+        redacted.append(arg)
+    return redacted
+
+
 def _emit_run_header() -> None:
     global _RUN_HEADER_EMITTED
     if _RUN_HEADER_EMITTED:
         return
-    argv = [str(arg) for arg in sys.argv[1:]]
+    argv = _redact_argv([str(arg) for arg in sys.argv[1:]])
     if "--json-output" in argv or argv[:2] == ["client-drift", "policy-template"]:
         _RUN_HEADER_EMITTED = True
         return
@@ -797,6 +827,150 @@ def doctor_repair_identity(db, apply, max_actions, allow_bind_alias, report_json
                 f"path={item.get('path')}"
             )
 
+@cli.command("orphan-validate")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--hardlink-guard", is_flag=True, help="Check for hardlinks to actively-seeding content.")
+@click.argument("orphan_dir", type=click.Path(exists=True, file_okay=False))
+def orphan_validate_cmd(db, hardlink_guard, orphan_dir):
+    """Validate orphan directory before migration.
+
+    Scans all files under ORPHAN_DIR and checks for hardlink references to
+    actively-seeding torrent content in the catalog. When --hardlink-guard
+    is passed, files hardlinked to seeding content are reported so they can
+    be excluded from migration.
+    """
+    from hashall.model import connect_db
+    from hashall.orphan_sweep import validate_orphan_hardlinks
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+
+    device_registry: dict[str, int] = {}
+    try:
+        for row in conn.execute(
+            "SELECT mount_point, device_id FROM devices"
+        ).fetchall():
+            device_registry[str(row[0])] = int(row[1])
+    except Exception:
+        pass
+
+    safe, skipped = validate_orphan_hardlinks(
+        orphan_dir=orphan_dir,
+        conn=conn,
+        device_registry=device_registry,
+    )
+    conn.close()
+
+    total = len(safe) + len(skipped)
+    safe_size = sum(s.get("size", 0) or 0 for s in safe)
+    skipped_size = sum(s.get("size", 0) or 0 for s in skipped)
+    total_size = safe_size + skipped_size
+
+    print(f"orphan_validate hardlink_guard={str(hardlink_guard).lower()}")
+    print(f"  orphan_dir={orphan_dir}")
+    print(f"  total_orphan_files={total}")
+    print(f"  files_safe_to_migrate={len(safe)}")
+    print(f"  files_skipped_hardlinked={len(skipped)}")
+    print(f"  estimated_transfer_size_safe={safe_size}")
+    print(f"  estimated_transfer_size_total={total_size}")
+
+    if skipped:
+        print()
+        print("Files skipped (hardlinked to seeding content):")
+        for item in skipped:
+            print(f"  {item['path']}")
+            if item.get("seeding_paths"):
+                for sp in item["seeding_paths"]:
+                    print(f"    hardlinked_to: {sp}")
+
+
+@cli.group()
+def orphan():
+    """Orphan directory management commands."""
+    pass
+
+
+@orphan.command("repoint")
+@click.option("--dry-run", is_flag=True, default=True, help="Report what would change without mutating.")
+@click.option("--execute", is_flag=True, help="Actually apply repoints (overrides --dry-run).")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+@click.option("--qb-cache", type=click.Path(), default=None, help="qB cache file path.")
+@click.option("--rt-rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC URL.")
+@click.option(
+    "--auto-scan/--no-auto-scan",
+    default=True,
+    help="After repoint, re-scan orphan dir to sync catalog with disk state (rm/mv detection). Recommended unless sequencing multiple ops with a final sync.",
+)
+@click.option(
+    "--hash",
+    "hash_filters",
+    multiple=True,
+    help="Only process torrent hash prefix(es); repeatable. REQUIRED for --execute.",
+)
+@click.option(
+    "--hash-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Read additional torrent hash prefixes from a newline-delimited file. REQUIRED for --execute.",
+)
+def orphan_repoint_cmd(
+    dry_run,
+    execute,
+    rt_session_dir,
+    qb_cache,
+    rt_rpc_url,
+    auto_scan,
+    hash_filters,
+    hash_file,
+):
+    """Scan RT and qB for torrents pointing at the orphan directory and repoint to canonical paths.
+
+    Dry-run by default. Pass --execute to apply repoints.
+
+    Use --no-auto-scan when running multiple repoints in rapid succession;
+    run a final scan sync separately.
+    """
+    from hashall.orphan_repoint import run_orphan_repoint
+
+    really_dry_run = not execute
+
+    try:
+        summary = run_orphan_repoint(
+            dry_run=really_dry_run,
+            rt_session_dir=Path(rt_session_dir),
+            qb_cache_path=Path(qb_cache) if qb_cache else None,
+            rt_rpc_url=rt_rpc_url,
+            auto_scan=auto_scan,
+            hash_filters=list(hash_filters),
+            hash_file=Path(hash_file) if hash_file else None,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    mode = "DRY-RUN" if really_dry_run else "EXECUTION"
+    print(f"orphan-repoint mode={mode}")
+    print(f"  Scanning RT session dirs... found {summary['rt_scanned']} torrents")
+    print(f"  Scanning qB cache... found {summary['qb_scanned']} torrents")
+    print(f"  Orphan-path references found: {summary['total_orphan_refs']}")
+
+    for r in summary["results"]:
+        arrow = "→" if r.get("canonical_path") else "→ (no canonical path found — needs manual review)"
+        canonical = r.get("canonical_path") or ""
+        print(f"    {r['torrent_hash']} ({r['name']})  {r['source']}  {r['current_path']}  {arrow}  {canonical}")
+
+    if not really_dry_run:
+        print(f"  RT repointed: {summary['rt_repointed']}")
+        print(f"  qB repointed: {summary['qb_repointed']}")
+        if summary["failed"]:
+            print(f"  Failed: {summary['failed']}")
+
+    if really_dry_run and not execute:
+        print()
+        print("  (dry-run — pass --execute to apply)")
+
+    if not summary["total_orphan_refs"]:
+        print("  All clear — no orphan-path references found.")
+
+
 # Payload command group
 @cli.group()
 def payload():
@@ -815,7 +989,14 @@ def payload():
 )
 @click.option("--qbit-url", default=None, help="qBittorrent URL (default: http://localhost:9003)")
 @click.option("--qbit-user", default=None, help="qBittorrent username (default: admin)")
-@click.option("--qbit-pass", default=None, help="qBittorrent password")
+@click.option(
+    "--qbit-pass",
+    default=None,
+    help=(
+        "qBittorrent password. Deprecated because it can appear in process argv; "
+        "prefer QBITTORRENTAPI_PASSWORD or QBITTORRENT_CREDENTIALS_FILE."
+    ),
+)
 @click.option(
     "--rt-session-dir",
     type=click.Path(exists=True, file_okay=False),
@@ -825,6 +1006,18 @@ def payload():
 )
 @click.option("--category", default=None, help="Filter torrents by category")
 @click.option("--tag", default=None, help="Filter torrents by tag")
+@click.option(
+    "--hash",
+    "hash_filters",
+    multiple=True,
+    help="Only process torrent hash prefix(es); repeatable.",
+)
+@click.option(
+    "--hash-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Read additional torrent hash prefixes from a newline-delimited file.",
+)
 @click.option(
     "--path-prefix",
     "path_prefixes",
@@ -893,6 +1086,8 @@ def payload_sync(
     rt_session_dir,
     category,
     tag,
+    hash_filters,
+    hash_file,
     path_prefixes,
     path_prefix_file,
     limit,
@@ -932,7 +1127,7 @@ def payload_sync(
     _payload_sync_lock_fh = None
     if not dry_run:
         import fcntl as _fcntl
-        _payload_sync_lock_path = Path(db).parent / "payload-sync.lock"
+        _payload_sync_lock_path = Path(f"{db}.payload-sync.lock")
         _payload_sync_lock_fh = _payload_sync_lock_path.open("a+", encoding="utf-8")
         try:
             _fcntl.flock(_payload_sync_lock_fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
@@ -955,6 +1150,12 @@ def payload_sync(
     root_path_files_fallback_calls = 0
 
     if source == "qb":
+        if qbit_pass:
+            click.echo(
+                "WARNING: --qbit-pass is deprecated because it can leak via process argv; "
+                "prefer QBITTORRENTAPI_PASSWORD or QBITTORRENT_CREDENTIALS_FILE.",
+                err=True,
+            )
         print("🔌 Connecting to qBittorrent...")
         qbit = get_qbittorrent_client(qbit_url, qbit_user, qbit_pass)
 
@@ -998,6 +1199,25 @@ def payload_sync(
         print("⚠️  DRY-RUN: ignoring --upgrade-missing (would modify DB)")
         upgrade_missing = False
 
+    hash_filter_inputs = [str(h).strip().lower() for h in hash_filters if str(h).strip()]
+    if hash_file:
+        for raw in Path(hash_file).read_text(encoding="utf-8").splitlines():
+            cleaned = raw.split("#", 1)[0].strip().lower()
+            if cleaned:
+                hash_filter_inputs.append(cleaned)
+    hash_filter_prefixes: list[str] = []
+    seen_hash_filter_prefixes: set[str] = set()
+    for value in hash_filter_inputs:
+        if value not in seen_hash_filter_prefixes:
+            seen_hash_filter_prefixes.add(value)
+            hash_filter_prefixes.append(value)
+
+    def _hash_matches_filters(torrent_hash: str) -> bool:
+        if not hash_filter_prefixes:
+            return True
+        h = str(torrent_hash or "").strip().lower()
+        return bool(h) and any(h.startswith(prefix) for prefix in hash_filter_prefixes)
+
     prefix_inputs = list(path_prefixes)
     if path_prefix_file:
         for raw in Path(path_prefix_file).read_text(encoding="utf-8").splitlines():
@@ -1005,13 +1225,6 @@ def payload_sync(
             if not cleaned or cleaned.startswith("#"):
                 continue
             prefix_inputs.append(cleaned)
-
-    prefix_paths = []
-    for p in prefix_inputs:
-        try:
-            prefix_paths.append(canonicalize_path(Path(p)))
-        except Exception:
-            prefix_paths.append(Path(p))
 
     def _canonicalize_payload_root_path(root_path: str) -> Path:
         """
@@ -1052,6 +1265,64 @@ def payload_sync(
 
         return p
 
+    def _expand_prefix_path_aliases(prefix_path: str) -> list[Path]:
+        """
+        Expand --path-prefix through the same mount-alias vocabulary used for roots.
+
+        Without this, a scoped sync can canonicalize a torrent root from /data/... to
+        /stash/... and then reject an operator's equivalent /data/... prefix.
+        """
+        raw = Path(prefix_path)
+        candidates: list[Path] = [raw]
+        try:
+            candidates.append(canonicalize_path(raw))
+        except Exception:
+            pass
+        try:
+            candidates.append(_canonicalize_payload_root_path(str(raw)))
+        except Exception:
+            pass
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT mount_point, preferred_mount_point
+                FROM devices
+                WHERE mount_point IS NOT NULL OR preferred_mount_point IS NOT NULL
+                """
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        for row in rows:
+            bases = [Path(v) for v in row if v]
+            for candidate in list(candidates):
+                for base in bases:
+                    remapped = remap_to_mount_alias(candidate, base)
+                    if remapped is not None:
+                        candidates.append(remapped)
+                    for other in bases:
+                        if base == other:
+                            continue
+                        try:
+                            rel = candidate.relative_to(base)
+                        except ValueError:
+                            continue
+                        candidates.append(other / rel)
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(candidate)
+        return deduped
+
+    prefix_paths: list[Path] = []
+    for p in prefix_inputs:
+        prefix_paths.extend(_expand_prefix_path_aliases(p))
+
     # Get torrents
     if source == "qb":
         print("📥 Fetching torrents...")
@@ -1086,6 +1357,7 @@ def payload_sync(
     synced_count = 0
     incomplete_count = 0
     missing_in_catalog = 0
+    skipped_hash = 0
     skipped_prefix = 0
     processed = 0
     checked = 0
@@ -1095,6 +1367,7 @@ def payload_sync(
     write_batch_ops = 0
     write_batch_threshold = 400
     upgrade_queue: dict[str, dict] = {}
+    total_upgrade_roots = 0
     upgrade_started = 0
     upgrade_completed = 0
     upgrade_failed = 0
@@ -1108,6 +1381,17 @@ def payload_sync(
         for torrent in inventory_rows:
             if limit and processed >= limit:
                 break
+
+            torrent_hash = str(torrent.get("hash") or "").strip()
+            if not _hash_matches_filters(torrent_hash):
+                skipped_hash += 1
+                checked += 1
+                progress.update(
+                    desc=f"hash-filter checked={checked}/{len(inventory_rows)} "
+                         f"processed={processed} skipped_hash={skipped_hash}",
+                    advance=1,
+                )
+                continue
 
             # Get torrent root path
             root_path = str(torrent.get("root_path") or torrent.get("content_path") or "").strip()
@@ -1134,7 +1418,6 @@ def payload_sync(
                 or torrent.get("root_name")
                 or ""
             ).strip()
-            torrent_hash = str(torrent.get("hash") or "").strip()
             if torrent_hash:
                 processed_torrent_hashes.add(torrent_hash)
 
@@ -1466,7 +1749,7 @@ def payload_sync(
                 f"payload_candidates={stale_rt_stats['payload_candidates']}"
             )
 
-    if (not dry_run) and limit == 0:
+    if (not dry_run) and limit == 0 and not hash_filter_prefixes:
         prune_roots = [str(p) for p in prefix_paths] if prefix_paths else None
         try:
             prune_stats = prune_orphan_payloads(
@@ -1479,6 +1762,8 @@ def payload_sync(
         except Exception as exc:
             print(f"   ⚠️  orphan prune failed (non-fatal): {exc}")
             prune_stats = None
+    elif (not dry_run) and limit == 0 and hash_filter_prefixes:
+        print("   orphan prune skipped: hash-scoped sync")
 
     if not dry_run:
         recount = _payload_sync_recount_for_hashes(conn, torrent_hashes=processed_torrent_hashes)
@@ -1491,6 +1776,12 @@ def payload_sync(
     else:
         print(f"\n✅ Sync complete!")
     print(f"   processed: {processed}")
+    if hash_filter_prefixes:
+        print(f"   skipped (hash): {skipped_hash}")
+        if processed == 0 and len(inventory_rows) > 0:
+            sample_hashes = ", ".join(hash_filter_prefixes[:5])
+            print("   ⚠️  no torrents matched current hash filters")
+            print(f"      hashes(sample): {sample_hashes}")
     if prefix_paths:
         print(f"   skipped (path-prefix): {skipped_prefix}")
         if processed == 0 and len(inventory_rows) > 0:
@@ -2464,7 +2755,8 @@ def payload_save_path_audit_cmd(db, json_output, limit, drifted_only):
 @click.option("--hash", "hash_filter", default=None, help="Audit a single torrent by hash.")
 @click.option("--drifted-only", is_flag=True, help="Show only items not at canonical path.")
 @click.option("--needs-review", is_flag=True, help="Show only items flagged for human review.")
-def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
+@click.option("--library-dupe", is_flag=True, default=False, help="Force SHA256-matched CROSS_SEED items with no ~noHL tag to STASH.")
+def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review, library_dupe):
     """
     Audit canonical paths for all managed torrents.
 
@@ -2536,7 +2828,7 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
         )
 
         try:
-            res = resolve_canonical_path(qb_row, rt_path)
+            res = resolve_canonical_path(qb_row, rt_path, library_dupe=library_dupe)
         except Exception as e:
             click.echo(f"Error resolving {tor_hash[:16]}: {e}", err=True)
             continue
@@ -2612,7 +2904,8 @@ def payload_canonical_path_cmd(limit, hash_filter, drifted_only, needs_review):
 @click.option("--hash", "hash_filter", default=None, help="Plan a single torrent by hash.")
 @click.option("--safe-only", is_flag=True, default=True, help="Show only safe-to-rename items (default: on).")
 @click.option("--show-unsafe", is_flag=True, help="Also show unsafe items (source missing, target exists, cross-device).")
-def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe):
+@click.option("--library-dupe", is_flag=True, default=False, help="Force SHA256-matched CROSS_SEED items with no ~noHL tag to STASH.")
+def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe, library_dupe):
     """
     Dry-run rename plan for Lane 1 (CATEGORY_DRIFT) items.
 
@@ -2686,7 +2979,7 @@ def payload_lane1_plan_cmd(limit, hash_filter, safe_only, show_unsafe):
         )
 
         try:
-            res = resolve_canonical_path(qb_row, rt_path)
+            res = resolve_canonical_path(qb_row, rt_path, library_dupe=library_dupe)
         except Exception:
             continue
 
@@ -3498,6 +3791,10 @@ def _print_rt_qb_event_status(event: dict) -> None:
     print(f"      status: {_rt_qb_style(status, fg=status_color, bold=True)}")
     if "recheck_started" in event:
         print(f"      recheck_started: {_rt_qb_bool(bool(event['recheck_started']))}")
+    if "hardlinks_created" in event:
+        print(f"      hardlinks_created: {event['hardlinks_created']}")
+    if "pool_removed" in event:
+        print(f"      pool_removed: {event['pool_removed']}")
     if "verify" in event:
         verify = event["verify"]
         if isinstance(verify, dict) and verify.get("ok") is True:
@@ -3569,16 +3866,37 @@ def _monitor_rt_qb_rechecks(
     # command. Track consecutive stoppedDL observations per hash; only fail after the grace
     # window expires so we don't misclassify a queued recheck as a download failure.
     stalled_dl_seen: dict[str, int] = {}
+    last_recheck_progress: dict[str, tuple[float, int]] = {}
     while pending and time.time() < deadline:
         for torrent_hash in list(pending):
             info = qbit.get_torrent_info(torrent_hash)
             raw_state = str(info.state or "") if info is not None else ""
+            progress = float(getattr(info, "progress", 0.0) or 0.0) if info is not None else 0.0
+            amount_left = int(getattr(info, "amount_left", 0) or 0) if info is not None else 0
+            previous_progress = last_recheck_progress.get(torrent_hash)
+            progress_changed = (
+                previous_progress is not None
+                and (progress != previous_progress[0] or amount_left != previous_progress[1])
+            )
+            last_recheck_progress[torrent_hash] = (progress, amount_left)
             if raw_state == "stoppedDL":
                 count = stalled_dl_seen.get(torrent_hash, 0) + 1
                 stalled_dl_seen[torrent_hash] = count
                 if count <= stalled_dl_grace:
                     status = "pending"
                     detail = f"stoppedDL (grace {count}/{stalled_dl_grace}, waiting for recheck)"
+                elif previous_progress is None:
+                    status = "pending"
+                    detail = (
+                        "stoppedDL (baseline; waiting for recheck) "
+                        f"progress={progress:.3f} left={amount_left}"
+                    )
+                elif progress_changed:
+                    status = "pending"
+                    detail = (
+                        "stoppedDL (progress moving; waiting for recheck) "
+                        f"progress={progress:.3f} left={amount_left}"
+                    )
                 else:
                     status, detail = _rt_qb_monitor_classify(info)
             else:
@@ -3922,6 +4240,14 @@ def _print_client_drift_path_candidate(row: dict, *, index: int | None = None, a
     if placement.get("proposed_rt_repoint_target") or placement.get("proposed_rt_directory"):
         target = placement.get("proposed_rt_repoint_target") or placement.get("proposed_rt_directory")
         print("     " + _rt_qb_style("set RT: ", fg="bright_black") + target)
+    if placement.get("stash_sibling_root"):
+        print("     " + _rt_qb_style("stash_root: ", fg="bright_black") + placement.get("stash_sibling_root"))
+
+    # Library dupe indicator
+    arr_anchor_source = (placement.get("anchor_scan") or {}).get("source") or ""
+    arr_has_anchor = (placement.get("anchor_scan") or {}).get("has_arr_anchor")
+    if arr_anchor_source == "sha256_dupe" and arr_has_anchor is True:
+        print("     " + _rt_qb_style("library_dupe", fg="green", bold=True))
 
     # Reasons (key decision factors) with checkmark
     for reason in reasons[:5]:
@@ -3947,7 +4273,7 @@ def _apply_client_drift_path_rows(
     completed_hashes: frozenset[str] = frozenset(),
 ) -> list[dict]:
     events: list[dict] = []
-    if do_apply and action in ("repoint_qb_to_rt_path", "repoint_both_to_pool") and qbit is None:
+    if do_apply and action in ("repoint_qb_to_rt_path", "repoint_both_to_pool", "repoint_both_to_stash") and qbit is None:
         from hashall.qbittorrent import get_qbittorrent_client
 
         qbit = get_qbittorrent_client()
@@ -4066,6 +4392,122 @@ def _apply_client_drift_path_rows(
                             qbit.pause_torrent(torrent_hash)
                         except Exception:
                             event["pause_after_recheck_failed"] = str(getattr(qbit, "last_error", "unknown"))
+        elif action == "repoint_both_to_stash":
+            if qbit is None:
+                raise click.ClickException("qB client not initialized")
+            from hashall.rtorrent import rt_apply_directory_repoint
+
+            target = str(placement.get("proposed_qb_save_path") or "").strip()
+            anchor = placement.get("anchor_scan") or {}
+            anchor_paths = list(row.get("arr_anchor_paths") or anchor.get("anchor_paths") or [])
+            qb_content = str(placement.get("qb_content_path") or "").strip()
+
+            if not target:
+                event["error"] = "missing_proposed_qb_save_path"
+            elif not anchor_paths:
+                event["error"] = "missing_arr_anchor_paths_for_hardlink"
+            elif not qb_content:
+                event["error"] = "missing_qb_content_path"
+            else:
+                # Create target directory
+                target_path = Path(target)
+                target_path.mkdir(parents=True, exist_ok=True)
+
+                # a. Create hardlinks from library file(s) to stash seeding path
+                event["hardlinks_created"] = 0
+                for anchor_src in anchor_paths:
+                    src = Path(anchor_src)
+                    if not src.exists():
+                        continue
+                    dst = target_path / src.name
+                    if not dst.exists():
+                        try:
+                            os.link(src, dst)
+                            event["hardlinks_created"] += 1
+                        except OSError as exc:
+                            event["error"] = f"hardlink_failed:{anchor_src}->{dst}:{exc}"
+                            _append_client_drift_journal(journal, event)
+                            raise click.ClickException(
+                                f"client drift apply failed hash={torrent_hash}: {event['error']}"
+                            )
+                    # Also hardlink siblings in same directory as anchor
+                    if src.parent.is_dir():
+                        for sibling in src.parent.iterdir():
+                            if sibling.is_file() and sibling.name != src.name:
+                                dst_sib = target_path / sibling.name
+                                if not dst_sib.exists():
+                                    try:
+                                        os.link(sibling, dst_sib)
+                                        event["hardlinks_created"] += 1
+                                    except OSError:
+                                        pass
+
+                # b. Remove pool copy (all hardlinks) — unlink pool content
+                pool_path = Path(qb_content)
+                if pool_path.exists():
+                    event["pool_removed"] = 0
+                    if pool_path.is_dir():
+                        for f in pool_path.iterdir():
+                            if f.is_file():
+                                try:
+                                    f.unlink()
+                                    event["pool_removed"] += 1
+                                except OSError:
+                                    pass
+                        try:
+                            pool_path.rmdir()
+                            event["pool_removed"] += 1
+                        except OSError:
+                            pass
+                    elif pool_path.is_file():
+                        try:
+                            pool_path.unlink()
+                            event["pool_removed"] += 1
+                        except OSError:
+                            pass
+
+                event["save_path"] = target
+
+                # c. Repoint RT via rt_apply_directory_repoint(check_before_start=True)
+                _rt_qb_progress("repointing RT to stash path")
+                try:
+                    rt_completed = rt_apply_directory_repoint(
+                        torrent_hash,
+                        target,
+                        rpc_url=rt_rpc_url,
+                        restart=True,
+                        check_before_start=True,
+                        validate_target_exists=True,
+                    )
+                    event["rt_calls"] = rt_completed
+                except Exception:
+                    event["status"] = "error"
+                    event["error"] = "rt_repoint_failed"
+                    _append_client_drift_journal(journal, event)
+                    raise
+
+                # d. Repoint qB via set_location + explicit recheck
+                _rt_qb_progress("setting qB save path to stash path")
+                ok = qbit.set_location(torrent_hash, target)
+                if not ok:
+                    event["status"] = "error"
+                    event["error"] = str(qbit.last_error or "qbit_set_location_failed")
+                    _append_client_drift_journal(journal, event)
+                    raise click.ClickException(
+                        f"client drift apply failed hash={torrent_hash}: {event['error']}"
+                    )
+                event["qbit_done"] = True
+
+                # OP-56: explicit qB recheck after set_location
+                _rt_qb_progress("starting qB recheck to verify files at new stash location")
+                event["recheck_started"] = bool(qbit.recheck_torrent(torrent_hash))
+                if event["recheck_started"]:
+                    try:
+                        qbit.pause_torrent(torrent_hash)
+                    except Exception:
+                        event["pause_after_recheck_failed"] = str(getattr(qbit, "last_error", "unknown"))
+                event["status"] = "ok"
+                event["error"] = ""
         else:
             event["error"] = f"unsupported_path_drift_action:{action}"
 
@@ -4322,7 +4764,7 @@ def client_drift_rank_cmd(
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
 @click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
 @click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
-@click.option("--action", type=click.Choice(["mirror_rt_to_qb", "repoint_rt_to_qb_path", "repoint_qb_to_rt_path", "repoint_both_to_pool"]), default="mirror_rt_to_qb", show_default=True, help="Action class to apply.")
+@click.option("--action", type=click.Choice(["mirror_rt_to_qb", "repoint_rt_to_qb_path", "repoint_qb_to_rt_path", "repoint_both_to_pool", "repoint_both_to_stash"]), default="mirror_rt_to_qb", show_default=True, help="Action class to apply.")
 @click.option("--hash", "hash_filters", multiple=True, help="Restrict apply to specific torrent hash(es). Prefixes are accepted.")
 @click.option("--anchor-scan-max-files", type=int, default=None, help="Override policy anchor scan limit for selected path-drift pilots. Default uses policy.")
 @click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), help="Optional read-only catalog DB for hardlink-anchor evidence.")
@@ -4731,8 +5173,25 @@ def client_drift_verify_layout_scan_cmd(qb_cache_file, rt_cache_file, rt_session
 @click.argument("hash_val", metavar="HASH")
 @click.option("--qb-url", default="http://localhost:9003", show_default=True, help="qBittorrent API URL.")
 @click.option("--base-dir", "base_dir_override", type=click.Path(file_okay=False), default=None, help="Override base directory (default: QB save_path converted to FS path).")
+@click.option("--payload-root", type=click.Path(file_okay=True), default=None, help="Verify against an exact payload root instead of base_dir/info_name.")
+@click.option("--quarantine-root", type=click.Path(file_okay=True), default=None, help="Alias for --payload-root when checking a .invalid-for-* tree.")
+@click.option("--compare-root", type=click.Path(file_okay=True), default=None, help="Exact payload root to compare failed-piece byte ranges against.")
 @click.option("--torrent-file", "torrent_file_override", type=click.Path(exists=True, dir_okay=False), default=None, help="Override .torrent file path (default: RT session dir).")
-def client_drift_verify_pieces_cmd(hash_val, qb_url, base_dir_override, torrent_file_override):
+@click.option("--show-failed-pieces", is_flag=True, help="Show failed/missing piece indexes and byte ranges.")
+@click.option("--map-failed-pieces-to-files", is_flag=True, help="Map failed/missing pieces to expected torrent files.")
+@click.option("--json-output", is_flag=True, help="Emit machine-readable JSON.")
+def client_drift_verify_pieces_cmd(
+    hash_val,
+    qb_url,
+    base_dir_override,
+    payload_root,
+    quarantine_root,
+    compare_root,
+    torrent_file_override,
+    show_failed_pieces,
+    map_failed_pieces_to_files,
+    json_output,
+):
     """Verify torrent piece hashes from .torrent file against data on disk.
 
     Reads piece SHA1 hashes directly from the .torrent bencode metadata and
@@ -4740,37 +5199,39 @@ def client_drift_verify_pieces_cmd(hash_val, qb_url, base_dir_override, torrent_
     """
     import sys
     from pathlib import Path as _Path
-    from hashall.torrent_verify import verify_torrent_pieces, format_verify_result
+    from hashall.torrent_verify import verify_torrent_pieces, format_verify_result, result_to_json
     from hashall.qbittorrent import QBittorrentClient, get_torrents_from_cache, DEFAULT_QB_CACHE_FILE
     from hashall.rtorrent import DEFAULT_RT_SESSION_DIR
     from hashall.nested_folder_repair import _api_to_fs
 
     prefix = str(hash_val).strip().lower()
     qb_client = QBittorrentClient(base_url=qb_url)
+    needs_qb_lookup = not (torrent_file_override and (base_dir_override or payload_root or quarantine_root))
 
     # Resolve QB torrent to get save_path and full hash
     qb_torrent = None
-    try:
-        cached = get_torrents_from_cache(max_age_s=600, cache_path=DEFAULT_QB_CACHE_FILE)
-        if cached is not None:
-            for r in cached:
-                t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
-                if t and t.hash and t.hash.lower().startswith(prefix):
-                    qb_torrent = t
-                    break
-        if qb_torrent is None:
-            live = qb_client.get_torrents_by_hashes([hash_val]) or {}
-            for h, t in live.items():
-                if h.lower().startswith(prefix):
-                    qb_torrent = t
-                    break
-    except Exception as e:
-        raise click.ClickException(f"QB lookup failed: {e}")
+    if needs_qb_lookup:
+        try:
+            cached = get_torrents_from_cache(max_age_s=600, cache_path=DEFAULT_QB_CACHE_FILE)
+            if cached is not None:
+                for r in cached:
+                    t = qb_client._torrent_from_payload(qb_client._normalize_torrent_payload(r))
+                    if t and t.hash and t.hash.lower().startswith(prefix):
+                        qb_torrent = t
+                        break
+            if qb_torrent is None:
+                live = qb_client.get_torrents_by_hashes([hash_val]) or {}
+                for h, t in live.items():
+                    if h.lower().startswith(prefix):
+                        qb_torrent = t
+                        break
+        except Exception as e:
+            raise click.ClickException(f"QB lookup failed: {e}")
 
-    if qb_torrent is None:
+    if needs_qb_lookup and qb_torrent is None:
         raise click.ClickException(f"hash not found in QB: {hash_val}")
 
-    full_hash = qb_torrent.hash.upper()
+    full_hash = qb_torrent.hash.upper() if qb_torrent is not None else str(hash_val).strip().upper()
 
     # Resolve .torrent file
     if torrent_file_override:
@@ -4783,31 +5244,462 @@ def client_drift_verify_pieces_cmd(hash_val, qb_url, base_dir_override, torrent_
         raise click.ClickException(f".torrent not found: {torrent_path}")
 
     # Resolve base_dir (save_path on host FS)
-    if base_dir_override:
+    content_root = None
+    if payload_root and quarantine_root:
+        raise click.ClickException("choose --payload-root or --quarantine-root, not both")
+    if payload_root or quarantine_root:
+        content_root = _Path(payload_root or quarantine_root)
+        base_dir = content_root.parent
+    elif base_dir_override:
         base_dir = _Path(base_dir_override)
     else:
+        if qb_torrent is None:
+            raise click.ClickException("base directory required when QB lookup is bypassed")
         save_path_api = (qb_torrent.save_path or "").rstrip("/")
         base_dir = _Path(_api_to_fs(save_path_api))
 
-    click.echo(f"Verifying: {qb_torrent.name}")
-    click.echo(f"  hash:        {full_hash.lower()[:16]}")
-    click.echo(f"  torrent:     {torrent_path}")
-    click.echo(f"  base_dir:    {base_dir}")
+    if not json_output:
+        click.echo(f"Verifying: {qb_torrent.name if qb_torrent is not None else hash_val}")
+        click.echo(f"  hash:        {full_hash.lower()[:16]}")
+        click.echo(f"  torrent:     {torrent_path}")
+        click.echo(f"  base_dir:    {base_dir}")
+        if content_root is not None:
+            click.echo(f"  payload_root:{content_root}")
+        if compare_root:
+            click.echo(f"  compare_root:{compare_root}")
 
     def _progress(idx: int, total: int) -> None:
+        if json_output:
+            return
         pct = idx / total * 100
         sys.stderr.write(f"\r  checking pieces: {idx}/{total} ({pct:.0f}%)  ")
         sys.stderr.flush()
 
     try:
-        result = verify_torrent_pieces(torrent_path, base_dir, progress_cb=_progress)
+        result = verify_torrent_pieces(
+            torrent_path,
+            base_dir,
+            content_root=content_root,
+            compare_root=_Path(compare_root) if compare_root else None,
+            collect_piece_details=show_failed_pieces or map_failed_pieces_to_files or json_output or bool(compare_root),
+            progress_cb=_progress,
+        )
     except Exception as e:
         raise click.ClickException(f"verification failed: {e}")
 
-    sys.stderr.write("\n")
-    click.echo(format_verify_result(result))
+    if json_output:
+        click.echo(result_to_json(result))
+    else:
+        sys.stderr.write("\n")
+        click.echo(format_verify_result(result))
     if not result.success:
         raise SystemExit(1)
+
+
+@client_drift.command("source-inode-manifest")
+@click.option("--source-root", "source_roots", multiple=True, required=True, type=click.Path(exists=True), help="Source payload root whose inodes should be tracked.")
+@click.option("--target-root", "target_roots", multiple=True, type=click.Path(), help="Target/root path that must not be cleaned.")
+@click.option("--library-root", "library_roots", multiple=True, help="Media/library root that protects matching inode paths.")
+@click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), default=str(DEFAULT_DB_PATH), show_default=True, help="Catalog DB used for inode reference lookup.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON manifest to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON manifest to stdout.")
+def client_drift_source_inode_manifest_cmd(
+    source_roots,
+    target_roots,
+    library_roots,
+    catalog_path,
+    output_path,
+    json_output,
+):
+    """Build a read-only source-inode cleanup manifest for surgical rehome work."""
+    from hashall.incomplete_rehome import (
+        DEFAULT_LIBRARY_ROOTS,
+        build_source_inode_manifest,
+        write_manifest,
+    )
+
+    manifest = build_source_inode_manifest(
+        source_roots=[Path(item).expanduser() for item in source_roots],
+        target_roots=[Path(item).expanduser() for item in target_roots],
+        library_roots=library_roots or DEFAULT_LIBRARY_ROOTS,
+        catalog_path=Path(catalog_path).expanduser() if catalog_path else None,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), manifest)
+
+    if json_output:
+        click.echo(json.dumps(manifest, indent=2, sort_keys=True))
+        return
+
+    summary = manifest["summary"]
+    click.echo("source inode manifest")
+    click.echo(f"  sources: {len(manifest['sources'])}")
+    click.echo(f"  source_files: {summary['source_files']}")
+    click.echo(f"  source_unique_inodes: {summary['source_unique_inodes']}")
+    click.echo(f"  catalog_matches: {summary['catalog_matches']}")
+    click.echo(f"  protected_or_live_paths: {summary['protected_or_live_paths']}")
+    click.echo(f"  cleanup_candidates_after_verify: {summary['cleanup_candidates_after_verify']}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-plan")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--source-root", "source_roots", multiple=True, required=True, type=click.Path(exists=True), help="Known 99.* source payload root. First root is the copy source.")
+@click.option("--target-root", required=True, type=click.Path(), help="Canonical pool payload/view root to prepare.")
+@click.option("--verify-json", "verify_json_path", type=click.Path(exists=True, dir_okay=False), help="JSON output from client-drift verify-pieces for the source root.")
+@click.option("--qb-save-path", default="", help="Expected qB save_path after rehome.")
+@click.option("--qb-expected-state", default="stoppedDL", show_default=True, help="Expected qB state after recheck.")
+@click.option("--rt-target-directory", default="", help="Expected RT d.directory target after rehome.")
+@click.option("--rt-expected-state", default="stalledDL", show_default=True, help="Expected RT state after recheck/start.")
+@click.option("--library-root", "library_roots", multiple=True, help="Media/library root that protects matching inode paths.")
+@click.option("--catalog", "catalog_path", type=click.Path(exists=True, dir_okay=False), default=str(DEFAULT_DB_PATH), show_default=True, help="Catalog DB used for inode reference lookup.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON plan to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON plan to stdout.")
+def client_drift_incomplete_rehome_plan_cmd(
+    hash_val,
+    source_roots,
+    target_root,
+    verify_json_path,
+    qb_save_path,
+    qb_expected_state,
+    rt_target_directory,
+    rt_expected_state,
+    library_roots,
+    catalog_path,
+    output_path,
+    json_output,
+):
+    """Build a dry-run surgical plan for an expected-incomplete payload rehome."""
+    from hashall.incomplete_rehome import (
+        DEFAULT_LIBRARY_ROOTS,
+        build_incomplete_rehome_plan,
+        write_manifest,
+    )
+
+    verify_result = None
+    if verify_json_path:
+        verify_result = json.loads(Path(verify_json_path).expanduser().read_text(encoding="utf-8"))
+    plan = build_incomplete_rehome_plan(
+        torrent_hash=hash_val,
+        source_roots=[Path(item).expanduser() for item in source_roots],
+        target_root=Path(target_root).expanduser(),
+        catalog_path=Path(catalog_path).expanduser() if catalog_path else None,
+        verify_result=verify_result,
+        qb_save_path=qb_save_path,
+        qb_expected_state=qb_expected_state,
+        rt_target_directory=rt_target_directory,
+        rt_expected_state=rt_expected_state,
+        library_roots=library_roots or DEFAULT_LIBRARY_ROOTS,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), plan)
+
+    if json_output:
+        click.echo(json.dumps(plan, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome plan")
+    click.echo(f"  hash: {plan['hash'][:16]}")
+    click.echo(f"  status: {plan['status']}")
+    click.echo(f"  source_roots: {len(plan['source_roots'])}")
+    click.echo(f"  target_class: {plan['target']['class']}")
+    click.echo(f"  expected_incomplete_gate: {plan['expected_incomplete_gate']['ok']}")
+    click.echo(f"  cleanup_candidates_after_verify: {plan['cleanup_gate']['manifest_summary']['cleanup_candidates_after_verify']}")
+    if plan["blockers"]:
+        click.echo(f"  blockers: {', '.join(plan['blockers'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-pilot-dry-run")
+@click.option("--plan", "plan_path", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON plan from incomplete-rehome-plan.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON pilot dry-run to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON pilot dry-run to stdout.")
+def client_drift_incomplete_rehome_pilot_dry_run_cmd(plan_path, output_path, json_output):
+    """Build the non-mutating pilot operation manifest for a Plan C repair."""
+    from hashall.incomplete_rehome import build_incomplete_rehome_pilot_dryrun, write_manifest
+
+    plan = json.loads(Path(plan_path).expanduser().read_text(encoding="utf-8"))
+    pilot = build_incomplete_rehome_pilot_dryrun(plan=plan)
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), pilot)
+
+    if json_output:
+        click.echo(json.dumps(pilot, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome pilot dry-run")
+    click.echo(f"  hash: {pilot['hash'][:16]}")
+    click.echo(f"  status: {pilot['status']}")
+    click.echo(f"  source_roots: {len(pilot['current_sources'])}")
+    click.echo(f"  target_class: {pilot['current_target'].get('class')}")
+    click.echo(f"  operations: {len(pilot['operations'])}")
+    click.echo(f"  cleanup_delete_paths_after_verify: {len((pilot.get('cleanup_gate') or {}).get('delete_paths_after_verify') or [])}")
+    if pilot["blockers"]:
+        click.echo(f"  blockers: {', '.join(pilot['blockers'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-pilot-execute")
+@click.option("--pilot", "pilot_path", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON pilot dry-run manifest.")
+@click.option("--approval", default="", help="Required live approval string; must include 'Plan C', hash, and 'no cleanup'.")
+@click.option("--rt-rpc-url", default=DEFAULT_RT_RPC_URL, show_default=True, help="rTorrent XMLRPC endpoint.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON execution report to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON execution report to stdout.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually run copy/qB/RT operations. Default is dry-run.")
+def client_drift_incomplete_rehome_pilot_execute_cmd(
+    pilot_path,
+    approval,
+    rt_rpc_url,
+    output_path,
+    json_output,
+    do_apply,
+):
+    """Execute or preview a guarded Plan C pilot. Cleanup is never performed here."""
+    from hashall.incomplete_rehome import execute_incomplete_rehome_pilot, write_manifest
+
+    pilot = json.loads(Path(pilot_path).expanduser().read_text(encoding="utf-8"))
+    report = execute_incomplete_rehome_pilot(
+        pilot=pilot,
+        apply=bool(do_apply),
+        approval=approval,
+        rt_rpc_url=rt_rpc_url,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), report)
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome pilot execute")
+    click.echo(f"  hash: {report['hash'][:16]}")
+    click.echo(f"  mode: {report['mode']}")
+    click.echo(f"  status: {report['status']}")
+    click.echo(f"  events: {len(report.get('events') or [])}")
+    if report.get("blockers"):
+        click.echo(f"  blockers: {', '.join(report['blockers'])}")
+    if report.get("error"):
+        click.echo(f"  error: {report['error']}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-post-validate")
+@click.option("--execute-report", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON report from incomplete-rehome-pilot-execute.")
+@click.option("--target-verify-json", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON output from verify-pieces against the target tree after pilot.")
+@click.option("--qb-json", type=click.Path(exists=True, dir_okay=False), help="Optional qB snapshot JSON with state/save_path/progress/amount_left.")
+@click.option("--rt-json", type=click.Path(exists=True, dir_okay=False), help="Optional RT snapshot JSON with state/directory/complete/left_bytes.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON validation report to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON validation report to stdout.")
+def client_drift_incomplete_rehome_post_validate_cmd(
+    execute_report,
+    target_verify_json,
+    qb_json,
+    rt_json,
+    output_path,
+    json_output,
+):
+    """Validate a Plan C pilot after copy/repoint/recheck, before cleanup approval."""
+    from hashall.incomplete_rehome import validate_incomplete_rehome_post_pilot, write_manifest
+
+    execute_payload = json.loads(Path(execute_report).expanduser().read_text(encoding="utf-8"))
+    verify_payload = json.loads(Path(target_verify_json).expanduser().read_text(encoding="utf-8"))
+    qb_payload = json.loads(Path(qb_json).expanduser().read_text(encoding="utf-8")) if qb_json else None
+    rt_payload = json.loads(Path(rt_json).expanduser().read_text(encoding="utf-8")) if rt_json else None
+    report = validate_incomplete_rehome_post_pilot(
+        execute_report=execute_payload,
+        target_verify_result=verify_payload,
+        qb_snapshot=qb_payload,
+        rt_snapshot=rt_payload,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), report)
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome post-validate")
+    click.echo(f"  hash: {report['hash'][:16]}")
+    click.echo(f"  status: {report['status']}")
+    click.echo(f"  target_verify_gate: {report['target_verify_gate']['ok']}")
+    click.echo(f"  qb_snapshot: {report['qb_check']['provided']}")
+    click.echo(f"  rt_snapshot: {report['rt_check']['provided']}")
+    click.echo(f"  cleanup_delete_paths_after_verify: {len((report.get('cleanup_gate') or {}).get('delete_paths_after_verify') or [])}")
+    if report["blockers"]:
+        click.echo(f"  blockers: {', '.join(report['blockers'])}")
+    if report["warnings"]:
+        click.echo(f"  warnings: {', '.join(report['warnings'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-snapshot")
+@click.argument("hash_val", metavar="HASH")
+@click.option("--side", type=click.Choice(["qb", "rt"]), required=True, help="Client cache to snapshot.")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON snapshot to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON snapshot to stdout.")
+def client_drift_incomplete_rehome_snapshot_cmd(
+    hash_val,
+    side,
+    qb_cache_file,
+    rt_cache_file,
+    output_path,
+    json_output,
+):
+    """Build a single-hash qB or RT cache snapshot for Plan C validation."""
+    from hashall.incomplete_rehome import (
+        build_qb_snapshot_from_cache,
+        build_rt_snapshot_from_cache,
+        write_manifest,
+    )
+
+    if side == "qb":
+        snapshot = build_qb_snapshot_from_cache(
+            torrent_hash=hash_val,
+            cache_file=Path(qb_cache_file).expanduser(),
+        )
+    else:
+        snapshot = build_rt_snapshot_from_cache(
+            torrent_hash=hash_val,
+            cache_file=Path(rt_cache_file).expanduser(),
+        )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), snapshot)
+
+    if json_output:
+        click.echo(json.dumps(snapshot, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome snapshot")
+    click.echo(f"  side: {snapshot['side']}")
+    click.echo(f"  hash: {snapshot['hash'][:16]}")
+    click.echo(f"  status: {snapshot['status']}")
+    click.echo(f"  state: {snapshot.get('state', '')}")
+    if snapshot["side"] == "qb":
+        click.echo(f"  save_path: {snapshot.get('save_path', '')}")
+        click.echo(f"  content_path: {snapshot.get('content_path', '')}")
+        click.echo(f"  amount_left: {snapshot.get('amount_left', '')}")
+    else:
+        click.echo(f"  directory: {snapshot.get('directory', '')}")
+        click.echo(f"  complete: {snapshot.get('complete', '')}")
+        click.echo(f"  left_bytes: {snapshot.get('left_bytes', '')}")
+    if snapshot.get("blockers"):
+        click.echo(f"  blockers: {', '.join(snapshot['blockers'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-source-cleanup-dry-run")
+@click.option("--plan", "plan_path", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON Plan C dry-run plan.")
+@click.option("--post-validate", "post_validate_path", required=True, type=click.Path(exists=True, dir_okay=False), help="Validated post-pilot report.")
+@click.option("--source-root", "source_roots", multiple=True, required=True, type=click.Path(), help="Old source release root to evaluate for cleanup.")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--library-root", "library_roots", multiple=True, help="Media/library root that blocks source cleanup.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON dry-run to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON dry-run to stdout.")
+def client_drift_incomplete_rehome_source_cleanup_dry_run_cmd(
+    plan_path,
+    post_validate_path,
+    source_roots,
+    qb_cache_file,
+    rt_cache_file,
+    library_roots,
+    output_path,
+    json_output,
+):
+    """Dry-run old source-payload cleanup after a validated Plan C repair."""
+    from hashall.incomplete_rehome import (
+        DEFAULT_LIBRARY_ROOTS,
+        build_plan_c_source_cleanup_dryrun,
+        write_manifest,
+    )
+
+    plan = json.loads(Path(plan_path).expanduser().read_text(encoding="utf-8"))
+    post_validate = json.loads(Path(post_validate_path).expanduser().read_text(encoding="utf-8"))
+    report = build_plan_c_source_cleanup_dryrun(
+        plan=plan,
+        post_validate=post_validate,
+        source_roots=[Path(item).expanduser() for item in source_roots],
+        qb_cache_file=Path(qb_cache_file).expanduser(),
+        rt_cache_file=Path(rt_cache_file).expanduser(),
+        library_roots=library_roots or DEFAULT_LIBRARY_ROOTS,
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), report)
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    summary = report["summary"]
+    click.echo("incomplete rehome source cleanup dry-run")
+    click.echo(f"  hash: {report['hash'][:16]}")
+    click.echo(f"  status: {report['status']}")
+    click.echo(f"  roots_total: {summary['roots_total']}")
+    click.echo(f"  roots_eligible: {summary['roots_eligible']}")
+    click.echo(f"  roots_blocked: {summary['roots_blocked']}")
+    click.echo(f"  total_bytes: {summary['total_bytes']}")
+    click.echo(f"  bytes_reclaimable_if_roots_unlinked: {summary['bytes_reclaimable_if_roots_unlinked']}")
+    for root in report["roots"]:
+        click.echo(f"  root: {root['source_root']}")
+        click.echo(f"    status: {root['status']}")
+        if root["blockers"]:
+            click.echo(f"    blockers: {', '.join(root['blockers'])}")
+        if root["warnings"]:
+            click.echo(f"    warnings: {', '.join(root['warnings'])}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
+
+
+@client_drift.command("incomplete-rehome-source-cleanup-execute")
+@click.option("--dry-run-report", "dryrun_path", required=True, type=click.Path(exists=True, dir_okay=False), help="JSON source cleanup dry-run report.")
+@click.option("--approval", default="", help="Required live approval string; must include Plan C, source cleanup, delete, hash, and exact path.")
+@click.option("--cleanup-min-depth", default=4, show_default=True, type=int, help="Minimum absolute path depth allowed for deletion.")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False), help="Write JSON execution report to this path.")
+@click.option("--json-output", is_flag=True, help="Emit full JSON execution report to stdout.")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually delete approved source roots. Default is preview only.")
+def client_drift_incomplete_rehome_source_cleanup_execute_cmd(
+    dryrun_path,
+    approval,
+    cleanup_min_depth,
+    output_path,
+    json_output,
+    do_apply,
+):
+    """Execute or preview approved old source-payload cleanup after Plan C validation."""
+    from hashall.incomplete_rehome import execute_plan_c_source_cleanup, write_manifest
+
+    dryrun = json.loads(Path(dryrun_path).expanduser().read_text(encoding="utf-8"))
+    report = execute_plan_c_source_cleanup(
+        dryrun=dryrun,
+        apply=bool(do_apply),
+        approval=approval,
+        min_depth=int(cleanup_min_depth),
+    )
+    if output_path:
+        write_manifest(Path(output_path).expanduser(), report)
+
+    if json_output:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    click.echo("incomplete rehome source cleanup execute")
+    click.echo(f"  hash: {report['hash'][:16]}")
+    click.echo(f"  status: {report['status']}")
+    click.echo(f"  delete_roots: {len(report['delete_roots'])}")
+    if report["blockers"]:
+        click.echo(f"  blockers: {', '.join(report['blockers'])}")
+    if report.get("error"):
+        click.echo(f"  error: {report['error']}")
+    if output_path:
+        click.echo(f"  output: {Path(output_path).expanduser()}")
 
 
 @cli.group("rt-qb-mirror")
@@ -8832,10 +9724,503 @@ def devices_preferred_mount(device, mount_point, db):
     conn.close()
 
 
+@cli.command("canonicalize")
+@click.argument("torrent_hash")
+@click.option("--detail", is_flag=True, help="Include inference_notes and external_consumers in output.")
+@click.option("--json", "json_output", is_flag=True, help="Output CanonicalizeVerdict as JSON.")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+def canonicalize_cmd(torrent_hash, detail, json_output, db, rt_session_dir):
+    """Canonicalize a single torrent: determine canonical device, path, and drift status."""
+    from dataclasses import asdict
+    from hashall.canonicalize import (
+        canonicalize_torrent,
+        CanonicalizeRequest,
+        CanonicalizeConfig,
+        generate_repair_plan,
+    )
+    from hashall.client_drift import default_policy
+    from hashall.device import resolve_device_id
+    from hashall.model import connect_db
+    from hashall.rtorrent import load_rt_inventory_rows
+    from rehome.planner import DemotionPlanner
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    try:
+        stash_device = resolve_device_id(conn, "stash")
+        pool_device = resolve_device_id(conn, "pool")
+    except ValueError:
+        click.echo("Could not resolve stash/pool device IDs. Ensure devices are registered.", err=True)
+        conn.close()
+        raise click.Abort()
+
+    planner = DemotionPlanner(
+        catalog_path=Path(db),
+        seeding_roots=["/pool/media/torrents/seeding", "/stash/media/torrents/seeding"],
+        library_roots=[],
+        stash_device=stash_device,
+        pool_device=pool_device,
+        stash_seeding_root="/stash/media/torrents/seeding",
+        pool_seeding_root="/pool/media/torrents/seeding",
+        pool_payload_root="/pool/media/torrents/seeding",
+    )
+    policy = default_policy()
+    config = CanonicalizeConfig(planner=planner, policy=policy)
+
+    rt_rows = {r.torrent_hash.lower(): r for r in load_rt_inventory_rows(Path(rt_session_dir))}
+    rt_row = rt_rows.get(torrent_hash.lower())
+    if rt_row is None:
+        click.echo(f"Torrent not found in RT inventory: {torrent_hash}")
+        conn.close()
+        return
+
+    request = CanonicalizeRequest(
+        torrent_hash=torrent_hash,
+        category="",
+        tags="",
+        save_path=rt_row.save_path,
+        content_path=rt_row.content_path,
+        rt_directory=rt_row.content_path,
+        state="completed",
+    )
+
+    verdict = canonicalize_torrent(request, conn, config)
+    current_path = request.content_path or request.save_path
+    plan = generate_repair_plan(verdict, current_path=current_path)
+    conn.close()
+
+    if json_output:
+        click.echo(json.dumps(asdict(verdict), indent=2))
+        return
+
+    device_status = "DRIFT" if verdict.placement_drift else "✓"
+    path_status = "DRIFT" if verdict.full_path_drift else "✓"
+    current_path = request.content_path or request.save_path
+
+    drift_parts = []
+    if verdict.placement_drift:
+        drift_parts.append("placement")
+    if verdict.path_structure_drift:
+        drift_parts.append("path_structure")
+    drift_label = " + ".join(drift_parts) if drift_parts else "none"
+
+    action_label = plan.plan_type
+    action_parts = [action_label]
+    if plan.move_required:
+        action_parts.append("(move required)")
+
+    click.echo(f"hash:      {verdict.torrent_hash}")
+    click.echo(f"device:    {verdict.canonical_device}  (canonical: {verdict.canonical_device})  {device_status}")
+    click.echo(f"path:      {current_path}")
+    click.echo(f"canonical: {verdict.canonical_path}  {path_status}")
+    click.echo(f"drift:     {drift_label}")
+    click.echo(f"action:    {' '.join(action_parts)}")
+
+    if detail:
+        if verdict.inference_notes:
+            click.echo(f"inference_notes:")
+            for note in verdict.inference_notes:
+                click.echo(f"  {note}")
+        if verdict.external_consumers:
+            click.echo(f"external_consumers:")
+            for ec in verdict.external_consumers:
+                click.echo(f"  path={ec.path} domain={ec.domain}")
+
+
+@cli.command("canonicalize-batch")
+@click.option("--drifted-only", is_flag=True, help="Only show items with placement_drift or path_structure_drift.")
+@click.option("--limit", type=int, default=0, show_default=True, help="Max items to process; 0 means no limit.")
+@click.option("--json", "json_output", is_flag=True, help="Output NDJSON (one JSON object per line).")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+def canonicalize_batch_cmd(drifted_only, limit, json_output, db, rt_session_dir):
+    """Canonicalize all RT inventory torrents in batch. Read-only."""
+    from dataclasses import asdict
+    from hashall.canonicalize import (
+        canonicalize_torrent,
+        CanonicalizeRequest,
+        CanonicalizeConfig,
+        generate_repair_plan,
+    )
+    from hashall.client_drift import default_policy
+    from hashall.device import resolve_device_id
+    from hashall.model import connect_db
+    from hashall.rtorrent import load_rt_inventory_rows
+    from rehome.planner import DemotionPlanner
+
+    conn = connect_db(Path(db), read_only=True, apply_migrations=False)
+    try:
+        stash_device = resolve_device_id(conn, "stash")
+        pool_device = resolve_device_id(conn, "pool")
+    except ValueError:
+        click.echo("Could not resolve stash/pool device IDs. Ensure devices are registered.", err=True)
+        conn.close()
+        raise click.Abort()
+
+    planner = DemotionPlanner(
+        catalog_path=Path(db),
+        seeding_roots=["/pool/media/torrents/seeding", "/stash/media/torrents/seeding"],
+        library_roots=[],
+        stash_device=stash_device,
+        pool_device=pool_device,
+        stash_seeding_root="/stash/media/torrents/seeding",
+        pool_seeding_root="/pool/media/torrents/seeding",
+        pool_payload_root="/pool/media/torrents/seeding",
+    )
+    policy = default_policy()
+    config = CanonicalizeConfig(planner=planner, policy=policy)
+
+    rt_rows = load_rt_inventory_rows(Path(rt_session_dir))
+    total = len(rt_rows)
+    processed = 0
+    results = []
+    error_count = 0
+
+    for rt_row in rt_rows:
+        if limit > 0 and processed >= limit:
+            break
+        request = CanonicalizeRequest(
+            torrent_hash=rt_row.torrent_hash,
+            category="",
+            tags="",
+            save_path=rt_row.save_path,
+            content_path=rt_row.content_path,
+            rt_directory=rt_row.content_path,
+            state="completed",
+        )
+        try:
+            verdict = canonicalize_torrent(request, conn, config)
+            current_path = request.content_path or request.save_path
+            plan = generate_repair_plan(verdict, current_path=current_path)
+        except Exception as exc:
+            error_count += 1
+            if json_output:
+                click.echo(json.dumps({"hash": rt_row.torrent_hash, "error": str(exc)}))
+            else:
+                click.echo(f"{rt_row.torrent_hash[:16]}  error  {exc}", err=True)
+            processed += 1
+            continue
+
+        has_drift = verdict.placement_drift or verdict.path_structure_drift
+        if drifted_only and not has_drift:
+            processed += 1
+            continue
+
+        if json_output:
+            payload = asdict(verdict)
+            payload["plan_type"] = plan.plan_type
+            payload["move_required"] = plan.move_required
+            click.echo(json.dumps(payload))
+        else:
+            drift_summary = plan.plan_type
+            current_path = request.content_path or request.save_path
+            detail_parts = []
+            if verdict.placement_drift or verdict.path_structure_drift:
+                path_short = str(Path(current_path).parent)
+                canon_short = str(Path(verdict.canonical_path).parent)
+                detail_parts.append(f"{path_short} → {canon_short}")
+            if plan.move_required:
+                detail_parts.append("(move required)")
+            detail_str = "  " + "  ".join(detail_parts) if detail_parts else ""
+            click.echo(f"{rt_row.torrent_hash[:16]}  {drift_summary}{detail_str}")
+
+        results.append((verdict, plan))
+        processed += 1
+
+    conn.close()
+
+    if not json_output:
+        totals = {"ok": 0, "fix_path_only": 0, "fix_placement_only": 0, "fix_both": 0, "blocked": 0, "ambiguous": 0}
+        for _, plan in results:
+            pt = plan.plan_type
+            if pt in totals:
+                totals[pt] += 1
+            else:
+                totals["ambiguous"] += 1
+        total_ok = totals.pop("ok", 0)
+        click.echo(
+            f"total={processed}  ok={total_ok}  "
+            f"fix_path={totals.get('fix_path_only', 0)}  "
+            f"fix_placement={totals.get('fix_placement_only', 0)}  "
+            f"fix_both={totals.get('fix_both', 0)}  "
+            f"blocked={totals.get('blocked', 0)}  "
+            f"ambiguous={totals.get('ambiguous', 0)}  "
+            f"errors={error_count}"
+        )
+
+
+@cli.command("canonicalize-apply")
+@click.argument("torrent_hash")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Simulate actions (no mutations).")
+@click.option("--force", "force_mode", is_flag=True, default=False, help="Live execution (mutually exclusive with --dry-run).")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+def canonicalize_apply_cmd(torrent_hash, dry_run, force_mode, db, rt_session_dir):
+    """Apply a canonicalize repair plan for a single torrent.
+
+    Defaults to safe mode (no mutations). Pass --dry-run to simulate, --force to execute live.
+    """
+    from dataclasses import asdict
+    from hashall.canonicalize import (
+        canonicalize_torrent,
+        apply_repair_plan,
+        CanonicalizeRequest,
+        CanonicalizeConfig,
+        generate_repair_plan,
+    )
+    from hashall.client_drift import default_policy
+    from hashall.device import resolve_device_id
+    from hashall.model import connect_db
+    from hashall.qbittorrent import QBittorrentClient
+    from hashall.rtorrent import load_rt_inventory_rows
+    from rehome.planner import DemotionPlanner
+
+    if dry_run and force_mode:
+        click.echo("Error: --dry-run and --force are mutually exclusive.", err=True)
+        raise click.Abort()
+
+    live_execution = force_mode
+    if not dry_run and not force_mode:
+        live_execution = False
+
+    conn = connect_db(Path(db), read_only=False, apply_migrations=False)
+    try:
+        stash_device = resolve_device_id(conn, "stash")
+        pool_device = resolve_device_id(conn, "pool")
+    except ValueError:
+        click.echo("Could not resolve stash/pool device IDs.", err=True)
+        conn.close()
+        raise click.Abort()
+
+    planner = DemotionPlanner(
+        catalog_path=Path(db),
+        seeding_roots=["/pool/media/torrents/seeding", "/stash/media/torrents/seeding"],
+        library_roots=[],
+        stash_device=stash_device,
+        pool_device=pool_device,
+        stash_seeding_root="/stash/media/torrents/seeding",
+        pool_seeding_root="/pool/media/torrents/seeding",
+        pool_payload_root="/pool/media/torrents/seeding",
+    )
+    policy = default_policy()
+    config = CanonicalizeConfig(planner=planner, policy=policy)
+
+    rt_rows = {r.torrent_hash.lower(): r for r in load_rt_inventory_rows(Path(rt_session_dir))}
+    rt_row = rt_rows.get(torrent_hash.lower())
+    if rt_row is None:
+        click.echo(f"Torrent not found in RT inventory: {torrent_hash}")
+        conn.close()
+        return
+
+    request = CanonicalizeRequest(
+        torrent_hash=torrent_hash,
+        category="",
+        tags="",
+        save_path=rt_row.save_path,
+        content_path=rt_row.content_path,
+        rt_directory=rt_row.content_path,
+        state="completed",
+    )
+
+    verdict = canonicalize_torrent(request, conn, config)
+    current_path = request.content_path or request.save_path
+    plan = generate_repair_plan(verdict, current_path=current_path)
+
+    click.echo(f"hash:       {verdict.torrent_hash}")
+    click.echo(f"plan_type:  {plan.plan_type}")
+    click.echo(f"source:     {plan.source_path}")
+    click.echo(f"target:     {plan.target_path}")
+    click.echo(f"mode:       {'LIVE' if live_execution else 'DRY-RUN'}")
+
+    qb_client = QBittorrentClient() if live_execution else None
+
+    result = apply_repair_plan(
+        plan=plan,
+        db_session=conn,
+        config=config,
+        dry_run=not live_execution,
+        qb_client=qb_client,
+    )
+
+    click.echo(f"success:    {result.success}")
+    if result.error:
+        click.echo(f"error:      {result.error}")
+    if result.pre_state:
+        click.echo("pre_state:")
+        for k, v in result.pre_state.items():
+            click.echo(f"  {k}: {v}")
+    if result.post_state:
+        click.echo("post_state:")
+        for k, v in result.post_state.items():
+            click.echo(f"  {k}: {v}")
+    if result.notes:
+        click.echo("notes:")
+        for note in result.notes:
+            click.echo(f"  {note}")
+
+    conn.close()
+
+
+@cli.command("canonicalize-apply-batch")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Simulate actions (no mutations).")
+@click.option("--force", "force_mode", is_flag=True, default=False, help="Live execution (mutually exclusive with --dry-run).")
+@click.option("--limit", type=int, default=0, show_default=True, help="Max items to process; 0 means no limit.")
+@click.option("--plan-type", "plan_type_filter", type=str, default="", help="Filter: fix_path_only | fix_placement_only | fix_both")
+@click.option("--abort-on-failure/--no-abort-on-failure", "abort_on_soft_failure", default=False, help="Abort on first soft failure (default: continue).")
+@click.option("--json", "json_output", is_flag=True, help="NDJSON output (one ApplyResult per line).")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="rTorrent session directory.")
+def canonicalize_apply_batch_cmd(dry_run, force_mode, limit, plan_type_filter, abort_on_soft_failure, json_output, db, rt_session_dir):
+    """Apply canonicalize repair plans for all RT inventory torrents.
+
+    Defaults to safe mode (no mutations). Pass --dry-run to simulate, --force to execute live.
+    In live mode, continues on soft failures (e.g. qB not found) unless --abort-on-failure is set.
+    Hard errors (exceptions) always abort.
+    """
+    from dataclasses import asdict
+    from hashall.canonicalize import (
+        canonicalize_torrent,
+        apply_repair_plan,
+        CanonicalizeRequest,
+        CanonicalizeConfig,
+        generate_repair_plan,
+    )
+    from hashall.client_drift import default_policy
+    from hashall.device import resolve_device_id
+    from hashall.model import connect_db
+    from hashall.qbittorrent import QBittorrentClient
+    from hashall.rtorrent import load_rt_inventory_rows
+    from rehome.planner import DemotionPlanner
+
+    if dry_run and force_mode:
+        click.echo("Error: --dry-run and --force are mutually exclusive.", err=True)
+        raise click.Abort()
+
+    live_execution = force_mode
+
+    valid_types = {"fix_path_only", "fix_placement_only", "fix_both"}
+    if plan_type_filter and plan_type_filter not in valid_types:
+        click.echo(f"Error: --plan-type must be one of {valid_types}", err=True)
+        raise click.Abort()
+
+    conn = connect_db(Path(db), read_only=False, apply_migrations=False)
+    try:
+        stash_device = resolve_device_id(conn, "stash")
+        pool_device = resolve_device_id(conn, "pool")
+    except ValueError:
+        click.echo("Could not resolve stash/pool device IDs.", err=True)
+        conn.close()
+        raise click.Abort()
+
+    planner = DemotionPlanner(
+        catalog_path=Path(db),
+        seeding_roots=["/pool/media/torrents/seeding", "/stash/media/torrents/seeding"],
+        library_roots=[],
+        stash_device=stash_device,
+        pool_device=pool_device,
+        stash_seeding_root="/stash/media/torrents/seeding",
+        pool_seeding_root="/pool/media/torrents/seeding",
+        pool_payload_root="/pool/media/torrents/seeding",
+    )
+    policy = default_policy()
+    config = CanonicalizeConfig(planner=planner, policy=policy)
+
+    qb_client = QBittorrentClient() if live_execution else None
+
+    rt_rows = load_rt_inventory_rows(Path(rt_session_dir))
+    total = len(rt_rows)
+    processed = 0
+    results: list = []
+    error_count = 0
+    abort_on_hard_error = live_execution
+    abort_on_failure = live_execution and abort_on_soft_failure
+
+    for rt_row in rt_rows:
+        if limit > 0 and processed >= limit:
+            break
+
+        request = CanonicalizeRequest(
+            torrent_hash=rt_row.torrent_hash,
+            category="",
+            tags="",
+            save_path=rt_row.save_path,
+            content_path=rt_row.content_path,
+            rt_directory=rt_row.content_path,
+            state="completed",
+        )
+        try:
+            verdict = canonicalize_torrent(request, conn, config)
+            current_path = request.content_path or request.save_path
+            plan = generate_repair_plan(verdict, current_path=current_path)
+        except Exception as exc:
+            error_count += 1
+            if json_output:
+                click.echo(json.dumps({"hash": rt_row.torrent_hash, "error": str(exc)}))
+            else:
+                click.echo(f"{rt_row.torrent_hash[:16]}  error  {exc}", err=True)
+            if abort_on_hard_error:
+                conn.close()
+                raise click.Abort()
+            processed += 1
+            continue
+
+        if plan_type_filter and plan.plan_type != plan_type_filter:
+            processed += 1
+            continue
+
+        try:
+            result = apply_repair_plan(
+                plan=plan,
+                db_session=conn,
+                config=config,
+                dry_run=not live_execution,
+                qb_client=qb_client,
+            )
+        except Exception as exc:
+            error_count += 1
+            if json_output:
+                click.echo(json.dumps({"hash": rt_row.torrent_hash, "error": str(exc)}))
+            else:
+                click.echo(f"{rt_row.torrent_hash[:16]}  error  {exc}", err=True)
+            if abort_on_hard_error:
+                conn.close()
+                raise click.Abort()
+            processed += 1
+            continue
+
+        if json_output:
+            click.echo(json.dumps(asdict(result)))
+        else:
+            status = "✓" if result.success else "✗"
+            plan_label = result.plan_type
+            mode_label = "DRY" if result.dry_run else "LIVE"
+            click.echo(f"{rt_row.torrent_hash[:16]}  {status}  {plan_label}  {mode_label}")
+            if result.error:
+                click.echo(f"  error: {result.error}", err=True)
+
+        results.append(result)
+        processed += 1
+
+        if abort_on_failure and not result.success:
+            click.echo(f"Aborting on first failure: {result.error}", err=True)
+            conn.close()
+            raise click.Abort()
+
+    conn.close()
+
+    if not json_output:
+        success_count = sum(1 for r in results if r.success)
+        fail_count = sum(1 for r in results if not r.success)
+        click.echo(
+            f"total={processed}  success={success_count}  fail={fail_count}  "
+            f"errors={error_count}  mode={'LIVE' if live_execution else 'DRY-RUN'}"
+        )
+
+
 # Canonical CLI surface:
 # - `hashall rehome ...` exposes the full rehome command tree
 # - `hashall refresh` is a direct top-level alias for the rehome refresh flow
-# - `hashall refresh-dashboard` exposes the refresh task status view directly
+# - `hashall refresh-dashboard` exposes the refresh task status display
 from rehome.cli import (
     cli as rehome_cli,
     refresh_cmd as rehome_refresh_cmd,

@@ -1,8 +1,8 @@
 # RT / qB Client State Policy
 
-**Version:** 1.3.0  
+**Version:** 1.4.0
 **Status:** Authoritative  
-**Last updated:** 2026-06-12  
+**Last updated:** 2026-07-05
 **Source:** USER-NOTES.md (target state), operator Q&A (2026-06-12 session)  
 **Supersedes:** Scattered state guidance in USER-NOTES.md, REQUIREMENTS.md §8.4, RUNBOOK.md
 
@@ -18,6 +18,16 @@ qB will eventually be shut down once the RT transition is complete.
 **cross-seed** items are **always hardlinked** from existing data. They are injected
 pre-seeded and must never download any bytes. If a cross-seed item is downloading,
 its hardlink source is missing — that is a violation requiring immediate investigation.
+
+### 1.1 Mutation Enforcement
+
+Live RT/qB state changes must follow `docs/4-GATE-MUTATION-PROTOCOL.md`.
+
+- Broad or batch repair uses the full 4-Gate protocol.
+- Explicit small repairs, normally 1-5 hashes, use the surgical mini-gate.
+- Direct helper/API/XMLRPC mutation is forbidden outside those gates.
+- The only exception is qB stop-only containment when qB is actively uploading
+  or downloading; it must be hash-scoped and logged afterward.
 
 ---
 
@@ -72,6 +82,11 @@ qB is passive. It must never actively upload.
 
 **Rule:** qB items must always be in a stopped or paused state. Active seeding or
 downloading in qB is always a violation.
+
+**Containment rule:** Stopping a qB mirror item that is actively uploading or
+downloading is allowed immediately because it reduces risk. Do not combine that
+containment action with `setLocation`, recheck, resume, RT start/repoint, or
+filesystem mutation unless the full gate or surgical mini-gate has passed.
 
 ---
 
@@ -143,6 +158,12 @@ See SPRINT.md Slice 13 for prior execution history.
 ---
 
 ## 6. Decision Tree — RT Item Repair
+
+Manual RT repairs must use the approved surgical repair wrapper rather than
+calling `d.directory.set`, `d.start`, or `rt_apply_directory_repoint()` directly.
+The wrapper must verify every torrent metadata file exists at the candidate
+payload path, run or trigger a hash check, and only start the torrent after RT
+reports the item complete. Missing sidecar files such as `.nfo` block the repair.
 
 ```
 FOR EACH RT ITEM NOT AT 100% SEEDING (stalledUP/uploading):

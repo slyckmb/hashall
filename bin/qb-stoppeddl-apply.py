@@ -22,7 +22,7 @@ if str(SRC_DIR) not in sys.path:
 from hashall.qbittorrent import get_qbittorrent_client
 from rehome.seed_state import SEED_ROOT_STATE_PATH, validate_seed_root_state
 
-SEMVER = "0.2.12"
+SEMVER = "0.2.14"
 SCRIPT_NAME = Path(__file__).name
 DEFAULT_FASTRESUME_DIR = Path("/dump/docker/gluetun_qbit/qbittorrent_vpn/qBittorrent/BT_backup")
 DEFAULT_QB_CONTAINER = "qbittorrent_vpn"
@@ -398,6 +398,38 @@ def same_filesystem_paths(source_path: str, target_path: str) -> Tuple[bool, str
     if src_root == dst_root:
         return True, f"storage_root_fallback:{src_root}"
     return False, f"storage_root_mismatch:{src_root}!={dst_root}"
+
+
+def fastresume_same_filesystem_gate(
+    row: ApplyRow,
+    item: Dict[str, Any],
+    *,
+    enforce: bool,
+    allow_verified_cross_filesystem: bool = False,
+) -> Tuple[bool, str]:
+    if not enforce:
+        item["same_filesystem_gate"] = {"enforced": False, "ok": True, "reason": "disabled"}
+        return True, "disabled"
+    fr_save_path = str(item.get("fastresume_probe", {}).get("save_path") or "")
+    same_ok, same_reason = same_filesystem_paths(fr_save_path, row.location)
+    overridden = bool(
+        not same_ok
+        and allow_verified_cross_filesystem
+        and row.verified
+        and float(row.ratio) >= 1.0
+    )
+    item["same_filesystem_gate"] = {
+        "enforced": True,
+        "source_path": fr_save_path,
+        "target_path": row.location,
+        "ok": bool(same_ok or overridden),
+        "reason": same_reason,
+        "overridden": bool(overridden),
+        "override_reason": "verified_fastresume_retarget" if overridden else "",
+    }
+    if overridden:
+        return True, f"verified_fastresume_retarget:{same_reason}"
+    return bool(same_ok), same_reason
 
 
 def is_download_state(state: str) -> bool:
@@ -873,6 +905,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(enforce_same_filesystem=True)
     p.add_argument(
+        "--allow-verified-fastresume-cross-filesystem",
+        action="store_true",
+        help=(
+            "Allow fastresume-only retargets across filesystems when the row is independently "
+            "verified at ratio 1.0. Does not affect API setLocation mode."
+        ),
+    )
+    p.add_argument(
         "--ignore-hashes",
         default="",
         help="Optional hashes/prefixes to ignore (pipe/comma/space separated)",
@@ -1274,6 +1314,7 @@ def main() -> int:
                 "failed": 0,
                 "blocked": 0,
                 "same_filesystem_blocked": 0,
+                "same_filesystem_overridden": 0,
                 "recheck_dispatched": 0,
                 "skipped_live_state": 0,
                 "skipped_ignored": int(ignored_plan),
@@ -1364,6 +1405,7 @@ def main() -> int:
         "failed": 0,
         "blocked": 0,
         "same_filesystem_blocked": 0,
+        "same_filesystem_overridden": 0,
         "recheck_dispatched": 0,
         "skipped_live_state": 0,
         "skipped_ignored": int(ignored_plan),
@@ -1380,14 +1422,31 @@ def main() -> int:
         for item in out_rows:
             item["status"] = "planned"
             item["detail"] = f"dry_run:{selected_mode}"
+        if selected_ops == "fastresume_batch" and bool(args.enforce_same_filesystem):
+            for row in plan:
+                item = item_by_hash[row.torrent_hash]
+                same_ok, same_reason = fastresume_same_filesystem_gate(
+                    row,
+                    item,
+                    enforce=bool(args.enforce_same_filesystem),
+                    allow_verified_cross_filesystem=bool(args.allow_verified_fastresume_cross_filesystem),
+                )
+                if bool(item.get("same_filesystem_gate", {}).get("overridden")):
+                    counts["same_filesystem_overridden"] += 1
+                elif not same_ok:
+                    item["status"] = "blocked"
+                    item["detail"] = f"same_filesystem_blocked:{same_reason}"
+                    counts["blocked"] += 1
+                    counts["same_filesystem_blocked"] += 1
         summary = {
             "mode": selected_mode,
             "planned": int(counts["planned"]),
             "applied": 0,
             "ok": 0,
             "failed": 0,
-            "blocked": 0,
-            "same_filesystem_blocked": 0,
+            "blocked": int(counts["blocked"]),
+            "same_filesystem_blocked": int(counts["same_filesystem_blocked"]),
+            "same_filesystem_overridden": int(counts["same_filesystem_overridden"]),
             "recheck_dispatched": 0,
             "skipped_live_state": 0,
             "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1437,6 +1496,7 @@ def main() -> int:
                 "failed": 0,
                 "blocked": int(counts["blocked"]),
                 "same_filesystem_blocked": int(counts["same_filesystem_blocked"]),
+                "same_filesystem_overridden": int(counts["same_filesystem_overridden"]),
                 "recheck_dispatched": 0,
                 "skipped_live_state": 0,
                 "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1501,160 +1561,187 @@ def main() -> int:
                 if not fr_dir.exists():
                     print(f"ERROR fastresume_dir_not_found path={fr_dir}", flush=True)
                     return 2
-                backup_suffix = ".bak-qb-stoppeddl-apply-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-                print(
-                    f"fastresume_batch begin container={args.qb_container} dir={fr_dir} rows={len(active_plan)}",
-                    flush=True,
-                )
-                ok_stop, stop_msg = docker_ctl("stop", str(args.qb_container))
-                print(
-                    f"qB stop status={'ok' if ok_stop else 'fail'} detail={stop_msg or 'none'}",
-                    flush=True,
-                )
-                if not ok_stop:
+                if bool(args.enforce_same_filesystem):
+                    next_plan: List[ApplyRow] = []
                     for row in active_plan:
                         item = item_by_hash[row.torrent_hash]
-                        item["status"] = "failed"
-                        item["detail"] = f"docker_stop_failed:{stop_msg or 'unknown'}"
-                    counts["failed"] = len(active_plan)
-                else:
-                    for idx, row in enumerate(active_plan, start=1):
-                        item = item_by_hash[row.torrent_hash]
-                        counts["applied"] += 1
-                        print(
-                            f"[{idx}/{len(active_plan)}] hash={row.torrent_hash[:12]} class={row.classification} ratio={row.ratio:.6f} source={row.source}",
-                            flush=True,
+                        same_ok, same_reason = fastresume_same_filesystem_gate(
+                            row,
+                            item,
+                            enforce=bool(args.enforce_same_filesystem),
+                            allow_verified_cross_filesystem=bool(args.allow_verified_fastresume_cross_filesystem),
                         )
-                        print(f"  path={row.recommended_path}", flush=True)
-                        print(f"  location={row.location}", flush=True)
-                        fr_save_path = str(item.get("fastresume_probe", {}).get("save_path") or "")
-                        if bool(args.enforce_same_filesystem):
-                            same_ok, same_reason = same_filesystem_paths(fr_save_path, row.location)
-                            item["same_filesystem_gate"] = {
-                                "enforced": True,
-                                "source_path": fr_save_path,
-                                "target_path": row.location,
-                                "ok": bool(same_ok),
-                                "reason": same_reason,
-                            }
-                            if not same_ok:
-                                item["status"] = "blocked"
-                                item["detail"] = f"same_filesystem_blocked:{same_reason}"
-                                counts["blocked"] += 1
-                                counts["same_filesystem_blocked"] += 1
-                                print(f"  BLOCK same_filesystem {same_reason}", flush=True)
-                                continue
-                        fr_path = fr_dir / f"{row.torrent_hash}.fastresume"
-                        ok_patch, patch_msg, changed = patch_fastresume(
-                            fr_path, row.location, backup_suffix, apply_mode=True
-                        )
-                        item["steps"].append(
-                            {
-                                "step": "fastresume_patch",
-                                "ok": bool(ok_patch),
-                                "changed": bool(changed),
-                                "path": str(fr_path),
-                                "detail": patch_msg,
-                            }
-                        )
-                        if not ok_patch:
-                            item["status"] = "failed"
-                            item["detail"] = patch_msg
-                            counts["failed"] += 1
-                            counts["fr_patch_failed"] += 1
-                            print(f"  FAIL fastresume {patch_msg}", flush=True)
-                            continue
-                        if changed:
-                            counts["fr_patched"] += 1
-                            append_rollback_entry(
-                                {
-                                    "ts": ts_iso(),
-                                    "run_started_at": started,
-                                    "tool": SCRIPT_NAME,
-                                    "semver": SEMVER,
-                                    "action": "fastresume_patch",
-                                    "mode": selected_mode,
-                                    "hash": row.torrent_hash,
-                                    "name": row.name,
-                                    "classification": row.classification,
-                                    "source": row.source,
-                                    "from_save_path": str(item.get("fastresume_probe", {}).get("save_path") or ""),
-                                    "to_save_path": row.location,
-                                    "drain_report": str(drain_path),
-                                    "apply_report_json": str(report_path),
-                                    "detail": str(patch_msg or ""),
-                                }
+                        if bool(item.get("same_filesystem_gate", {}).get("overridden")):
+                            counts["same_filesystem_overridden"] += 1
+                            print(
+                                f"  ALLOW verified_fastresume_retarget hash={row.torrent_hash[:12]} {same_reason}",
+                                flush=True,
                             )
-
-                    ok_start, start_msg = docker_ctl("start", str(args.qb_container))
+                        elif not same_ok:
+                            item["status"] = "blocked"
+                            item["detail"] = f"same_filesystem_blocked:{same_reason}"
+                            counts["blocked"] += 1
+                            counts["same_filesystem_blocked"] += 1
+                            print(f"  BLOCK same_filesystem hash={row.torrent_hash[:12]} {same_reason}", flush=True)
+                            continue
+                        next_plan.append(row)
+                    active_plan = next_plan
+                if not active_plan:
+                    print("no active hashes remain after same-filesystem gate; nothing to apply", flush=True)
+                if active_plan:
+                    backup_suffix = ".bak-qb-stoppeddl-apply-" + datetime.now().strftime("%Y%m%d-%H%M%S")
                     print(
-                        f"qB start status={'ok' if ok_start else 'fail'} detail={start_msg or 'none'}",
+                        f"fastresume_batch begin container={args.qb_container} dir={fr_dir} rows={len(active_plan)}",
                         flush=True,
                     )
-                    if not ok_start:
+                    ok_stop, stop_msg = docker_ctl("stop", str(args.qb_container))
+                    print(
+                        f"qB stop status={'ok' if ok_stop else 'fail'} detail={stop_msg or 'none'}",
+                        flush=True,
+                    )
+                    if not ok_stop:
                         for row in active_plan:
                             item = item_by_hash[row.torrent_hash]
-                            if item["status"] == "failed":
-                                continue
                             item["status"] = "failed"
-                            item["detail"] = f"docker_start_failed:{start_msg or 'unknown'}"
-                            counts["failed"] += 1
-                    elif not wait_qb_online(qb, float(args.restart_timeout)):
-                        for row in active_plan:
-                            item = item_by_hash[row.torrent_hash]
-                            if item["status"] == "failed":
-                                continue
-                            item["status"] = "failed"
-                            item["detail"] = "qb_online_timeout_after_restart"
-                            counts["failed"] += 1
-                        print("ERROR qB API did not return after restart timeout", flush=True)
+                            item["detail"] = f"docker_stop_failed:{stop_msg or 'unknown'}"
+                        counts["failed"] = len(active_plan)
                     else:
-                        for row in active_plan:
+                        for idx, row in enumerate(active_plan, start=1):
                             item = item_by_hash[row.torrent_hash]
-                            if item["status"] == "failed":
-                                continue
-                            allowlist_registered = guard_allowlist_add(row.torrent_hash, item)
-                            ok_recheck = qb.recheck_torrent(row.torrent_hash)
-                            item["steps"].append({"step": "recheck", "ok": bool(ok_recheck)})
-                            if not ok_recheck:
-                                if allowlist_registered:
-                                    guard_allowlist_remove(row.torrent_hash, item, "recheck_failed")
-                                item["status"] = "failed"
-                                item["detail"] = f"recheck_failed:{qb.last_error or 'unknown'}"
-                                counts["failed"] += 1
-                                print(f"  FAIL recheck error={qb.last_error or 'unknown'}", flush=True)
-                                continue
-                            counts["recheck_dispatched"] += 1
-                            if not bool(args.wait_recheck):
-                                item["status"] = "queued"
-                                item["detail"] = "recheck_dispatched:fastresume_batch"
-                                print("  OK recheck_dispatched (no-wait)", flush=True)
-                                continue
-                            status, detail = wait_recheck_terminal(
-                                qb=qb,
-                                torrent_hash=row.torrent_hash,
-                                poll_seconds=float(args.poll),
-                                timeout_seconds=float(args.timeout),
-                                show_progress=bool(args.show_poll_progress),
-                                progress_interval=float(args.progress_interval),
-                                protect_download=bool(args.protect_download),
-                                transient_miss_retries=int(args.transient_miss_retries),
-                                item=item,
-                                guard_daemon_active=bool(guard_daemon_active),
+                            counts["applied"] += 1
+                            print(
+                                f"[{idx}/{len(active_plan)}] hash={row.torrent_hash[:12]} class={row.classification} ratio={row.ratio:.6f} source={row.source}",
+                                flush=True,
                             )
-                            if allowlist_registered:
-                                guard_allowlist_remove(row.torrent_hash, item, "wait_recheck_terminal")
-                            item["status"] = status
-                            item["detail"] = detail
-                            if status == "ok":
-                                counts["ok"] += 1
-                                print(f"  OK {detail}", flush=True)
-                            elif status == "blocked":
-                                counts["blocked"] += 1
-                                print(f"  BLOCK {detail}", flush=True)
-                            else:
+                            print(f"  path={row.recommended_path}", flush=True)
+                            print(f"  location={row.location}", flush=True)
+                            if bool(args.enforce_same_filesystem):
+                                same_ok, same_reason = fastresume_same_filesystem_gate(
+                                    row,
+                                    item,
+                                    enforce=bool(args.enforce_same_filesystem),
+                                    allow_verified_cross_filesystem=bool(args.allow_verified_fastresume_cross_filesystem),
+                                )
+                                if bool(item.get("same_filesystem_gate", {}).get("overridden")):
+                                    print(f"  ALLOW verified_fastresume_retarget {same_reason}", flush=True)
+                                elif not same_ok:
+                                    item["status"] = "blocked"
+                                    item["detail"] = f"same_filesystem_blocked:{same_reason}"
+                                    counts["blocked"] += 1
+                                    counts["same_filesystem_blocked"] += 1
+                                    print(f"  BLOCK same_filesystem {same_reason}", flush=True)
+                                    continue
+                            fr_path = fr_dir / f"{row.torrent_hash}.fastresume"
+                            ok_patch, patch_msg, changed = patch_fastresume(
+                                fr_path, row.location, backup_suffix, apply_mode=True
+                            )
+                            item["steps"].append(
+                                {
+                                    "step": "fastresume_patch",
+                                    "ok": bool(ok_patch),
+                                    "changed": bool(changed),
+                                    "path": str(fr_path),
+                                    "detail": patch_msg,
+                                }
+                            )
+                            if not ok_patch:
+                                item["status"] = "failed"
+                                item["detail"] = patch_msg
                                 counts["failed"] += 1
-                                print(f"  FAIL {detail}", flush=True)
+                                counts["fr_patch_failed"] += 1
+                                print(f"  FAIL fastresume {patch_msg}", flush=True)
+                                continue
+                            if changed:
+                                counts["fr_patched"] += 1
+                                append_rollback_entry(
+                                    {
+                                        "ts": ts_iso(),
+                                        "run_started_at": started,
+                                        "tool": SCRIPT_NAME,
+                                        "semver": SEMVER,
+                                        "action": "fastresume_patch",
+                                        "mode": selected_mode,
+                                        "hash": row.torrent_hash,
+                                        "name": row.name,
+                                        "classification": row.classification,
+                                        "source": row.source,
+                                        "from_save_path": str(item.get("fastresume_probe", {}).get("save_path") or ""),
+                                        "to_save_path": row.location,
+                                        "drain_report": str(drain_path),
+                                        "apply_report_json": str(report_path),
+                                        "detail": str(patch_msg or ""),
+                                    }
+                                )
+    
+                        ok_start, start_msg = docker_ctl("start", str(args.qb_container))
+                        print(
+                            f"qB start status={'ok' if ok_start else 'fail'} detail={start_msg or 'none'}",
+                            flush=True,
+                        )
+                        if not ok_start:
+                            for row in active_plan:
+                                item = item_by_hash[row.torrent_hash]
+                                if item["status"] == "failed":
+                                    continue
+                                item["status"] = "failed"
+                                item["detail"] = f"docker_start_failed:{start_msg or 'unknown'}"
+                                counts["failed"] += 1
+                        elif not wait_qb_online(qb, float(args.restart_timeout)):
+                            for row in active_plan:
+                                item = item_by_hash[row.torrent_hash]
+                                if item["status"] == "failed":
+                                    continue
+                                item["status"] = "failed"
+                                item["detail"] = "qb_online_timeout_after_restart"
+                                counts["failed"] += 1
+                            print("ERROR qB API did not return after restart timeout", flush=True)
+                        else:
+                            for row in active_plan:
+                                item = item_by_hash[row.torrent_hash]
+                                if item["status"] == "failed":
+                                    continue
+                                allowlist_registered = guard_allowlist_add(row.torrent_hash, item)
+                                ok_recheck = qb.recheck_torrent(row.torrent_hash)
+                                item["steps"].append({"step": "recheck", "ok": bool(ok_recheck)})
+                                if not ok_recheck:
+                                    if allowlist_registered:
+                                        guard_allowlist_remove(row.torrent_hash, item, "recheck_failed")
+                                    item["status"] = "failed"
+                                    item["detail"] = f"recheck_failed:{qb.last_error or 'unknown'}"
+                                    counts["failed"] += 1
+                                    print(f"  FAIL recheck error={qb.last_error or 'unknown'}", flush=True)
+                                    continue
+                                counts["recheck_dispatched"] += 1
+                                if not bool(args.wait_recheck):
+                                    item["status"] = "queued"
+                                    item["detail"] = "recheck_dispatched:fastresume_batch"
+                                    print("  OK recheck_dispatched (no-wait)", flush=True)
+                                    continue
+                                status, detail = wait_recheck_terminal(
+                                    qb=qb,
+                                    torrent_hash=row.torrent_hash,
+                                    poll_seconds=float(args.poll),
+                                    timeout_seconds=float(args.timeout),
+                                    show_progress=bool(args.show_poll_progress),
+                                    progress_interval=float(args.progress_interval),
+                                    protect_download=bool(args.protect_download),
+                                    transient_miss_retries=int(args.transient_miss_retries),
+                                    item=item,
+                                    guard_daemon_active=bool(guard_daemon_active),
+                                )
+                                if allowlist_registered:
+                                    guard_allowlist_remove(row.torrent_hash, item, "wait_recheck_terminal")
+                                item["status"] = status
+                                item["detail"] = detail
+                                if status == "ok":
+                                    counts["ok"] += 1
+                                    print(f"  OK {detail}", flush=True)
+                                elif status == "blocked":
+                                    counts["blocked"] += 1
+                                    print(f"  BLOCK {detail}", flush=True)
+                                else:
+                                    counts["failed"] += 1
+                                    print(f"  FAIL {detail}", flush=True)
             else:
                 for idx, row in enumerate(active_plan, start=1):
                     item = item_by_hash[row.torrent_hash]
@@ -1784,6 +1871,7 @@ def main() -> int:
                 "failed": int(counts["failed"]),
                 "blocked": int(counts["blocked"]),
                 "same_filesystem_blocked": int(counts["same_filesystem_blocked"]),
+                "same_filesystem_overridden": int(counts["same_filesystem_overridden"]),
                 "recheck_dispatched": int(counts["recheck_dispatched"]),
                 "skipped_live_state": int(counts["skipped_live_state"]),
                 "skipped_ignored": int(counts["skipped_ignored"]),
@@ -1870,6 +1958,7 @@ def main() -> int:
         f"skipped_ignored={summary.get('skipped_ignored',0)} "
         f"blocked={summary['blocked']} fr_needed={summary.get('fr_needed',0)} "
         f"same_filesystem_blocked={summary.get('same_filesystem_blocked',0)} "
+        f"same_filesystem_overridden={summary.get('same_filesystem_overridden',0)} "
         f"fr_patched={summary.get('fr_patched',0)} fr_patch_failed={summary.get('fr_patch_failed',0)} "
         f"root_policy_rejected={summary.get('root_policy_rejected',0)} "
         f"rollback_ledger_written={summary.get('rollback_ledger_written',0)} "
