@@ -2313,6 +2313,56 @@ def payload_orphan_audit_cmd(db, path_prefixes, samples, json_output):
     conn.close()
 
 
+@payload.command("classify-orphan-dedup")
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option(
+    "--path-prefix",
+    "path_prefixes",
+    multiple=True,
+    help="Only include orphan payload roots under this path (repeatable).",
+)
+@click.option(
+    "--min-size",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Minimum file size in bytes for cross-device matching.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON summary.")
+@click.option("--show-candidates", type=int, default=0, help="Show first N candidate entries in text output.")
+def payload_classify_orphan_dedup_cmd(db, path_prefixes, min_size, json_output, show_candidates):
+    """Dry-run classification of orphan dedupe candidates.
+
+    Separates SHA256-confirmed cross-device duplicates from quick-hash-only
+    candidates and unmatched orphans.  Never modifies the database or filesystem.
+    """
+    from hashall.orphan_classify import (
+        classify_orphan_dedup,
+        format_classification_text,
+        format_classification_json,
+    )
+    result = classify_orphan_dedup(
+        Path(db),
+        path_prefixes=list(path_prefixes) if path_prefixes else None,
+        min_size=min_size,
+    )
+    if json_output:
+        print(format_classification_json(result))
+        return
+
+    print(format_classification_text(result))
+    if show_candidates and result.candidates:
+        print("")
+        print(f"--- First {min(show_candidates, len(result.candidates))} candidates ---")
+        for c in result.candidates[:show_candidates]:
+            match_str = ", ".join(c.match_paths[:3]) if c.match_paths else "none"
+            print(
+                f"  [{c.classification}] size={c.file_size} "
+                f"device={c.device_id} path={c.file_path} "
+                f"matches=[{match_str}]"
+            )
+
+
 @payload.command("orphan-sweep")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
 @click.option(
