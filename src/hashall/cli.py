@@ -8114,7 +8114,8 @@ def link():
 @click.option("--cross-device", is_flag=True, help="Analyze duplicates across devices.")
 @click.option("--min-size", type=int, default=0, help="Minimum file size in bytes (default: 0).")
 @click.option("--format", type=click.Choice(['text', 'json']), default='text', help="Output format.")
-def link_analyze_cmd(db, device, cross_device, min_size, format):
+@click.option("--use-quick-hash", is_flag=True, help="Use quick_hash for candidate grouping (cross-device only).")
+def link_analyze_cmd(db, device, cross_device, min_size, format, use_quick_hash):
     """
     Analyze catalog for deduplication opportunities.
 
@@ -8142,7 +8143,7 @@ def link_analyze_cmd(db, device, cross_device, min_size, format):
 
     if cross_device:
         try:
-            result = analyze_cross_device(conn, min_size=min_size)
+            result = analyze_cross_device(conn, min_size=min_size, use_quick_hash=use_quick_hash)
             if format == 'json':
                 click.echo(format_cross_device_json(result))
             else:
