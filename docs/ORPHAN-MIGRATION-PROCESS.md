@@ -181,6 +181,41 @@ Repoint RT first (it's more resilient), then qB. After both repointed, run reche
 | Hotspare out of space during Class C rsync | `df` before rsync | Abort rsync, reclassify remaining orphans, expand storage or run phased delete-then-rsync for future orphans only. |
 | Orphan file has SHA256 match in library (stash) but no hardlink | `_Sha256ContentMatcher` (j48 t02) | Class B — library has the content. Delete from orphan dir. No need to keep on pool. |
 
+## Pre-Deletion Evidence Checklist
+
+Before any live deletion of orphan files, every candidate must satisfy this
+checklist.  Each item requires explicit evidence captured before mutation.  Run
+`hashall payload classify-orphan-dedup` as a pre-flight dry-run gate first.
+
+| # | Check | Evidence Required | How to Verify |
+|---|-------|-------------------|---------------|
+| **E1** | **Path** | Absolute source path on origin device and absolute match path(s) on target device(s) confirmed | `stat <path>` on source; cross-reference against classify-orphan-dedup match_paths |
+| **E2** | **Size** | File size in bytes matches across devices within classification group | `stat --format=%s` on source and each target; must be bit-identical |
+| **E3** | **Hash basis** | SHA256 confirmed for all Class A / Class B candidates; quick-hash-only candidates must complete `hashall payload upgrade-collisions` before eligibility | Classification output shows `sha256_confirmed`; quick-hash-only candidates blocked until SHA256 upgrade |
+| **E4** | **Link count** | `st_nlink` confirmed ≤ 2 if hardlinked to seeder (Class A), or = 1 if fully unique (Class B/C); intra-orphan hardlinks enumerated | `stat --format=%h` per file; `hashall orphan-validate --hardlink-guard` for batch |
+| **E5** | **Device** | Source device alias + target device alias(s) recorded; cross-device `fs_uuid` verified distinct (prevents same-device false positives) | `df` on source/target mount points; `hashall device list` for catalog mapping |
+| **E6** | **Active-client exclusion** | Zero RT `/data/media/...` or qB `save_path` entries point at orphan root path; orphan-audit confirms zero `torrent_instances` refs | `hashall payload orphan-audit --path-prefix <orphan_root>` shows `true orphans (eligible class)`; RT/qB state query confirms no active references |
+| **E7** | **Rollback posture** | Hotspare copy confirmed for all Class B/C files before source deletion; restore procedure tested with a small pilot | Class B: `rsync --dry-run --itemize-changes` shows target identical to source. Class C: rsync completed and verified. Rollback: `rsync -aH` from hotspare back to orphan dir |
+| **E8** | **Backup posture** | Pre-deletion snapshot captured: output of `hashall payload classify-orphan-dedup --json` + `hashall payload orphan-audit --json` saved to `~/.logs/hashall/orphan-dedup/<run_id>/` | Both JSON outputs saved to timestamped run directory; rsync verify between source and hotspare captured |
+
+### Wet-Run Approval Gates
+
+After the dry-run classification passes and all E1–E8 evidence is collected,
+the operator must explicitly approve each phase before live deletion:
+
+1. **Phase 0 — Dry-run approval**: Review classify-orphan-dedup output; confirm
+   SHA256-confirmed group sizes are expected before any mutation.
+2. **Phase 1 — Pilot deletion (1–3 files)**: Delete 1–3 SHA256-confirmed files;
+   verify pool free space; verify hotspare still holds copies; verify no client
+   impact.
+3. **Phase 2 — Batch deletion (≤50 files per batch)**: Delete in small batches;
+   re-run classify-orphan-dedup after each batch to confirm no drift.
+4. **Phase 3 — Quick-hash upgrade + reclassify**: For quick-hash-only candidates,
+   run `hashall payload upgrade-collisions` then re-run classify-orphan-dedup to
+   promote them to SHA256-confirmed before deletion eligibility.
+
+No batch proceeds to the next phase without explicit operator sign-off.
+
 ## Verification Gates
 
 Between every step, verify:
