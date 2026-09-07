@@ -1,10 +1,10 @@
 # Lead–Agent Injection Protocol
 
-**Version:** 0.3.0  
+**Version:** 0.3.1
 **Status:** Active — evolving through session hashall-20260530-000517-claude  
-**Last updated:** 2026-06-12  
+**Last updated:** 2026-09-06
 **Scope:** Defines the full contract between the Web Lead and CLI Agent for task
-dispatch, reporting, tmux injection, and job lifecycle management.
+briefs, PR-native launch, reporting, and job lifecycle management.
 
 ---
 
@@ -13,8 +13,8 @@ dispatch, reporting, tmux injection, and job lifecycle management.
 | Role | Who | Responsibilities |
 |---|---|---|
 | **User** | Operator | Sets goals, approves direction, owns final acceptance |
-| **Lead** | Web UI agent (this doc's author) | Writes briefs, reads logs, drives decisions, issues one task at a time |
-| **Agent** | CLI agent (OpenCode / Claude Code) | Executes briefs, writes logs, notifies Lead, never broadens scope |
+| **Lead** | Web UI agent (this doc's author) | Writes briefs, posts PR-native handoffs, reads logs, drives decisions, issues one task at a time |
+| **Agent** | CLI agent (OpenCode / Claude Code) | Hydrates the PR-native handoff, executes the bounded task, writes logs, never broadens scope |
 
 The Lead writes **one brief at a time**. The Agent executes and returns **one log**.
 The Lead reads the log, decides, writes the next brief.
@@ -48,7 +48,7 @@ J<NN>-T<NN>
 ### Canonical task path (local)
 ```
 <worktree>/jobs/<N>-<job-slug>/tasks/<JNN>-<TNN>--<task-slug>/
-  TASK-BRIEF.md     ← Lead writes before dispatch
+  TASK-BRIEF.md     ← Lead writes before launch
   TASK-LOG.md       ← Agent writes after completion
 ```
 
@@ -116,8 +116,7 @@ brief_freeze_violation: "false"
 <fenced code block containing the 🟪 task-log= template>
 
 ## After completing this task
-<write TASK-LOG.md and mirror instructions>
-<tmux notify instructions>
+<write TASK-LOG.md, mirror, and PR-report instructions>
 ```
 
 ### 🟦 task-brief= block fields (required)
@@ -219,16 +218,14 @@ Required steps in order:
 cp <worktree>/jobs/<N>-<slug>/tasks/<JNN-TNN>--<slug>/TASK-LOG.md \
    /mnt/gdrive/chatrap/repos/<repo>/jobs/<N>-<slug>/tasks/<JNN-TNN>--<slug>/TASK-LOG.md
 
-# 3. Notify Lead tmux pane (two-send pattern)
-tmux send-keys -t %14 "🟪 <JNN-TNN> done | <key=val> <key=val> <key=val>"
-tmux send-keys -t %14 "" Enter
+# 3. Post the required report to the bound PR
+# The PR report is durable coordination; the local log remains the Hashall
+# task artifact and must still be mirrored when configured.
 ```
-
-**Note on tmux Enter:** Use `tmux send-keys -t <pane> "" Enter` or a second `send-keys` with `Enter` as the key argument. Do NOT rely on `""` alone to trigger Enter.
 
 ---
 
-## 8. Lead Dispatch Sequence
+## 8. Lead Launch Sequence
 
 Steps in order for each task:
 
@@ -239,20 +236,20 @@ Steps in order for each task:
 # 2. Mirror to GDrive
 cp <worktree>/jobs/.../TASK-BRIEF.md /mnt/gdrive/.../TASK-BRIEF.md
 
-# 3. Inject into agent pane
-#    If ok to clear (prior task complete, agent idle):
-tmux send-keys -t %117 "/clear" Enter
-sleep 5
-tmux send-keys -t %117 "Read and execute the task brief at: <absolute path to TASK-BRIEF.md>" Enter
+# 3. Publish a reset-safe handoff to the task's bound Hashall PR
+#    It includes the brief's bounded content and current PR head as Based-On.
 
-#    If NOT ok to clear (agent may have pending context):
-tmux send-keys -t %117 "Read and execute the task brief at: <absolute path to TASK-BRIEF.md>" Enter
+# 4. Launch the selected native client through Airo. Do not inject a local
+#    brief path into an interactive TUI.
+set -o pipefail
+pr-agent <client> worker slyckmb/hashall <PR> \
+  --model <model> --cwd <worktree> |& tee <launcher-transcript.log>
 ```
 
-**When is it ok to clear?**
-- Prior task TASK-LOG.md written to disk and evaluated by Lead
-- Agent pane shows idle state (no `esc interrupt` indicator)
-- No carry-over context needed from prior task
+The launcher transcript is diagnostic foreground output; it is not the worker-authored
+`TASK-LOG.md`. The runner's default prompt is `work slyckmb/hashall PR #<PR>`; the worker
+recovers the handoff from the PR. Do not supply the local brief as a launcher
+argument or override that prompt merely to inject it.
 
 ---
 
@@ -284,37 +281,26 @@ cd /home/michael/dev/work/hashall/.agent/worktrees/<new-worktree>
 
 ---
 
-## 10. Agent Pane Lifecycle (OpenCode)
+## 10. Airo Launch Lifecycle
 
-### Job transition pattern (reuse same pane)
+### Task transition pattern
 ```bash
-# 1. Exit current OpenCode session
-tmux send-keys -t %117 "q" Enter      # 'q' exits OpenCode TUI to shell
-sleep 2
-
-# 2. cd out of deleted worktree (if prior job worktree was removed)
-tmux send-keys -t %117 "cd <new-worktree-path>" Enter
-sleep 1
-
-# 3. Launch OpenCode in new worktree
-tmux send-keys -t %117 "opencode ." Enter
-sleep 6                                 # wait for TUI to fully load
-
-# 4. Optionally clear prior session context
-tmux send-keys -t %117 "/clear" Enter
-sleep 5
-
-# 5. Send brief pointer
-tmux send-keys -t %117 "Read and execute the task brief at: <path>" Enter
+# Each task is a new PR-native invocation after its handoff is posted.
+command -v pr-agent >/dev/null || exit 127
+pr-agent <client> worker slyckmb/hashall <PR> \
+  --model <model> --cwd <worktree>
 ```
 
 ### Key findings
-- `q` exits OpenCode TUI → shell (not `/exit`, not `/quit`)
-- `opencode <path>` sets project root explicitly — preferred over `cd` + `opencode .` when pane $PWD is unknown/deleted
-- `/clear` clears conversation history but requires **12–15s** to settle before next input — 5s and 10s are insufficient for this OpenCode instance; if prompt is swallowed, resend without re-clearing (do not send /clear again)
-- `tmux send-keys -t <pane> "text" Enter` submits (single call with `Enter` key name)
-- `tmux send-keys -t <pane> "text"` types but does NOT submit
-- Two-send notify pattern: `send-keys "message"` then `send-keys "" Enter`
+- Airo runs the selected native client in the foreground and preserves its
+  truthful exit code; use `tee` only when retaining a local task log.
+- Airo selects no hidden fallback model. The lead supplies the selected client
+  and model for each invocation.
+- `worker` is a PR-work role/provenance label. For OpenCode it does not select
+  a native agent preset or change permissions.
+- A launcher availability, client-version, or feature-gate failure is blocked;
+  do not replace it with an interactive TUI, direct native client command, or
+  an approval/sandbox bypass.
 
 ---
 
@@ -345,42 +331,27 @@ GIT_AUTHOR_NAME="claude" GIT_AUTHOR_EMAIL="claude@chatrap.local" chatrap ack com
 
 | Issue | Status | Fix |
 |---|---|---|
-| Two-send tmux pattern for notify | ✅ Confirmed working | `send-keys "msg"` then `send-keys "" Enter` |
-| `/clear` timing | ✅ Fixed | Sleep 5s after `/clear` before next input |
-| OpenCode exit command | ✅ Confirmed | `q` (not `/exit`) |
+| PR-native handoff and report | Required | Post the bounded handoff before launch; retain the task log as the local artifact |
+| Airo foreground launch | Required | Use `pr-agent`; preserve its native output and exit status |
 | Worktree dir unpadded vs branch padded | ⚠️ Active | `git worktree move …__jN …__j0N` after job-start |
 | Agent writes raw terminal output | ⚠️ Active | Brief requires "full output" — agent sometimes substitutes summaries |
 | TASK-LOG.md not written to disk by default | ✅ Fixed | Added explicit write+mirror instructions to brief After section |
-| Lead pane notification requires Enter | ✅ Fixed | Two-send pattern; `send-keys "" Enter` not `""` alone |
 
 ---
 
 ## 13. Quick Reference
 
 ### Lead issues a task
-1. Write `TASK-BRIEF.md` → mirror to GDrive → inject pointer into agent pane
+1. Write `TASK-BRIEF.md` → mirror to GDrive → post its bounded contents as a reset-safe PR handoff → launch `pr-agent`
 
 ### Agent executes a task
-1. Read brief → verify context → execute → write `TASK-LOG.md` → mirror → notify `%14`
+1. Recover PR handoff → verify context → execute → write `TASK-LOG.md` → mirror → post PR report
 
 ### Lead evaluates a log
 1. `Read TASK-LOG.md from disk` → assess format + content → accept or reject → write next brief
 
-### Pane injection (ok to clear)
+### PR-native worker launch
 ```bash
-tmux send-keys -t %117 "q" Enter && sleep 2 && \
-tmux send-keys -t %117 "cd <worktree> && opencode ." Enter && sleep 6 && \
-tmux send-keys -t %117 "/clear" Enter && sleep 15 && \
-tmux send-keys -t %117 "Read and execute the task brief at: <path>" Enter
-```
-
-### Pane injection (not ok to clear)
-```bash
-tmux send-keys -t %117 "Read and execute the task brief at: <path>" Enter
-```
-
-### Agent notify Lead
-```bash
-tmux send-keys -t %14 "🟪 J<NN>-T<NN> done | key=val key=val"
-tmux send-keys -t %14 "" Enter
+pr-agent <client> worker slyckmb/hashall <PR> \
+  --model <model> --cwd <worktree>
 ```
