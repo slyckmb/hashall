@@ -355,6 +355,55 @@ def test_client_drift_common_qb_mirror_health_verdict(
         assert "qb_progress_not_complete:0.000" in health_rows[0]["reasons"]
 
 
+@pytest.mark.parametrize(
+    ("rt_nested_complete", "expected_flag"),
+    [
+        (1, True),
+        (0, False),
+    ],
+)
+def test_client_drift_qb_mirror_health_verdict_production_rt_cache_shape(
+    tmp_path: Path,
+    rt_nested_complete: int,
+    expected_flag: bool,
+) -> None:
+    # v0.8.77 regression: production Silo RT cache rows nest the authoritative
+    # `complete` flag under row["raw"]["complete"], not at the row's top
+    # level. Use a top-level state outside HEALTHY_RT_STATES so this test
+    # cannot pass via the state-based progress fallback alone -- it only
+    # passes if the nested `complete` flag is actually read.
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.Two"
+    content_root.mkdir(parents=True)
+    (content_root / "file.bin").write_text("payload", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "bbb222"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text(json.dumps([{
+        "hash": torrent_hash, "name": "Release.Two", "save_path": str(seed_root),
+        "content_path": str(content_root), "state": "stoppedDL", "progress": 0.0,
+    }]), encoding="utf-8")
+    rt_cache.write_text(json.dumps([{
+        "hash": torrent_hash, "name": "Release.Two", "directory": str(content_root),
+        "state": "checking", "raw": {
+            "hash": torrent_hash, "state": "checking", "complete": rt_nested_complete,
+        },
+    }]), encoding="utf-8")
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(),
+    )
+
+    health_rows = [row for row in report["rows"] if row["side"] == "qb_unverified_mirror"]
+    assert report["summary"]["qb_unverified_mirror"] == int(expected_flag)
+    assert bool(health_rows) is expected_flag
+
+
 def _mirror_pause_drift_setup(tmp_path: Path, torrent_hash: str, qb_state: str, rt_state: str) -> tuple[Path, Path, Path]:
     seed_root = tmp_path / "seeding" / "site"
     content_root = seed_root / "Release.One"
