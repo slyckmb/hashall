@@ -1,3 +1,7 @@
+# Script: tests/test_client_drift.py
+# Version: 0.8.76
+# Last-updated: 2026-09-24T09:23:14-04:00
+
 import hashlib
 import json
 import re
@@ -297,7 +301,58 @@ def test_client_drift_common_hash_aligned_paths_are_not_drift(tmp_path: Path) ->
     )
 
     assert report["summary"]["path_drift"] == 0
+    assert report["summary"]["qb_unverified_mirror"] == 0
     assert report["rows"] == []
+
+
+@pytest.mark.parametrize(
+    ("qb_state", "qb_progress", "rt_complete", "expected_flag"),
+    [
+        ("stoppedUP", 1.0, 1, False),
+        ("stoppedDL", 0.0, 1, True),
+        ("stoppedDL", 0.0, 0, False),
+    ],
+)
+def test_client_drift_common_qb_mirror_health_verdict(
+    tmp_path: Path,
+    qb_state: str,
+    qb_progress: float,
+    rt_complete: int,
+    expected_flag: bool,
+) -> None:
+    # v0.8.76: Cover healthy, qB-unverified/RT-complete, and RT-incomplete common rows.
+    seed_root = tmp_path / "seeding" / "site"
+    content_root = seed_root / "Release.One"
+    content_root.mkdir(parents=True)
+    (content_root / "file.bin").write_text("payload", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    qb_cache = tmp_path / "qb.json"
+    rt_cache = tmp_path / "rt.json"
+    torrent_hash = "aaa111"
+    _write_rt_session(session_dir, torrent_hash, content_root)
+    qb_cache.write_text(json.dumps([{
+        "hash": torrent_hash, "name": "Release.One", "save_path": str(seed_root),
+        "content_path": str(content_root), "state": qb_state, "progress": qb_progress,
+    }]), encoding="utf-8")
+    rt_cache.write_text(json.dumps([{
+        "hash": torrent_hash, "name": "Release.One", "directory": str(content_root),
+        "state": "stalledUP" if rt_complete else "downloading", "complete": rt_complete,
+    }]), encoding="utf-8")
+
+    report = build_client_drift_report(
+        qb_cache_file=qb_cache,
+        rt_cache_file=rt_cache,
+        rt_session_dir=session_dir,
+        policy=ClientDriftPolicy(),
+    )
+
+    health_rows = [row for row in report["rows"] if row["side"] == "qb_unverified_mirror"]
+    assert report["summary"]["qb_unverified_mirror"] == int(expected_flag)
+    assert bool(health_rows) is expected_flag
+    if expected_flag:
+        assert health_rows[0]["action"] == "inspect_qb_unverified_mirror"
+        assert "rt_complete=1" in health_rows[0]["reasons"]
+        assert "qb_progress_not_complete:0.000" in health_rows[0]["reasons"]
 
 
 def _mirror_pause_drift_setup(tmp_path: Path, torrent_hash: str, qb_state: str, rt_state: str) -> tuple[Path, Path, Path]:
@@ -415,7 +470,8 @@ def test_mirror_pause_drift_not_detected_when_both_uploading(tmp_path: Path) -> 
             mirror_roots=(str(tmp_path / "seeding"),),
         ),
     )
-    assert report["rows"] == []
+    assert all(row["side"] != "mirror_pause_drift" for row in report["rows"])
+    assert [row["side"] for row in report["rows"]] == ["qb_unverified_mirror"]
 
 
 def test_mirror_pause_drift_not_detected_without_mirror_roots(tmp_path: Path) -> None:
@@ -430,7 +486,8 @@ def test_mirror_pause_drift_not_detected_without_mirror_roots(tmp_path: Path) ->
         rt_session_dir=session_dir,
         policy=ClientDriftPolicy(),
     )
-    assert report["rows"] == []
+    assert all(row["side"] != "mirror_pause_drift" for row in report["rows"])
+    assert [row["side"] for row in report["rows"]] == ["qb_unverified_mirror"]
 
 
 def test_client_drift_mount_alias_paths_are_not_path_drift(monkeypatch, tmp_path: Path) -> None:
