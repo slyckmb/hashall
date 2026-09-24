@@ -254,13 +254,18 @@ torrentClients = ['qbittorrent:readonly:http://...@gluetun:9003', 'rtorrent:http
 ```
 
 A `readonly` client is a search-match source for cross-seed, never an
-injection target. This was independently confirmed durable in
+injection target. This was independently corroborated in
 **`slyckmb/docker` issue #18** ("cross-seed: resolve v7 health warnings and
-injection/client errors"), closed 2026-09-22, whose terminal state records:
-*"qBittorrent: healthy; cross-seed login succeeds, configured read-only."*
-That same issue's history shows the last real cross-seed→qB injection batch
-was **2026-09-08 — "Injected 28/34 torrents"** — the exact date and batch
-that produced the 8 stuck 0% items in Finding 1.
+injection/client errors") — **issue is still OPEN as of this writing**, kept
+open for unrelated operator/external gates (MyAnonamouse credential refresh,
+DocsPedia cookie refresh, tracker-timeout retests), not for anything
+qB/cross-seed-injection related. Its 2026-09-22 investigation comment
+verbatim records: *"qBittorrent: healthy; cross-seed login succeeds,
+configured read-only,"* and the same comment's history shows the last real
+cross-seed→qB injection batch was **2026-09-08 — "Injected 28/34
+torrents"** — the exact date and batch that produced the 8 stuck 0% items in
+Finding 1. The `readonly` finding itself is solid; only its remaining open
+status (not "closed") is corrected here.
 
 **Revised understanding:**
 
