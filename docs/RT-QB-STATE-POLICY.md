@@ -144,6 +144,12 @@ pct < 100%). Never use `rm -rf`.
 **For `deleted` items:** Use `make trk-warn-dry BUCKET=deleted` to preview replacements,
 then `make trk-warn-upgrade-packs` or `make trk-warn-replace-individual` as appropriate.
 See SPRINT.md Slice 13 for prior execution history.
+For a 0% deleted episode, first identify its 10-character hash with
+`make trk-warn BUCKET=deleted INCLUDE_INCOMPLETE=1`, then preview only that item with
+`make trk-warn-dry BUCKET=deleted HASH=<hash> INCLUDE_INCOMPLETE=1`. When the preview
+names a suitable individual episode, run
+`make trk-warn-replace-individual BUCKET=deleted HASH=<hash> INCLUDE_INCOMPLETE=1`.
+The incomplete replacement path requires a single hash and zero downloaded bytes.
 
 **Quality rule for all replacements:**
 - System runs **1080p only**. Never add 2160p/4K/UHD/HDR torrents.
