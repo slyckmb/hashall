@@ -2,6 +2,10 @@
 
 **Status:** planning / design-only. No code changes in this PR.
 **Date:** 2026-09-24
+**Correction (2026-09-24, appended, does not rewrite the original text below):**
+see [Correction: cross-seed→qB injection question is already resolved](#correction-cross-seedqb-injection-question-is-already-resolved-2026-09-24)
+at the end of this document. It supersedes the "open question" framing in
+Non-goals and Phase 3 regarding whether cross-seed should inject into qB.
 
 ## Objective
 
@@ -231,3 +235,62 @@ biggest long-term payoff)
   (`_load_client_drift_report`, `_select_client_drift_mirror_rows`,
   `_apply_client_drift_mirror_rows`, `_warn_stopped_dl`).
 - `src/hashall/client_drift.py` — drift classification logic.
+
+## Correction: cross-seed→qB injection question is already resolved (2026-09-24)
+
+The original Non-goals section deferred "should cross-seed inject into qB at
+all" as an open Phase 3 decision. That framing was wrong — the question was
+never actually investigated against cross-seed's own configuration before
+this plan was written. It has now been checked, and the answer already
+exists in a sibling repo this plan failed to hydrate on.
+
+**Cross-seed is v7, config is DB-backed (no `config.js` file — it's driven
+entirely by cross-seed's own webui now), and qBittorrent is already
+configured `readonly` there.** Live query of
+`/dump/docker/cross-seed/cross-seed.db` (`settings.settings_json`):
+
+```
+torrentClients = ['qbittorrent:readonly:http://...@gluetun:9003', 'rtorrent:http://gluetun:8000/RPC2']
+```
+
+A `readonly` client is a search-match source for cross-seed, never an
+injection target. This was independently corroborated in
+**`slyckmb/docker` issue #18** ("cross-seed: resolve v7 health warnings and
+injection/client errors") — **issue is still OPEN as of this writing**, kept
+open for unrelated operator/external gates (MyAnonamouse credential refresh,
+DocsPedia cookie refresh, tracker-timeout retests), not for anything
+qB/cross-seed-injection related. Its 2026-09-22 investigation comment
+verbatim records: *"qBittorrent: healthy; cross-seed login succeeds,
+configured read-only,"* and the same comment's history shows the last real
+cross-seed→qB injection batch was **2026-09-08 — "Injected 28/34
+torrents"** — the exact date and batch that produced the 8 stuck 0% items in
+Finding 1. The `readonly` finding itself is solid; only its remaining open
+status (not "closed") is corrected here.
+
+**Revised understanding:**
+
+- The 8 stuck items are **one-time historical residue** from the last batch
+  that landed *before* `readonly` was set (2026-09-08, two weeks before
+  `readonly` was confirmed healthy on 2026-09-22) — not evidence of an
+  ongoing leak. Phase 2 remediation is a one-time cleanup, not a recurring
+  pattern to design around.
+- Phase 3's "explicitly decide hashall's relationship to cross-seed's
+  direct-to-qB injection" is **no longer an open design decision** — the
+  infra-level fix (readonly) is already in place and independently verified
+  healthy as of 2026-09-22. Phase 3 should instead be: confirm `readonly`
+  continues to hold (a cheap periodic check, e.g. as part of Phase 1's health
+  scan or a `slyckmb/docker`-owned check — not a hashall redesign), and drop
+  the "disable cross-seed's dual injection" branch of the original decision
+  entirely. The "teach hashall to detect/adopt cross-seed's own injections"
+  branch is now lower priority, since new dual-injections into qB should not
+  be occurring going forward.
+- This correction does not change Findings 1–7, Phase 1, Phase 2, or Phase 4
+  above — only the Non-goals framing and the second bullet of Phase 3.
+
+**Process note:** this is exactly the kind of cross-repo context the original
+plan's "no Mission/cross-repo coordination needed" conclusion should have
+prompted a check against — a sibling-repo issue directly answered an "open
+question" this plan deferred. No Mission is needed retroactively (the
+question is resolved, not still requiring cross-owner coordination), but
+future planning docs in this repo touching cross-seed behavior should check
+`slyckmb/docker` issues first.
