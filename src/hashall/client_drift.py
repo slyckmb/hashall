@@ -189,6 +189,20 @@ def _path_exists(path: str) -> bool:
     return bool(path and Path(path).exists())
 
 
+def _rt_raw_complete_flag(raw: dict) -> Any:
+    """Extract the RT `complete` flag from a Silo RT cache row.
+
+    Production Silo rows nest the RT XML-RPC payload under a `raw` sub-key
+    (`row["raw"]["complete"]`); some legacy/flat/test-fixture rows instead
+    carry `complete` at the top level. Prefer the nested value when present,
+    falling back to the flat form so both shapes work.
+    """
+    nested = raw.get("raw")
+    if isinstance(nested, dict) and "complete" in nested:
+        return nested.get("complete")
+    return raw.get("complete")
+
+
 def _policy_mount_points(policy: ClientDriftPolicy) -> tuple[Path, ...]:
     roots = (
         *policy.mirror_roots,
@@ -456,7 +470,7 @@ def load_rt_cache_rows(
             category=category,
             tags=str(raw.get("tags") or "").strip(),
             state=str(raw.get("state") or "unknown").strip() or "unknown",
-            progress=1.0 if _to_int(raw.get("complete")) == 1 or str(raw.get("state")) in HEALTHY_RT_STATES else 0.0,
+            progress=1.0 if _to_int(_rt_raw_complete_flag(raw)) == 1 or str(raw.get("state")) in HEALTHY_RT_STATES else 0.0,
             size=_to_int(raw.get("size") or raw.get("total_size") or (meta.total_bytes if meta else 0)),
             tracker=str(raw.get("tracker") or "").strip(),
             added_on=_to_int(raw.get("added_on")),
@@ -1580,7 +1594,7 @@ def _classify_qb_unverified_mirror(
     qb_row: ClientTorrentRow,
     rt_row: ClientTorrentRow,
 ) -> tuple[str, str, list[str], list[str]] | None:
-    if _to_int(rt_row.raw.get("complete")) != 1:
+    if not (rt_row.progress >= 1.0):
         return None
     qb_state = str(qb_row.state or "").strip()
     qb_complete = qb_row.progress >= 1.0
