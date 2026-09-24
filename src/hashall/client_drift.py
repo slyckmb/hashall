@@ -1,3 +1,6 @@
+# Script: src/hashall/client_drift.py
+# Version: 0.8.76
+# Last-updated: 2026-09-24T09:23:14-04:00
 from __future__ import annotations
 
 from collections import Counter
@@ -1572,6 +1575,25 @@ def _classify_mirror_pause_drift(
     return None
 
 
+# v0.8.76: Flag aligned qB mirrors that are not stopped and fully verified while RT reports complete.
+def _classify_qb_unverified_mirror(
+    qb_row: ClientTorrentRow,
+    rt_row: ClientTorrentRow,
+) -> tuple[str, str, list[str], list[str]] | None:
+    if _to_int(rt_row.raw.get("complete")) != 1:
+        return None
+    qb_state = str(qb_row.state or "").strip()
+    qb_complete = qb_row.progress >= 1.0
+    if qb_state == "stoppedUP" and qb_complete:
+        return None
+    reasons = ["present_in_both_clients", "rt_complete=1"]
+    if qb_state != "stoppedUP":
+        reasons.append(f"qb_state_not_stoppedUP:{qb_state or 'unknown'}")
+    if not qb_complete:
+        reasons.append(f"qb_progress_not_complete:{qb_row.progress:.3f}")
+    return "inspect_qb_unverified_mirror", "high", reasons, []
+
+
 def build_client_drift_report(
     *,
     qb_cache_file: Path = DEFAULT_QB_CACHE_FILE,
@@ -1616,6 +1638,24 @@ def build_client_drift_report(
                     {
                         "hash": torrent_hash,
                         "side": "mirror_pause_drift",
+                        "action": action,
+                        "confidence": confidence,
+                        "reasons": reasons,
+                        "blockers": blockers,
+                        "name": qb_row.name or rt_row.name,
+                        "placement": {"anchor_scan": {}},
+                        "rt": rt_row.to_dict(),
+                        "qb": qb_row.to_dict(),
+                    }
+                )
+                continue
+            qb_health_drift = _classify_qb_unverified_mirror(qb_row, rt_row)
+            if qb_health_drift is not None:
+                action, confidence, reasons, blockers = qb_health_drift
+                drift_rows.append(
+                    {
+                        "hash": torrent_hash,
+                        "side": "qb_unverified_mirror",
                         "action": action,
                         "confidence": confidence,
                         "reasons": reasons,
@@ -1773,6 +1813,7 @@ def build_client_drift_report(
         "qb_only": len(qb_hashes - rt_hashes),
         "rt_only": len(rt_hashes - qb_hashes),
         "path_drift": side_counts.get("path_drift", 0),
+        "qb_unverified_mirror": side_counts.get("qb_unverified_mirror", 0),
         "drift_total": len(drift_rows),
         "side_counts": dict(side_counts),
         "action_counts": dict(action_counts),

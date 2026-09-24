@@ -1,6 +1,9 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
-# src/hashall/cli.py
+# Script: src/hashall/cli.py
+# Version: 0.8.76
+# Last-updated: 2026-09-24T09:23:14-04:00
 # ✅ Minimal fix: Added --no-export, fixed missing arg to verify_trees
+# v0.8.76: Surface qB mirror-health drift in client-drift audit output.
 
 import click
 import hashlib
@@ -4627,7 +4630,7 @@ def client_drift_policy_template_cmd():
 @click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True, help="Directory containing rtorrent session metadata.")
 @click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
 @click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="conservative", show_default=True, help="Built-in defaults to use before applying --policy.")
-@click.option("--side", type=click.Choice(["rt_only", "qb_only", "path_drift"]), default=None, help="Only show one drift side.")
+@click.option("--side", type=click.Choice(["rt_only", "qb_only", "path_drift", "qb_unverified_mirror"]), default=None, help="Only show one drift side.")
 @click.option("--action", default="", help="Only show rows with this classified action.")
 @click.option("--hash", "hash_filters", multiple=True, help="Restrict audit to specific torrent hash(es). Prefixes are accepted.")
 @click.option("--anchor-scan-max-files", type=int, default=None, help="Override policy anchor scan limit for selected dry-run/pilot audits. Default uses policy.")
@@ -4688,6 +4691,8 @@ def client_drift_audit_cmd(
           f"{_rt_qb_style('Common:', fg='bright_black')} {summary['common']:5d}")
     print(f"   {_rt_qb_style('QB-only:', fg='bright_black')} {summary['qb_only']:5d}  "
           f"{_rt_qb_style('RT-only:', fg='bright_black')} {summary['rt_only']:5d}")
+    print(f"   {_rt_qb_style('QB unverified:', fg='bright_black')} "
+          f"{_rt_qb_style(str(summary.get('qb_unverified_mirror', 0)), bold=True)}")
 
     # Drift summary — confidence breakdown from path_drift rows
     drift_total = summary.get('path_drift', 0)
@@ -4742,6 +4747,14 @@ def client_drift_audit_cmd(
             if placement.get("proposed_source_client"):
                 print(f"      {_rt_qb_style('→ proposed', fg='green')}  source={placement.get('proposed_source_client')}  "
                       f"qb_save={placement.get('proposed_qb_save_path') or '-'}")
+        elif side_value == "qb_unverified_mirror":
+            qb_row = row.get("qb") or {}
+            rt_row = row.get("rt") or {}
+            print(f"      qb state={qb_row.get('state') or ''} progress={float(qb_row.get('progress') or 0.0):.3f}")
+            print(f"      rt state={rt_row.get('state') or ''} reported_complete=yes")
+            path = qb_row.get('content_path') or qb_row.get('save_path') or ''
+            if path:
+                print(f"      {path}")
         else:
             print(f"      state={client_row.get('state') or ''} "
                   f"category={client_row.get('category') or ''}")
