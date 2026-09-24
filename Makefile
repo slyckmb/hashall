@@ -109,6 +109,7 @@ help:
 	@echo "  make qb-missing-remediate-dry SOURCE_ROOT=<old> TARGET_ROOT=<new> — dry-run qB missing remediation"
 	@echo ""
 	@echo "  make trk-warn                — list RT tracker-warning items (deleted/auth_err/other)"
+	@echo "  make trk-warn BUCKET=deleted INCLUDE_INCOMPLETE=1 — include incomplete tracker warnings"
 	@echo "  make trk-warn-prowlarr       — same, with Prowlarr search + verbose hit list"
 	@echo "  make trk-warn-conn-err       — dry-run: show RT tracker conn_err items that would be restarted"
 	@echo "  make trk-restart-conn-err    — stop/start RT tracker conn_err items to force re-announce"
@@ -116,7 +117,7 @@ help:
 	@echo "  make trk-warn-dry            — dry-run: plan removes + season-pack upgrades for deleted+other"
 	@echo "  make trk-warn-cleanup        — execute cleanup: remove deleted+other (no upgrades), sync to qB"
 	@echo "  make trk-warn-upgrade-packs  — season pack upgrades: erase individual eps, add pack, sync to qB"
-	@echo "  make trk-warn-replace-individual — individual-ep replacements: erase deleted ep, add correct ep"
+	@echo "  make trk-warn-replace-individual — individual-ep replacements; BUCKET=deleted HASH=<10-char hash> INCLUDE_INCOMPLETE=1 for a 0% item"
 	@echo ""
 	@echo "  make canonical-tree-report     — report non-canonical path classes (FULL=1 for all items)"
 	@echo ""
@@ -392,13 +393,13 @@ qb-missing-remediate-apply:
 	@[ -n "$${SOURCE_ROOT:-}" ] || { echo "SOURCE_ROOT is required"; exit 2; }; [ -n "$${TARGET_ROOT:-}" ] || { echo "TARGET_ROOT is required"; exit 2; }; $(REHOME_CLI) qb-missing-remediate --catalog "$(CATALOG)" --source-root "$${SOURCE_ROOT}" --target-root "$${TARGET_ROOT}" --apply --limit $${LIMIT:-0} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${OUTPUT:-}" ] && echo "--output $${OUTPUT}")
 
 trk-warn:
-	@python3 $(TRK_WARN_SCRIPT) --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
+	@python3 $(TRK_WARN_SCRIPT) --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}") $$([ "$${INCLUDE_INCOMPLETE:-0}" = 1 ] && echo --include-incomplete)
 
 trk-warn-prowlarr:
-	@python3 $(TRK_WARN_SCRIPT) --prowlarr --verbose-prowlarr --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
+	@python3 $(TRK_WARN_SCRIPT) --prowlarr --verbose-prowlarr --bucket $${BUCKET:-deleted,auth_err,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}") $$([ "$${INCLUDE_INCOMPLETE:-0}" = 1 ] && echo --include-incomplete)
 
 trk-warn-dry:
-	@python3 $(TRK_WARN_SCRIPT) --dryrun --prowlarr --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --dryrun --prowlarr --bucket $${BUCKET:-deleted,other} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ "$${INCLUDE_INCOMPLETE:-0}" = 1 ] && echo --include-incomplete)
 
 trk-warn-cleanup:
 	$(call _pip-gate)
@@ -410,7 +411,7 @@ trk-warn-upgrade-packs:
 
 trk-warn-replace-individual:
 	$(call _pip-gate)
-	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --escalating-search --replace-individual --bucket $${BUCKET:-deleted,auth_err} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}")
+	@python3 $(TRK_WARN_SCRIPT) --cleanup --repair --prowlarr --escalating-search --replace-individual --bucket $${BUCKET:-deleted,auth_err} $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ "$${INCLUDE_INCOMPLETE:-0}" = 1 ] && echo --include-incomplete)
 
 trk-warn-conn-err:
 	@python3 $(TRK_WARN_SCRIPT) --restart-conn-err --dryrun $$([ -n "$${HASH:-}" ] && echo "--hash $${HASH}") $$([ -n "$${LIMIT:-}" ] && echo "--limit $${LIMIT}")
