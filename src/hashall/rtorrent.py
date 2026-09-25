@@ -373,6 +373,100 @@ def rt_directories_match(actual: str | None, expected: str | None) -> bool:
     return bool(actual and expected and _canonical_path_text(actual) == _canonical_path_text(expected))
 
 
+# Verified 2026-09-24 directly against the live rTorrent instance at
+# DEFAULT_RT_RPC_URL (d.directory/d.complete called with an unloaded hash):
+# the exact faultString is "invalid parameters: info-hash not found" (faultCode
+# -500), distinct from an unrelated fault such as an unknown method ("method
+# 'x' not defined", faultCode -506). "info-hash not found" is the only XML-RPC
+# fault that legitimately means "hash is gone, stale-cache race, safe to skip".
+# Any other fault (method, protocol, permission, or another server-side
+# semantic error) must NOT be folded into that same quiet-skip path -- see PR
+# #10 review comment https://github.com/slyckmb/hashall/pull/10#issuecomment-5826147394.
+_RT_HASH_NOT_FOUND_FAULT_MARKER = "info-hash not found"
+
+
+def _rt_fault_is_hash_not_found(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "rt_xmlrpc_fault" in text and _RT_HASH_NOT_FOUND_FAULT_MARKER in text
+
+
+def rt_live_confirm_mirror_candidate(
+    torrent_hash: str,
+    expected_directory: str | None,
+    *,
+    rpc_url: str = DEFAULT_RT_RPC_URL,
+    timeout: int = 20,
+) -> dict:
+    """Live (non-cached) pre-mutation confirmation for an RT->qB mirror candidate.
+
+    Distinguishes three outcomes on an XML-RPC fault:
+    - the known "could not find info-hash" fault -- RT was reachable and
+      answered, the hash is just gone -- an ordinary stale-cache race the
+      reconciler should quietly skip;
+    - any other/unrecognized XML-RPC fault (method, protocol, permission, or
+      server semantic error) -- live confirmation itself is broken, so this
+      must fail closed (reachable stays False) rather than being silently
+      normalized into the same "hash disappeared" skip;
+    - a transport/connectivity failure (RT unreachable) -- must also fail
+      closed rather than silently falling back to trusting the cache.
+    """
+    key = str(torrent_hash or "").strip().lower()
+    result: dict = {
+        "reachable": False,
+        "found": False,
+        "complete": None,
+        "directory": None,
+        "path_matches": False,
+        "ok": False,
+        "error": None,
+    }
+    if not key:
+        result["error"] = "missing_hash"
+        return result
+    try:
+        directory_xml = rt_xmlrpc_call("d.directory", key, rpc_url=rpc_url, timeout=timeout)
+        complete_xml = rt_xmlrpc_call("d.complete", key, rpc_url=rpc_url, timeout=timeout)
+    except requests.exceptions.RequestException as exc:
+        result["error"] = f"rt_unreachable:{exc}"
+        return result
+    except RuntimeError as exc:
+        if _rt_fault_is_hash_not_found(exc):
+            # The known fault: RT itself was reachable and answered -- the
+            # hash is just gone, a legitimate skip.
+            result["reachable"] = True
+            result["found"] = False
+            result["error"] = f"rt_fault_hash_not_found:{exc}"
+            return result
+        if "rt_xmlrpc_fault" in str(exc):
+            # An unrecognized XML-RPC fault: RT answered, but not with the
+            # known "hash is gone" signal. Treat this as a live-confirm
+            # semantic failure and fail closed -- do not normalize it into
+            # the stale-hash skip path.
+            result["error"] = f"rt_fault_unknown:{exc}"
+            return result
+        result["error"] = f"rt_error:{exc}"
+        return result
+    result["reachable"] = True
+    result["found"] = True
+    directory = _xmlrpc_scalar_text(directory_xml).strip()
+    try:
+        complete = int(_xmlrpc_scalar_text(complete_xml))
+    except (TypeError, ValueError):
+        complete = 0
+    result["directory"] = directory or None
+    result["complete"] = complete == 1
+    result["path_matches"] = rt_directories_match(directory, expected_directory)
+    result["ok"] = bool(result["complete"] and result["path_matches"])
+    if not result["ok"]:
+        reasons = []
+        if not result["complete"]:
+            reasons.append("rt_not_complete")
+        if not result["path_matches"]:
+            reasons.append(f"rt_path_mismatch:{directory!r}!={expected_directory!r}")
+        result["error"] = ",".join(reasons)
+    return result
+
+
 def rt_expected_loaded_directory(target_directory: str, torrent_meta: RTTorrentMeta | None) -> str:
     normalized = normalize_rt_target_directory(target_directory, torrent_meta)
     if torrent_meta and torrent_meta.is_multi_file and torrent_meta.info_name:
