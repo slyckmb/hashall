@@ -3738,7 +3738,26 @@ def _append_client_drift_journal(journal_path: Path, event: dict) -> None:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
-def _verify_qb_import_complete(qbit, torrent_hash: str, *, timeout_s: float, interval_s: float) -> dict:
+def _verify_qb_import_complete(
+    qbit,
+    torrent_hash: str,
+    *,
+    timeout_s: float,
+    interval_s: float,
+    active_download_states: frozenset[str] | None = None,
+    on_active_download=None,
+) -> dict:
+    """Poll qB for post-add/post-recheck completion.
+
+    ``active_download_states``/``on_active_download`` are optional and only
+    used by the Phase 3 reconciler (amendment 4 safety brake): when set, every
+    live poll -- not just the immediate post-add check -- is brake-aware, so a
+    torrent that transitions into an active-download state *during*
+    verification (e.g. a transient checkingDL observed first, then downloading
+    on a later poll) is paused and reported rather than silently polled to
+    completion. Left unset (the default), this preserves the existing manual
+    `client-drift apply` sync behavior exactly.
+    """
     deadline = time.time() + max(0.0, float(timeout_s))
     interval = max(0.5, float(interval_s))
     last = None
@@ -3757,6 +3776,9 @@ def _verify_qb_import_complete(qbit, torrent_hash: str, *, timeout_s: float, int
                 f"verify poll state={info.state} progress={float(info.progress):.3f} "
                 f"left={int(info.amount_left)} timeout_left={remaining_s:.0f}s"
             )
+            if active_download_states is not None and info.state in active_download_states:
+                paused = on_active_download(torrent_hash) if on_active_download else None
+                return {"ok": False, "brake_triggered": True, "paused": bool(paused), **last}
             if info.progress >= 0.999 and int(info.amount_left) == 0:
                 return {"ok": True, **last}
         else:
@@ -4215,6 +4237,355 @@ def _apply_client_drift_mirror_rows(
         if sleep_row > 0:
             time.sleep(sleep_row)
     return events
+
+
+# v0.8.78: Phase 3 -- single periodic add-only RT->qB reconciler (PR #10), implementing
+# the approved Option B design plus the 8 required amendments from PR #8's review. This
+# is deliberately a *separate* code path from _apply_client_drift_mirror_rows above: the
+# manual sync/process-queue commands keep their existing journal-veto, --force, RT-side
+# tagging, and optional-verify behavior unchanged (Issue #6's "regression tests
+# preserving manual behavior"); the reconciler below has different, stricter safety
+# semantics appropriate to unattended periodic execution.
+
+DEFAULT_RT_QB_RECONCILE_JOURNAL = Path.home() / ".cache" / "hashall" / "rt-qb-mirror-reconcile" / "apply.jsonl"
+DEFAULT_RT_QB_RECONCILE_LOCK = Path.home() / ".cache" / "hashall" / "rt-qb-mirror-reconcile" / "reconcile.lock"
+
+# Amendment 4 safety-brake states: derived from the existing _RT_QB_DOWNLOADING_STATES
+# rather than invented fresh. Excludes the already-stopped {stoppedDL, pausedDL} (a
+# distinct, non-brake case per amendment 4: "leave it stopped, fail/alert, do not
+# auto-recheck"), the transient checking* states (appear briefly right after add and
+# are not downloading), and "moving" (post-add relocation, not peer transfer).
+_RT_QB_RECONCILE_ACTIVE_DOWNLOAD_STATES = frozenset(
+    state for state in _RT_QB_DOWNLOADING_STATES
+    if state not in {"stoppedDL", "pausedDL", "moving"} and not state.startswith("checking")
+)
+_RT_QB_RECONCILE_STOPPED_DOWNLOAD_STATES = frozenset({"stoppedDL", "pausedDL"})
+
+# Outcomes that make the run exit nonzero (amendment 4: "fail loudly on semantic
+# problems"). Pre-existing qb_unverified_mirror residue and a deferred backlog (deadline
+# reached with candidates untouched) are reported but do NOT fail the run -- see
+# rt_qb_mirror_reconcile_cmd for the full exit-code policy.
+_RT_QB_RECONCILE_FAILING_STATUSES = frozenset(
+    {
+        "rt_unreachable",
+        "add_failed",
+        "safety_brake",
+        "unverified_added",
+        "already_present_unhealthy",
+        "verify_timeout",
+    }
+)
+
+
+def _select_reconcile_candidates(
+    report: dict,
+    *,
+    hash_filters: tuple[str, ...] | list[str] = (),
+    limit: int = 0,
+) -> list[dict]:
+    """Live-state-only candidate selection for the periodic reconciler (amendment 3).
+
+    Unlike _select_client_drift_mirror_rows, this never reads a journal to filter
+    candidates: journal entries are history/evidence only and must never veto a
+    currently-valid RT-only candidate. Idempotency instead comes from the live
+    "already present in qB" check each candidate gets in _process_reconcile_candidate,
+    so no --force flag is needed either.
+    """
+    rows = _filtered_client_drift_rows(report, side="rt_only", action="mirror_rt_to_qb", limit=0)
+    hash_prefixes = [str(item or "").strip().lower() for item in hash_filters if str(item or "").strip()]
+    if hash_prefixes:
+        rows = [
+            row for row in rows
+            if any(str(row.get("hash") or "").lower().startswith(prefix) for prefix in hash_prefixes)
+        ]
+    if limit > 0:
+        rows = rows[:limit]
+    return rows
+
+
+def _reconcile_cache_freshness(
+    *,
+    qb_cache_file: str,
+    rt_cache_file: str,
+    max_age_s: float,
+) -> tuple[bool, list[str]]:
+    """Explicit, tight cache-freshness gate for candidate discovery (amendment 1).
+
+    This runs once before discovery and is in *addition* to -- not a substitute for --
+    the per-candidate live RT re-confirmation in _process_reconcile_candidate, which is
+    the part of amendment 1 that actually prevents acting on a stale read immediately
+    before mutation. 300s default is materially tighter than typical staleness
+    allowances elsewhere in this codebase (e.g. orphan_sweep.py's 3600s), appropriate
+    for a reconciler intended to run every ~15 minutes.
+    """
+    from hashall.qbittorrent import _cache_is_fresh, get_qb_cache_meta
+    from hashall.rt_cache import load_rt_cache_snapshot
+
+    problems: list[str] = []
+    qb_path = Path(qb_cache_file).expanduser()
+    if not _cache_is_fresh(qb_path, max_age_s=max_age_s):
+        problems.append(f"qb_cache_stale path={qb_path} max_age_s={max_age_s:.0f}")
+    else:
+        # Derive the meta file from the *configured* cache path rather than assuming
+        # the global default -- this command accepts a custom --qb-cache-file.
+        qb_meta = get_qb_cache_meta(qb_path.with_name(f"{qb_path.stem}.meta.json"))
+        if isinstance(qb_meta, dict) and str(qb_meta.get("source") or "") == "daemon_error":
+            problems.append("qb_cache_daemon_error")
+    rt_path = Path(rt_cache_file).expanduser()
+    rt_snapshot = load_rt_cache_snapshot(
+        cache_file=rt_path,
+        meta_file=rt_path.with_name(f"{rt_path.stem}.meta.json"),
+        max_age_s=max_age_s,
+    )
+    if rt_snapshot.get("freshness") != "fresh":
+        problems.append(
+            f"rt_cache_{rt_snapshot.get('freshness')} age_s={rt_snapshot.get('cache_age_s')} "
+            f"max_age_s={max_age_s:.0f}"
+        )
+    return (not problems), problems
+
+
+def _process_reconcile_candidate(
+    row: dict,
+    *,
+    do_apply: bool,
+    qbit,
+    rt_rpc_url: str,
+    rt_confirm_timeout: float,
+    verify_timeout: float,
+    verify_interval: float,
+    extra_tags: tuple[str, ...] | list[str],
+    skip_checking: bool,
+) -> dict:
+    from hashall.rtorrent import rt_live_confirm_mirror_candidate
+
+    rt_row = row.get("rt") or {}
+    torrent_hash = str(row.get("hash") or "").strip().lower()
+    expected_directory = str(rt_row.get("save_path") or "")
+    event: dict = {"event": "reconcile", "hash": torrent_hash, "action": "mirror_rt_to_qb"}
+
+    # Amendment 1: re-confirm live (not cached) immediately before any qB add that RT
+    # still reports the hash present, complete, and at the same authoritative path.
+    confirm = rt_live_confirm_mirror_candidate(
+        torrent_hash,
+        expected_directory,
+        rpc_url=rt_rpc_url,
+        timeout=int(rt_confirm_timeout),
+    )
+    event["rt_live_confirm"] = confirm
+    if not confirm["reachable"]:
+        # RT transport/RPC failure: fail closed rather than trust the cache.
+        event["status"] = "rt_unreachable"
+        event["error"] = confirm.get("error")
+        return event
+    if not confirm["ok"]:
+        # Either a legitimate fault (hash gone from RT) or a live mismatch against the
+        # cached candidate (no longer complete / path moved) -- either way this is the
+        # stale-cache race amendment 1 exists to catch. Skip quietly, not a failure.
+        event["status"] = "skipped_stale"
+        event["error"] = confirm.get("error")
+        return event
+
+    if not do_apply:
+        event["status"] = "would_add"
+        return event
+
+    assert qbit is not None
+    existing = qbit.get_torrent_info(torrent_hash)
+    if existing is not None:
+        existing_state = str(getattr(existing, "state", "") or "")
+        if existing_state in _RT_QB_RECONCILE_ACTIVE_DOWNLOAD_STATES:
+            # Amendment 4 safety brake is unconditional ("if qB is ever observed
+            # in an active downloading state, immediately pause/stop that
+            # torrent, then fail the run") -- it applies here too, to a
+            # pre-existing qB mirror this run never added. Pausing a live
+            # transfer is the brake, not the excluded "auto-repair an
+            # already-present unhealthy mirror" recovery action.
+            paused = qbit.pause_torrent(torrent_hash)
+            event["status"] = "safety_brake"
+            event["state"] = existing_state
+            event["paused"] = bool(paused)
+            event["error"] = f"qb_active_download_state:{existing_state}"
+            return event
+        existing_progress = float(getattr(existing, "progress", 0.0) or 0.0)
+        if not (existing_state == "stoppedUP" and existing_progress >= 1.0):
+            # Umbrella-manager finding (issuecomment-5849848962): a stale RT-only
+            # discovery cache can classify a row as a candidate, then this
+            # mandatory live qB check finds it already present -- no mutation
+            # happens this run, so the active-download brake above never fires.
+            # stoppedDL/pausedDL is the archetypal already-stopped, non-brake case
+            # amendment 4 requires "leave it stopped, fail/alert, do not
+            # auto-recheck" for, but the same detect/alert-only contract from the
+            # existing base-design classification of a healthy mirror
+            # (client_drift.py::_classify_qb_unverified_mirror: stoppedUP and
+            # fully complete, nothing else) applies to any other already-present
+            # mirror that is not that exact healthy state -- checking*/error/
+            # missingFiles/unknown/incomplete included, not just the two explicit
+            # stopped-download states. None of these are silently reported as a
+            # healthy already_present success, and none are auto-rechecked here.
+            event["status"] = "already_present_unhealthy"
+            event["state"] = existing_state
+            event["progress"] = existing_progress
+            event["error"] = f"qb_unverified_mirror_state:{existing_state}"
+            return event
+        event["status"] = "already_present"
+        event["state"] = existing_state
+        return event
+
+    tags = ["hashall-client-drift", *extra_tags]
+    ok = qbit.add_torrent_file(
+        Path(str(rt_row.get("torrent_file") or "")),
+        save_path=str(rt_row.get("target_qb_save_path") or rt_row.get("save_path") or ""),
+        category=str(rt_row.get("category") or ""),
+        tags=tags,
+        stopped=True,
+        skip_checking=skip_checking,
+    )
+    # Amendment 2 (explicit decision): unlike _apply_client_drift_mirror_rows, the
+    # reconciler deliberately does NOT write the RT-side ~qb-mirrored custom2 tag.
+    # Current-state reconciliation re-derives candidates from live RT/qB state every
+    # run and does not need historical RT provenance to find missing qB mirrors.
+    if not ok:
+        event["status"] = "add_failed"
+        event["error"] = str(qbit.last_error or "unknown")
+        return event
+
+    info = qbit.get_torrent_info(torrent_hash)
+    state = str(getattr(info, "state", "") or "") if info is not None else ""
+    if state in _RT_QB_RECONCILE_ACTIVE_DOWNLOAD_STATES:
+        # Amendment 4 safety brake: qB must never actually download. If it somehow
+        # ended up in an active-download state despite skip_checking, pause it
+        # immediately and fail the run.
+        paused = qbit.pause_torrent(torrent_hash)
+        event["status"] = "safety_brake"
+        event["state"] = state
+        event["paused"] = bool(paused)
+        event["error"] = f"qb_active_download_state:{state}"
+        return event
+    if state in _RT_QB_RECONCILE_STOPPED_DOWNLOAD_STATES:
+        # Distinct from the brake case (amendment 4): already stopped, nothing to
+        # pause. Leave it stopped, fail loud, never auto-recheck it.
+        event["status"] = "unverified_added"
+        event["state"] = state
+        event["error"] = f"qb_stopped_download_state:{state}"
+        return event
+
+    # Amendment 5: verify against LIVE qB, not cache. Stay brake-aware
+    # (amendment 4) for the entire verification window, not just the
+    # immediate post-add check above: a torrent can be observed as a
+    # transient/non-download state first and only transition to an
+    # active-download state on a later poll.
+    verify = _verify_qb_import_complete(
+        qbit,
+        torrent_hash,
+        timeout_s=max(1.0, verify_timeout),
+        interval_s=verify_interval,
+        active_download_states=_RT_QB_RECONCILE_ACTIVE_DOWNLOAD_STATES,
+        on_active_download=qbit.pause_torrent,
+    )
+    event["verify"] = verify
+    if verify.get("brake_triggered"):
+        event["status"] = "safety_brake"
+        event["state"] = verify.get("state")
+        event["paused"] = verify.get("paused")
+        event["error"] = f"qb_active_download_state:{verify.get('state')}"
+        return event
+    last_error = str(getattr(qbit, "last_error", "") or "")
+    if verify.get("ok") and last_error.startswith("cache_fallback"):
+        # get_torrent_info can silently fall back to its own cache after repeated API
+        # failures; a verify "success" built on that fallback is not the live
+        # confirmation amendment 5 requires.
+        event["verify"] = {**verify, "ok": False}
+        event["status"] = "verify_timeout"
+        event["error"] = f"post_mutation_verify_used_cache_fallback:{last_error}"
+        return event
+    if not verify.get("ok"):
+        event["status"] = "verify_timeout"
+        event["error"] = f"post_mutation_verify_failed:{verify}"
+        return event
+    event["status"] = "ok"
+    return event
+
+
+def _apply_reconcile_rows(
+    rows: list[dict],
+    *,
+    do_apply: bool,
+    journal: Path,
+    extra_tags: tuple[str, ...] | list[str] = (),
+    skip_checking: bool = True,
+    verify_timeout: float = 60.0,
+    verify_interval: float = 5.0,
+    rt_confirm_timeout: float = 20.0,
+    rt_rpc_url: str = "",
+    deadline: float | None = None,
+    qbit=None,
+) -> dict:
+    """Apply (or dry-run) reconcile candidates under an optional wall-clock deadline.
+
+    Returns a summary dict the caller uses to derive the exit-code policy (amendments
+    4 and 8) without re-scanning events itself.
+    """
+    from hashall.rtorrent import DEFAULT_RT_RPC_URL
+
+    effective_rpc_url = rt_rpc_url or DEFAULT_RT_RPC_URL
+    if do_apply and qbit is None:
+        from hashall.qbittorrent import get_qbittorrent_client
+
+        qbit = get_qbittorrent_client()
+
+    events: list[dict] = []
+    deferred: list[str] = []
+    brake_tripped = False
+    for index, row in enumerate(rows, start=1):
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        if brake_tripped:
+            deferred.append(torrent_hash)
+            continue
+        if deadline is not None and time.time() >= deadline:
+            # Amendment 8: a stuck/overrun run stops touching new candidates rather
+            # than hanging indefinitely; untouched candidates are simply deferred to
+            # the next run (see exit-code policy in rt_qb_mirror_reconcile_cmd).
+            deferred.extend(str(r.get("hash") or "").strip().lower() for r in rows[index - 1:])
+            break
+        _print_rt_qb_candidate(row, index=index)
+        if deadline is not None:
+            row_verify_timeout = min(verify_timeout, max(1.0, deadline - time.time()))
+        else:
+            row_verify_timeout = verify_timeout
+        event = _process_reconcile_candidate(
+            row,
+            do_apply=do_apply,
+            qbit=qbit,
+            rt_rpc_url=effective_rpc_url,
+            rt_confirm_timeout=rt_confirm_timeout,
+            verify_timeout=row_verify_timeout,
+            verify_interval=verify_interval,
+            extra_tags=extra_tags,
+            skip_checking=skip_checking,
+        )
+        _append_client_drift_journal(journal, event)
+        events.append(event)
+        _print_rt_qb_event_status(event)
+        if event.get("error"):
+            print(f"      error: {_rt_qb_style(event['error'], fg='red', bold=True)}")
+        if event.get("status") == "safety_brake":
+            # Amendment 4: something is systemically wrong (qB actually transferring
+            # despite skip_checking) -- stop adding more candidates this run.
+            brake_tripped = True
+
+    outcome_counts: dict[str, int] = {}
+    for event in events:
+        status = str(event.get("status") or "unknown")
+        outcome_counts[status] = outcome_counts.get(status, 0) + 1
+    failed = [event for event in events if event.get("status") in _RT_QB_RECONCILE_FAILING_STATUSES]
+    return {
+        "events": events,
+        "outcome_counts": outcome_counts,
+        "deferred": deferred,
+        "failed": failed,
+        "brake_tripped": brake_tripped,
+    }
 
 
 def _print_client_drift_path_candidate(row: dict, *, index: int | None = None, already_done: bool = False) -> None:
@@ -6151,6 +6522,187 @@ def rt_qb_mirror_process_queue_cmd(
     blocked = [entry for entry in ready if not matched_selected(str(entry["hash"]).lower())]
     for entry in blocked[:20]:
         print(f"   queued_not_ready_for_mirror hash={entry['hash'][:16]} age_s={entry['age_s']:.0f}")
+
+
+@rt_qb_mirror.command("reconcile")
+@click.option("--qb-cache-file", default=str(DEFAULT_QB_CACHE_FILE), show_default=True, help="Shared qB cache JSON.")
+@click.option("--rt-cache-file", default=str(DEFAULT_RT_SHARED_CACHE_FILE), show_default=True, help="Shared RT cache JSON.")
+@click.option("--rt-session-dir", type=click.Path(exists=True, file_okay=False), default=str(DEFAULT_RT_SESSION_DIR), show_default=True)
+@click.option("--policy", "policy_path", type=click.Path(exists=True, dir_okay=False), help="JSON policy file for intentional one-client rows and safe actions.")
+@click.option("--policy-mode", type=click.Choice(["conservative", "rt-authoritative-mirror"]), default="rt-authoritative-mirror", show_default=True)
+@click.option("--config", "config_path", type=click.Path(dir_okay=False), help="Optional JSON config; {\"enabled\": false} disables the mirror.")
+@click.option("--hash", "hash_filters", multiple=True, help="Restrict this run to hash prefixes.")
+@click.option("--limit", type=int, default=0, show_default=True)
+@click.option("--cache-max-age", type=float, default=300.0, show_default=True, help="Reject stale Silo caches at discovery time (amendment 1); tight vs. the 30s daemon interval.")
+@click.option("--rt-confirm-timeout", type=float, default=20.0, show_default=True, help="Per-candidate live RT XML-RPC pre-mutation confirm timeout.")
+@click.option("--verify-timeout", type=float, default=60.0, show_default=True, help="Mandatory live post-mutation verify timeout (amendment 5); must be > 0.")
+@click.option("--verify-interval", type=float, default=5.0, show_default=True)
+@click.option("--max-runtime", type=float, default=600.0, show_default=True, help="Bounded wall-clock budget for this run (amendment 8); keep shorter than the scheduling cadence.")
+@click.option("--tag", "extra_tags", multiple=True, default=("hashall-rt-qb-mirror-reconcile",), help="Additional qB tag(s) for imported torrents.")
+@click.option("--skip-checking/--no-skip-checking", default=True, show_default=True, help="Ask qB to skip piece verification on add (safe default; prevents auto-download in qB v5+).")
+@click.option("--rt-rpc-url", default="http://127.0.0.1:18000/", show_default=True, help="rTorrent XML-RPC URL for live pre-mutation confirmation.")
+@click.option("--journal", "journal_path", type=click.Path(dir_okay=False), default=str(DEFAULT_RT_QB_RECONCILE_JOURNAL), show_default=True, help="Evidence-only journal; never used to select/veto candidates.")
+@click.option("--lock-file", type=click.Path(dir_okay=False), default=str(DEFAULT_RT_QB_RECONCILE_LOCK), show_default=True, help="Advisory lock preventing overlapping --apply runs.")
+@click.option("--json", "json_output", is_flag=True, help="Also emit a machine-readable JSON summary (for shadow-phase comparison, amendment 7).")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually mutate qB. Default is dry-run/shadow mode.")
+def rt_qb_mirror_reconcile_cmd(
+    qb_cache_file,
+    rt_cache_file,
+    rt_session_dir,
+    policy_path,
+    policy_mode,
+    config_path,
+    hash_filters,
+    limit,
+    cache_max_age,
+    rt_confirm_timeout,
+    verify_timeout,
+    verify_interval,
+    max_runtime,
+    extra_tags,
+    skip_checking,
+    rt_rpc_url,
+    journal_path,
+    lock_file,
+    json_output,
+    do_apply,
+):
+    """Single periodic add-only RT->qB reconciler (Phase 3, PR #10, Issue #6).
+
+    Discovers RT-complete/qB-missing candidates from the live Silo caches and adds
+    them to qB stopped + skip-checking, after a live (non-cached) RT re-confirmation
+    immediately before each mutation. Add-only: never touches qB-only rows (orphan
+    cleanup is a separate, deliberately excluded concern) and never auto-rechecks or
+    auto-repairs an already-present unhealthy qB mirror (detect/alert only). Defaults
+    to dry-run/shadow mode; pass --apply to mutate.
+    """
+    disabled = _rt_qb_mirror_disabled_reason(config_path)
+    if disabled:
+        print(f"rt-qb-mirror reconcile disabled reason={disabled}")
+        return
+
+    if verify_timeout <= 0:
+        raise click.ClickException(
+            "--verify-timeout must be > 0: the reconciler always performs live "
+            "post-mutation validation (amendment 5), unlike the manual sync/"
+            "process-queue commands."
+        )
+
+    fresh, problems = _reconcile_cache_freshness(
+        qb_cache_file=qb_cache_file,
+        rt_cache_file=rt_cache_file,
+        max_age_s=cache_max_age,
+    )
+    if not fresh:
+        for problem in problems:
+            print(f"  {_rt_qb_style('!', fg='red', bold=True)} {problem}")
+        raise click.ClickException(f"cache freshness gate failed: {'; '.join(problems)}")
+
+    report = _load_client_drift_report(
+        qb_cache_file=qb_cache_file,
+        rt_cache_file=rt_cache_file,
+        rt_session_dir=rt_session_dir,
+        policy_path=policy_path,
+        policy_mode=policy_mode,
+    )
+    selected = _select_reconcile_candidates(report, hash_filters=hash_filters, limit=limit)
+    qb_unverified_count = sum(
+        1 for row in (report.get("rows") or [])
+        if str(row.get("action") or "") == "inspect_qb_unverified_mirror"
+    )
+
+    _print_rt_qb_summary(
+        f"RT→qB reconcile ({'APPLY' if do_apply else 'DRY RUN / SHADOW'})",
+        [
+            ("apply", "yes" if do_apply else "no", "green" if do_apply else "yellow"),
+            ("policy_mode", report["summary"]["policy_mode"], "cyan"),
+            ("rt_only", report["summary"]["rt_only"], "yellow" if report["summary"]["rt_only"] else "green"),
+            ("candidates", len(selected), "yellow" if selected else "green"),
+            ("qb_unverified_mirror_residue", qb_unverified_count, "yellow" if qb_unverified_count else "green"),
+            ("cache_max_age_s", f"{cache_max_age:.0f}", None),
+            ("max_runtime_s", f"{max_runtime:.0f}", None),
+            ("journal", journal_path, None),
+        ],
+    )
+    if qb_unverified_count:
+        print(
+            _rt_qb_style(
+                f"  note: {qb_unverified_count} pre-existing qb_unverified_mirror row(s) detected — "
+                "detect/alert only, this reconciler never auto-repairs them (base design).",
+                fg="yellow",
+            )
+        )
+
+    lock_path = Path(lock_file).expanduser()
+    lock_fh = None
+    if do_apply:
+        import fcntl as _fcntl
+
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fh = lock_path.open("a+", encoding="utf-8")
+        try:
+            _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Do not queue/block behind a stuck previous run -- an unattended periodic
+            # reconciler should skip and let the next scheduled run try again, not pile
+            # up waiting invocations.
+            print(f"rt-qb-mirror reconcile skipped: another reconcile run holds {lock_path}")
+            lock_fh.close()
+            return
+
+    try:
+        journal = Path(journal_path).expanduser()
+        deadline = time.time() + max(1.0, max_runtime)
+        result = _apply_reconcile_rows(
+            selected,
+            do_apply=do_apply,
+            journal=journal,
+            extra_tags=extra_tags,
+            skip_checking=skip_checking,
+            verify_timeout=verify_timeout,
+            verify_interval=verify_interval,
+            rt_confirm_timeout=rt_confirm_timeout,
+            rt_rpc_url=rt_rpc_url,
+            deadline=deadline,
+        )
+    finally:
+        if lock_fh is not None:
+            import fcntl as _fcntl
+
+            _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_UN)
+            lock_fh.close()
+
+    _print_rt_qb_summary(
+        "RT→qB reconcile result",
+        [
+            (status, count, "red" if status in _RT_QB_RECONCILE_FAILING_STATUSES else None)
+            for status, count in sorted(result["outcome_counts"].items())
+        ]
+        + [("deferred", len(result["deferred"]), "yellow" if result["deferred"] else None)],
+    )
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "apply": do_apply,
+                    "candidates": len(selected),
+                    "qb_unverified_mirror_residue": qb_unverified_count,
+                    "outcome_counts": result["outcome_counts"],
+                    "deferred": result["deferred"],
+                    "events": result["events"],
+                },
+                sort_keys=True,
+                default=str,
+            )
+        )
+
+    if result["failed"]:
+        failing_statuses = sorted(set(result["outcome_counts"]) & _RT_QB_RECONCILE_FAILING_STATUSES)
+        failed_hashes = ", ".join(str(event.get("hash") or "")[:16] for event in result["failed"][:10])
+        raise click.ClickException(
+            f"rt-qb-mirror reconcile failed: {len(result['failed'])} candidate(s) in a failing "
+            f"state ({', '.join(failing_statuses)}); hashes: {failed_hashes}"
+        )
 
 
 def _default_content_base_roots() -> list[str]:
