@@ -1,6 +1,7 @@
 # Script: tests/test_rt_qb_mirror_reconcile.py
-# Version: 0.8.78
-# Last-updated: 2026-09-24T23:00:00-04:00
+# Version: 0.8.81
+# Last-updated: 2026-09-26T18:12:00-04:00
+# v0.8.81: cover fail-closed pre-mutation qB lookup and Phase 4 outcome guidance.
 #
 # Coverage for the Phase 3 periodic add-only RT->qB reconciler (PR #10, Issue #6),
 # specifically the 8 required amendments from PR #8's manager critical review.
@@ -21,7 +22,9 @@ from hashall.cli import (
     _load_client_drift_report,
     _process_reconcile_candidate,
     _reconcile_cache_freshness,
+    _reconcile_summary_classes,
     _select_reconcile_candidates,
+    _client_drift_operator_guidance,
     cli,
 )
 from hashall.rtorrent import rt_live_confirm_mirror_candidate
@@ -514,6 +517,83 @@ def test_reconcile_already_present_stopped_download_is_not_silently_healthy(tmp_
     assert len(result["events"]) == 2, "second candidate must still be processed, not deferred"
 
 
+def test_reconcile_pre_mutation_cache_fallback_fails_closed_without_mutation(tmp_path, monkeypatch) -> None:
+    rows = _build_reconcile_candidate_rows(tmp_path)
+    torrent_hash = rows[0]["hash"]
+    monkeypatch.setattr("hashall.rtorrent.rt_live_confirm_mirror_candidate", _confirm_ok)
+
+    class _CacheBackedExistingQbit(_FakeQbit):
+        def get_torrent_info(self, torrent_hash: str):
+            self.last_error = "cache_fallback:live qB timeout"
+            return _Info(state="stoppedUP", progress=1.0, amount_left=0)
+
+    fake = _CacheBackedExistingQbit()
+    result = _apply_reconcile_rows(
+        rows,
+        do_apply=True,
+        journal=tmp_path / "journal.jsonl",
+        verify_timeout=1.0,
+        qbit=fake,
+    )
+    assert not fake.added
+    assert fake.paused == []
+    assert result["outcome_counts"] == {"qb_live_lookup_failed": 1}
+    assert len(result["failed"]) == 1
+    assert "cache_fallback" in result["events"][0]["error"]
+
+
+def test_reconcile_pre_mutation_live_lookup_error_without_cache_fails_closed(tmp_path, monkeypatch) -> None:
+    rows = _build_reconcile_candidate_rows(tmp_path)
+    monkeypatch.setattr("hashall.rtorrent.rt_live_confirm_mirror_candidate", _confirm_ok)
+
+    class _FailedLiveLookupQbit(_FakeQbit):
+        def get_torrent_info(self, torrent_hash: str):
+            self.last_error = "live qB connection refused"
+            return None
+
+    fake = _FailedLiveLookupQbit()
+    result = _apply_reconcile_rows(
+        rows,
+        do_apply=True,
+        journal=tmp_path / "journal.jsonl",
+        verify_timeout=1.0,
+        qbit=fake,
+    )
+    assert not fake.added
+    assert result["outcome_counts"] == {"qb_live_lookup_failed": 1}
+    assert len(result["failed"]) == 1
+
+
+def test_reconcile_phase4_summary_classes_distinguish_operator_actions() -> None:
+    classes = _reconcile_summary_classes(
+        {
+            "ok": 1,
+            "already_present": 2,
+            "would_add": 3,
+            "already_present_unhealthy": 1,
+            "qb_live_lookup_failed": 1,
+            "skipped_stale": 4,
+        },
+        deferred_count=2,
+    )
+    assert classes == {
+        "healthy": 3,
+        "actionable": 3,
+        "manual_review": 2,
+        "no_action": 4,
+        "deferred": 2,
+    }
+
+
+def test_phase4_client_drift_guidance_keeps_mutation_boundaries_explicit() -> None:
+    assert "do not auto-recheck" in _client_drift_operator_guidance(
+        "qb_unverified_mirror", "inspect_qb_unverified_mirror"
+    )
+    assert "never deletes" in _client_drift_operator_guidance("qb_only", "remove_from_qb")
+    assert "live RT confirmation" in _client_drift_operator_guidance("rt_only", "mirror_rt_to_qb")
+    assert "explicit classified action" in _client_drift_operator_guidance("path_drift", "repoint_qb_to_rt_path")
+
+
 def test_reconcile_already_present_healthy_mirror_stays_green(tmp_path, monkeypatch) -> None:
     """Counterpart to the unhealthy case above: a pre-existing qB mirror observed
     live in the base-design healthy state (stoppedUP, fully complete) must remain
@@ -644,6 +724,15 @@ def test_reconcile_cli_fails_closed_on_stale_cache(tmp_path) -> None:
     )
     assert result.exit_code != 0
     assert "cache freshness gate failed" in result.output or "stale" in result.output
+
+
+def test_reconcile_help_makes_live_poll_vs_recheck_boundary_explicit() -> None:
+    result = CliRunner().invoke(cli, ["rt-qb-mirror", "reconcile", "--help"])
+    assert result.exit_code == 0
+    normalized = " ".join(result.output.split())
+    assert "observation only" in normalized
+    assert "rechecks qB; must be > 0" in normalized
+    assert "never issues a qB force-recheck" in normalized
 
 
 def test_reconcile_rejects_zero_verify_timeout(tmp_path) -> None:
