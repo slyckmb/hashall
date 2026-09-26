@@ -21,6 +21,7 @@ from hashall.cli import (
     _apply_reconcile_rows,
     _load_client_drift_report,
     _process_reconcile_candidate,
+    _print_rt_qb_event_status,
     _reconcile_cache_freshness,
     _reconcile_summary_classes,
     _select_reconcile_candidates,
@@ -562,6 +563,17 @@ def test_reconcile_pre_mutation_live_lookup_error_without_cache_fails_closed(tmp
     assert not fake.added
     assert result["outcome_counts"] == {"qb_live_lookup_failed": 1}
     assert len(result["failed"]) == 1
+
+
+def test_phase4_event_guidance_is_reconcile_only(capsys) -> None:
+    _print_rt_qb_event_status({"event": "reconcile", "status": "already_present"})
+    reconcile_output = capsys.readouterr().out
+    assert "guidance:" in reconcile_output
+    assert "healthy:" in reconcile_output
+
+    _print_rt_qb_event_status({"event": "finished", "status": "already_present"})
+    manual_output = capsys.readouterr().out
+    assert "guidance:" not in manual_output
 
 
 def test_reconcile_phase4_summary_classes_distinguish_operator_actions() -> None:

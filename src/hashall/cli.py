@@ -3901,7 +3901,9 @@ def _print_rt_qb_event_status(event: dict) -> None:
     else:
         status_color = "red"
     print(f"      status: {_rt_qb_style(status, fg=status_color, bold=True)}")
-    guidance = _RT_QB_RECONCILE_STATUS_GUIDANCE.get(status)
+    # v0.8.81: reconcile-only UX. This helper is also used by the legacy
+    # manual sync/path commands, so keep their established output unchanged.
+    guidance = _RT_QB_RECONCILE_STATUS_GUIDANCE.get(status) if event.get("event") == "reconcile" else None
     if guidance:
         print(f"      guidance: {guidance}")
     if "recheck_started" in event:
