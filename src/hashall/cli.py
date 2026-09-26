@@ -1,9 +1,11 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 # Script: src/hashall/cli.py
-# Version: 0.8.76
-# Last-updated: 2026-09-24T09:23:14-04:00
+# Version: 0.8.81
+# Last-updated: 2026-09-26T18:12:00-04:00
 # ✅ Minimal fix: Added --no-export, fixed missing arg to verify_trees
 # v0.8.76: Surface qB mirror-health drift in client-drift audit output.
+# v0.8.81: Fail closed when the reconciler cannot prove a live qB pre-mutation
+#   lookup, and make reconciler/drift outcome guidance explicit (PR #11).
 
 import click
 import hashlib
@@ -3860,10 +3862,50 @@ def _print_rt_qb_candidate(row: dict, *, index: int | None = None) -> None:
     )
 
 
+_RT_QB_RECONCILE_STATUS_GUIDANCE = {
+    "ok": "healthy: mirror added and live-verified complete without active downloading",
+    "already_present": "healthy: qB mirror already present, stopped, and complete; no action needed",
+    "would_add": "actionable: RT is complete and qB is missing; dry-run only, no mutation performed",
+    "skipped_stale": "no_action: live RT state no longer matches the cached candidate",
+    "qb_live_lookup_failed": "manual_review: live qB state could not be proven; no mutation attempted",
+    "already_present_unhealthy": "manual_review: qB mirror is present but unhealthy/unverified; no recheck or repair attempted",
+    "unverified_added": "manual_review: qB mirror is stopped but incomplete/unverified; no automatic recheck attempted",
+    "verify_timeout": "manual_review: live qB verification did not complete; no automatic repair attempted",
+    "rt_unreachable": "manual_review: live RT state could not be proven; no mutation attempted",
+    "add_failed": "manual_review: qB add failed; no automatic repair attempted",
+    "safety_brake": "safety_brake: active qB downloading was stopped/paused; investigate before retry",
+}
+
+
+def _client_drift_operator_guidance(side: str, action: str = "") -> str:
+    """Return concise non-mutating operator guidance for one drift verdict."""
+    if side == "qb_unverified_mirror":
+        return "manual_review: mirror is present but unhealthy/unverified; do not auto-recheck or auto-repair"
+    if side == "rt_only":
+        if action == "mirror_rt_to_qb":
+            return "actionable: RT-only mirror candidate; add only after live RT confirmation (reconciler is dry-run by default)"
+        return "manual_review: RT-only row; follow the classified action and blockers"
+    if side == "qb_only":
+        return "manual_review: qB-only row; periodic RT->qB reconciler never deletes qB-only torrents"
+    if side == "path_drift":
+        return "manual_review: path drift; apply only the explicit classified action after reviewing blockers"
+    return ""
+
+
 def _print_rt_qb_event_status(event: dict) -> None:
     status = str(event.get("status") or "")
-    status_color = "green" if status in {"ok", "already_present"} else "red"
+    if status in {"ok", "already_present"}:
+        status_color = "green"
+    elif status in {"would_add", "skipped_stale"}:
+        status_color = "yellow"
+    else:
+        status_color = "red"
     print(f"      status: {_rt_qb_style(status, fg=status_color, bold=True)}")
+    # v0.8.81: reconcile-only UX. This helper is also used by the legacy
+    # manual sync/path commands, so keep their established output unchanged.
+    guidance = _RT_QB_RECONCILE_STATUS_GUIDANCE.get(status) if event.get("event") == "reconcile" else None
+    if guidance:
+        print(f"      guidance: {guidance}")
     if "recheck_started" in event:
         print(f"      recheck_started: {_rt_qb_bool(bool(event['recheck_started']))}")
     if "hardlinks_created" in event:
@@ -4272,9 +4314,25 @@ _RT_QB_RECONCILE_FAILING_STATUSES = frozenset(
         "safety_brake",
         "unverified_added",
         "already_present_unhealthy",
+        "qb_live_lookup_failed",
         "verify_timeout",
     }
 )
+
+
+def _reconcile_summary_classes(outcome_counts: dict[str, int], *, deferred_count: int = 0) -> dict[str, int]:
+    """Project low-level statuses into stable operator-facing outcome classes."""
+    return {
+        "healthy": int(outcome_counts.get("ok", 0)) + int(outcome_counts.get("already_present", 0)),
+        "actionable": int(outcome_counts.get("would_add", 0)),
+        "manual_review": sum(
+            int(count)
+            for status, count in outcome_counts.items()
+            if status in _RT_QB_RECONCILE_FAILING_STATUSES
+        ),
+        "no_action": int(outcome_counts.get("skipped_stale", 0)),
+        "deferred": int(deferred_count),
+    }
 
 
 def _select_reconcile_candidates(
@@ -4392,6 +4450,16 @@ def _process_reconcile_candidate(
 
     assert qbit is not None
     existing = qbit.get_torrent_info(torrent_hash)
+    lookup_error = str(getattr(qbit, "last_error", "") or "")
+    if lookup_error and not lookup_error.startswith("not_found:"):
+        # v0.8.81 / Phase 4: absence is actionable only when qB itself
+        # answered live that the hash is not present. A cache fallback (or any
+        # other failed live lookup) cannot be used as authority for the
+        # already-present/safety-brake decision and must fail closed before
+        # any qB mutation.
+        event["status"] = "qb_live_lookup_failed"
+        event["error"] = f"pre_mutation_qb_lookup_failed:{lookup_error}"
+        return event
     if existing is not None:
         existing_state = str(getattr(existing, "state", "") or "")
         if existing_state in _RT_QB_RECONCILE_ACTIVE_DOWNLOAD_STATES:
@@ -5132,6 +5200,10 @@ def client_drift_audit_cmd(
             path = client_row.get('content_path') or client_row.get('save_path') or ''
             if path:
                 print(f"      {path}")
+
+        guidance = _client_drift_operator_guidance(str(side_value or ""), str(action or ""))
+        if guidance:
+            print(f"      guidance={guidance}")
 
         # Blockers (red, prominent)
         if blockers:
@@ -6535,7 +6607,7 @@ def rt_qb_mirror_process_queue_cmd(
 @click.option("--limit", type=int, default=0, show_default=True)
 @click.option("--cache-max-age", type=float, default=300.0, show_default=True, help="Reject stale Silo caches at discovery time (amendment 1); tight vs. the 30s daemon interval.")
 @click.option("--rt-confirm-timeout", type=float, default=20.0, show_default=True, help="Per-candidate live RT XML-RPC pre-mutation confirm timeout.")
-@click.option("--verify-timeout", type=float, default=60.0, show_default=True, help="Mandatory live post-mutation verify timeout (amendment 5); must be > 0.")
+@click.option("--verify-timeout", type=float, default=60.0, show_default=True, help="Mandatory live post-mutation state-poll timeout; observation only, never force-rechecks qB; must be > 0.")
 @click.option("--verify-interval", type=float, default=5.0, show_default=True)
 @click.option("--max-runtime", type=float, default=600.0, show_default=True, help="Bounded wall-clock budget for this run (amendment 8); keep shorter than the scheduling cadence.")
 @click.option("--tag", "extra_tags", multiple=True, default=("hashall-rt-qb-mirror-reconcile",), help="Additional qB tag(s) for imported torrents.")
@@ -6573,8 +6645,9 @@ def rt_qb_mirror_reconcile_cmd(
     them to qB stopped + skip-checking, after a live (non-cached) RT re-confirmation
     immediately before each mutation. Add-only: never touches qB-only rows (orphan
     cleanup is a separate, deliberately excluded concern) and never auto-rechecks or
-    auto-repairs an already-present unhealthy qB mirror (detect/alert only). Defaults
-    to dry-run/shadow mode; pass --apply to mutate.
+    auto-repairs an already-present unhealthy qB mirror (detect/alert only). Live
+    verification only polls qB state; this command never issues a qB force-recheck.
+    Defaults to dry-run/shadow mode; pass --apply to mutate.
     """
     disabled = _rt_qb_mirror_disabled_reason(config_path)
     if disabled:
@@ -6627,8 +6700,8 @@ def rt_qb_mirror_reconcile_cmd(
     if qb_unverified_count:
         print(
             _rt_qb_style(
-                f"  note: {qb_unverified_count} pre-existing qb_unverified_mirror row(s) detected — "
-                "detect/alert only, this reconciler never auto-repairs them (base design).",
+                f"  manual_review: {qb_unverified_count} pre-existing qb_unverified_mirror row(s) detected — "
+                "detect/alert only; this reconciler never auto-rechecks or auto-repairs them.",
                 fg="yellow",
             )
         )
@@ -6672,13 +6745,23 @@ def rt_qb_mirror_reconcile_cmd(
             _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_UN)
             lock_fh.close()
 
+    summary_classes = _reconcile_summary_classes(
+        result["outcome_counts"],
+        deferred_count=len(result["deferred"]),
+    )
     _print_rt_qb_summary(
         "RT→qB reconcile result",
         [
-            (status, count, "red" if status in _RT_QB_RECONCILE_FAILING_STATUSES else None)
-            for status, count in sorted(result["outcome_counts"].items())
+            ("healthy", summary_classes["healthy"], "green" if summary_classes["healthy"] else None),
+            ("actionable", summary_classes["actionable"], "yellow" if summary_classes["actionable"] else None),
+            ("manual_review", summary_classes["manual_review"], "red" if summary_classes["manual_review"] else "green"),
+            ("no_action", summary_classes["no_action"], None),
+            ("deferred", summary_classes["deferred"], "yellow" if summary_classes["deferred"] else None),
         ]
-        + [("deferred", len(result["deferred"]), "yellow" if result["deferred"] else None)],
+        + [
+            (f"status.{status}", count, "red" if status in _RT_QB_RECONCILE_FAILING_STATUSES else None)
+            for status, count in sorted(result["outcome_counts"].items())
+        ],
     )
     if json_output:
         print(
@@ -6688,6 +6771,7 @@ def rt_qb_mirror_reconcile_cmd(
                     "candidates": len(selected),
                     "qb_unverified_mirror_residue": qb_unverified_count,
                     "outcome_counts": result["outcome_counts"],
+                    "summary_classes": summary_classes,
                     "deferred": result["deferred"],
                     "events": result["events"],
                 },
