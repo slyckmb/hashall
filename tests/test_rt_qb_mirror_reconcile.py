@@ -469,6 +469,74 @@ def test_reconcile_safety_brake_fires_on_already_present_active_download(tmp_pat
     assert len(result["failed"]) == 1
 
 
+def test_reconcile_already_present_stopped_download_is_not_silently_healthy(tmp_path, monkeypatch) -> None:
+    """Umbrella-manager blocking finding (issuecomment-5849848962): a stale RT-only
+    discovery cache can classify a row as a candidate, then the mandatory live qB
+    check in _process_reconcile_candidate finds it already present. No mutation
+    happens this run, so the active-download safety brake never fires -- but an
+    already-present stoppedDL/pausedDL mirror is exactly the already-stopped,
+    non-brake case amendment 4 requires "leave it stopped, fail/alert, do not
+    auto-recheck" for. It must not be silently reported as a healthy
+    already_present success. A second, distinctly-hashed candidate proves this is
+    genuinely non-brake (unlike an active-download already_present hit, it must not
+    trip brake_tripped or defer the rest of the run). _FakeQbit also has no
+    recheck_torrent(s) method at all, so any attempt to auto-recheck would crash
+    this test outright -- "not rechecked" is structurally enforced, not just
+    asserted via fake.paused."""
+    first = _build_reconcile_candidate_rows(tmp_path)[0]
+    # A second, distinctly-hashed candidate this run never observes as already
+    # present in qB (only ``first["hash"]`` is pre-seeded into fake.present) --
+    # its own outcome is irrelevant here; it exists solely to prove the first
+    # candidate's already_present_unhealthy finding does NOT trip the brake or
+    # defer the rest of the run the way an active-download already_present hit
+    # would (test_reconcile_safety_brake_fires_on_already_present_active_download).
+    second = dict(first)
+    second["hash"] = "bbb222"
+    rows = [first, second]
+    monkeypatch.setattr("hashall.rtorrent.rt_live_confirm_mirror_candidate", _confirm_ok)
+    fake = _FakeQbit()
+    fake.present[first["hash"]] = _Info(state="stoppedDL", progress=0.5, amount_left=100)
+    result = _apply_reconcile_rows(
+        rows,
+        do_apply=True,
+        journal=tmp_path / "journal.jsonl",
+        verify_timeout=1.0,
+        qbit=fake,
+    )
+    first_event = result["events"][0]
+    assert first_event["hash"] == first["hash"]
+    assert first_event["status"] == "already_present_unhealthy"
+    assert first_event["state"] == "stoppedDL"
+    assert fake.paused == [], "stoppedDL is already stopped -- nothing to pause, and no recheck"
+    assert result["outcome_counts"].get("already_present_unhealthy") == 1
+    assert result["brake_tripped"] is False, "unhealthy already_present is not a brake condition"
+    assert result["deferred"] == [], "unhealthy already_present must not defer the rest of the run"
+    assert len(result["events"]) == 2, "second candidate must still be processed, not deferred"
+
+
+def test_reconcile_already_present_healthy_mirror_stays_green(tmp_path, monkeypatch) -> None:
+    """Counterpart to the unhealthy case above: a pre-existing qB mirror observed
+    live in the base-design healthy state (stoppedUP, fully complete) must remain
+    an ordinary successful already_present outcome, not be swept into
+    already_present_unhealthy by an overly broad state check."""
+    rows = _build_reconcile_candidate_rows(tmp_path)
+    torrent_hash = rows[0]["hash"]
+    monkeypatch.setattr("hashall.rtorrent.rt_live_confirm_mirror_candidate", _confirm_ok)
+    fake = _FakeQbit()
+    fake.present[torrent_hash] = _Info(state="stoppedUP", progress=1.0, amount_left=0)
+    result = _apply_reconcile_rows(
+        rows,
+        do_apply=True,
+        journal=tmp_path / "journal.jsonl",
+        verify_timeout=1.0,
+        qbit=fake,
+    )
+    assert not fake.added, "must not add -- already present in qB"
+    assert fake.paused == []
+    assert result["outcome_counts"] == {"already_present": 1}
+    assert result["failed"] == []
+
+
 # --- Amendment 5: post-mutation validation must be against live qB, not cache ---
 
 def test_reconcile_rejects_verify_backed_by_cache_fallback(tmp_path, monkeypatch) -> None:

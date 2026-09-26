@@ -4266,7 +4266,14 @@ _RT_QB_RECONCILE_STOPPED_DOWNLOAD_STATES = frozenset({"stoppedDL", "pausedDL"})
 # reached with candidates untouched) are reported but do NOT fail the run -- see
 # rt_qb_mirror_reconcile_cmd for the full exit-code policy.
 _RT_QB_RECONCILE_FAILING_STATUSES = frozenset(
-    {"rt_unreachable", "add_failed", "safety_brake", "unverified_added", "verify_timeout"}
+    {
+        "rt_unreachable",
+        "add_failed",
+        "safety_brake",
+        "unverified_added",
+        "already_present_unhealthy",
+        "verify_timeout",
+    }
 )
 
 
@@ -4399,6 +4406,27 @@ def _process_reconcile_candidate(
             event["state"] = existing_state
             event["paused"] = bool(paused)
             event["error"] = f"qb_active_download_state:{existing_state}"
+            return event
+        existing_progress = float(getattr(existing, "progress", 0.0) or 0.0)
+        if not (existing_state == "stoppedUP" and existing_progress >= 1.0):
+            # Umbrella-manager finding (issuecomment-5849848962): a stale RT-only
+            # discovery cache can classify a row as a candidate, then this
+            # mandatory live qB check finds it already present -- no mutation
+            # happens this run, so the active-download brake above never fires.
+            # stoppedDL/pausedDL is the archetypal already-stopped, non-brake case
+            # amendment 4 requires "leave it stopped, fail/alert, do not
+            # auto-recheck" for, but the same detect/alert-only contract from the
+            # existing base-design classification of a healthy mirror
+            # (client_drift.py::_classify_qb_unverified_mirror: stoppedUP and
+            # fully complete, nothing else) applies to any other already-present
+            # mirror that is not that exact healthy state -- checking*/error/
+            # missingFiles/unknown/incomplete included, not just the two explicit
+            # stopped-download states. None of these are silently reported as a
+            # healthy already_present success, and none are auto-rechecked here.
+            event["status"] = "already_present_unhealthy"
+            event["state"] = existing_state
+            event["progress"] = existing_progress
+            event["error"] = f"qb_unverified_mirror_state:{existing_state}"
             return event
         event["status"] = "already_present"
         event["state"] = existing_state
