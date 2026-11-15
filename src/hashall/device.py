@@ -1002,6 +1002,23 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
             ensure_files_table(cursor, device_id, fs_uuid=fs_uuid)
 
     else:
+        # Fail closed before ANY registry mutation if this filesystem's own files
+        # table is already bound to a different durable filesystem's row (a
+        # misbound registry; e.g. /pool/backup's row owning stash/secrets' table).
+        own_table = files_table_name_for_fs_uuid(fs_uuid)
+        if "files_table" in _devices_columns(cursor):
+            squatter = cursor.execute(
+                "SELECT fs_uuid, mount_point FROM devices "
+                "WHERE files_table = ? AND fs_uuid != ? AND fs_uuid NOT LIKE 'dev-%'",
+                (own_table, fs_uuid),
+            ).fetchone()
+            if squatter:
+                raise FilesystemIdentityError(
+                    f"Refusing to register {fs_uuid} at {mount_point}: its files table "
+                    f"{own_table} is already bound to {squatter[0]} ({squatter[1]}). "
+                    "The registry is misbound; reconcile it explicitly before scanning."
+                )
+
         # Handle legacy/placeholder fs_uuid rows that already own this device_id.
         # This avoids UNIQUE(device_id) failures when fs_uuid identity is corrected.
         existing_device = cursor.execute("""
@@ -1097,18 +1114,6 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                     print(f"   Updated dependent identity rows for fs_uuid correction: {details}")
         else:
             # New device - register it
-            own_table = files_table_name_for_fs_uuid(fs_uuid)
-            if "files_table" in _devices_columns(cursor):
-                squatter = cursor.execute(
-                    "SELECT fs_uuid, mount_point FROM devices WHERE files_table = ? AND fs_uuid != ?",
-                    (own_table, fs_uuid),
-                ).fetchone()
-                if squatter:
-                    raise FilesystemIdentityError(
-                        f"Refusing to register {fs_uuid} at {mount_point}: its files table "
-                        f"{own_table} is already bound to {squatter[0]} ({squatter[1]}). "
-                        "The registry is misbound; reconcile it explicitly before scanning."
-                    )
             alias = suggest_device_alias(Path(mount_point), cursor)
 
             # Try to get ZFS metadata

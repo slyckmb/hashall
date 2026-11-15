@@ -357,6 +357,29 @@ def test_unstable_newcomer_cannot_displace_stable_identity(_fs_type, _zfs, tmp_p
     conn.close()
 
 
+@patch("hashall.fs_utils.get_zfs_metadata", return_value={})
+@patch("hashall.device._get_fs_type", return_value="zfs")
+def test_squatted_files_table_refused_before_any_registry_change(_fs_type, _zfs, tmp_path):
+    """Live shape: /pool/backup's row owns stash/secrets' table, and /stash/secrets'
+    st_dev (52) is held by pool/backup/home. Registering stash/secrets must refuse
+    without parking/rewriting anything."""
+    conn = connect_db(tmp_path / "catalog.db")
+    cur = conn.cursor()
+    register_or_update_device(cur, "zfs-backup-home", 52, "/pool/backup/home")
+    cur.execute(
+        "INSERT INTO devices (fs_uuid, device_id, mount_point, preferred_mount_point, files_table) "
+        "VALUES ('zfs-backup', 48, '/pool/backup', '/stash/secrets', ?)",
+        (files_table_name_for_fs_uuid("zfs-stash-secrets"),),
+    )
+    conn.commit()
+    before = [tuple(r) for r in cur.execute("SELECT * FROM devices ORDER BY fs_uuid")]
+    with pytest.raises(FilesystemIdentityError):
+        register_or_update_device(cur, "zfs-stash-secrets", 52, "/stash/secrets")
+    after = [tuple(r) for r in cur.execute("SELECT * FROM devices ORDER BY fs_uuid")]
+    assert after == before
+    conn.close()
+
+
 def test_stale_compat_view_does_not_resolve_to_other_filesystem(tmp_path):
     """files_54 -> michael's table while device 54 is secrets (live catalog state)."""
     conn = connect_db(tmp_path / "catalog.db")
