@@ -1,5 +1,6 @@
 # gptrail: pyco-hashall-003-26Jun25-smart-verify-2cfc4c
 import os
+import stat as _stat_mod
 import hashlib
 import sqlite3
 import uuid
@@ -16,7 +17,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from tqdm import tqdm
 from hashall.model import connect_db, init_db_schema
-from hashall.device import register_or_update_device, ensure_files_table, get_files_table_name
+from hashall.device import (
+    FilesystemIdentityError,
+    register_or_update_device,
+    ensure_files_table,
+    get_files_table_name,
+    verify_registered_identity,
+)
 from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source, get_zfs_metadata
 from hashall.pathing import canonicalize_path, is_under
 from hashall.hash_progress import HashProgressReporter
@@ -91,6 +98,9 @@ class ScanStats:
     inode_groups_hashed: int = 0  # Unique inodes hashed
     hardlinks_propagated: int = 0  # Hardlinks that got copied hashes
     safety_guard_triggered: bool = False
+    files_reactivated: int = 0  # Tombstoned rows found present again, hashes reused
+    deletion_skipped_reason: str = ""  # Why the absence-based delete pass did not run
+    final_status: str = ""  # completed | partial | interrupted | failed
 
 
 @dataclass
@@ -117,19 +127,35 @@ class ScanResult:
     inode_groups_hashed: int = 0
     hardlinks_propagated: int = 0
     safety_guard_triggered: bool = False
+    files_reactivated: int = 0
+    final_status: str = ""
+    deletion_skipped_reason: str = ""
 
 
-def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
+def load_existing_files(
+    cursor,
+    device_id: int,
+    root_path: Path,
+    *,
+    fs_uuid: Optional[str] = None,
+    table_name: Optional[str] = None,
+    include_deleted: bool = False,
+) -> dict:
     """
     Load existing files from DB for incremental scan (scoped to root_path).
 
     Args:
         cursor: Database cursor for executing SQL commands
-        device_id: Device ID to query
+        device_id: Device ID to query (legacy lookup key; transient across reboots)
         root_path: Root path to scope the query to
+        fs_uuid: Stable filesystem identity. When given, the devices row and files
+            table are resolved by fs_uuid, never by the reusable kernel device_id.
+        table_name: Explicit files table already resolved by the caller.
+        include_deleted: Also return 'deleted' rows (tagged via 'status') so a scan
+            can reactivate files that are present again without rehashing them.
 
     Returns:
-        dict: {path: {size, mtime, quick_hash, sha1, sha256}} for files under root_path
+        dict: {path: {size, mtime, quick_hash, sha1, sha256, status}} for files under root_path
 
     Edge cases:
         - Mount point not found -> return empty dict
@@ -138,14 +164,16 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
     """
     # Get mount point for the device (prefer canonical mount when available)
     columns = {row[1] for row in cursor.execute("PRAGMA table_info(devices)").fetchall()}
-    if "preferred_mount_point" in columns:
-        row = cursor.execute("""
-            SELECT mount_point, preferred_mount_point FROM devices WHERE device_id = ?
-        """, (device_id,)).fetchone()
-    else:
-        row = cursor.execute("""
-            SELECT mount_point, NULL FROM devices WHERE device_id = ?
-        """, (device_id,)).fetchone()
+    mount_select = "mount_point, preferred_mount_point" if "preferred_mount_point" in columns else "mount_point, NULL"
+    row = None
+    if fs_uuid and "fs_uuid" in columns:
+        row = cursor.execute(
+            f"SELECT {mount_select} FROM devices WHERE fs_uuid = ?", (str(fs_uuid),)
+        ).fetchone()
+    if row is None and not fs_uuid:
+        row = cursor.execute(
+            f"SELECT {mount_select} FROM devices WHERE device_id = ?", (device_id,)
+        ).fetchone()
 
     if not row:
         return {}
@@ -162,27 +190,35 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
         return {}
 
     rel_root_str = str(rel_root)
-    table_name = get_files_table_name(cursor, device_id=device_id)
+    if not table_name:
+        if fs_uuid:
+            table_name = get_files_table_name(cursor, fs_uuid=fs_uuid, device_id=device_id)
+        else:
+            table_name = get_files_table_name(cursor, device_id=device_id)
     if not table_name:
         return {}
 
-    # Query files under root_path with status='active'
+    status_clause = "status IN ('active', 'deleted')" if include_deleted else "status = 'active'"
     # Special case: if rel_root is ".", get all files (root == mount point)
     if rel_root_str == ".":
         cursor.execute(f"""
-            SELECT path, size, mtime, quick_hash, sha1, sha256
+            SELECT path, size, mtime, quick_hash, sha1, sha256, status
             FROM {table_name}
-            WHERE status = 'active'
+            WHERE {status_clause}
         """)
     else:
-        # Use both exact match and prefix match to get all files under the path
+        # Exact match plus a literal prefix match. LIKE is not used because '_'
+        # and '%' are wildcards and real paths contain them (e.g.
+        # "_michaels_data_"), which would pull rows from sibling directories into
+        # this root's scope and expose them to the deletion pass.
+        prefix = f"{rel_root_str}/"
         cursor.execute(f"""
-            SELECT path, size, mtime, quick_hash, sha1, sha256
+            SELECT path, size, mtime, quick_hash, sha1, sha256, status
             FROM {table_name}
-            WHERE status = 'active' AND (path = ? OR path LIKE ?)
-        """, (rel_root_str, f"{rel_root_str}/%"))
+            WHERE {status_clause} AND (path = ? OR substr(path, 1, ?) = ?)
+        """, (rel_root_str, len(prefix), prefix))
 
-    # Build dict: {path: {size, mtime, quick_hash, sha1, sha256}}
+    # Build dict: {path: {size, mtime, quick_hash, sha1, sha256, status}}
     existing = {}
     for row in cursor.fetchall():
         existing[row[0]] = {
@@ -190,7 +226,8 @@ def load_existing_files(cursor, device_id: int, root_path: Path) -> dict:
             'mtime': row[2],
             'quick_hash': row[3],
             'sha1': row[4],
-            'sha256': row[5]
+            'sha256': row[5],
+            'status': row[6],
         }
 
     return existing
@@ -1029,7 +1066,14 @@ def _hash_file_worker(
                 and existing_file.get("sha1") == sha1
                 and existing_file.get("sha256") == sha256
             )
-            is_updated = not is_new and not same_existing
+            # A previously tombstoned row that is present again must be written
+            # through the update path (which reactivates it), even when its
+            # metadata and hashes are unchanged and were reused without rehash.
+            reactivated = (
+                existing_file is not None
+                and existing_file.get("status", "active") != "active"
+            )
+            is_updated = not is_new and (not same_existing or reactivated)
 
             # Determine hash_source
             hash_source = None
@@ -1052,7 +1096,8 @@ def _hash_file_worker(
         print(f"⚠️ Could not process work item: {e}")
         return None
 
-def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple], stats: ScanStats):
+def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple], stats: ScanStats,
+                 existing_files: Optional[Dict[str, dict]] = None):
     """
     Write a batch of file records to the per-device table.
 
@@ -1062,6 +1107,8 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
         root_canonical: Canonical root path for this scan
         rows: List of tuples from _hash_file_worker
         stats: ScanStats object to update
+        existing_files: Prior catalog rows (used to account for reactivations
+            that reused existing hashes instead of hashing)
     """
     if not rows:
         return
@@ -1106,6 +1153,19 @@ def _write_batch(cursor, table_name: str, root_canonical: Path, rows: list[tuple
                     last_seen_at = datetime('now'), last_modified_at = datetime('now'), status = 'active'
                 WHERE path = ?
             """, (size, mtime, quick_hash, sha1, sha256, hash_source, inode, rel_path))
+            prior = existing_files.get(rel_path) if existing_files else None
+            if (
+                prior is not None
+                and prior.get("status", "active") != "active"
+                and prior.get("size") == size
+                and abs(float(prior.get("mtime") or 0.0) - float(mtime)) < 0.001
+                and prior.get("quick_hash") == quick_hash
+                and prior.get("sha1") == sha1
+                and prior.get("sha256") == sha256
+            ):
+                # Present again and unchanged: reactivated with reused hashes.
+                stats.files_reactivated += 1
+                continue
             stats.files_updated += 1
             # Only count bytes_hashed once per inode group (when hash was calculated)
             if hash_source == 'calculated' or hash_source is None:
@@ -1269,6 +1329,43 @@ def _canonicalize_root(
     return preferred_mount / rel_root
 
 
+def _finalize_aborted_session(db_path: Path, session_state: dict, exc: BaseException) -> None:
+    """Record a truthful terminal status for a session whose scan body raised.
+
+    Without this, an interrupt during discovery or a sequential scan left the
+    session 'running' forever. No deletion pass runs on this path.
+    """
+    session_id = session_state.get("scan_session_id")
+    conn = session_state.get("conn")
+    if session_id is None or session_state.get("finalized") or conn is None:
+        return
+    status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+    # Use the scan's own connection: it may hold an open write transaction, so a
+    # second connection would block on the lock. Rows already written describe
+    # files actually observed (the parallel path commits them the same way).
+    try:
+        try:
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+        conn.execute(
+            """
+            UPDATE scan_sessions
+            SET status = ?, completed_at = datetime('now')
+            WHERE id = ? AND status = 'running'
+            """,
+            (status, session_id),
+        )
+        conn.commit()
+    except Exception as finalize_exc:
+        print(f"⚠️  Could not finalize scan session {session_id}: {finalize_exc}", file=sys.stderr)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
               workers: int | None = None, batch_size: int | None = None,
               tqdm_position: int | None = None, quiet: bool = False,
@@ -1276,6 +1373,32 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
               scan_nested_datasets: bool = False,
               drift_policy: str = "metadata",
               hash_progress: str = "auto"):
+    """Incrementally scan a directory; see _scan_path_impl for details.
+
+    Guarantees a non-'running' terminal session status when the scan raises.
+    """
+    session_state: dict = {}
+    try:
+        return _scan_path_impl(
+            db_path=db_path, root_path=root_path, parallel=parallel,
+            workers=workers, batch_size=batch_size, tqdm_position=tqdm_position,
+            quiet=quiet, hash_mode=hash_mode, show_current_path=show_current_path,
+            scan_nested_datasets=scan_nested_datasets, drift_policy=drift_policy,
+            hash_progress=hash_progress, _session_state=session_state,
+        )
+    except BaseException as exc:
+        _finalize_aborted_session(Path(db_path), session_state, exc)
+        raise
+
+
+def _scan_path_impl(db_path: Path, root_path: Path, parallel: bool = False,
+              workers: int | None = None, batch_size: int | None = None,
+              tqdm_position: int | None = None, quiet: bool = False,
+              hash_mode: str = 'fast', show_current_path: bool = False,
+              scan_nested_datasets: bool = False,
+              drift_policy: str = "metadata",
+              hash_progress: str = "auto",
+              _session_state: Optional[dict] = None):
     """
     Incrementally scan a directory with per-device table tracking.
 
@@ -1318,10 +1441,20 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     mount_point_str = get_mount_point(str(root_canonical)) or str(root_canonical)
     mount_source = get_mount_source(str(root_canonical)) or ""
 
-    # 4. Register/update device in registry
-    device_info = register_or_update_device(
-        cursor, fs_uuid, device_id, mount_point_str
-    )
+    # 4. Register/update device in registry.
+    # Fail closed (before any registry write) if the row for this fs_uuid is
+    # bound to another filesystem's files table or preferred mount.
+    try:
+        verify_registered_identity(
+            cursor, fs_uuid=fs_uuid, device_id=device_id, current_mount=mount_point_str
+        )
+        device_info = register_or_update_device(
+            cursor, fs_uuid, device_id, mount_point_str
+        )
+    except FilesystemIdentityError:
+        conn.rollback()
+        conn.close()
+        raise
     conn.commit()
 
     current_mount = Path(device_info["mount_point"])
@@ -1343,15 +1476,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     # 5. Ensure per-device files table exists
     table_name = ensure_files_table(cursor, device_id, fs_uuid=fs_uuid)
 
-    # 6. Track scan root
-    cursor.execute("""
-        INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count)
-        VALUES (?, ?, datetime('now'), 1)
-        ON CONFLICT (fs_uuid, root_path) DO UPDATE SET
-            last_scanned_at = datetime('now'),
-            scan_count = scan_count + 1
-    """, (fs_uuid, str(canonical_root)))
-    conn.commit()
+    # 6. scan_roots is recorded only after a successful, complete scan (step 12)
+    # so an interrupted/partial scan never advertises the root as refreshed.
 
     # 7. Create scan session with new fields
     scan_id = str(uuid.uuid4())
@@ -1364,12 +1490,26 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     """, (scan_id, fs_uuid, device_id, str(canonical_root), parallel, workers))
     scan_session_id = cursor.lastrowid
     conn.commit()
+    if _session_state is not None:
+        _session_state["scan_session_id"] = scan_session_id
+        _session_state["conn"] = conn
 
     _emit(quiet, f"✅ Scan session: {scan_id}")
 
-    # 8. Load existing files from DB (scoped to root_path)
-    existing_files = load_existing_files(cursor, device_id, canonical_root)
-    _emit(quiet, f"📊 Existing files in catalog: {len(existing_files)}")
+    # 8. Load existing files from DB (scoped to root_path), resolved through the
+    # stable fs_uuid binding. Tombstoned rows are loaded too so a file present
+    # again is reactivated with its existing hashes instead of being rehashed.
+    existing_files = load_existing_files(
+        cursor, device_id, canonical_root,
+        fs_uuid=fs_uuid, table_name=table_name, include_deleted=True,
+    )
+    existing_active_count = sum(
+        1 for meta in existing_files.values() if meta.get("status", "active") == "active"
+    )
+    existing_deleted_count = len(existing_files) - existing_active_count
+    _emit(quiet, f"📊 Existing files in catalog: {existing_active_count}")
+    if existing_deleted_count:
+        _emit(quiet, f"   Tombstoned rows eligible for hash reuse if present: {existing_deleted_count}")
 
     # 9. Walk filesystem and collect file metadata (path + stat)
     file_metadata = []  # List of (abs_path, stat_result)
@@ -1390,7 +1530,18 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             mininterval=0.5,
         )
 
-    for dirpath, dirnames, filenames in os.walk(root_canonical):
+    # Traversal completeness evidence. Absence-based tombstones are authorized
+    # only by a complete traversal, so every listing/stat failure is recorded
+    # (os.walk's default onerror=None silently drops unreadable directories,
+    # which would make their whole subtree look deleted).
+    walk_errors: list[str] = []
+    discovered_abs: list[str] = []  # every non-symlink path present on disk
+    skipped_nonregular_count = 0
+
+    def _walk_onerror(err: OSError) -> None:
+        walk_errors.append(f"{getattr(err, 'filename', '?')}: {err.strerror or err}")
+
+    for dirpath, dirnames, filenames in os.walk(root_canonical, onerror=_walk_onerror):
         # Skip symlinked or other-device directories (track nested datasets/mounts)
         filtered_dirs = []
         for d in dirnames:
@@ -1399,7 +1550,8 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 continue
             try:
                 child_stat = child.stat()
-            except OSError:
+            except OSError as err:
+                walk_errors.append(f"{child}: {err.strerror or err}")
                 continue
             if child_stat.st_dev != device_id:
                 child_resolved = child.resolve()
@@ -1421,17 +1573,28 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 continue
             try:
                 stat_result = file_path.stat()
-                if stat_result.st_dev != device_id:
-                    # File on different device
-                    skipped_other_device_count += 1
-                    if len(skipped_other_device_examples) < skipped_example_limit:
-                        skipped_other_device_examples.append(str(file_path))
-                    continue
-                file_metadata.append((str(file_path), stat_result))
-                file_count += 1
-            except OSError:
-                # Can't stat file, skip it
+            except FileNotFoundError:
+                # Vanished between listing and stat: genuinely absent.
                 continue
+            except OSError as err:
+                # Present but not stat-able: never treat it as absent.
+                discovered_abs.append(str(file_path))
+                walk_errors.append(f"{file_path}: {err.strerror or err}")
+                continue
+            discovered_abs.append(str(file_path))
+            if stat_result.st_dev != device_id:
+                # File on different device
+                skipped_other_device_count += 1
+                if len(skipped_other_device_examples) < skipped_example_limit:
+                    skipped_other_device_examples.append(str(file_path))
+                continue
+            if not _stat_mod.S_ISREG(stat_result.st_mode):
+                # Sockets/FIFOs/device nodes carry no catalogable content and
+                # opening a FIFO blocks a hash worker (ENXIO seen on ipc-socket).
+                skipped_nonregular_count += 1
+                continue
+            file_metadata.append((str(file_path), stat_result))
+            file_count += 1
 
     if discovery is not None:
         discovery.set_postfix(files=file_count)
@@ -1619,7 +1782,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     seen_paths.add(result[0])
 
                 # Write batch of results
-                _write_batch(cursor, table_name, canonical_root, results, stats)
+                _write_batch(cursor, table_name, canonical_root, results, stats, existing_files=existing_files)
                 stats.files_scanned += len(results)
                 progress.update(desc=work_item['representative_path'], advance=len(results))
 
@@ -1659,7 +1822,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                     seen_paths.add(result[0])
 
                 # Write batch of results
-                _write_batch(cursor, table_name, canonical_root, results, stats)
+                _write_batch(cursor, table_name, canonical_root, results, stats, existing_files=existing_files)
                 stats.files_scanned += len(results)
 
                 # Commit periodically
@@ -1746,7 +1909,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                 stats.files_scanned += len(results)
 
                                 if len(batch_rows) >= batch_size:
-                                    _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
+                                    _write_batch(cursor, table_name, canonical_root, batch_rows, stats, existing_files=existing_files)
                                     batch_rows.clear()
                                     conn.commit()
                             if work_item:
@@ -1824,7 +1987,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                                     stats.files_scanned += len(results)
 
                                     if len(batch_rows) >= batch_size:
-                                        _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
+                                        _write_batch(cursor, table_name, canonical_root, batch_rows, stats, existing_files=existing_files)
                                         batch_rows.clear()
                                         conn.commit()
                                     pbar.update(len(results))
@@ -1859,7 +2022,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
                 for fut in list(pending):
                     fut.cancel()
             if batch_rows:
-                _write_batch(cursor, table_name, canonical_root, batch_rows, stats)
+                _write_batch(cursor, table_name, canonical_root, batch_rows, stats, existing_files=existing_files)
                 batch_rows.clear()
             conn.commit()
 
@@ -1887,16 +2050,69 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
 
     rel_root_str = str(rel_root)
 
-    # Find deleted paths (existed before but not seen now)
+    # Absence-based tombstones are authorized only by a complete traversal of
+    # this root on a verified identity. A partial scan (interrupt, listing/stat
+    # errors) never infers deletion from "not visited" (issue #12).
+    deletion_blockers: list[str] = []
+    if interrupted:
+        deletion_blockers.append("interrupted")
+    if walk_errors:
+        deletion_blockers.append(f"traversal_errors={len(walk_errors)}")
+
+    # Paths that exist on disk, whether or not they were processed: a file that
+    # was found but failed hashing is not deleted.
+    discovered_rel: Set[str] = set(seen_paths)
+    for abs_path in discovered_abs:
+        try:
+            discovered_rel.add(_relative_to_any_mount(abs_path, mount_point, alias_mounts))
+        except ValueError:
+            continue
+    # Rows under a nested dataset/mount boundary were not traversed here (the
+    # path is shadowed by another filesystem); leave their status untouched.
+    nested_rel_prefixes = []
+    for nested in nested_roots:
+        try:
+            nested_rel_prefixes.append(_relative_to_any_mount(nested, mount_point, alias_mounts) + "/")
+        except Exception:
+            # Cannot place the boundary: fail closed rather than expose rows
+            # under it to the delete pass.
+            deletion_blockers.append(f"unresolved_nested_boundary={nested}")
+
+    def _under_nested(rel: str) -> bool:
+        return any(rel.startswith(prefix) for prefix in nested_rel_prefixes)
+
+    # Find deleted paths (active before, absent from a complete traversal now)
     deleted_paths = []
-    for existing_path in existing_files.keys():
-        if existing_path not in seen_paths:
-            # File was in DB but not seen in this scan
-            deleted_paths.append(existing_path)
+    for existing_path, meta in existing_files.items():
+        if meta.get("status", "active") != "active":
+            continue
+        if existing_path in discovered_rel or _under_nested(existing_path):
+            continue
+        deleted_paths.append(existing_path)
+
+    if worker_path_errors:
+        _emit(quiet, f"⚠️  Processing errors: {worker_path_errors:,} files not refreshed (scan marked partial)")
+        for example in worker_path_error_examples:
+            _emit(quiet, f"   - {example}")
+    if walk_errors:
+        _emit(quiet, f"⚠️  Traversal errors: {len(walk_errors):,} (catalog liveness preserved)")
+        for example in walk_errors[:5]:
+            _emit(quiet, f"   - {example}")
+
+    if deleted_paths and deletion_blockers:
+        stats.deletion_skipped_reason = ",".join(deletion_blockers)
+        _emit(
+            quiet,
+            (
+                f"⏸️  Skipping delete pass ({stats.deletion_skipped_reason}); "
+                f"{len(deleted_paths):,} unvisited active rows left unchanged"
+            ),
+        )
+        deleted_paths = []
 
     if deleted_paths:
         skip_delete = _should_skip_deletion(
-            existing_count=len(existing_files),
+            existing_count=existing_active_count,
             discovered_count=file_count,
             seen_count=len(seen_paths),
             worker_errors=worker_path_errors,
@@ -1914,6 +2130,17 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             )
             for example in worker_path_error_examples:
                 _emit(quiet, f"   - worker path error sample: {example}")
+        elif worker_path_errors:
+            # Partial processing: issue #12 forbids an absence-based delete pass.
+            # Checked after the mass-failure guard so that case stays 'failed'.
+            stats.deletion_skipped_reason = f"worker_errors={worker_path_errors}"
+            _emit(
+                quiet,
+                (
+                    f"⏸️  Skipping delete pass ({stats.deletion_skipped_reason}); "
+                    f"{len(deleted_paths):,} absent active rows left unchanged"
+                ),
+            )
         else:
             _emit(quiet, f"🗑️  Marking {len(deleted_paths)} deleted files...")
             for path in deleted_paths:
@@ -1925,7 +2152,21 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
             stats.files_deleted = len(deleted_paths)
             conn.commit()
 
-    # 12. Update scan session stats
+    # 12. Update scan session stats (truthful completion status)
+    if scan_failed:
+        final_status = "failed"
+    elif interrupted:
+        final_status = "interrupted"
+    elif walk_errors or worker_path_errors:
+        # Discovered files that failed processing were not refreshed; the root
+        # is not completely refreshed (present-but-failed files are never
+        # tombstoned, so only the status/scan_roots claim changes).
+        final_status = "partial"
+    else:
+        final_status = "completed"
+    stats.final_status = final_status
+    if stats.files_reactivated:
+        _emit(quiet, f"♻️  Reactivated {stats.files_reactivated:,} tombstoned files with reused hashes")
     duration = time.time() - started_at
     cursor.execute("""
         UPDATE scan_sessions SET
@@ -1941,7 +2182,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         WHERE id = ?
     """, (
         duration,
-        'failed' if scan_failed else ('interrupted' if interrupted else 'completed'),
+        final_status,
         stats.files_scanned,
         stats.files_added,
         stats.files_updated,
@@ -1950,6 +2191,18 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         stats.bytes_hashed,
         scan_session_id
     ))
+
+    # Track scan root only for a successful, complete scan.
+    if final_status == "completed":
+        cursor.execute("""
+            INSERT INTO scan_roots (fs_uuid, root_path, last_scanned_at, scan_count)
+            VALUES (?, ?, datetime('now'), 1)
+            ON CONFLICT (fs_uuid, root_path) DO UPDATE SET
+                last_scanned_at = datetime('now'),
+                scan_count = scan_count + 1
+        """, (fs_uuid, str(canonical_root)))
+    if _session_state is not None:
+        _session_state["finalized"] = True
 
     # 13. Update device metadata
     cursor.execute(f"""
@@ -2022,10 +2275,12 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         print(
             f"""
 📦 Scan complete!
+   Status: {final_status}{f" (delete pass skipped: {stats.deletion_skipped_reason})" if stats.deletion_skipped_reason else ""}
    Duration: {duration:.1f}s
    Scanned: {stats.files_scanned:,} files
    Added: {stats.files_added:,}
    Updated: {stats.files_updated:,}
+   Reactivated: {stats.files_reactivated:,}
    Unchanged: {stats.files_unchanged:,}
    Deleted: {stats.files_deleted:,}
    Hashed: {stats.bytes_hashed / 1024 / 1024:.1f} MB
@@ -2064,7 +2319,9 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
     conn.close()
 
     # Phase 3A: Return ScanResult with had_changes flag for gating
-    had_changes = (stats.files_added + stats.files_updated + stats.files_deleted) > 0
+    had_changes = (
+        stats.files_added + stats.files_updated + stats.files_deleted + stats.files_reactivated
+    ) > 0
     return ScanResult(
         root_path=canonical_root,
         device_id=device_id,
@@ -2080,4 +2337,7 @@ def scan_path(db_path: Path, root_path: Path, parallel: bool = False,
         inode_groups_hashed=stats.inode_groups_hashed,
         hardlinks_propagated=stats.hardlinks_propagated,
         safety_guard_triggered=stats.safety_guard_triggered,
+        files_reactivated=stats.files_reactivated,
+        final_status=stats.final_status,
+        deletion_skipped_reason=stats.deletion_skipped_reason,
     )
