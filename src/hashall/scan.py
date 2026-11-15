@@ -2074,7 +2074,9 @@ def _scan_path_impl(db_path: Path, root_path: Path, parallel: bool = False,
         try:
             nested_rel_prefixes.append(_relative_to_any_mount(nested, mount_point, alias_mounts) + "/")
         except Exception:
-            continue
+            # Cannot place the boundary: fail closed rather than expose rows
+            # under it to the delete pass.
+            deletion_blockers.append(f"unresolved_nested_boundary={nested}")
 
     def _under_nested(rel: str) -> bool:
         return any(rel.startswith(prefix) for prefix in nested_rel_prefixes)
@@ -2088,6 +2090,10 @@ def _scan_path_impl(db_path: Path, root_path: Path, parallel: bool = False,
             continue
         deleted_paths.append(existing_path)
 
+    if worker_path_errors:
+        _emit(quiet, f"⚠️  Processing errors: {worker_path_errors:,} files not refreshed (scan marked partial)")
+        for example in worker_path_error_examples:
+            _emit(quiet, f"   - {example}")
     if walk_errors:
         _emit(quiet, f"⚠️  Traversal errors: {len(walk_errors):,} (catalog liveness preserved)")
         for example in walk_errors[:5]:
@@ -2140,7 +2146,10 @@ def _scan_path_impl(db_path: Path, root_path: Path, parallel: bool = False,
         final_status = "failed"
     elif interrupted:
         final_status = "interrupted"
-    elif walk_errors:
+    elif walk_errors or worker_path_errors:
+        # Discovered files that failed processing were not refreshed; the root
+        # is not completely refreshed (present-but-failed files are never
+        # tombstoned, so only the status/scan_roots claim changes).
         final_status = "partial"
     else:
         final_status = "completed"

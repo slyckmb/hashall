@@ -183,10 +183,15 @@ def test_worker_errors_do_not_tombstone_existing_files(tmp_path, monkeypatch):
         return real(work_item, *args, **kwargs)
 
     monkeypatch.setattr(scan, "_hash_file_worker", worker)
+    files[1].write_text("changed while its worker fails\n")
     result = scan_path(db_path=db, root_path=root, quiet=True)
     assert result.files_deleted == 0
     assert set(_statuses(db, root).values()) == {"active"}
     assert len(_statuses(db, root)) == len(files)
+    # Unprocessed files mean the root was NOT completely refreshed.
+    assert result.final_status == "partial"
+    assert _sessions(db)[-1][0] == "partial"
+    assert _scan_root_count(db, root) == 1
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses permissions")
@@ -536,3 +541,23 @@ def test_targeted_sha256_backfill_reuse_and_staleness(tmp_path):
     other = hash_selected_files(db, [outside], write=False)
     assert other.results[0].status == SHA256_COMPUTED
     assert other.results[0].catalog in {"absent", "uncataloged"} and other.results[0].written == 0
+
+
+def test_sha256_lookup_flags_preferred_mount_on_other_filesystem(tmp_path):
+    from hashall.sha256_targeted import lookup_sha256
+
+    db = tmp_path / "catalog.db"
+    root = tmp_path / "home"
+    files = _make_tree(root, n=2)
+    scan_path(db_path=db, root_path=root, quiet=True)
+    hash_selected_files(db, [files[0]])
+    digest = hashlib.sha256(files[0].read_bytes()).hexdigest()
+    assert {h["live"] for h in lookup_sha256(db, [digest])} == {"live-unchanged"}
+
+    fs_uuid = get_filesystem_uuid(str(root))
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE devices SET preferred_mount_point = '/proc' WHERE fs_uuid = ?", (fs_uuid,))
+    conn.commit()
+    conn.close()
+    hits = lookup_sha256(db, [digest])
+    assert hits and {h["live"] for h in hits} == {"identity-mismatch"}

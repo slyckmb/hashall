@@ -8675,6 +8675,8 @@ def sha256_files_cmd(paths, db, paths_from, write, verify, cached_only, max_byte
     Each line: STATUS SHA256 SIZE CATALOG PATH. Only sha256-cataloged and
     sha256-computed rows are SHA-256 proof; name/size/quick-hash agreement is never
     reported as proof. Equal proven hashes across inputs are listed under groups.
+    sha256-cataloged is a stored full hash whose file size+mtime are unchanged
+    since hashing; use --verify for a fresh content re-read of every file.
     """
     from hashall.sha256_targeted import hash_selected_files, results_to_json
 

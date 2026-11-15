@@ -306,13 +306,20 @@ def lookup_sha256(db_path: Path, hashes: Iterable[str], *, check_live: bool = Tr
             if not exists or not files_table_matches_fs(table, fs_uuid):
                 continue  # skip missing or misbound tables
             base = Path(str(preferred or mount))
+            base_ok = True
+            if check_live:
+                # The mount must still BE this filesystem; otherwise a same-path,
+                # same-size file on another dataset would look like live proof.
+                base_ok = os.path.isdir(base) and get_filesystem_uuid(str(base)) == fs_uuid
             for digest in wanted:
                 for path, size, mtime, status in conn.execute(
                     f'SELECT path, size, mtime, status FROM "{table}" WHERE sha256 = ?', (digest,)
                 ):
                     abs_path = base / path
                     live = "unchecked"
-                    if check_live:
+                    if check_live and not base_ok:
+                        live = "identity-mismatch"
+                    elif check_live:
                         try:
                             st = os.stat(abs_path)
                             live = "live-unchanged" if _fresh(size, mtime, st) else "live-changed"
