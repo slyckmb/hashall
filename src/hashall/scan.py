@@ -22,6 +22,7 @@ from hashall.device import (
     register_or_update_device,
     ensure_files_table,
     get_files_table_name,
+    resolve_verified_files_table,
     verify_registered_identity,
 )
 from hashall.fs_utils import get_filesystem_uuid, get_mount_point, get_mount_source, get_zfs_metadata
@@ -682,22 +683,25 @@ def upgrade_quick_hash_collisions(device_id: int, db_path: Path, quiet: bool = F
     """
     conn = connect_db(db_path)
     cursor = conn.cursor()
-    table_name = ensure_files_table(cursor, device_id)
-
-    row = _run_with_db_lock_retry(
-        lambda: cursor.execute(
-            "SELECT preferred_mount_point, mount_point FROM devices WHERE device_id = ?",
-            (device_id,),
-        ).fetchone(),
-        quiet=quiet,
-        label=f"{table_name}:load-device-mounts",
-    )
-    if not row:
+    try:
+        # device_id may name another filesystem after st_dev reuse (issue #12);
+        # only hash and write once the registered mount is that row's live fs.
+        verified = _run_with_db_lock_retry(
+            lambda: resolve_verified_files_table(cursor, device_id=device_id),
+            quiet=quiet,
+            label=f"device {device_id}:verify-identity",
+        )
+    except FilesystemIdentityError as exc:
         conn.close()
+        print(
+            f"⛔ Skipping collision upgrade for device {device_id}: "
+            f"filesystem identity check failed: {exc}"
+        )
         return 0
+    table_name = verified.files_table
 
-    preferred_mount = Path(row[0]) if row[0] else None
-    mount_point = Path(row[1]) if row[1] else None
+    preferred_mount = Path(verified.preferred_mount_point) if verified.preferred_mount_point else None
+    mount_point = Path(verified.mount_point) if verified.mount_point else None
     base_mounts = [p for p in (preferred_mount, mount_point) if p is not None]
 
     quick_hashes_rows = _run_with_db_lock_retry(

@@ -30,7 +30,7 @@ from typing import Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
-from hashall.device import get_files_table_name
+from hashall.device import FilesystemIdentityError, resolve_verified_files_table
 from hashall.link_query import get_plan, get_plan_actions, ActionInfo
 from hashall.fs_utils import get_zfs_metadata
 
@@ -329,13 +329,34 @@ def _db_path_for_action(path: str, mount_point: Optional[str]) -> str:
     return path
 
 
+def _resolve_plan_files_table(
+    conn: sqlite3.Connection,
+    device_id: Optional[int],
+    mount_point: Optional[str],
+) -> Optional[str]:
+    """Return the verified catalog table for the filesystem a plan acts on.
+
+    Plans and actions store a kernel device_id, which can be reused by another
+    dataset after a reboot (issue #12). Resolve from the live filesystem at the
+    plan's mount when it exists, else from the devices row with a live mount
+    check. Returns None when identity cannot be verified.
+    """
+    try:
+        if mount_point and os.path.isdir(mount_point):
+            return resolve_verified_files_table(conn.cursor(), live_path=str(mount_point)).files_table
+        if device_id is None:
+            return None
+        return resolve_verified_files_table(conn.cursor(), device_id=int(device_id)).files_table
+    except FilesystemIdentityError:
+        return None
+
+
 def _fetch_file_metadata(
     conn: sqlite3.Connection,
-    device_id: int,
+    table_name: Optional[str],
     db_path: str
 ) -> Optional[Tuple[int, float, Optional[str], Optional[str]]]:
     cursor = conn.cursor()
-    table_name = get_files_table_name(cursor, device_id=device_id)
     if not table_name:
         return None
     cursor.execute(
@@ -348,6 +369,7 @@ def _maybe_refresh_files_for_action(
     conn: sqlite3.Connection,
     action: ActionInfo,
     mount_point: Optional[str],
+    catalog_table: Optional[str] = None,
 ) -> None:
     """
     Best-effort: if canonical + duplicate now point to the same inode, update the catalog rows.
@@ -373,7 +395,7 @@ def _maybe_refresh_files_for_action(
     size = st_c.st_size
     mtime = st_c.st_mtime
 
-    table_name = get_files_table_name(conn.cursor(), device_id=action.device_id)
+    table_name = catalog_table or _resolve_plan_files_table(conn, action.device_id, mount_point)
     if not table_name:
         return
     canonical_db = _db_path_for_action(action.canonical_path, mount_point)
@@ -699,7 +721,8 @@ def _precheck_jdupes_action(
     conn: sqlite3.Connection,
     action: ActionInfo,
     mount_point: Optional[str],
-    verify_mode: str
+    verify_mode: str,
+    catalog_table: Optional[str] = None,
 ) -> Tuple[str, Optional[str], Path, Path]:
     canonical_path = _resolve_path(action.canonical_path, mount_point)
     duplicate_path = _resolve_path(action.duplicate_path, mount_point)
@@ -723,8 +746,9 @@ def _precheck_jdupes_action(
     if verify_mode != "none":
         canonical_db_path = _db_path_for_action(action.canonical_path, mount_point)
         duplicate_db_path = _db_path_for_action(action.duplicate_path, mount_point)
-        canonical_row = _fetch_file_metadata(conn, action.device_id, canonical_db_path)
-        duplicate_row = _fetch_file_metadata(conn, action.device_id, duplicate_db_path)
+        table_name = catalog_table or _resolve_plan_files_table(conn, action.device_id, mount_point)
+        canonical_row = _fetch_file_metadata(conn, table_name, canonical_db_path)
+        duplicate_row = _fetch_file_metadata(conn, table_name, duplicate_db_path)
         if not canonical_row or not duplicate_row:
             return "failed", "Catalog metadata missing for verification", canonical_path, duplicate_path
 
@@ -845,7 +869,8 @@ def execute_action(
     mount_point: Optional[str] = None,
     dry_run: bool = False,
     verify_mode: str = 'fast',
-    create_backup: bool = True
+    create_backup: bool = True,
+    catalog_table: Optional[str] = None,
 ) -> Tuple[bool, Optional[str], int]:
     """
     Execute a single hardlink action.
@@ -889,8 +914,9 @@ def execute_action(
     if verify_mode != 'none':
         canonical_db_path = _db_path_for_action(action.canonical_path, mount_point)
         duplicate_db_path = _db_path_for_action(action.duplicate_path, mount_point)
-        canonical_row = _fetch_file_metadata(conn, action.device_id, canonical_db_path)
-        duplicate_row = _fetch_file_metadata(conn, action.device_id, duplicate_db_path)
+        table_name = catalog_table or _resolve_plan_files_table(conn, action.device_id, mount_point)
+        canonical_row = _fetch_file_metadata(conn, table_name, canonical_db_path)
+        duplicate_row = _fetch_file_metadata(conn, table_name, duplicate_db_path)
 
         if not canonical_row or not duplicate_row:
             return False, "Catalog metadata missing for verification", 0
@@ -1137,6 +1163,18 @@ def execute_plan(
     if limit > 0:
         actions = actions[:limit]
 
+    # The catalog is read for pre-link verification and written by the
+    # post-link refresh. Resolve it once from the live filesystem and refuse
+    # the plan when that identity cannot be verified (issue #12).
+    catalog_table = None
+    if actions and (verify_mode != 'none' or not dry_run):
+        catalog_table = _resolve_plan_files_table(conn, plan.device_id, plan.mount_point)
+        if catalog_table is None:
+            raise FilesystemIdentityError(
+                f"Plan {plan_id}: cannot verify the catalog filesystem for mount "
+                f"{plan.mount_point!r} (device_id {plan.device_id}); refusing to execute."
+            )
+
     # Execute actions
     executed = 0
     failed = 0
@@ -1183,7 +1221,7 @@ def execute_plan(
             return
 
         for refresh_action in refresh_actions:
-            _maybe_refresh_files_for_action(conn, refresh_action, plan.mount_point)
+            _maybe_refresh_files_for_action(conn, refresh_action, plan.mount_point, catalog_table)
         refresh_actions.clear()
 
         if status_updates:
@@ -1316,7 +1354,7 @@ def execute_plan(
 
             for action in group_actions:
                 status, error, canonical_path, duplicate_path = _precheck_jdupes_action(
-                    conn, action, plan.mount_point, verify_mode
+                    conn, action, plan.mount_point, verify_mode, catalog_table
                 )
                 log_lines.append(f"precheck: action={action.id} status={status} canonical={canonical_path} duplicate={duplicate_path} error={error or ''}")
                 if status == "ok":
@@ -1545,6 +1583,7 @@ def execute_plan(
         for action in actions:
             success, error, bytes_saved = execute_action(
                 conn, action,
+                catalog_table=catalog_table,
                 mount_point=plan.mount_point,
                 dry_run=dry_run,
                 verify_mode=verify_mode,
