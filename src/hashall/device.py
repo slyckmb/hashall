@@ -905,17 +905,19 @@ def resolve_verified_files_table(
             f"a different filesystem (expected {files_table_name_for_fs_uuid(row_fs_uuid)})."
         )
 
-    if live_uuid is None:
-        base = preferred or mount_point
-        if not base or not os.path.isdir(base):
-            raise FilesystemIdentityError(
-                f"Registered mount {base!r} for {row_fs_uuid} is unavailable; cannot verify it."
-            )
-        live_uuid = get_filesystem_uuid(base)
-        if live_uuid != row_fs_uuid:
-            raise FilesystemIdentityError(
-                f"Registered mount {base} for {row_fs_uuid} is live filesystem {live_uuid}."
-            )
+    # Callers hash and stat files under the registered mount, so it must be
+    # this filesystem too, even when the row was found from a live path: a
+    # preferred mount can point at another dataset (#14 shape).
+    base = preferred or mount_point
+    if not base or not os.path.isdir(base):
+        raise FilesystemIdentityError(
+            f"Registered mount {base!r} for {row_fs_uuid} is unavailable; cannot verify it."
+        )
+    base_uuid = get_filesystem_uuid(base)
+    if base_uuid != row_fs_uuid:
+        raise FilesystemIdentityError(
+            f"Registered mount {base} for {row_fs_uuid} is live filesystem {base_uuid}."
+        )
 
     table = get_files_table_name(cursor, fs_uuid=row_fs_uuid, device_id=row_device_id)
     if not table:

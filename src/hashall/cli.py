@@ -9641,6 +9641,19 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
                     conn.close()
                     return 0
 
+        # Refuse before --fix-perms or a snapshot touch anything when the plan's
+        # catalog filesystem cannot be verified (issue #12); execute_plan
+        # repeats this check.
+        if verify != "none" or not dry_run:
+            from hashall.device import FilesystemIdentityError
+            from hashall.link_executor import _resolve_plan_files_table
+
+            if _resolve_plan_files_table(conn, plan.device_id, plan.mount_point) is None:
+                raise FilesystemIdentityError(
+                    f"Plan {plan_id}: cannot verify the catalog filesystem for mount "
+                    f"{plan.mount_point!r} (device_id {plan.device_id}); refusing to execute."
+                )
+
         if low_priority:
             _apply_low_priority()
 
@@ -9834,6 +9847,12 @@ def link_execute_cmd(plan_id, db, dry_run, verify, no_backup, limit, jdupes, jdu
         conn.close()
         raise click.exceptions.Exit(1)
     except Exception as e:
+        from hashall.device import FilesystemIdentityError
+
+        if isinstance(e, FilesystemIdentityError):
+            click.echo(f"⛔ Filesystem identity check failed; nothing executed: {e}", err=True)
+            conn.close()
+            raise click.exceptions.Exit(1)
         click.echo(f"❌ Unexpected error: {e}", err=True)
         import traceback
         traceback.print_exc()

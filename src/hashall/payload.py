@@ -22,6 +22,7 @@ from hashall.fs_utils import get_filesystem_uuid
 from hashall.device import (
     FilesystemIdentityError,
     get_files_table_name,
+    resolve_current_device_row,
     resolve_verified_files_table,
 )
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
@@ -50,18 +51,31 @@ def _get_mount_info(conn: sqlite3.Connection, device_id: int):
     return mount_point, preferred_mount
 
 
-def _catalog_device_id_for_live_path(conn: sqlite3.Connection, path: Path) -> Optional[int]:
-    """Map a live path to its registered devices.device_id via fs_uuid.
+def _catalog_device_id_for_payload_root(
+    conn: sqlite3.Connection, root: Path, device_id: Optional[int]
+) -> Optional[int]:
+    """Return the verified devices.device_id for a payload root.
 
-    Returns None only for a legacy catalog without a devices table. Raises
-    FilesystemIdentityError when the live filesystem is unregistered or its
-    row is misbound: any st_dev-keyed lookup would then read another dataset.
+    An existing root is resolved by its live fs_uuid (any passed device_id is
+    ignored). A missing root falls back to the passed devices-row id, verified
+    against its live mount. Returns None for a legacy catalog without a
+    devices table, or a missing root whose id is absent or has no devices row. Raises FilesystemIdentityError
+    when the filesystem is unregistered or misbound: any device_id-keyed lookup
+    would then read another dataset.
     """
     if not conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
     ).fetchone():
         return None
-    return resolve_verified_files_table(conn.cursor(), live_path=str(path)).device_id
+    if root.exists():
+        return resolve_verified_files_table(conn.cursor(), live_path=str(root)).device_id
+    if device_id is None:
+        return None
+    if resolve_current_device_row(conn.cursor(), device_id=int(device_id)) is None:
+        # Legacy files_<device_id> catalog with no registered row; no other
+        # filesystem's row can be reached through this id.
+        return None
+    return resolve_verified_files_table(conn.cursor(), device_id=int(device_id)).device_id
 
 
 def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
@@ -935,27 +949,32 @@ def build_payload(
     if root.is_absolute() and not already_canonical:
         root = canonicalize_path(root)
 
-    # Derive device_id from root_path if not provided. A live st_dev is not a
-    # catalog key: kernel ids are reused across datasets (issue #12), so map the
-    # live filesystem to its registered row by fs_uuid first.
+    # Neither a live st_dev nor a stored payloads.device_id is a catalog key:
+    # kernel ids are reused across datasets (issue #12). Map the root to its
+    # registered row (by live fs_uuid, or by a passed id whose mount is still
+    # that filesystem), and build nothing when identity cannot be verified.
+    try:
+        verified_device_id = _catalog_device_id_for_payload_root(conn, root, device_id)
+    except FilesystemIdentityError as exc:
+        print(f"⛔ Payload {root}: filesystem identity check failed: {exc}")
+        return Payload(
+            payload_id=None,
+            payload_hash=None,
+            device_id=None,
+            root_path=str(root),
+            file_count=0,
+            total_bytes=0,
+            status='incomplete',
+            last_built_at=None,
+            fs_uuid=None,
+        )
+    if verified_device_id is not None:
+        device_id = verified_device_id
+
+    # Derive device_id from root_path if not provided (legacy catalogs only).
     if device_id is None:
         try:
             device_id = os.stat(root).st_dev
-            verified_device_id = _catalog_device_id_for_live_path(conn, root)
-            if verified_device_id is not None:
-                device_id = verified_device_id
-        except FilesystemIdentityError:
-            return Payload(
-                payload_id=None,
-                payload_hash=None,
-                device_id=None,
-                root_path=str(root),
-                file_count=0,
-                total_bytes=0,
-                status='incomplete',
-                last_built_at=None,
-                fs_uuid=None,
-            )
         except (OSError, IOError):
             # Path doesn't exist or is inaccessible
             return Payload(

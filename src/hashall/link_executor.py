@@ -342,7 +342,9 @@ def _resolve_plan_files_table(
     check. Returns None when identity cannot be verified.
     """
     try:
-        if mount_point and os.path.isdir(mount_point):
+        if mount_point:
+            if not os.path.isdir(mount_point):
+                return None
             return resolve_verified_files_table(conn.cursor(), live_path=str(mount_point)).files_table
         if device_id is None:
             return None

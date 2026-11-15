@@ -224,7 +224,8 @@ def test_build_payload_does_not_read_other_dataset_by_st_dev(catalog):
     _insert_file(catalog["db"], catalog["table_a"], "nested/payload/a.bin", f, sha256="ab" * 32)
 
     conn = connect_db(catalog["db"])
-    result = build_payload(conn, str(payload))
+    # already_canonical: temp dirs are not real mountpoints (see below).
+    result = build_payload(conn, str(payload), already_canonical=True)
     conn.close()
     assert result.status == "incomplete"
     assert result.payload_hash is None
@@ -343,3 +344,109 @@ def test_orphan_validate_fails_closed_without_verified_catalog(catalog):
     assert safe == []
     assert [s["path"] for s in skipped] == [str(orphan)]
 
+
+
+# ------------------------------------------- review follow-ups (PR #15 G1/G2)
+
+def test_resolver_refuses_live_path_when_registered_mount_is_other_fs(catalog):
+    conn = connect_db(catalog["db"])
+    conn.execute(
+        "UPDATE devices SET preferred_mount_point = ? WHERE fs_uuid = ?",
+        (str(catalog["fs_b"]), FS_A),
+    )
+    with pytest.raises(FilesystemIdentityError):
+        resolve_verified_files_table(conn.cursor(), live_path=str(catalog["fs_a"]))
+    conn.close()
+
+
+def test_payload_upgrade_never_hashes_under_a_foreign_preferred_mount(catalog):
+    for fs, data in ((catalog["fs_a"], b"A" * 64), (catalog["fs_b"], b"B" * 64)):
+        (fs / "payload").mkdir()
+        (fs / "payload" / "a.bin").write_bytes(data)
+    _insert_file(catalog["db"], catalog["table_a"], "payload/a.bin", catalog["fs_a"] / "payload" / "a.bin")
+    conn = connect_db(catalog["db"])
+    conn.execute(
+        "UPDATE devices SET preferred_mount_point = ? WHERE fs_uuid = ?",
+        (str(catalog["fs_b"]), FS_A),
+    )
+    conn.commit()
+    assert upgrade_payload_missing_sha256(conn, str(catalog["fs_a"] / "payload")) == 0
+    conn.close()
+    assert _sha256_values(catalog["db"], catalog["table_a"]) == [None]
+
+
+def test_build_payload_ignores_stored_device_id_of_other_filesystem(catalog):
+    payload = catalog["fs_a"] / "payload"
+    payload.mkdir()
+    f = payload / "a.bin"
+    f.write_bytes(b"k" * 64)
+    _insert_file(catalog["db"], catalog["table_a"], "payload/a.bin", f, sha256="cd" * 32)
+    conn = connect_db(catalog["db"])
+    # payload upgrade-collisions passes stored payloads.device_id; 61 is the
+    # misbound row. The live root is FS_A, so FS_A's row is used.
+    result = build_payload(conn, str(payload), device_id=61, already_canonical=True)
+    assert result.status == "complete"
+    assert result.fs_uuid == FS_A
+    assert result.device_id == catalog["live_dev"]
+    # A nested dataset sharing the st_dev: an explicit st_dev is not trusted.
+    nested = catalog["nested"] / "payload"
+    nested.mkdir()
+    (nested / "n.bin").write_bytes(b"n" * 8)
+    _insert_file(catalog["db"], catalog["table_a"], "nested/payload/n.bin", nested / "n.bin", sha256="ef" * 32)
+    result = build_payload(conn, str(nested), device_id=catalog["live_dev"], already_canonical=True)
+    assert result.status == "incomplete"
+    assert result.file_count == 0
+    conn.close()
+
+
+def test_build_payload_missing_root_verifies_passed_device_id(catalog):
+    conn = connect_db(catalog["db"])
+    missing = catalog["fs_b"] / "gone"
+    result = build_payload(conn, str(missing), device_id=60, already_canonical=True)
+    assert result.status == "incomplete"
+    assert result.device_id is None
+    conn.close()
+
+
+def test_link_execute_refuses_recorded_but_missing_mount(catalog):
+    canonical = catalog["fs_a"] / "c.bin"
+    duplicate = catalog["fs_a"] / "d.bin"
+    canonical.write_bytes(b"same")
+    duplicate.write_bytes(b"same")
+    plan_id = _insert_plan(
+        catalog["db"], device_id=catalog["live_dev"], mount=catalog["fs_a"] / "missing",
+        canonical=canonical, duplicate=duplicate,
+    )
+    conn = connect_db(catalog["db"])
+    with pytest.raises(FilesystemIdentityError):
+        execute_plan(conn, plan_id, dry_run=True, verify_mode="fast", use_jdupes=False,
+                     create_backup=False)
+    conn.close()
+
+
+def test_link_execute_cli_refuses_before_fix_perms(catalog, monkeypatch):
+    from click.testing import CliRunner
+
+    import hashall.cli as cli_mod
+
+    canonical = catalog["fs_b"] / "c.bin"
+    duplicate = catalog["fs_b"] / "d.bin"
+    canonical.write_bytes(b"same")
+    duplicate.write_bytes(b"same")
+    plan_id = _insert_plan(
+        catalog["db"], device_id=catalog["live_dev"], mount=catalog["fs_b"],
+        canonical=canonical, duplicate=duplicate,
+    )
+    calls = []
+    monkeypatch.setattr(cli_mod.subprocess, "run", lambda *a, **k: calls.append(a))
+    result = CliRunner().invoke(
+        cli_mod.cli,
+        ["link", "execute", str(plan_id), "--db", str(catalog["db"]), "--yes",
+         "--no-jdupes", "--no-backup"],
+    )
+    assert result.exit_code == 1
+    assert "Filesystem identity check failed" in result.output
+    assert "Traceback" not in result.output
+    # Read-only `zfs list` dataset discovery may run; nothing that mutates.
+    mutating = [c for c in calls if any(t in str(c) for t in ("sudo", "chmod", "chown", "setfacl", "snapshot"))]
+    assert mutating == []
