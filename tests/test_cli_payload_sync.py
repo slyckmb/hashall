@@ -51,6 +51,14 @@ class _FakeQbit:
 
 class TestPayloadSyncCLI(unittest.TestCase):
     def setUp(self):
+        # These fixtures model a legacy catalog: files_<st_dev> tables keyed by
+        # the temp filesystem's st_dev, with either no devices row or a dev-*
+        # placeholder row that never matches the live fs_uuid. build_payload
+        # now refuses both (issue #12); that refusal is covered in
+        # test_identity_verified_lookups.py, so bypass it here.
+        legacy_lookup = patch("hashall.payload._catalog_device_id_for_payload_root", return_value=None)
+        legacy_lookup.start()
+        self.addCleanup(legacy_lookup.stop)
         self._tmpdir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self._tmpdir.name)
 

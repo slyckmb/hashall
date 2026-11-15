@@ -15,4 +15,4 @@
 #   tombstone unvisited rows; a reused kernel device_id no longer rebinds another
 #   filesystem's catalog; tombstoned-but-present files reactivate with reused hashes;
 #   new `doctor repair-liveness`, `sha256-files`, `sha256-lookup`.
-__version__ = "0.8.81"
+__version__ = "0.8.82"

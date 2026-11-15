@@ -19,7 +19,12 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 from hashall.fs_utils import get_filesystem_uuid
-from hashall.device import get_files_table_name
+from hashall.device import (
+    FilesystemIdentityError,
+    get_files_table_name,
+    resolve_current_device_row,
+    resolve_verified_files_table,
+)
 from hashall.pathing import canonicalize_path, remap_to_mount_alias, to_relpath
 from hashall.scan import compute_full_hashes
 
@@ -44,6 +49,33 @@ def _get_mount_info(conn: sqlite3.Connection, device_id: int):
             mount_point = Path(dev_row[0])
             preferred_mount = Path(dev_row[1] or dev_row[0])
     return mount_point, preferred_mount
+
+
+def _catalog_device_id_for_payload_root(
+    conn: sqlite3.Connection, root: Path, device_id: Optional[int]
+) -> Optional[int]:
+    """Return the verified devices.device_id for a payload root.
+
+    An existing root is resolved by its live fs_uuid (any passed device_id is
+    ignored). A missing root falls back to the passed devices-row id, verified
+    against its live mount. Returns None for a legacy catalog without a
+    devices table, or a missing root whose id is absent or has no devices row. Raises FilesystemIdentityError
+    when the filesystem is unregistered or misbound: any device_id-keyed lookup
+    would then read another dataset.
+    """
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone():
+        return None
+    if root.exists():
+        return resolve_verified_files_table(conn.cursor(), live_path=str(root)).device_id
+    if device_id is None:
+        return None
+    if resolve_current_device_row(conn.cursor(), device_id=int(device_id)) is None:
+        # Legacy files_<device_id> catalog with no registered row; no other
+        # filesystem's row can be reached through this id.
+        return None
+    return resolve_verified_files_table(conn.cursor(), device_id=int(device_id)).device_id
 
 
 def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
@@ -917,7 +949,29 @@ def build_payload(
     if root.is_absolute() and not already_canonical:
         root = canonicalize_path(root)
 
-    # Derive device_id from root_path if not provided
+    # Neither a live st_dev nor a stored payloads.device_id is a catalog key:
+    # kernel ids are reused across datasets (issue #12). Map the root to its
+    # registered row (by live fs_uuid, or by a passed id whose mount is still
+    # that filesystem), and build nothing when identity cannot be verified.
+    try:
+        verified_device_id = _catalog_device_id_for_payload_root(conn, root, device_id)
+    except FilesystemIdentityError as exc:
+        print(f"⛔ Payload {root}: filesystem identity check failed: {exc}")
+        return Payload(
+            payload_id=None,
+            payload_hash=None,
+            device_id=None,
+            root_path=str(root),
+            file_count=0,
+            total_bytes=0,
+            status='incomplete',
+            last_built_at=None,
+            fs_uuid=None,
+        )
+    if verified_device_id is not None:
+        device_id = verified_device_id
+
+    # Derive device_id from root_path if not provided (legacy catalogs only).
     if device_id is None:
         try:
             device_id = os.stat(root).st_dev
@@ -1017,22 +1071,23 @@ def upgrade_payload_missing_sha256(conn: sqlite3.Connection, root_path: str,
     Uses inode grouping to hash once per hardlinked file set.
     Returns number of inode groups hashed.
     """
-    if device_id is None:
-        try:
-            device_id = os.stat(root_path).st_dev
-        except (OSError, IOError):
-            return 0
-
-    table_name = get_files_table_name(conn.cursor(), device_id=device_id)
-    if not table_name:
+    # Resolve the catalog table from the live filesystem, never from a bare
+    # device_id: callers pass live st_dev or stored payload ids, and either can
+    # name another dataset after st_dev reuse (issue #12). Hashes are written
+    # back, so refuse when identity cannot be verified.
+    live_root = Path(root_path)
+    if live_root.is_absolute():
+        live_root = canonicalize_path(live_root)
+    if not live_root.exists():
         return 0
-    if not conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table_name,),
-    ).fetchone():
+    try:
+        verified = resolve_verified_files_table(conn.cursor(), live_path=str(live_root))
+    except FilesystemIdentityError as exc:
+        print(f"⛔ Skipping SHA256 upgrade for {root_path}: filesystem identity check failed: {exc}")
         return 0
-
-    mount_point, preferred_mount = _get_mount_info(conn, device_id)
+    table_name = verified.files_table
+    mount_point = Path(verified.mount_point) if verified.mount_point else None
+    preferred_mount = Path(verified.base) if verified.base else None
     rel_root, root = _resolve_rel_root(root_path, mount_point, preferred_mount)
     if rel_root is None:
         return 0

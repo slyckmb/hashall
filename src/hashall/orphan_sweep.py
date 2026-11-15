@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Literal
 
-from hashall.device import get_files_table_name
+from hashall.device import FilesystemIdentityError, resolve_verified_files_table
 from hashall.rt_cache import DEFAULT_RT_SHARED_CACHE_FILE, DEFAULT_RT_SHARED_CACHE_META_FILE, load_rt_cache_snapshot
 from hashall.qbittorrent import DEFAULT_QB_CACHE_FILE
 
@@ -577,46 +577,28 @@ def run_orphan_sweep(
     }
 
 
-def _resolve_files_table(conn, device_id: int) -> str | None:
-    """Return the files table name for a device, trying modern then legacy names."""
-    try:
-        name = get_files_table_name(conn.cursor(), device_id=device_id)
-        if name:
-            return name
-    except Exception:
-        pass
-    legacy = f"files_{device_id}"
-    try:
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (legacy,),
-        ).fetchone()
-        if row:
-            return legacy
-    except Exception:
-        pass
-    try:
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='files'"
-        ).fetchone()
-        if row:
-            return "files"
-    except Exception:
-        pass
-    return None
+def _resolve_orphan_catalog(conn, live_path: Path) -> tuple[str, str | None] | None:
+    """Return (files table, mount) for the filesystem live at ``live_path``.
 
-
-def _get_device_mount(conn, device_id: int) -> str | None:
-    """Return the mount_point or preferred_mount_point for a device."""
-    try:
-        row = conn.execute(
-            "SELECT COALESCE(preferred_mount_point, mount_point) FROM devices WHERE device_id = ?",
-            (device_id,),
-        ).fetchone()
-        if row:
-            return str(row[0])
-    except Exception:
-        pass
+    Resolved by the live fs_uuid, never by st_dev: kernel device ids are reused
+    across datasets (issue #12), and an inode lookup in another dataset's table
+    finds no external links, which would wrongly mark a seeded file safe.
+    Returns None when the catalog cannot be verified for that filesystem.
+    """
+    has_devices = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='devices'"
+    ).fetchone()
+    if has_devices:
+        try:
+            verified = resolve_verified_files_table(conn.cursor(), live_path=str(live_path))
+        except FilesystemIdentityError:
+            return None
+        return verified.files_table, verified.base
+    # Legacy monolithic catalog: absolute paths keyed by a device_id column.
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='files'"
+    ).fetchone():
+        return "files", None
     return None
 
 
@@ -669,6 +651,7 @@ def validate_orphan_hardlinks(
 
     safe_files: list[dict] = []
     skipped_files: list[dict] = []
+    catalog_cache: dict[int, tuple[str, str | None] | None] = {}
 
     for (dev, ino), paths in inode_map.items():
         try:
@@ -690,8 +673,10 @@ def validate_orphan_hardlinks(
             continue
 
         # nlink > orphan_count → external hardlinks exist; query catalog
-        table_name = _resolve_files_table(conn, dev)
-        if not table_name:
+        if dev not in catalog_cache:
+            catalog_cache[dev] = _resolve_orphan_catalog(conn, paths[0])
+        resolved = catalog_cache[dev]
+        if resolved is None:
             # No table found: can't verify; err on side of skipping
             for fp in paths:
                 skipped_files.append({
@@ -699,11 +684,11 @@ def validate_orphan_hardlinks(
                     "device_id": dev,
                     "inode": ino,
                     "size": size,
-                    "seeding_paths": ["(no catalog table for this device)"],
+                    "seeding_paths": ["(no verified catalog table for this filesystem)"],
                 })
             continue
 
-        mount_point = _get_device_mount(conn, dev)
+        table_name, mount_point = resolved
 
         if table_name == "files":
             # Monolithic files table with full paths + device_id column

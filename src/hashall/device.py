@@ -9,6 +9,7 @@ files, enabling efficient incremental scanning and device-specific operations.
 import sqlite3
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -824,6 +825,110 @@ def verify_registered_identity(
                 f"filesystem (st_dev {preferred_dev} != {device_id} at {current_mount}). "
                 "Refusing to remap this scan root into another dataset."
             )
+
+
+@dataclass(frozen=True)
+class VerifiedFilesTable:
+    """A files table whose owning devices row matches the live filesystem."""
+
+    fs_uuid: str
+    device_id: int
+    mount_point: Optional[str]
+    preferred_mount_point: Optional[str]
+    files_table: str
+
+    @property
+    def base(self) -> Optional[str]:
+        return self.preferred_mount_point or self.mount_point
+
+
+def resolve_verified_files_table(
+    cursor: sqlite3.Cursor,
+    *,
+    fs_uuid: Optional[str] = None,
+    device_id: Optional[int] = None,
+    live_path: Optional[str] = None,
+) -> VerifiedFilesTable:
+    """Resolve a filesystem's files table, failing closed on identity drift.
+
+    Kernel st_dev values are reused across datasets (issue #12), so a bare
+    device_id, or a devices row's stored mount, can name a different
+    filesystem than the one live on disk. Callers that read rows to act on
+    files, or write hashes/inodes back, must resolve through this helper.
+
+    Exactly one identity source is used, in this order:
+    - ``live_path``: the live filesystem containing that path (its fs_uuid);
+    - ``fs_uuid``: the durable registry identity;
+    - ``device_id``: a devices row id. Only safe for ids read from the devices
+      table itself; never pass a live ``st_dev``.
+
+    Raises FilesystemIdentityError when the filesystem is unregistered, its
+    files_table belongs to another filesystem, its registered mount is
+    unavailable or is a different live filesystem, or no files table exists.
+    Never creates or renames tables.
+    """
+    import os
+
+    from hashall.fs_utils import get_filesystem_uuid
+
+    live_uuid: Optional[str] = None
+    if live_path is not None:
+        live_uuid = get_filesystem_uuid(str(live_path))
+        if fs_uuid is not None and str(fs_uuid) != live_uuid:
+            raise FilesystemIdentityError(
+                f"{live_path} is on filesystem {live_uuid}, not {fs_uuid}."
+            )
+        row = resolve_current_device_row(cursor, fs_uuid=live_uuid)
+        label = f"{live_path} ({live_uuid})"
+    elif fs_uuid is not None:
+        row = resolve_current_device_row(cursor, fs_uuid=str(fs_uuid))
+        label = str(fs_uuid)
+    elif device_id is not None:
+        row = resolve_current_device_row(cursor, device_id=int(device_id))
+        label = f"device_id {int(device_id)}"
+    else:
+        raise ValueError("resolve_verified_files_table needs live_path, fs_uuid or device_id")
+
+    if row is None:
+        raise FilesystemIdentityError(f"No catalog registration for {label}.")
+
+    row_device_id = int(row[0])
+    row_fs_uuid = str(row[1] or "").strip()
+    mount_point = str(row[3] or "").strip() or None
+    preferred = str(row[4] or "").strip() or None
+    bound_table = str(row[5] or "").strip()
+    if not row_fs_uuid:
+        raise FilesystemIdentityError(f"Catalog row for {label} has no fs_uuid; cannot verify it.")
+    if not files_table_matches_fs(bound_table, row_fs_uuid):
+        raise FilesystemIdentityError(
+            f"Registered files table for {row_fs_uuid} is {bound_table}, which belongs to "
+            f"a different filesystem (expected {files_table_name_for_fs_uuid(row_fs_uuid)})."
+        )
+
+    # Callers hash and stat files under the registered mount, so it must be
+    # this filesystem too, even when the row was found from a live path: a
+    # preferred mount can point at another dataset (#14 shape).
+    base = preferred or mount_point
+    if not base or not os.path.isdir(base):
+        raise FilesystemIdentityError(
+            f"Registered mount {base!r} for {row_fs_uuid} is unavailable; cannot verify it."
+        )
+    base_uuid = get_filesystem_uuid(base)
+    if base_uuid != row_fs_uuid:
+        raise FilesystemIdentityError(
+            f"Registered mount {base} for {row_fs_uuid} is live filesystem {base_uuid}."
+        )
+
+    table = get_files_table_name(cursor, fs_uuid=row_fs_uuid, device_id=row_device_id)
+    if not table:
+        raise FilesystemIdentityError(f"No files table exists for {row_fs_uuid}.")
+    return VerifiedFilesTable(
+        fs_uuid=row_fs_uuid,
+        device_id=row_device_id,
+        mount_point=mount_point,
+        preferred_mount_point=preferred,
+        files_table=table,
+    )
 
 
 def _same_mount(a: Optional[str], b: Optional[str]) -> bool:

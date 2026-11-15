@@ -31,6 +31,7 @@ def test_link_execute_returns_nonzero_when_execute_plan_raises() -> None:
         patch("hashall.model.connect_db", return_value=_Conn()),
         patch("hashall.link_query.get_plan", return_value=_Plan()),
         patch("hashall.link_executor.execute_plan", side_effect=sqlite3.OperationalError("database is locked")),
+        patch("hashall.link_executor._resolve_plan_files_table", return_value="files_fs_test"),
     ):
         result = runner.invoke(
             cli,
