@@ -674,11 +674,16 @@ def scan_cmd(path, db, parallel, workers, batch_size, hash_mode, hash_mode_flag,
         _apply_low_priority()
     # Use flag if provided, otherwise use hash_mode
     mode = hash_mode_flag if hash_mode_flag else hash_mode
-    stats = scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
-                      workers=workers, batch_size=batch_size, hash_mode=mode,
-                      show_current_path=show_path, scan_nested_datasets=scan_nested_datasets,
-                      drift_policy=drift_policy.lower(),
-                      hash_progress=hash_progress.lower())
+    from hashall.device import FilesystemIdentityError
+
+    try:
+        stats = scan_path(db_path=Path(db), root_path=Path(path), parallel=parallel,
+                          workers=workers, batch_size=batch_size, hash_mode=mode,
+                          show_current_path=show_path, scan_nested_datasets=scan_nested_datasets,
+                          drift_policy=drift_policy.lower(),
+                          hash_progress=hash_progress.lower())
+    except FilesystemIdentityError as exc:
+        raise click.ClickException(f"Filesystem identity check failed; catalog unchanged: {exc}")
     if getattr(stats, "safety_guard_triggered", False):
         raise click.ClickException(
             "Scan safety guard blocked deletion due path-resolution errors; "
@@ -829,6 +834,56 @@ def doctor_repair_identity(db, apply, max_actions, allow_bind_alias, report_json
                 f"device_id={item.get('device_id')} fs_uuid={item.get('fs_uuid')} "
                 f"path={item.get('path')}"
             )
+
+@doctor.command("repair-liveness")
+@click.argument("root", type=click.Path(exists=True, file_okay=False))
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--apply", is_flag=True, help="Reactivate verified rows (default: read-only dry run).")
+@click.option("--backup-dir", type=click.Path(file_okay=False), default=None,
+              help="Directory for the mandatory pre-apply sqlite backup.")
+@click.option("--manifest", type=click.Path(dir_okay=False), default=None,
+              help="Write a TSV of every evaluated row (enables exact revert).")
+@click.option("--drop-misbound-views", is_flag=True,
+              help="With --apply, drop files_<id> compat views that target this table from another filesystem's slot.")
+@click.option("--report-json", type=click.Path(dir_okay=False), default=None, help="Write the JSON report here.")
+def doctor_repair_liveness(root, db, apply, backup_dir, manifest, drop_misbound_views, report_json):
+    """Reactivate false 'deleted' rows under ROOT using live on-disk proof.
+
+    A row is reactivated only if the file exists, is a regular file on ROOT's
+    filesystem, and its size and mtime equal the row. Everything else stays
+    'deleted'. Misbound registrations are refused.
+    """
+    from hashall.device import FilesystemIdentityError
+    from hashall.liveness_repair import LivenessRepairError, run_liveness_repair
+
+    if apply and not backup_dir:
+        raise click.UsageError("--apply requires --backup-dir")
+    try:
+        result = run_liveness_repair(
+            Path(db), Path(root), apply_mode=bool(apply),
+            backup_dir=Path(backup_dir) if backup_dir else None,
+            manifest_path=Path(manifest) if manifest else None,
+            drop_misbound_views=bool(drop_misbound_views),
+        )
+    except (LivenessRepairError, FilesystemIdentityError) as exc:
+        raise click.ClickException(str(exc))
+    if report_json:
+        Path(report_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(report_json).write_text(result.to_json(), encoding="utf-8")
+        click.echo(f"report_json={report_json}")
+    if result.backup_path:
+        click.echo(f"backup={result.backup_path} backup_quick_check={result.backup_check}")
+    if result.manifest_path:
+        click.echo(f"manifest={result.manifest_path}")
+    for view in result.misbound_views:
+        click.echo(f"misbound_view={view} dropped={str(view in result.dropped_views).lower()}")
+    for entry in result.misattributed_scan_roots:
+        click.echo(f"misattributed_scan_root fs_uuid={entry['fs_uuid']} root={entry['root_path']}")
+    for bucket, paths in sorted(result.samples.items()):
+        for sample in paths[:3]:
+            click.echo(f"sample {bucket} {sample}")
+    click.echo(result.summary_line())
+
 
 @cli.command("orphan-validate")
 @click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
@@ -8601,6 +8656,66 @@ def sha256_verify_cmd(db, device, sample):
         device=device,
         sample=sample,
     )
+
+
+@cli.command("sha256-files")
+@click.argument("paths", nargs=-1, type=click.Path())
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--paths-from", type=click.File("r"), default=None,
+              help="Read one path per line from this file ('-' for stdin).")
+@click.option("--write/--no-write", default=True, show_default=True,
+              help="Write computed SHA-256 back to fresh, active catalog rows.")
+@click.option("--verify", is_flag=True, help="Re-hash even when a fresh stored SHA-256 exists.")
+@click.option("--cached-only", is_flag=True, help="Never read file contents; report stored fresh hashes only.")
+@click.option("--max-bytes", type=int, default=None, help="Stop hashing new content after this many bytes.")
+@click.option("--json-output", is_flag=True, help="Print full JSON results.")
+def sha256_files_cmd(paths, db, paths_from, write, verify, cached_only, max_bytes, json_output):
+    """Targeted SHA-256 for selected files (lookup + backfill, no global refresh).
+
+    Each line: STATUS SHA256 SIZE CATALOG PATH. Only sha256-cataloged and
+    sha256-computed rows are SHA-256 proof; name/size/quick-hash agreement is never
+    reported as proof. Equal proven hashes across inputs are listed under groups.
+    """
+    from hashall.sha256_targeted import hash_selected_files, results_to_json
+
+    selected = list(paths)
+    if paths_from is not None:
+        selected.extend(line.strip() for line in paths_from if line.strip() and not line.startswith("#"))
+    if not selected:
+        raise click.UsageError("Provide PATHS or --paths-from.")
+    summary = hash_selected_files(
+        Path(db), selected, write=write and not cached_only, verify=verify,
+        cached_only=cached_only, max_bytes=max_bytes,
+    )
+    if json_output:
+        click.echo(results_to_json(summary))
+        return
+    for result in summary.results:
+        click.echo(
+            f"{result.status}\t{result.sha256 or '-'}\t{result.size if result.size is not None else '-'}"
+            f"\t{result.catalog}\t{result.path}" + (f"\t{result.detail}" if result.detail else "")
+        )
+    for digest, members in summary.groups().items():
+        if len(members) > 1:
+            click.echo(f"group\t{digest}\t{len(members)}\t" + "\t".join(members))
+    click.echo(summary.summary_line())
+
+
+@cli.command("sha256-lookup")
+@click.argument("hashes", nargs=-1)
+@click.option("--db", type=click.Path(), default=DEFAULT_DB_PATH, help="SQLite DB path.")
+@click.option("--no-live-check", is_flag=True, help="Do not stat catalog hits on disk.")
+def sha256_lookup_cmd(hashes, db, no_live_check):
+    """Find cataloged files with the given SHA-256 values (read-only)."""
+    from hashall.sha256_targeted import lookup_sha256
+
+    if not hashes:
+        raise click.UsageError("Provide one or more SHA-256 values.")
+    hits = lookup_sha256(Path(db), hashes, check_live=not no_live_check)
+    for hit in hits:
+        click.echo(f"{hit['sha256']}\t{hit['live']}\t{hit['catalog_status']}\t{hit['size']}\t{hit['path']}")
+    found = {hit["sha256"] for hit in hits}
+    click.echo(f"sha256_lookup queried={len(set(h.lower() for h in hashes))} found={len(found)} hits={len(hits)}")
 
 
 @cli.command("dupes")

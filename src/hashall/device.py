@@ -52,6 +52,33 @@ def _view_exists(cursor: sqlite3.Cursor, view_name: str) -> bool:
     return _relation_type(cursor, view_name) == "view"
 
 
+def _view_target(cursor: sqlite3.Cursor, view_name: str) -> Optional[str]:
+    """Return the single table a files_* compat view selects from, if parseable."""
+    import re
+
+    row = cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?",
+        (view_name,),
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    match = re.search(r'\bFROM\s+(?:"((?:[^"]|"")+)"|([A-Za-z0-9_\-]+))', str(row[0]), re.IGNORECASE)
+    if not match:
+        return None
+    return (match.group(1) or "").replace('""', '"') if match.group(1) else match.group(2)
+
+
+def _bound_to_other_fs(cursor: sqlite3.Cursor, table_name: str, fs_uuid: Optional[str]) -> bool:
+    """True when another filesystem's devices row owns ``table_name``."""
+    if "files_table" not in _devices_columns(cursor):
+        return False
+    row = cursor.execute(
+        "SELECT 1 FROM devices WHERE files_table = ? AND fs_uuid != ?",
+        (table_name, str(fs_uuid or "")),
+    ).fetchone()
+    return row is not None
+
+
 def _devices_has_files_table_column(cursor: sqlite3.Cursor) -> bool:
     try:
         columns = {row[1] for row in cursor.execute("PRAGMA table_info(devices)").fetchall()}
@@ -299,7 +326,9 @@ def get_files_table_name(
                 legacy_table = f"files_{legacy_id}"
                 if legacy_table == target_table:
                     continue
-                if _table_exists(cursor, legacy_table):
+                if _table_exists(cursor, legacy_table) and not _bound_to_other_fs(
+                    cursor, legacy_table, row_fs_uuid
+                ):
                     cursor.execute(
                         f"ALTER TABLE {_quote_ident(legacy_table)} RENAME TO {_quote_ident(target_table)}"
                     )
@@ -315,8 +344,17 @@ def get_files_table_name(
             return target_table
         for legacy_id in legacy_ids:
             legacy_table = f"files_{legacy_id}"
-            if _table_exists(cursor, legacy_table) or _view_exists(cursor, legacy_table):
+            if _table_exists(cursor, legacy_table):
+                if _bound_to_other_fs(cursor, legacy_table, row_fs_uuid):
+                    continue
                 return legacy_table
+            if _view_exists(cursor, legacy_table):
+                # A compat view is only this filesystem's catalog if it targets
+                # this row's own table. A stale view can target another
+                # filesystem's table (issue #12: files_54 -> stash/home/michael
+                # while device 54 is pool/backup/secrets).
+                if _view_target(cursor, legacy_table) == target_table:
+                    return legacy_table
         return target_table if create else None
 
     if device_id is None:
@@ -672,6 +710,128 @@ def suggest_device_alias(path: Path, cursor: sqlite3.Cursor) -> str:
         suffix += 1
 
 
+class FilesystemIdentityError(RuntimeError):
+    """Raised when a scan root's live identity conflicts with the catalog registry.
+
+    Scanning through a mismatched registration would read and write another
+    filesystem's files table (issue #12), so callers must fail closed.
+    """
+
+
+def _park_device_row(cursor: sqlite3.Cursor, colliding_uuid: str, device_id: int) -> int:
+    """Move the devices row ``colliding_uuid`` off ``device_id`` to a temp negative id.
+
+    The row keeps its fs_uuid, files_table and mount metadata; only the transient
+    kernel device_id slot is released. Dependent identity rows that still point at
+    the slot are remapped with it. Returns the temp id.
+    """
+    temp_id = -(abs(hash(colliding_uuid)) % (2 ** 30))
+    while cursor.execute(
+        "SELECT 1 FROM devices WHERE device_id = ?", (temp_id,)
+    ).fetchone():
+        temp_id -= 1
+    colliding_table = get_files_table_name(
+        cursor,
+        device_id=device_id,
+        fs_uuid=colliding_uuid,
+        create=True,
+        legacy_device_ids=[device_id, temp_id],
+    )
+    displaced_counts = {
+        name: _remap_identity_table(
+            cursor,
+            name,
+            match_fs_uuid=colliding_uuid,
+            match_device_id=device_id,
+            target_fs_uuid=colliding_uuid,
+            target_device_id=temp_id,
+        )
+        for name in ("payloads", "torrent_instances", "scan_sessions")
+    }
+    cursor.execute(
+        "UPDATE devices SET device_id = ?, files_table = ?, updated_at = datetime('now') WHERE fs_uuid = ?",
+        (temp_id, colliding_table, colliding_uuid)
+    )
+    _drop_compat_view(cursor, device_id)
+    _create_compat_view(cursor, temp_id, colliding_table)
+    print(
+        f"⚠️  Parked conflicting device {colliding_uuid[:8]} at temp id {temp_id}"
+        f" (physical files table stays {colliding_table})"
+    )
+    displaced_total = sum(displaced_counts.values())
+    if displaced_total > 0:
+        details = " ".join(
+            f"{name}={count}"
+            for name, count in displaced_counts.items()
+            if count > 0
+        )
+        print(f"   Remapped displaced identity rows: {details}")
+    return temp_id
+
+
+def files_table_matches_fs(files_table: Optional[str], fs_uuid: str) -> bool:
+    """True when ``files_table`` may legitimately hold ``fs_uuid``'s catalog.
+
+    Accepted: no binding yet, legacy ``files_<device_id>`` tables, the table
+    named for this fs_uuid, and a ``files_fs_dev_*`` table carried over when a
+    placeholder dev-* identity was upgraded in place. A ``files_fs_*`` table
+    named for a different durable fs_uuid belongs to another filesystem.
+    """
+    table = str(files_table or "").strip()
+    if not table or not table.startswith("files_fs_"):
+        return True
+    if table == files_table_name_for_fs_uuid(fs_uuid):
+        return True
+    return table.startswith("files_fs_dev_")
+
+
+def verify_registered_identity(
+    cursor: sqlite3.Cursor,
+    *,
+    fs_uuid: str,
+    device_id: int,
+    current_mount: str,
+) -> None:
+    """Fail closed when the registered row for ``fs_uuid`` belongs to another filesystem.
+
+    Checked before registration so a misbound row is never refreshed or scanned
+    through. Raises FilesystemIdentityError on:
+    - a files_table named for a different fs_uuid (catalog of another dataset);
+    - a preferred mount that currently resolves to a different filesystem, which
+      would remap this scan's root into another dataset's namespace.
+    """
+    import os
+
+    row = resolve_current_device_row(cursor, fs_uuid=fs_uuid)
+    if row is None:
+        return
+    files_table = str(row[5] or "").strip()
+    expected = files_table_name_for_fs_uuid(fs_uuid)
+    if not files_table_matches_fs(files_table, fs_uuid):
+        raise FilesystemIdentityError(
+            f"Registered files table for {fs_uuid} is {files_table}, which belongs to a "
+            f"different filesystem (expected {expected}). Refusing to scan through it."
+        )
+    preferred = str(row[4] or "").strip()
+    if preferred and not _same_mount(preferred, current_mount):
+        try:
+            preferred_dev = os.stat(preferred).st_dev
+        except OSError:
+            return
+        if preferred_dev != int(device_id):
+            raise FilesystemIdentityError(
+                f"Registered preferred mount {preferred} for {fs_uuid} is a different live "
+                f"filesystem (st_dev {preferred_dev} != {device_id} at {current_mount}). "
+                "Refusing to remap this scan root into another dataset."
+            )
+
+
+def _same_mount(a: Optional[str], b: Optional[str]) -> bool:
+    if not a or not b:
+        return False
+    return str(Path(a)) == str(Path(b))
+
+
 def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: int,
                               mount_point: str, **kwargs) -> dict:
     """
@@ -762,63 +922,7 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                 (device_id, fs_uuid)
             ).fetchone()
             if colliding:
-                colliding_uuid = colliding[0]
-                temp_id = -(abs(hash(colliding_uuid)) % (2 ** 30))
-                while cursor.execute(
-                    "SELECT 1 FROM devices WHERE device_id = ?", (temp_id,)
-                ).fetchone():
-                    temp_id -= 1
-                colliding_table = get_files_table_name(
-                    cursor,
-                    device_id=device_id,
-                    fs_uuid=colliding_uuid,
-                    create=True,
-                    legacy_device_ids=[device_id, temp_id],
-                )
-                displaced_counts = {
-                    "payloads": _remap_identity_table(
-                        cursor,
-                        "payloads",
-                        match_fs_uuid=colliding_uuid,
-                        match_device_id=device_id,
-                        target_fs_uuid=colliding_uuid,
-                        target_device_id=temp_id,
-                    ),
-                    "torrent_instances": _remap_identity_table(
-                        cursor,
-                        "torrent_instances",
-                        match_fs_uuid=colliding_uuid,
-                        match_device_id=device_id,
-                        target_fs_uuid=colliding_uuid,
-                        target_device_id=temp_id,
-                    ),
-                    "scan_sessions": _remap_identity_table(
-                        cursor,
-                        "scan_sessions",
-                        match_fs_uuid=colliding_uuid,
-                        match_device_id=device_id,
-                        target_fs_uuid=colliding_uuid,
-                        target_device_id=temp_id,
-                    ),
-                }
-                cursor.execute(
-                    "UPDATE devices SET device_id = ?, files_table = ?, updated_at = datetime('now') WHERE fs_uuid = ?",
-                    (temp_id, colliding_table, colliding_uuid)
-                )
-                _drop_compat_view(cursor, device_id)
-                _create_compat_view(cursor, temp_id, colliding_table)
-                print(
-                    f"⚠️  Parked conflicting device {colliding_uuid[:8]} at temp id {temp_id}"
-                    f" (physical files table stays {colliding_table})"
-                )
-                displaced_total = sum(displaced_counts.values())
-                if displaced_total > 0:
-                    details = " ".join(
-                        f"{name}={count}"
-                        for name, count in displaced_counts.items()
-                        if count > 0
-                    )
-                    print(f"   Remapped displaced identity rows: {details}")
+                _park_device_row(cursor, colliding[0], device_id)
 
             migrated_counts = {
                 "payloads": _remap_identity_table(
@@ -901,8 +1005,34 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
         # Handle legacy/placeholder fs_uuid rows that already own this device_id.
         # This avoids UNIQUE(device_id) failures when fs_uuid identity is corrected.
         existing_device = cursor.execute("""
-            SELECT fs_uuid FROM devices WHERE device_id = ?
+            SELECT fs_uuid, mount_point, preferred_mount_point FROM devices WHERE device_id = ?
         """, (device_id,)).fetchone()
+
+        if existing_device:
+            from hashall.fs_utils import filesystem_uuid_is_stable
+
+            old_fs_uuid, old_mount, old_preferred = existing_device
+            same_place = _same_mount(old_mount, mount_point) or _same_mount(old_preferred, mount_point)
+            if filesystem_uuid_is_stable(old_fs_uuid) or not same_place:
+                # A kernel device_id is transient and is reused across datasets
+                # after reboots/remounts. Sharing it does NOT prove the incumbent
+                # row is this filesystem: rewriting its fs_uuid in place would
+                # bind this filesystem to the incumbent's files table, preferred
+                # mount and scan history (issue #12: stash/home/michael's catalog
+                # ended up owned by pool/backup/secrets). Only a placeholder
+                # dev-* identity at the same mount may be upgraded in place.
+                if not filesystem_uuid_is_stable(fs_uuid):
+                    raise FilesystemIdentityError(
+                        f"Refusing to register unstable fs_uuid {fs_uuid} at {mount_point}: "
+                        f"device_id {device_id} is held by {old_fs_uuid} ({old_mount}). "
+                        "The filesystem identity is ambiguous; resolve the UUID lookup and retry."
+                    )
+                print(
+                    f"⚠️  device_id {device_id} is held by a different filesystem "
+                    f"{old_fs_uuid} ({old_mount}); registering {fs_uuid} separately"
+                )
+                _park_device_row(cursor, old_fs_uuid, device_id)
+                existing_device = None
 
         if existing_device:
             old_fs_uuid = existing_device[0]
@@ -967,6 +1097,18 @@ def register_or_update_device(cursor: sqlite3.Cursor, fs_uuid: str, device_id: i
                     print(f"   Updated dependent identity rows for fs_uuid correction: {details}")
         else:
             # New device - register it
+            own_table = files_table_name_for_fs_uuid(fs_uuid)
+            if "files_table" in _devices_columns(cursor):
+                squatter = cursor.execute(
+                    "SELECT fs_uuid, mount_point FROM devices WHERE files_table = ? AND fs_uuid != ?",
+                    (own_table, fs_uuid),
+                ).fetchone()
+                if squatter:
+                    raise FilesystemIdentityError(
+                        f"Refusing to register {fs_uuid} at {mount_point}: its files table "
+                        f"{own_table} is already bound to {squatter[0]} ({squatter[1]}). "
+                        "The registry is misbound; reconcile it explicitly before scanning."
+                    )
             alias = suggest_device_alias(Path(mount_point), cursor)
 
             # Try to get ZFS metadata
