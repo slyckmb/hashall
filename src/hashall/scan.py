@@ -2130,6 +2130,17 @@ def _scan_path_impl(db_path: Path, root_path: Path, parallel: bool = False,
             )
             for example in worker_path_error_examples:
                 _emit(quiet, f"   - worker path error sample: {example}")
+        elif worker_path_errors:
+            # Partial processing: issue #12 forbids an absence-based delete pass.
+            # Checked after the mass-failure guard so that case stays 'failed'.
+            stats.deletion_skipped_reason = f"worker_errors={worker_path_errors}"
+            _emit(
+                quiet,
+                (
+                    f"⏸️  Skipping delete pass ({stats.deletion_skipped_reason}); "
+                    f"{len(deleted_paths):,} absent active rows left unchanged"
+                ),
+            )
         else:
             _emit(quiet, f"🗑️  Marking {len(deleted_paths)} deleted files...")
             for path in deleted_paths:

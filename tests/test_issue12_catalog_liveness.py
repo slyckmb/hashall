@@ -561,3 +561,43 @@ def test_sha256_lookup_flags_preferred_mount_on_other_filesystem(tmp_path):
     conn.close()
     hits = lookup_sha256(db, [digest])
     assert hits and {h["live"] for h in hits} == {"identity-mismatch"}
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_partial_processing_never_runs_absence_pass(tmp_path, monkeypatch, parallel):
+    """Worker error + a genuinely removed file: a partial scan tombstones nothing."""
+    db = tmp_path / "catalog.db"
+    root = tmp_path / "home"
+    files = _make_tree(root)
+    scan_path(db_path=db, root_path=root, quiet=True)
+    files[5].unlink()
+    real = scan._hash_file_worker
+
+    def worker(work_item, *args, **kwargs):
+        if work_item["representative_path"].endswith("f01.txt"):
+            return None
+        return real(work_item, *args, **kwargs)
+
+    monkeypatch.setattr(scan, "_hash_file_worker", worker)
+    kwargs = {"parallel": True, "workers": 2} if parallel else {}
+    result = scan_path(db_path=db, root_path=root, quiet=True, **kwargs)
+    assert result.final_status == "partial"
+    assert result.files_deleted == 0
+    assert result.deletion_skipped_reason == "worker_errors=1"
+    assert _statuses(db, root)[str(files[5])] == "active"
+    assert _sessions(db)[-1] == ("partial", 0)
+    assert _scan_root_count(db, root) == 1
+
+
+def test_mass_worker_failure_still_trips_safety_guard(tmp_path, monkeypatch):
+    db = tmp_path / "catalog.db"
+    root = tmp_path / "home"
+    files = _make_tree(root, n=30)
+    scan_path(db_path=db, root_path=root, quiet=True)
+    files[0].unlink()
+    monkeypatch.setattr(scan, "_hash_file_worker", lambda *a, **k: None)
+    result = scan_path(db_path=db, root_path=root, quiet=True)
+    assert result.safety_guard_triggered
+    assert result.final_status == "failed"
+    assert result.files_deleted == 0
+    assert _statuses(db, root)[str(files[0])] == "active"
